@@ -175,6 +175,9 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 	}
 
 	destDir := filepath.Join(config.C.Data.ScriptsDir, saveDir)
+	if absDestDir, err := filepath.Abs(destDir); err == nil {
+		destDir = absDestDir
+	}
 	env := authCfg.Env
 
 	if IsGitRepo(destDir) {
