@@ -211,24 +211,16 @@ defineExpose({ loadViews })
       >
         全部
       </el-button>
-      <div
+      <el-button
         v-for="view in visibleViews"
         :key="view.id"
-        class="view-tab-item"
-        :class="{ active: activeViewId === view.id }"
+        :type="activeViewId === view.id ? 'primary' : 'default'"
+        size="small"
+        class="view-tab-btn"
+        @click="selectView(view.id)"
       >
-        <el-button
-          :type="activeViewId === view.id ? 'primary' : 'default'"
-          size="small"
-          @click="selectView(view.id)"
-        >
-          {{ view.name }}
-        </el-button>
-        <div class="view-tab-actions">
-          <el-icon class="view-action-icon" @click.stop="openEditDialog(view)"><Edit /></el-icon>
-          <el-icon class="view-action-icon view-action-icon--danger" @click.stop="handleDelete(view.id)"><Close /></el-icon>
-        </div>
-      </div>
+        {{ view.name }}
+      </el-button>
       <el-button size="small" @click="openCreateDialog">
         <el-icon><Plus /></el-icon>
       </el-button>
@@ -317,40 +309,11 @@ defineExpose({ loadViews })
   align-items: center;
 }
 
-.view-tab-item {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-
-  .view-tab-actions {
-    display: none;
-    align-items: center;
-    gap: 2px;
-    margin-left: 2px;
-  }
-
-  &:hover .view-tab-actions {
-    display: inline-flex;
-  }
-}
-
-.view-action-icon {
-  font-size: 14px;
-  padding: 2px;
-  border-radius: 4px;
-  cursor: pointer;
-  color: var(--el-text-color-secondary);
-  transition: all 0.15s;
-
-  &:hover {
-    color: var(--el-color-primary);
-    background: var(--el-color-primary-light-9);
-  }
-
-  &--danger:hover {
-    color: var(--el-color-danger);
-    background: var(--el-color-danger-light-9);
-  }
+.view-tab-btn {
+  min-width: 64px;
+  padding: 0 16px;
+  height: 32px;
+  font-size: 13px;
 }
 
 .filter-list {

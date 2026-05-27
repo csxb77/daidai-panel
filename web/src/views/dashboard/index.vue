@@ -1605,7 +1605,7 @@ function rerunLog(log: any) {
   }
 }
 
-.col-center {
+.log-table .col-center {
   text-align: center;
 }
 

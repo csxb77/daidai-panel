@@ -47,7 +47,7 @@ export function useSettingsConfig() {
     backup_schedule_monthday: 1,
     backup_schedule_name: '',
     backup_schedule_password: '',
-    backup_schedule_selection: 'configs,tasks,subscriptions,env_vars,logs,scripts,dependencies'
+    backup_schedule_selection: 'configs,tasks,subscriptions,env_vars,logs,scripts,dependencies,task_views'
   })
 
   function readConfigString(cfgs: Record<string, any>, key: string, fallback = ''): string {
@@ -113,7 +113,7 @@ export function useSettingsConfig() {
         backup_schedule_monthday: readConfigNumber(cfgs, 'backup_schedule_monthday', 1),
         backup_schedule_name: readConfigString(cfgs, 'backup_schedule_name', ''),
         backup_schedule_password: readConfigString(cfgs, 'backup_schedule_password', ''),
-        backup_schedule_selection: readConfigString(cfgs, 'backup_schedule_selection', 'configs,tasks,subscriptions,env_vars,logs,scripts,dependencies')
+        backup_schedule_selection: readConfigString(cfgs, 'backup_schedule_selection', 'configs,tasks,subscriptions,env_vars,logs,scripts,dependencies,task_views')
       }
       applyPanelAppearance(configForm.value)
     } catch (err: any) {

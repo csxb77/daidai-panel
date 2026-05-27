@@ -8,6 +8,7 @@ export interface BackupSelection {
   logs: boolean
   scripts: boolean
   dependencies: boolean
+  task_views: boolean
 }
 
 export interface RestoreProgressState {
@@ -95,6 +96,11 @@ export const systemApi = {
         : undefined,
     })
   },
+}
+
+export const configScriptApi = {
+  get: () => request.get('/system/config-script'),
+  save: (content: string) => request.put('/system/config-script', { content }),
 }
 
 export const configApi = {

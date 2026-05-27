@@ -224,13 +224,7 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 			if err != nil {
 				return fullOutput.String(), err
 			}
-
-			emit("[清理旧文件] 正在删除远端仓库已移除、但本地仍残留的文件和目录")
-			cmd = exec.CommandContext(ctx, "git", "clean", "-fd")
-			cmd.Dir = destDir
-			cmd.Env = env
-			output, err = runCmdWithCallback(ctx, cmd, emit)
-			fullOutput.WriteString(output)
+			emit("[已完成] 已覆盖更新所有仓库文件，本地新增的文件已保留")
 		} else {
 			emit("[保留本地修改] 正在合并远端更新（保留本地修改的文件）")
 			hasStash, err := gitHasWorkingTreeChanges(ctx, destDir, env)
@@ -341,19 +335,7 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 				return fullOutput.String(), err
 			}
 
-			if forceOverwrite {
-				emit("[清理旧文件] 正在删除远端仓库已移除、但本地仍残留的文件和目录")
-				cmd = exec.CommandContext(ctx, "git", "clean", "-fd")
-				cmd.Dir = destDir
-				cmd.Env = env
-				output, err = runCmdWithCallback(ctx, cmd, emit)
-				fullOutput.WriteString(output)
-				if err != nil {
-					return fullOutput.String(), err
-				}
-			} else {
-				emit("[保留本地文件] 跳过清理本地多余文件")
-			}
+			emit("[已完成] 已覆盖更新所有仓库文件，本地新增的文件已保留")
 			return fullOutput.String(), nil
 		}
 	}

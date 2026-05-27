@@ -138,6 +138,46 @@ func (s *BackupScheduler) runScheduledBackup() {
 	}
 
 	log.Printf("backup scheduler created backup: %s", filePath)
+
+	cleanupOldScheduledBackups(cfg, 3)
+}
+
+func cleanupOldScheduledBackups(cfg BackupScheduleConfig, retentionDays int) {
+	backups, err := ListBackups()
+	if err != nil {
+		log.Printf("backup cleanup: list backups failed: %v", err)
+		return
+	}
+
+	prefix := strings.TrimSpace(cfg.Name)
+	if prefix == "" {
+		prefix = "scheduled-backup"
+	}
+
+	cutoff := time.Now().AddDate(0, 0, -retentionDays)
+	deleted := 0
+
+	for _, b := range backups {
+		name, _ := b["name"].(string)
+		if name == "" || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		createdAt, ok := b["created_at"].(time.Time)
+		if !ok {
+			continue
+		}
+		if createdAt.Before(cutoff) {
+			if err := DeleteBackup(name); err != nil {
+				log.Printf("backup cleanup: delete %s failed: %v", name, err)
+			} else {
+				deleted++
+			}
+		}
+	}
+
+	if deleted > 0 {
+		log.Printf("backup cleanup: deleted %d old scheduled backup(s) older than %d days", deleted, retentionDays)
+	}
 }
 
 func loadBackupScheduleConfig() (BackupScheduleConfig, error) {
@@ -178,6 +218,7 @@ func parseBackupSelectionCSV(raw string) (BackupSelection, error) {
 		"logs":          func(s *BackupSelection) { s.Logs = true },
 		"scripts":       func(s *BackupSelection) { s.Scripts = true },
 		"dependencies":  func(s *BackupSelection) { s.Dependencies = true },
+		"task_views":    func(s *BackupSelection) { s.TaskViews = true },
 	}
 
 	var selection BackupSelection

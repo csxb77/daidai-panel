@@ -478,6 +478,7 @@ async function handleBatchAction(action: string) {
     run: { title: '批量运行', msg: `确定运行选中的 ${selectedIds.value.length} 个任务？`, type: 'info' },
     enable: { title: '批量启用', msg: `确定启用选中的 ${selectedIds.value.length} 个任务？`, type: 'info' },
     disable: { title: '批量禁用', msg: `确定禁用选中的 ${selectedIds.value.length} 个任务？`, type: 'warning' },
+    stop: { title: '批量停止', msg: `确定停止选中的 ${selectedIds.value.length} 个任务？`, type: 'warning' },
   }
   const confirm = confirmMap[action]
   if (confirm) {
@@ -669,6 +670,7 @@ async function handleImport(event: Event) {
           <el-button size="small" @click="handleBatchAction('enable')">批量启用</el-button>
           <el-button size="small" @click="handleBatchAction('disable')">批量禁用</el-button>
           <el-button size="small" @click="handleBatchAction('run')">批量运行</el-button>
+          <el-button size="small" type="warning" plain @click="handleBatchAction('stop')">批量停止</el-button>
           <el-button size="small" @click="handleBatchPin">批量置顶</el-button>
           <el-button size="small" type="danger" @click="handleBatchAction('delete')">批量删除</el-button>
         </div>

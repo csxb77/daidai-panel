@@ -58,6 +58,7 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		TaskBefore             *string  `json:"task_before"`
 		TaskAfter              *string  `json:"task_after"`
 		AllowMultipleInstances *bool    `json:"allow_multiple_instances"`
+		StopSchedule           *string  `json:"stop_schedule"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
@@ -138,6 +139,9 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	if req.AllowMultipleInstances != nil {
 		task.AllowMultipleInstances = *req.AllowMultipleInstances
 	}
+	if req.StopSchedule != nil {
+		task.StopSchedule = *req.StopSchedule
+	}
 
 	if err := database.DB.Select("*").Create(&task).Error; err != nil {
 		response.InternalError(c, "创建任务失败")
@@ -212,7 +216,7 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		"timeout":   true, "random_delay_seconds": true, "max_retries": true, "retry_interval": true,
 		"notify_on_failure": true, "notify_on_success": true, "notification_channel_id": true, "labels": true, "depends_on": true,
 		"sort_order": true, "task_before": true, "task_after": true,
-		"allow_multiple_instances": true,
+		"allow_multiple_instances": true, "stop_schedule": true,
 	}
 
 	updates := make(map[string]interface{})

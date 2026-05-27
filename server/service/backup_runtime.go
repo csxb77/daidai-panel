@@ -176,6 +176,12 @@ func buildBackupManifest(selection BackupSelection) (BackupManifest, error) {
 		}
 	}
 
+	if selection.TaskViews {
+		if err := database.DB.Order("sort_order ASC, id ASC").Find(&manifest.Data.TaskViews).Error; err != nil {
+			return BackupManifest{}, fmt.Errorf("load task views: %w", err)
+		}
+	}
+
 	if selection.Logs {
 		var taskLogs []model.TaskLog
 		if err := database.DB.Preload("Task").Order("id ASC").Find(&taskLogs).Error; err != nil {
@@ -684,6 +690,11 @@ func restoreBackupManifest(manifest BackupManifest, extractedDir string) error {
 			return rollback(err)
 		}
 	}
+	if selection.TaskViews {
+		if err := deleteAll(tx, "task_views"); err != nil {
+			return rollback(err)
+		}
+	}
 
 	notifyChannelIDMap := map[uint]uint{}
 
@@ -740,6 +751,21 @@ func restoreBackupManifest(manifest BackupManifest, extractedDir string) error {
 		createdDependencies, err = restoreDependencies(tx, manifest.Data.Dependencies)
 		if err != nil {
 			return rollback(err)
+		}
+	}
+
+	if selection.TaskViews {
+		for _, view := range manifest.Data.TaskViews {
+			newView := model.TaskView{
+				Name:      view.Name,
+				Filters:   view.Filters,
+				SortRules: view.SortRules,
+				Hidden:    view.Hidden,
+				SortOrder: view.SortOrder,
+			}
+			if err := tx.Create(&newView).Error; err != nil {
+				return rollback(fmt.Errorf("restore task view %q: %w", view.Name, err))
+			}
 		}
 	}
 

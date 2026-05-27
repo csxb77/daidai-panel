@@ -10,6 +10,22 @@ import (
 	"daidai-panel/model"
 )
 
+func SnapshotDepsToHost() {
+	depsDir := filepath.Join(config.C.Data.Dir, "deps")
+	persistDir := "/data/adb/daidai-panel/deps-snapshot"
+
+	if _, err := os.Stat(depsDir); err != nil {
+		return
+	}
+	if _, err := os.Stat("/data/adb/daidai-panel"); err != nil {
+		return
+	}
+
+	cmd := exec.Command("cp", "-rf", depsDir+"/.", persistDir+"/")
+	os.MkdirAll(persistDir, 0755)
+	cmd.Run()
+}
+
 func DependencyInstalled(depType, name string) bool {
 	name = strings.TrimSpace(name)
 	if depType == "" || name == "" {

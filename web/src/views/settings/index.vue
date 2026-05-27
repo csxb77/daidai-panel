@@ -184,7 +184,8 @@ function serializeBackupScheduleSelection() {
     'env_vars',
     'logs',
     'scripts',
-    'dependencies'
+    'dependencies',
+    'task_views'
   ]
   return order.filter((key) => backupScheduleSelection.value[key]).join(',')
 }
@@ -203,7 +204,8 @@ function applyBackupScheduleSelection(raw: string) {
     env_vars: selected.has('env_vars'),
     logs: selected.has('logs'),
     scripts: selected.has('scripts'),
-    dependencies: selected.has('dependencies')
+    dependencies: selected.has('dependencies'),
+    task_views: selected.has('task_views')
   }
 }
 

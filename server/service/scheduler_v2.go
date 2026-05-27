@@ -50,6 +50,7 @@ type SchedulerV2 struct {
 	config       SchedulerConfig
 	cron         *cron.Cron
 	entryMap     map[uint][]cron.EntryID
+	stopEntryMap map[uint][]cron.EntryID
 	entryLock    sync.RWMutex
 	taskQueue    chan *ExecutionRequest
 	rateLimiter  <-chan time.Time
@@ -77,6 +78,7 @@ func NewSchedulerV2(config SchedulerConfig, handler SchedulerEventHandler) *Sche
 		config:       config,
 		cron:         cron.New(cron.WithSeconds(), cron.WithChain(cron.Recover(cron.DefaultLogger))),
 		entryMap:     make(map[uint][]cron.EntryID),
+		stopEntryMap: make(map[uint][]cron.EntryID),
 		taskQueue:    make(chan *ExecutionRequest, config.QueueSize),
 		rateLimiter:  time.Tick(config.RateInterval),
 		stopCh:       make(chan struct{}),
@@ -303,7 +305,58 @@ func (s *SchedulerV2) AddJob(task *model.Task) error {
 	}
 
 	s.entryMap[task.ID] = entryIDs
+
+	if oldStopIDs, exists := s.stopEntryMap[task.ID]; exists {
+		for _, id := range oldStopIDs {
+			if id != 0 {
+				s.cron.Remove(id)
+			}
+		}
+		delete(s.stopEntryMap, task.ID)
+	}
+	if task.StopSchedule != "" {
+		stopExprs := panelcron.SplitExpressions(task.StopSchedule)
+		stopIDs := make([]cron.EntryID, 0, len(stopExprs))
+		for _, expr := range stopExprs {
+			schedule, err := panelcron.ParseSchedule(expr)
+			if err != nil {
+				continue
+			}
+			stopID := s.cron.Schedule(schedule, cron.FuncJob(func() {
+				s.stopTaskBySchedule(taskID)
+			}))
+			stopIDs = append(stopIDs, stopID)
+		}
+		if len(stopIDs) > 0 {
+			s.stopEntryMap[task.ID] = stopIDs
+		}
+	}
+
 	return nil
+}
+
+func (s *SchedulerV2) stopTaskBySchedule(taskID uint) {
+	executor := GetTaskExecutor()
+	if executor != nil {
+		executor.StopTask(taskID)
+	}
+
+	var task model.Task
+	if database.DB.First(&task, taskID).Error != nil {
+		return
+	}
+	if task.PID != nil && *task.PID > 0 {
+		KillProcessByPid(*task.PID)
+	}
+	if task.Status == model.TaskStatusRunning {
+		inactiveStatus := ResolveTaskInactiveStatus(&task)
+		database.DB.Model(&task).Updates(map[string]interface{}{
+			"status":   inactiveStatus,
+			"pid":      nil,
+			"log_path": nil,
+		})
+		log.Printf("task %d stopped by scheduled stop rule", taskID)
+	}
 }
 
 func (s *SchedulerV2) UpdateJob(task *model.Task) error {
@@ -321,6 +374,14 @@ func (s *SchedulerV2) RemoveJob(taskID uint) {
 			}
 		}
 		delete(s.entryMap, taskID)
+	}
+	if stopIDs, exists := s.stopEntryMap[taskID]; exists {
+		for _, id := range stopIDs {
+			if id != 0 {
+				s.cron.Remove(id)
+			}
+		}
+		delete(s.stopEntryMap, taskID)
 	}
 }
 

@@ -14,6 +14,7 @@ type BackupSelection struct {
 	Logs          bool `json:"logs"`
 	Scripts       bool `json:"scripts"`
 	Dependencies  bool `json:"dependencies"`
+	TaskViews     bool `json:"task_views"`
 }
 
 type BackupCreateOptions struct {
@@ -108,6 +109,7 @@ type BackupPayload struct {
 	SSHKeys       []BackupSSHKey       `json:"ssh_keys,omitempty"`
 	Dependencies  []BackupDependency   `json:"dependencies,omitempty"`
 	TaskLogs      []BackupTaskLog      `json:"task_logs,omitempty"`
+	TaskViews     []model.TaskView     `json:"task_views,omitempty"`
 }
 
 type BackupManifest struct {
@@ -128,11 +130,12 @@ func defaultBackupSelection() BackupSelection {
 		Logs:          true,
 		Scripts:       true,
 		Dependencies:  true,
+		TaskViews:     true,
 	}
 }
 
 func (s BackupSelection) Any() bool {
-	return s.Configs || s.Tasks || s.Subscriptions || s.EnvVars || s.Logs || s.Scripts || s.Dependencies
+	return s.Configs || s.Tasks || s.Subscriptions || s.EnvVars || s.Logs || s.Scripts || s.Dependencies || s.TaskViews
 }
 
 func (s BackupSelection) NormalizeDefaults() BackupSelection {

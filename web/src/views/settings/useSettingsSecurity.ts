@@ -37,6 +37,7 @@ export function useSettingsSecurity() {
     logs: true,
     scripts: true,
     dependencies: true,
+    task_views: true,
   })
   const backupScheduleSelection = ref<BackupSelection>({
     configs: true,
@@ -46,6 +47,7 @@ export function useSettingsSecurity() {
     logs: true,
     scripts: true,
     dependencies: true,
+    task_views: true,
   })
   const uploadProgress = ref(-1)
   const uploadUploading = ref(false)
@@ -117,6 +119,7 @@ export function useSettingsSecurity() {
       logs: true,
       scripts: true,
       dependencies: true,
+      task_views: true,
     }
   }
 

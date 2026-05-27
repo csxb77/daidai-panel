@@ -147,6 +147,15 @@
         <button :class="['status-tab', { active: activeTab === 'python' }]" @click="activeTab = 'python'; depsPage = 1; loadData()">Python3</button>
         <button :class="['status-tab', { active: activeTab === 'linux' }]" @click="activeTab = 'linux'; depsPage = 1; loadData()">Linux</button>
       </div>
+      <div class="status-tabs status-tabs--filter">
+        <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; depsPage = 1">全部</button>
+        <button :class="['status-tab status-tab--success', { active: statusFilter === 'installed' }]" @click="statusFilter = statusFilter === 'installed' ? '' : 'installed'; depsPage = 1">
+          已安装 <span class="status-tab__count">{{ installedCount }}</span>
+        </button>
+        <button :class="['status-tab status-tab--danger', { active: statusFilter === 'failed' }]" @click="statusFilter = statusFilter === 'failed' ? '' : 'failed'; depsPage = 1">
+          失败 <span class="status-tab__count">{{ failedCount }}</span>
+        </button>
+      </div>
     </div>
 
     <div class="toolbar">
@@ -616,6 +625,7 @@ const searchKeyword = ref('')
 const statusFilter = ref('')
 
 const failedCount = computed(() => depsList.value.filter(dep => dep.status === 'failed').length)
+const installedCount = computed(() => depsList.value.filter(dep => dep.status === 'installed').length)
 
 const filteredDepsList = computed(() => {
   let list = depsList.value
@@ -1132,16 +1142,25 @@ onBeforeUnmount(() => {
   font-size: 12px; font-weight: 800; font-family: Arial, sans-serif;
 }
 
-.deps-tabs { margin-bottom: 14px; }
+.deps-tabs { margin-bottom: 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .status-tabs {
   display: inline-flex; background: var(--el-fill-color-light); border-radius: 10px; padding: 3px; gap: 2px;
 }
 .status-tab {
   padding: 6px 18px; border-radius: 7px; border: none; background: transparent;
   color: var(--el-text-color-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
-  transition: all 0.18s; white-space: nowrap;
+  transition: all 0.18s; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px;
   &:hover { color: var(--el-text-color-primary); }
   &.active { background: var(--el-bg-color); color: var(--el-color-primary); box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); font-weight: 600; }
+  &--success.active { color: var(--el-color-success); }
+  &--danger.active { color: var(--el-color-danger); }
+}
+.status-tab__count {
+  font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; line-height: 18px;
+  text-align: center; border-radius: 9px; background: var(--el-fill-color); display: inline-block;
+  .status-tab.active & { background: currentColor; color: #fff; background-clip: padding-box; }
+  .status-tab--success.active & { background: var(--el-color-success); color: #fff; }
+  .status-tab--danger.active & { background: var(--el-color-danger); color: #fff; }
 }
 .dep-name-text {
   min-width: 0;

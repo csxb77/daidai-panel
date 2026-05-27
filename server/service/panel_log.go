@@ -6,6 +6,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -100,7 +101,8 @@ func compactGINLogLine(line string) (string, bool) {
 	path := strings.TrimSpace(match[5])
 	level := logLevelForStatusCode(statusCode)
 
-	return "[" + strings.ToUpper(level) + "] " + method + " " + path + " -> " + statusCode + " " + latency + " @" + clientIP, true
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	return ts + " [" + strings.ToUpper(level) + "] [" + clientIP + "] " + method + " " + path + " 状态=" + statusCode, true
 }
 
 func normalizeGINLatency(raw string) string {

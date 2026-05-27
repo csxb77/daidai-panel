@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, nextTick, computed, watch, type CSSProperties } from 'vue'
 import { envApi } from '@/api/env'
+import { configScriptApi } from '@/api/system'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { copyText } from '@/utils/clipboard'
 import EnvBatchGroupDialog from './components/EnvBatchGroupDialog.vue'
@@ -100,6 +101,10 @@ const exportScopeText = computed(() =>
 
 const showBatchRenameDialog = ref(false)
 const showBatchGroupDialog = ref(false)
+const showConfigScriptDialog = ref(false)
+const configScriptContent = ref('')
+const configScriptLoading = ref(false)
+const configScriptSaving = ref(false)
 
 const tableRef = ref()
 const desktopTableReady = ref(false)
@@ -435,11 +440,9 @@ async function initSortable() {
       bubbleScroll: true,
       scrollSensitivity: 100,
       scrollSpeed: 18,
-      // 移动端必须从拖拽手柄触发，且需长按 350ms 才进入拖拽态，
-      // 桌面端可全行拖拽不依赖 handle
       ...(isMobile.value
         ? { handle: '.env-mobile-drag-handle', delay: 350, delayOnTouchOnly: true, touchStartThreshold: 8 }
-        : { delay: 80, delayOnTouchOnly: true, touchStartThreshold: 4 }),
+        : { handle: '.env-drag-handle', delay: 0, touchStartThreshold: 4 }),
       onStart: (evt: any) => {
         updateDragPointer(evt)
         startDragAutoScroll()
@@ -712,6 +715,32 @@ async function handleImport(payload: { envs: any[]; mode: string }) {
   }
 }
 
+watch(showConfigScriptDialog, async (visible) => {
+  if (!visible) return
+  configScriptLoading.value = true
+  try {
+    const res = await configScriptApi.get()
+    configScriptContent.value = res.data?.content ?? ''
+  } catch {
+    configScriptContent.value = ''
+  } finally {
+    configScriptLoading.value = false
+  }
+})
+
+async function handleSaveConfigScript() {
+  configScriptSaving.value = true
+  try {
+    await configScriptApi.save(configScriptContent.value)
+    ElMessage.success('配置文件已保存')
+    showConfigScriptDialog.value = false
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    configScriptSaving.value = false
+  }
+}
+
 async function handleExportAll() {
   try {
     const exportIds = selectedIds.value.length > 0 ? [...selectedIds.value] : undefined
@@ -879,6 +908,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
               <el-dropdown-item @click="exportFormat = 'js'; handleExportFiles()">导出 JS</el-dropdown-item>
               <el-dropdown-item @click="exportFormat = 'python'; handleExportFiles()">导出 Python</el-dropdown-item>
               <el-dropdown-item divided @click="showImportDialog = true">导入</el-dropdown-item>
+              <el-dropdown-item divided @click="showConfigScriptDialog = true">
+                <el-icon><Document /></el-icon> 配置文件 (config.sh)
+              </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -1026,6 +1058,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         style="width: 100%"
       >
         <el-table-column type="selection" width="44" />
+        <el-table-column width="32" class-name="env-drag-col">
+          <template #default>
+            <el-icon class="env-drag-handle"><Rank /></el-icon>
+          </template>
+        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="188">
           <template #default="{ row }">
             <div class="env-name-wrap">
@@ -1199,6 +1236,26 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
       :groups="groups"
       @confirm="confirmBatchGroup"
     />
+
+    <el-dialog v-model="showConfigScriptDialog" title="配置文件 (config.sh)" width="680px" :fullscreen="isMobile" destroy-on-close>
+      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 14px">
+        适合存放不常变动的参数变量。文件中的变量会在每次任务执行时自动加载，优先级低于环境变量。
+        <br />格式：每行一个 <code>KEY=VALUE</code> 或 <code>export KEY="VALUE"</code>，<code>#</code> 开头为注释。
+      </el-alert>
+      <el-input
+        v-model="configScriptContent"
+        v-loading="configScriptLoading"
+        type="textarea"
+        :rows="18"
+        placeholder="# 示例：&#10;export MY_TOKEN=&quot;abc123&quot;&#10;API_BASE=&quot;https://example.com&quot;"
+        spellcheck="false"
+        style="font-family: var(--dd-font-mono); font-size: 13px"
+      />
+      <template #footer>
+        <el-button @click="showConfigScriptDialog = false">取消</el-button>
+        <el-button type="primary" :loading="configScriptSaving" @click="handleSaveConfigScript">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1774,12 +1831,23 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   color: var(--el-text-color-regular);
 }
 
-:deep(.el-table__body tr) {
+.env-drag-handle {
   cursor: grab;
+  color: var(--el-text-color-placeholder);
+  font-size: 16px;
+  transition: color 0.15s;
+
+  &:hover {
+    color: var(--el-text-color-secondary);
+  }
 
   &:active {
     cursor: grabbing;
   }
+}
+
+:deep(.env-drag-col) {
+  padding: 0 !important;
 }
 
 .top-action-active {

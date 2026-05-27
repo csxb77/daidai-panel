@@ -117,6 +117,14 @@ cp -rf $MODDIR/web/* $rootfs/app/web/ 2>/dev/null
 cp -f  $MODDIR/system/bin/daidai-server $rootfs/usr/local/bin/daidai-server 2>/dev/null
 chmod 755 $rootfs/usr/local/bin/daidai-server 2>/dev/null
 
+# 恢复持久化的依赖目录（容器 overlayfs 重启后可能丢失写入层）
+DEPS_PERSIST="$PERSIST_DIR/deps-snapshot"
+if [ -d "$DEPS_PERSIST" ]; then
+  mkdir -p $rootfs/app/Dumb-Panel/deps
+  cp -rf "$DEPS_PERSIST/." $rootfs/app/Dumb-Panel/deps/ 2>/dev/null
+  log "已从持久化快照恢复 deps 目录"
+fi
+
 if [ -f $MODDIR/system/bin/ddp ]; then
   cp -f  $MODDIR/system/bin/ddp $rootfs/usr/local/bin/ddp 2>/dev/null
   chmod 755 $rootfs/usr/local/bin/ddp 2>/dev/null
@@ -241,3 +249,20 @@ if "$RURIMA" ruri -p -N -S -A $rootfs /bin/ash -c "pgrep -f /usr/local/bin/daida
 else
   log "!! 面板启动失败，查看 $rootfs/app/Dumb-Panel/daidai.log"
 fi
+
+# ---- 后台定时快照 deps 目录到宿主持久化存储 --------------------------------
+# 容器 overlayfs 的写入层在重启后可能丢失，因此每隔 10 分钟
+# 将 deps 目录同步到宿主 /data/adb/daidai-panel/deps-snapshot/，
+# 下次开机时 service.sh 会自动回填到容器内。
+(
+  DEPS_PERSIST="$PERSIST_DIR/deps-snapshot"
+  DEPS_CONTAINER="$rootfs/app/Dumb-Panel/deps"
+  while true; do
+    sleep 600
+    if [ -d "$DEPS_CONTAINER" ] && [ "$(ls -A "$DEPS_CONTAINER" 2>/dev/null)" ]; then
+      mkdir -p "$DEPS_PERSIST"
+      rsync -a --delete "$DEPS_CONTAINER/" "$DEPS_PERSIST/" 2>/dev/null || \
+        cp -rf "$DEPS_CONTAINER/." "$DEPS_PERSIST/" 2>/dev/null
+    fi
+  done
+) &

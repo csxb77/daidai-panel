@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Clock, Delete, Download, Upload } from '@element-plus/icons-vue'
+import { Clock, Connection, Delete, Document, Download, Files, Setting, Timer, Upload, View } from '@element-plus/icons-vue'
 import { ref } from 'vue'
 import type { BackupSelection } from '@/api/system'
 import { useResponsive } from '@/composables/useResponsive'
@@ -54,41 +54,54 @@ defineProps<{
 const backupFileInput = ref<HTMLInputElement | null>(null)
 const { isMobile, dialogFullscreen } = useResponsive()
 
-const backupSelectionOptions: Array<{ key: keyof BackupSelection; title: string; description: string }> = [
+const backupSelectionOptions: Array<{ key: keyof BackupSelection; title: string; description: string; icon: any }> = [
   {
     key: 'configs',
     title: '配置项',
-    description: '系统设置、Open API、通知渠道与安全配置；恢复时不会覆盖当前面板账号密码',
+    description: '系统设置、Open API、通知渠道与安全配置',
+    icon: Setting,
   },
   {
     key: 'tasks',
     title: '定时任务',
     description: '任务定义、标签、执行参数与依赖关系',
+    icon: Timer,
   },
   {
     key: 'subscriptions',
     title: '订阅管理',
     description: '订阅配置与 SSH 密钥',
+    icon: Connection,
   },
   {
     key: 'env_vars',
     title: '环境变量',
     description: '面板环境变量与分组信息',
+    icon: Document,
   },
   {
     key: 'logs',
     title: '日志文件',
-    description: '任务日志记录、日志目录与面板运行日志',
+    description: '任务日志记录与面板运行日志',
+    icon: Files,
   },
   {
     key: 'scripts',
     title: '脚本文件',
-    description: '脚本目录内的源码、资源和可执行文件',
+    description: '脚本目录内的源码与可执行文件',
+    icon: Document,
   },
   {
     key: 'dependencies',
     title: '依赖记录',
-    description: '记录已安装依赖，恢复时按记录重新安装',
+    description: '已安装依赖，恢复时自动重装',
+    icon: Files,
+  },
+  {
+    key: 'task_views',
+    title: '任务视图',
+    description: '分组视图与自定义筛选排序',
+    icon: View,
   },
 ]
 
@@ -273,12 +286,15 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
             class="backup-selection-card"
             :class="{ 'is-active': backupScheduleSelection[option.key] }"
           >
-            <el-checkbox
-              :model-value="backupScheduleSelection[option.key]"
-              @update:model-value="updateBackupScheduleSelection(option.key, Boolean($event))"
-            >
-              {{ option.title }}
-            </el-checkbox>
+            <div class="backup-selection-card-header">
+              <el-icon class="backup-selection-icon" :size="16"><component :is="option.icon" /></el-icon>
+              <el-checkbox
+                :model-value="backupScheduleSelection[option.key]"
+                @update:model-value="updateBackupScheduleSelection(option.key, Boolean($event))"
+              >
+                {{ option.title }}
+              </el-checkbox>
+            </div>
             <span class="backup-selection-hint">{{ option.description }}</span>
           </label>
         </div>
@@ -286,7 +302,7 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
     </section>
   </el-card>
 
-  <el-dialog v-model="showBackupDialog" title="创建备份" width="520px" :fullscreen="dialogFullscreen">
+  <el-dialog v-model="showBackupDialog" title="创建备份" width="560px" :fullscreen="dialogFullscreen">
     <el-form :label-width="dialogFullscreen ? 'auto' : '100px'" :label-position="dialogFullscreen ? 'top' : 'right'">
       <el-form-item label="备份内容">
         <div class="backup-selection-grid">
@@ -296,12 +312,15 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
             class="backup-selection-card"
             :class="{ 'is-active': backupSelection[option.key] }"
           >
-            <el-checkbox
-              :model-value="backupSelection[option.key]"
-              @update:model-value="updateBackupSelection(option.key, Boolean($event))"
-            >
-              {{ option.title }}
-            </el-checkbox>
+            <div class="backup-selection-card-header">
+              <el-icon class="backup-selection-icon" :size="16"><component :is="option.icon" /></el-icon>
+              <el-checkbox
+                :model-value="backupSelection[option.key]"
+                @update:model-value="updateBackupSelection(option.key, Boolean($event))"
+              >
+                {{ option.title }}
+              </el-checkbox>
+            </div>
             <span class="backup-selection-hint">{{ option.description }}</span>
           </label>
         </div>
@@ -374,15 +393,15 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
 
 .backup-selection-grid {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .backup-selection-card {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 12px 14px;
   border: 1px solid var(--el-border-color-light);
   border-radius: 8px;
   background: var(--el-fill-color-extra-light);
@@ -408,19 +427,32 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
     font-weight: 600;
     font-size: 13px;
     color: var(--el-text-color-primary);
-    padding-left: 8px;
+    padding-left: 6px;
   }
+}
+
+.backup-selection-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.backup-selection-icon {
+  color: var(--el-text-color-secondary);
+  flex-shrink: 0;
+}
+
+.backup-selection-card.is-active .backup-selection-icon {
+  color: var(--el-color-primary);
 }
 
 .backup-selection-hint {
   display: block;
   font-size: 11px;
   color: var(--el-text-color-secondary);
-  line-height: 1.4;
-  margin-left: 30px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.5;
+  margin-left: 46px;
+  white-space: normal;
 }
 
 .schedule-section {
@@ -485,28 +517,16 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
   color: var(--el-text-color-primary);
 }
 
-@media (max-width: 1200px) {
-  .backup-selection-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-
 @media (max-width: 768px) {
   .card-header-buttons {
     width: 100%;
   }
 
   .backup-selection-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   .schedule-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 480px) {
-  .backup-selection-grid {
     grid-template-columns: 1fr;
   }
 }

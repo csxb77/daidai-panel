@@ -593,6 +593,36 @@ func (h *SystemHandler) RunHealthCheck(c *gin.Context) {
 	response.Success(c, buildSystemHealthSnapshot(items, checkedAt.Format(time.RFC3339)))
 }
 
+func (h *SystemHandler) GetConfigScript(c *gin.Context) {
+	filePath := filepath.Join(config.C.Data.Dir, "config.sh")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			response.Success(c, gin.H{"content": "", "path": "config.sh"})
+			return
+		}
+		response.ServerError(c, "读取配置文件失败")
+		return
+	}
+	response.Success(c, gin.H{"content": string(data), "path": "config.sh"})
+}
+
+func (h *SystemHandler) SaveConfigScript(c *gin.Context) {
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+	filePath := filepath.Join(config.C.Data.Dir, "config.sh")
+	if err := os.WriteFile(filePath, []byte(req.Content), 0755); err != nil {
+		response.ServerError(c, "保存配置文件失败")
+		return
+	}
+	response.Success(c, gin.H{"message": "配置文件已保存"})
+}
+
 func (h *SystemHandler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/system/public-version", h.PublicVersion)
 	r.GET("/system/panel-settings", h.PanelSettings)
@@ -618,5 +648,7 @@ func (h *SystemHandler) RegisterRoutes(r *gin.RouterGroup) {
 		sys.GET("/restore/progress", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.RestoreProgress)
 		sys.POST("/restore", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.Restore)
 		sys.DELETE("/backup", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.DeleteBackup)
+		sys.GET("/config-script", middleware.RequireRole("admin"), h.GetConfigScript)
+		sys.PUT("/config-script", middleware.RequireRole("admin"), h.SaveConfigScript)
 	}
 }

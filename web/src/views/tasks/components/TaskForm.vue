@@ -34,6 +34,7 @@ const form = ref({
   task_before: '',
   task_after: '',
   allow_multiple_instances: false,
+  stop_schedule: '',
   group_name: '',
 })
 
@@ -77,6 +78,7 @@ watch(() => props.visible, (val) => {
       task_before: props.task.task_before || '',
       task_after: props.task.task_after || '',
       allow_multiple_instances: props.task.allow_multiple_instances ?? false,
+      stop_schedule: props.task.stop_schedule || '',
     }
   } else if (val) {
     const p = props.prefill
@@ -88,7 +90,7 @@ watch(() => props.visible, (val) => {
       task_type: p?.task_type || 'cron',
       timeout: 86400, random_delay_seconds: null, max_retries: 0, retry_interval: 60,
       notify_on_failure: false, notify_on_success: false, notification_channel_id: null, labels: [], depends_on: null,
-      task_before: '', task_after: '', allow_multiple_instances: false, group_name: '',
+      task_before: '', task_after: '', allow_multiple_instances: false, group_name: '', stop_schedule: '',
     }
   }
   activeTab.value = 'basic'
@@ -182,6 +184,12 @@ function handleSubmit() {
           <el-form-item v-if="form.task_type === 'cron'" label="定时规则" required>
             <CronInput v-model="form.cron_expression" />
           </el-form-item>
+          <el-form-item v-if="form.task_type === 'cron'" label="定时停止">
+            <el-input v-model="form.stop_schedule" placeholder="cron 表达式，留空不自动停止（如 0 12 * * *）" />
+            <div style="font-size: 11px; color: var(--el-text-color-secondary); margin-top: 4px; line-height: 1.5">
+              到达设定时间后自动停止正在运行的任务，适合需要在特定时段运行的长驻任务。支持多条，换行分隔。
+            </div>
+          </el-form-item>
           <el-form-item v-else label="执行说明">
             <div style="font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.7">
               <template v-if="form.task_type === 'manual'">
@@ -218,7 +226,10 @@ function handleSubmit() {
       <el-tab-pane label="高级设置" name="advanced">
         <el-form :model="form" :label-width="dialogFullscreen ? 'auto' : '120px'" :label-position="dialogFullscreen ? 'top' : 'right'">
           <el-form-item label="超时(秒)">
-            <el-input-number v-model="form.timeout" :min="0" :max="86400" />
+            <el-input-number v-model="form.timeout" :min="0" :max="604800" />
+            <div v-if="form.timeout === 0" style="font-size: 11px; color: var(--el-color-warning); margin-top: 4px">
+              设置为 0 表示永不超时，任务将持续运行直到手动停止或定时停止。
+            </div>
           </el-form-item>
           <el-form-item label="随机延迟">
             <div class="advanced-field-block">

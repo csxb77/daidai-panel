@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch, nextTick } from 'vue'
 import { CopyDocument, Download, Refresh, Search, Tickets } from '@element-plus/icons-vue'
 import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
 import type { PanelLogLevel } from '../usePanelLogViewer'
@@ -42,6 +42,17 @@ const levelOptions: Array<{ label: string; value: PanelLogLevel }> = [
 const lineOptions = [100, 200, 500, 1000]
 
 const renderedHtml = computed(() => ansiToHtml(normalizeAnsi(props.logs.join('\n'))))
+
+const logViewRef = ref<HTMLElement>()
+
+watch(() => props.logs, () => {
+  nextTick(() => {
+    const el = logViewRef.value
+    if (el) {
+      el.scrollTop = el.scrollHeight
+    }
+  })
+}, { flush: 'post' })
 </script>
 
 <template>
@@ -135,7 +146,7 @@ const renderedHtml = computed(() => ansiToHtml(normalizeAnsi(props.logs.join('\n
       </div>
     </div>
 
-    <div class="panel-log-view dd-log-surface">
+    <div ref="logViewRef" class="panel-log-view dd-log-surface">
       <div v-if="logs.length === 0" class="panel-log-empty">
         当前筛选条件下暂无日志
       </div>

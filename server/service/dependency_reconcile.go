@@ -15,7 +15,6 @@ var dependencyRestartReinstallBatchFunc = reinstallDependenciesAfterRestartAsync
 func ReconcileDependenciesAfterRestart() {
 	var installed []model.Dependency
 	database.DB.Where("status = ?", model.DepStatusInstalled).Find(&installed)
-	resetCount := 0
 	reinstallAfterRestart := make([]model.Dependency, 0)
 	scheduledRestartReinstallIDs := make(map[uint]struct{})
 
@@ -24,34 +23,33 @@ func ReconcileDependenciesAfterRestart() {
 			continue
 		}
 
-		if dep.Type == model.DepTypeLinux {
-			nextLog := appendDependencyLog(dep.Log, "[启动校验] 检测到 Linux 依赖在容器重建后丢失，已在重启后自动重新安装")
-			database.DB.Model(&dep).Updates(map[string]interface{}{
-				"status": model.DepStatusInstalling,
-				"log":    nextLog,
-			})
-			dep.Status = model.DepStatusInstalling
-			dep.Log = nextLog
-			reinstallAfterRestart = append(reinstallAfterRestart, dep)
-			scheduledRestartReinstallIDs[dep.ID] = struct{}{}
-			log.Printf("dep verify: %s/%s missing after restart, scheduled automatic reinstall", dep.Type, dep.Name)
-			continue
+		var logMsg string
+		switch dep.Type {
+		case model.DepTypeLinux:
+			logMsg = "[启动校验] 检测到 Linux 依赖在容器重建后丢失，已在重启后自动重新安装"
+		case model.DepTypeNodeJS:
+			logMsg = "[启动校验] 检测到 Node.js 依赖丢失（可能因重启容器重建），已自动重新安装"
+		case model.DepTypePython:
+			logMsg = "[启动校验] 检测到 Python 依赖丢失（可能因重启容器重建），已自动重新安装"
+		default:
+			logMsg = "[启动校验] 依赖未检测到，已自动重新安装"
 		}
 
+		nextLog := appendDependencyLog(dep.Log, logMsg)
 		database.DB.Model(&dep).Updates(map[string]interface{}{
-			"status": model.DepStatusFailed,
-			"log":    appendDependencyLog(dep.Log, "[启动校验] 依赖未检测到，可能因容器重建而丢失，请重新安装"),
+			"status": model.DepStatusInstalling,
+			"log":    nextLog,
 		})
-		resetCount++
-		log.Printf("dep verify: %s/%s not found, status reset to failed", dep.Type, dep.Name)
+		dep.Status = model.DepStatusInstalling
+		dep.Log = nextLog
+		reinstallAfterRestart = append(reinstallAfterRestart, dep)
+		scheduledRestartReinstallIDs[dep.ID] = struct{}{}
+		log.Printf("dep verify: %s/%s missing after restart, scheduled automatic reinstall", dep.Type, dep.Name)
 	}
 
-	if resetCount > 0 {
-		log.Printf("dep verify: %d dependencies reset to failed (not found on system)", resetCount)
-	}
 	if len(reinstallAfterRestart) > 0 {
 		dependencyRestartReinstallBatchFunc(reinstallAfterRestart)
-		log.Printf("dep verify: resumed %d missing Linux dependencies after restart", len(reinstallAfterRestart))
+		log.Printf("dep verify: scheduled %d missing dependencies for automatic reinstall after restart", len(reinstallAfterRestart))
 	}
 
 	var stale []model.Dependency

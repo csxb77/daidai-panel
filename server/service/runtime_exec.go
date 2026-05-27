@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -93,6 +94,8 @@ func BuildManagedRuntimeEnvMap(workDir, scriptsDir string, defaultChannelID *uin
 	for _, name := range order {
 		envMap[name] = joinTaskEnvValues(grouped[name])
 	}
+
+	loadConfigShellVars(envMap)
 
 	runtimePaths := currentManagedRuntimePaths()
 	if runtimePaths.NodeModules != "" {
@@ -781,4 +784,40 @@ func joinPathSegments(parts ...string) string {
 		}
 	}
 	return strings.Join(joined, string(os.PathListSeparator))
+}
+
+func loadConfigShellVars(envMap map[string]string) {
+	dataDir := ""
+	if config.C != nil {
+		dataDir = config.C.Data.Dir
+	}
+	if dataDir == "" {
+		return
+	}
+
+	configPath := filepath.Join(dataDir, "config.sh")
+	f, err := os.Open(configPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		idx := strings.IndexByte(line, '=')
+		if idx <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		val = strings.Trim(val, "\"'")
+		if key != "" {
+			envMap[key] = val
+		}
+	}
 }

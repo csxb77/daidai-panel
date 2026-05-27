@@ -709,6 +709,10 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 		})
 	}
 
+	if status == successStatus {
+		go service.SnapshotDepsToHost()
+	}
+
 	broadcaster.done()
 }
 

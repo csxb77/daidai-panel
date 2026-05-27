@@ -309,7 +309,7 @@ watch(showVersionDiffDialog, (visible) => {
 .version-diff-dialog {
   display: flex;
   flex-direction: column;
-  min-height: 70vh;
+  height: calc(92vh - 80px);
 }
 
 .version-diff-header {
@@ -339,8 +339,9 @@ watch(showVersionDiffDialog, (visible) => {
 }
 
 .version-diff-editor {
-  flex: 1;
-  min-height: 62vh;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .version-diff-toolbar {

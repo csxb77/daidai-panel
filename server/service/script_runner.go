@@ -535,8 +535,13 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		}
 	}()
 
-	timer := time.NewTimer(time.Duration(timeout) * time.Second)
-	defer timer.Stop()
+	var timerC <-chan time.Time
+	var timer *time.Timer
+	if timeout > 0 {
+		timer = time.NewTimer(time.Duration(timeout) * time.Second)
+		timerC = timer.C
+		defer timer.Stop()
+	}
 
 	waitCh := make(chan error, 1)
 	go func() {
@@ -557,13 +562,11 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 			}
 		}
 		if readErr != nil && readErr != io.EOF && totalSize < maxLogSize && !truncated {
-			// Wait 结束后，部分平台会把 StdoutPipe/同 FD 的 Stderr 一并关闭。
-			// 此时 reader 侧常见 read |0: file already closed，不代表脚本真实执行失败。
 			if !isBenignProcessPipeReadError(readErr) {
 				emitLine(fmt.Sprintf("[读取脚本输出失败] %s", readErr.Error()))
 			}
 		}
-	case <-timer.C:
+	case <-timerC:
 		KillProcessGroup(cmd.Process)
 		readErr := <-done
 		<-waitCh

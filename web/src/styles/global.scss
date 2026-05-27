@@ -256,6 +256,30 @@ a {
   }
 }
 
+.el-table .el-checkbox {
+  .el-checkbox__inner {
+    width: 18px;
+    height: 18px;
+
+    &::after {
+      left: 6px;
+      top: 2px;
+      width: 4px;
+      height: 9px;
+    }
+  }
+
+  .el-checkbox__input {
+    position: relative;
+
+    &::before {
+      content: '';
+      position: absolute;
+      inset: -8px;
+    }
+  }
+}
+
 .el-tag {
   border-radius: 6px;
   font-weight: 500;
@@ -315,6 +339,24 @@ a {
     &:hover:not(.is-active) {
       background: var(--el-fill-color-light);
       transform: translateX(2px);
+    }
+  }
+
+  &.el-menu--collapse {
+    .el-menu-item {
+      margin: 2px 8px;
+      padding: 0 !important;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+
+      .el-icon {
+        margin: 0;
+      }
+
+      &:hover:not(.is-active) {
+        transform: none;
+      }
     }
   }
 }

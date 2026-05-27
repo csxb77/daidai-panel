@@ -9,6 +9,7 @@ import (
 	"daidai-panel/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func (h *TaskHandler) Batch(c *gin.Context) {
@@ -48,6 +49,21 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 				if err := scheduler.RunNow(id); err == nil {
 					count++
 				}
+				continue
+			}
+		case "stop":
+			if task.Status == model.TaskStatusRunning {
+				service.GetTaskExecutor().StopTask(id)
+				if task.PID != nil && *task.PID > 0 {
+					service.KillProcessByPid(*task.PID)
+				}
+				inactiveStatus := service.ResolveTaskInactiveStatus(&task)
+				database.DB.Model(&task).Updates(map[string]interface{}{
+					"status":   inactiveStatus,
+					"pid":      gorm.Expr("NULL"),
+					"log_path": gorm.Expr("NULL"),
+				})
+			} else {
 				continue
 			}
 		case "pin":

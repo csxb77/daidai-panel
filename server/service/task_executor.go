@@ -240,10 +240,14 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	maxLogSize := model.GetRegisteredConfigInt("max_log_content_size")
 
 	timeout := task.Timeout
-	if timeout <= 0 {
+	if timeout < 0 {
 		timeout = commandTimeout
 	}
-	envVars, envErr := BuildManagedRuntimeEnvMap(e.scriptsDir, e.scriptsDir, task.NotificationChannelID, time.Duration(timeout)*time.Second+time.Hour)
+	envTTL := time.Duration(timeout)*time.Second + time.Hour
+	if timeout == 0 {
+		envTTL = 365 * 24 * time.Hour
+	}
+	envVars, envErr := BuildManagedRuntimeEnvMap(e.scriptsDir, e.scriptsDir, task.NotificationChannelID, envTTL)
 	if envErr != nil {
 		log.Printf("prepare task runtime env failed: %v", envErr)
 	}
