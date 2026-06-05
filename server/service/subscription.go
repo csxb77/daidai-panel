@@ -709,7 +709,7 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 				CronExpression:  candidate.CronExpression,
 				TaskType:        model.TaskTypeCron,
 				Status:          model.TaskStatusEnabled,
-				Timeout:         86400,
+				Timeout:         0,
 				NotifyOnFailure: true,
 			}
 			task.SetLabelsFromSlice([]string{label})

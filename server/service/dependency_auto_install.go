@@ -13,11 +13,11 @@ import (
 )
 
 var (
-	autoInstallNodeModuleRe    = regexp.MustCompile(`(?:Cannot find module|Error \[ERR_MODULE_NOT_FOUND\].*)\s*'([^']+)'`)
-	autoInstallNodeHintRe      = regexp.MustCompile(`npm\s+install\s+([a-zA-Z@][a-zA-Z0-9_./@-]*)`)
-	autoInstallPyModuleRe      = regexp.MustCompile(`(?:ModuleNotFoundError|ImportError):\s*No module named\s+'([^']+)'`)
-	autoInstallPyHintRe        = regexp.MustCompile(`pip3?\s+install\s+([a-zA-Z][a-zA-Z0-9_.@-]*)`)
-	autoInstallGoModuleRe      = regexp.MustCompile(`(?:no required module provides package|missing go\.sum entry for module providing package)\s+([^\s:;]+)`)
+	autoInstallNodeModuleRe = regexp.MustCompile(`(?:Cannot find module|Error \[ERR_MODULE_NOT_FOUND\].*)\s*'([^']+)'`)
+	autoInstallNodeHintRe   = regexp.MustCompile(`npm\s+install\s+([a-zA-Z@][a-zA-Z0-9_./@-]*)`)
+	autoInstallPyModuleRe   = regexp.MustCompile(`(?:ModuleNotFoundError|ImportError):\s*No module named\s+'([^']+)'`)
+	autoInstallPyHintRe     = regexp.MustCompile(`pip3?\s+install\s+([a-zA-Z][a-zA-Z0-9_.@-]*)`)
+	autoInstallGoModuleRe   = regexp.MustCompile(`(?:no required module provides package|missing go\.sum entry for module providing package)\s+([^\s:;]+)`)
 
 	thirdPartyExcludedModules = map[string]bool{
 		"sendNotify":           true,
@@ -38,6 +38,7 @@ type AutoInstallCandidate struct {
 	WorkDir       string
 	RecordType    string
 	RecordName    string
+	PythonVersion string
 }
 
 type AutoInstallResult struct {
@@ -150,9 +151,12 @@ func InstallAutoDependency(candidate *AutoInstallCandidate, envVars map[string]s
 	switch candidate.Manager {
 	case "python":
 		pipEnv := PipInstallEnv(baseEnv, CurrentPipMirror())
-		pipBin, extraFlags, _ := ResolvePipInstallCommand()
-
-		cmd := exec.Command(pipBin, BuildPipInstallArgs(extraFlags, candidate.PackageName)...)
+		pythonVersion := ResolvePythonVersionFromEnv(envVars)
+		candidate.PythonVersion = pythonVersion
+		cmd, err := NewPipInstallCommandForPythonVersion(pythonVersion, candidate.PackageName)
+		if err != nil {
+			return AutoInstallResult{Error: err.Error()}
+		}
 		cmd.Env = pipEnv
 		out, err := cmd.CombinedOutput()
 
@@ -160,8 +164,11 @@ func InstallAutoDependency(candidate *AutoInstallCandidate, envVars map[string]s
 		// （venv 被外部破坏、用户改了 sys.prefix 等）仍可能撞到 PEP 668。检测到就加
 		// --break-system-packages --user 重跑一次。
 		if err != nil && IsExternallyManagedError(out) {
-			retryFlags := append([]string{"--break-system-packages", "--user"}, extraFlags...)
-			retry := exec.Command(pipBin, BuildPipInstallArgs(dedupFlags(retryFlags), candidate.PackageName)...)
+			retryFlags := []string{"--break-system-packages", "--user"}
+			retry, buildErr := NewPipInstallCommandForPythonVersionWithFlags(pythonVersion, candidate.PackageName, dedupFlags(retryFlags))
+			if buildErr != nil {
+				return AutoInstallResult{Log: string(out), Error: buildErr.Error()}
+			}
 			retry.Env = pipEnv
 			retryOut, retryErr := retry.CombinedOutput()
 			combined := append([]byte{}, out...)
@@ -197,17 +204,106 @@ func IsExternallyManagedError(out []byte) bool {
 		strings.Contains(text, "this environment is externally managed")
 }
 
-// ResolvePipInstallCommand 选 pip 二进制 + 自动决定 PEP 668 兜底参数。
-// 优先用托管 venv 里的 pip；venv 建不出来时 fallback 到系统 pip3 并预先加
-// --break-system-packages --user（避免触发 PEP 668 拒绝 + 装到 ~/.local 不污染系统）。
-// 返回值：pip 二进制路径、自动安装的附加 flag、是否使用系统 pip。
+// ResolvePipInstallCommand 选默认 Python 版本的 pip 二进制 + 自动决定 PEP 668 参数。
+// 优先用托管 venv 里的 pip，其次使用匹配目标版本的 python -m pip 或 pipX.Y。
+// 目标版本不可用时不回落到未带版本的 pip3，避免把依赖装进错误解释器。
 func ResolvePipInstallCommand() (binary string, extraFlags []string, usingSystemPip bool) {
-	binary = ResolveManagedPipBinary()
-	if strings.TrimSpace(binary) != "" {
-		return binary, nil, false
+	return ResolvePipInstallCommandForPythonVersion("")
+}
+
+type pipCommandSpec struct {
+	binary         string
+	prefixArgs     []string
+	extraFlags     []string
+	usingSystemPip bool
+}
+
+func (spec pipCommandSpec) command(args []string) *exec.Cmd {
+	fullArgs := append([]string{}, spec.prefixArgs...)
+	fullArgs = append(fullArgs, args...)
+	return exec.Command(spec.binary, fullArgs...)
+}
+
+func resolvePipCommandSpecForPythonVersion(pythonVersion string, includeSystemInstallFlags bool) (pipCommandSpec, error) {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if binary := ResolveManagedPipBinaryForPythonVersion(pythonVersion); strings.TrimSpace(binary) != "" {
+		return pipCommandSpec{binary: binary}, nil
 	}
-	// venv 创建失败的兜底
-	return "pip3", []string{"--break-system-packages", "--user"}, true
+
+	systemFlags := []string(nil)
+	if includeSystemInstallFlags {
+		systemFlags = []string{"--break-system-packages", "--user"}
+	}
+	for _, candidate := range managedPythonBootstrapCommandsForVersion(pythonVersion) {
+		if !managedBootstrapCommandMatchesVersion(candidate, pythonVersion) {
+			continue
+		}
+		prefix := append([]string{}, candidate.versionArgsPrefix...)
+		prefix = append(prefix, "-m", "pip")
+		return pipCommandSpec{
+			binary:         candidate.binary,
+			prefixArgs:     prefix,
+			extraFlags:     systemFlags,
+			usingSystemPip: true,
+		}, nil
+	}
+
+	runtimePip := "pip" + pythonVersion
+	if pipBin, err := exec.LookPath(runtimePip); err == nil && pipBinaryMatchesVersion(pipBin, pythonVersion) {
+		return pipCommandSpec{binary: runtimePip, extraFlags: systemFlags, usingSystemPip: true}, nil
+	}
+	return pipCommandSpec{}, fmt.Errorf("Python %s 不可用，请先安装 python%s 或切换依赖 Python 版本", pythonVersion, pythonVersion)
+}
+
+func pipBinaryMatchesVersion(binary, pythonVersion string) bool {
+	cmd := exec.Command(binary, "--version")
+	cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(string(out)))
+	return strings.Contains(text, "python "+NormalizePythonVersionOrDefault(pythonVersion))
+}
+
+func ResolvePipInstallCommandForPythonVersion(pythonVersion string) (binary string, extraFlags []string, usingSystemPip bool) {
+	spec, err := resolvePipCommandSpecForPythonVersion(pythonVersion, true)
+	if err != nil {
+		return "", nil, false
+	}
+	return spec.binary, append([]string{}, spec.extraFlags...), spec.usingSystemPip
+}
+
+func NewPipCommandForPythonVersion(pythonVersion string, args []string) (*exec.Cmd, error) {
+	spec, err := resolvePipCommandSpecForPythonVersion(pythonVersion, false)
+	if err != nil {
+		return nil, err
+	}
+	return spec.command(args), nil
+}
+
+func NewPipInstallCommandForPythonVersion(pythonVersion, packageName string) (*exec.Cmd, error) {
+	spec, err := resolvePipCommandSpecForPythonVersion(pythonVersion, true)
+	if err != nil {
+		return nil, err
+	}
+	return spec.command(BuildPipInstallArgs(spec.extraFlags, packageName)), nil
+}
+
+func NewPipInstallCommandForPythonVersionWithFlags(pythonVersion, packageName string, extraFlags []string) (*exec.Cmd, error) {
+	spec, err := resolvePipCommandSpecForPythonVersion(pythonVersion, true)
+	if err != nil {
+		return nil, err
+	}
+	return spec.command(BuildPipInstallArgs(extraFlags, packageName)), nil
+}
+
+func NewPipUninstallCommandForPythonVersion(pythonVersion, packageName string, extraOptions ...string) (*exec.Cmd, error) {
+	spec, err := resolvePipCommandSpecForPythonVersion(pythonVersion, true)
+	if err != nil {
+		return nil, err
+	}
+	return spec.command(BuildPipUninstallArgs(spec.extraFlags, packageName, extraOptions...)), nil
 }
 
 // BuildPipInstallArgs 把 install 子命令、附加 flag、包名拼成完整的 args。
@@ -257,7 +353,7 @@ func completeAutoInstall(candidate *AutoInstallCandidate, out []byte, err error)
 	}
 
 	if candidate.RecordType != "" && candidate.RecordName != "" {
-		RecordAutoInstalledDep(candidate.RecordType, candidate.RecordName, logText)
+		RecordAutoInstalledDepForPythonVersion(candidate.RecordType, candidate.RecordName, logText, candidate.PythonVersion)
 	}
 
 	return AutoInstallResult{

@@ -11,19 +11,6 @@ import (
 	_ "github.com/glebarez/sqlite"
 )
 
-func TestMapQingLongConfigToSystemConfig(t *testing.T) {
-	key, value, ok := mapQingLongConfigToSystemConfig("CommandTimeoutTime", "1h")
-	if !ok {
-		t.Fatal("expected command timeout to be mapped")
-	}
-	if key != "command_timeout" {
-		t.Fatalf("expected command_timeout key, got %q", key)
-	}
-	if value != "3600" {
-		t.Fatalf("expected 3600 seconds, got %q", value)
-	}
-}
-
 func TestMapQingLongDependencyType(t *testing.T) {
 	if got := mapQingLongDependencyType(0); got != "nodejs" {
 		t.Fatalf("expected nodejs, got %q", got)
@@ -130,6 +117,20 @@ func TestBuildQingLongNotificationChannels(t *testing.T) {
 	}
 	if got := byType["wxpusher"]["content_type"]; got != "2" {
 		t.Fatalf("unexpected wxpusher content type: %q", got)
+	}
+}
+
+func TestBuildQingLongEmailConfigMarksSSLForPort465(t *testing.T) {
+	cfg := buildQingLongEmailConfig(map[string]string{
+		"SMTP_SERVER":   "smtp.qq.com:465",
+		"SMTP_EMAIL":    "user@example.com",
+		"SMTP_PASSWORD": "secret",
+	})
+	if cfg == nil {
+		t.Fatal("expected email config")
+	}
+	if got := cfg["smtp_ssl"]; got != "true" {
+		t.Fatalf("expected smtp_ssl=true for port 465, got %q", got)
 	}
 }
 

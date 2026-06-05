@@ -36,7 +36,7 @@ func TestReconcileDependenciesAfterRestartResumesRestoreJobs(t *testing.T) {
 		dependencyReinstallBatchFunc = originalReinstallBatch
 	})
 
-	dependencyInstalledFunc = func(depType, name string) bool {
+	dependencyInstalledFunc = func(depType, name, pythonVersion string) bool {
 		return false
 	}
 
@@ -86,7 +86,7 @@ func TestReconcileDependenciesAfterRestartReinstallsMissingLinuxDeps(t *testing.
 		dependencyRestartReinstallBatchFunc = originalRestartReinstallBatch
 	})
 
-	dependencyInstalledFunc = func(depType, name string) bool {
+	dependencyInstalledFunc = func(depType, name, pythonVersion string) bool {
 		return false
 	}
 

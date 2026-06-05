@@ -39,6 +39,11 @@ func printHelp() {
   ddp list-users
   ddp disable-2fa <用户名>
   ddp disable-2fa --all
+  ddp ip-whitelist list
+  ddp ip-whitelist add <IP或CIDR> [--remarks 备注]
+  ddp ip-whitelist delete <ID或IP/CIDR>
+  ddp ip-whitelist clear
+  ddp ip-whitelist set <IP或CIDR> [更多IP或CIDR...]
 
 说明:
   1. 没有使用 dd 作为命令名，因为 Linux 已自带 dd 命令，容易冲突。
@@ -63,5 +68,7 @@ func printHelp() {
   ddp reset-password admin NewPass123
   ddp reset-username admin newadmin
   ddp list-users
-  ddp disable-2fa admin`)
+  ddp disable-2fa admin
+  ddp ip-whitelist clear
+  ddp ip-whitelist set 203.0.113.10 203.0.113.0/24`)
 }

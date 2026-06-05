@@ -260,10 +260,6 @@ func TestCaptchaUpstreamFailurePolicyOnLogin(t *testing.T) {
 			model.SetConfig("captcha_key", "secret-key")
 			model.SetConfig("captcha_fail_mode", tc.failMode)
 
-			for i := 0; i < service.CaptchaThreshold; i++ {
-				service.RecordFailedLogin(clientIP, user.Username)
-			}
-
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "upstream error", http.StatusBadGateway)
 			}))
@@ -301,6 +297,35 @@ func TestCaptchaUpstreamFailurePolicyOnLogin(t *testing.T) {
 				t.Fatalf("expected captcha_reason upstream_5xx, got %q", got)
 			}
 		})
+	}
+}
+
+func TestCaptchaEnabledRequiresCaptchaOnFirstLogin(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	password := "Password123!"
+	user := testutil.MustCreateLoginUser(t, "captcha-first-user", "admin", password)
+	model.SetConfig("captcha_enabled", "true")
+	model.SetConfig("captcha_id", "captcha-id")
+	model.SetConfig("captcha_key", "secret-key")
+
+	engine := newProtectedRouter()
+	body := `{"username":"` + user.Username + `","password":"` + password + `"}`
+	rec := performJSONRequest(engine, http.MethodPost, "/api/v1/auth/login", body, nil, "198.51.100.30")
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected missing captcha to be rejected with 401, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	payload := decodeJSONMap(t, rec)
+	if got, _ := payload["captcha_required"].(bool); !got {
+		t.Fatalf("expected captcha_required flag, got %v", payload)
+	}
+	if got, _ := payload["captcha_id"].(string); got != "captcha-id" {
+		t.Fatalf("expected captcha_id captcha-id, got %q", got)
+	}
+	if got, _ := payload["require_after_failures"].(float64); got != 0 {
+		t.Fatalf("expected require_after_failures 0 for every-login captcha, got %v", got)
 	}
 }
 

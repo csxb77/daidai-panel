@@ -24,7 +24,11 @@ func buildDependencyExportText(depType string, deps []model.Dependency) (string,
 }
 
 func buildDependencyExportLines(depType string, deps []model.Dependency) ([]string, error) {
-	versionMap, err := resolveDependencyVersions(depType)
+	pythonVersion := ""
+	if depType == model.DepTypePython && len(deps) > 0 {
+		pythonVersion = service.NormalizeDependencyPythonVersion(deps[0].PythonVersion)
+	}
+	versionMap, err := resolveDependencyVersions(depType, pythonVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -43,12 +47,12 @@ func buildDependencyExportLinesFromVersions(deps []model.Dependency, versions ma
 	return lines
 }
 
-func resolveDependencyVersions(depType string) (map[string]string, error) {
+func resolveDependencyVersions(depType, pythonVersion string) (map[string]string, error) {
 	switch depType {
 	case model.DepTypeNodeJS:
 		return resolveNodeDependencyVersions()
 	case model.DepTypePython:
-		return resolvePythonDependencyVersions()
+		return resolvePythonDependencyVersions(pythonVersion)
 	case model.DepTypeLinux:
 		return resolveLinuxDependencyVersions()
 	default:
@@ -82,14 +86,23 @@ func resolveNodeDependencyVersions() (map[string]string, error) {
 	return result, nil
 }
 
-func resolvePythonDependencyVersions() (map[string]string, error) {
+func resolvePythonDependencyVersions(pythonVersion string) (map[string]string, error) {
 	type pipPackage struct {
 		Name    string `json:"name"`
 		Version string `json:"version"`
 	}
 
-	pipBin := filepath.Join(config.C.Data.Dir, "deps", "python", "venv", "bin", "pip")
-	listCmd := exec.Command(pipBin, "list", "--format=json")
+	pipBin := service.ResolveManagedPipBinaryForPythonVersion(pythonVersion)
+	var listCmd *exec.Cmd
+	if strings.TrimSpace(pipBin) == "" {
+		var err error
+		listCmd, err = service.NewPipCommandForPythonVersion(pythonVersion, []string{"list", "--format=json"})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		listCmd = exec.Command(pipBin, "list", "--format=json")
+	}
 	listCmd.Env = service.SanitizePipEnv(os.Environ())
 	out, err := listCmd.Output()
 	if err != nil {

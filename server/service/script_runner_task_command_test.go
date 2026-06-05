@@ -2,6 +2,7 @@ package service
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -155,6 +156,31 @@ func TestParseCommandExecutionPlanSupportsTaskModesAndArgs(t *testing.T) {
 		}
 	})
 
+}
+
+func TestHookScriptsReceiveTaskScriptArgs(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+
+	outputFile := filepath.Join(config.C.Data.ScriptsDir, "hook-args.out")
+	hookPath := filepath.Join(config.C.Data.ScriptsDir, "task_before.sh")
+	hookContent := []byte(`printf '%s|%s|%s' "$1" "$2" "$3" > hook-args.out` + "\n")
+	if err := os.WriteFile(hookPath, hookContent, 0755); err != nil {
+		t.Fatalf("write hook script: %v", err)
+	}
+
+	RunHookScript("task_before.sh", config.C.Data.ScriptsDir, nil, nil, "http://127.0.0.1:7890", "two words", "value3")
+
+	content, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("read hook args output: %v", err)
+	}
+	if got, want := string(content), "http://127.0.0.1:7890|two words|value3"; got != want {
+		t.Fatalf("expected hook args %q, got %q", want, got)
+	}
 }
 
 func TestResolveTaskAccountSelections(t *testing.T) {

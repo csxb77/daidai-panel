@@ -8,15 +8,24 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"daidai-panel/model"
+	"daidai-panel/testutil"
 )
 
-func TestShouldRequireCaptchaByAttempts(t *testing.T) {
-	if ShouldRequireCaptchaByAttempts(CaptchaThreshold - 1) {
-		t.Fatalf("expected attempts below threshold to not require captcha")
+func TestIsCaptchaRequiredWhenEnabled(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if IsCaptchaRequired("198.51.100.10", "admin") {
+		t.Fatalf("expected captcha to be disabled by default")
 	}
 
-	if !ShouldRequireCaptchaByAttempts(CaptchaThreshold) {
-		t.Fatalf("expected attempts at threshold to require captcha")
+	model.SetConfig("captcha_enabled", "true")
+	model.SetConfig("captcha_id", "captcha-id")
+	model.SetConfig("captcha_key", "secret-key")
+
+	if !IsCaptchaRequired("198.51.100.10", "") {
+		t.Fatalf("expected enabled captcha to be required before any failed login")
 	}
 }
 

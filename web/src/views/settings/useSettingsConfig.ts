@@ -4,6 +4,8 @@ import { ElMessage } from 'element-plus'
 import { applyPanelAppearance } from '@/utils/panelAppearance'
 import type { SettingsConfigForm } from './types'
 
+const logBackgroundImageMaxBytes = 10 * 1024 * 1024
+
 export function useSettingsConfig() {
   // 此开关原为功能上线门控，当前已全量启用（保留常量以兼容消费方）
   const captchaFeatureImplemented = true
@@ -12,7 +14,6 @@ export function useSettingsConfig() {
 
   const configForm = ref<SettingsConfigForm>({
     max_concurrent_tasks: 5,
-    command_timeout: 86400,
     log_retention_days: 7,
     max_log_content_size: 102400000,
     random_delay: '',
@@ -29,6 +30,7 @@ export function useSettingsConfig() {
     notify_on_login: false,
     proxy_url: '',
     update_image_mirror: '',
+    binary_update_proxy: '',
     auto_update_enabled: false,
     trusted_proxy_cidrs: '',
     captcha_enabled: false,
@@ -80,7 +82,6 @@ export function useSettingsConfig() {
 
       configForm.value = {
         max_concurrent_tasks: readConfigNumber(cfgs, 'max_concurrent_tasks', 5),
-        command_timeout: readConfigNumber(cfgs, 'command_timeout', 86400),
         log_retention_days: readConfigNumber(cfgs, 'log_retention_days', 7),
         max_log_content_size: readConfigNumber(cfgs, 'max_log_content_size', 102400000),
         random_delay: readConfigString(cfgs, 'random_delay', ''),
@@ -97,6 +98,7 @@ export function useSettingsConfig() {
         notify_on_login: readConfigBool(cfgs, 'notify_on_login', false),
         proxy_url: readConfigString(cfgs, 'proxy_url', ''),
         update_image_mirror: readConfigString(cfgs, 'update_image_mirror', ''),
+        binary_update_proxy: readConfigString(cfgs, 'binary_update_proxy', ''),
         auto_update_enabled: readConfigBool(cfgs, 'auto_update_enabled', false),
         trusted_proxy_cidrs: readConfigString(cfgs, 'trusted_proxy_cidrs', ''),
         captcha_enabled: readConfigBool(cfgs, 'captcha_enabled', false),
@@ -181,8 +183,8 @@ export function useSettingsConfig() {
       ElMessage.warning('仅支持图片格式背景')
       return false
     }
-    if (file.size > 2 * 1024 * 1024) {
-      ElMessage.warning('背景图片不能超过 2MB')
+    if (file.size > logBackgroundImageMaxBytes) {
+      ElMessage.warning('背景图片不能超过 10MB')
       return false
     }
 
@@ -201,13 +203,13 @@ export function useSettingsConfig() {
 
   function handleSaveTaskConfig() {
     void saveConfigKeys([
-      'max_concurrent_tasks', 'command_timeout', 'log_retention_days',
+      'max_concurrent_tasks', 'log_retention_days',
       'max_log_content_size', 'random_delay', 'random_delay_extensions', 'auto_install_deps'
     ])
   }
 
   function handleSaveProxy() {
-    void saveConfigKeys(['proxy_url', 'update_image_mirror', 'auto_update_enabled', 'trusted_proxy_cidrs'])
+    void saveConfigKeys(['proxy_url', 'update_image_mirror', 'binary_update_proxy', 'auto_update_enabled', 'trusted_proxy_cidrs'])
   }
 
   function handleSaveCaptcha() {

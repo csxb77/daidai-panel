@@ -73,6 +73,10 @@ runpy.run_path(script_path, run_name="__main__")
 `
 
 func BuildManagedRuntimeEnvMap(workDir, scriptsDir string, defaultChannelID *uint, ttl time.Duration) (map[string]string, error) {
+	return BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir, defaultChannelID, ttl, "")
+}
+
+func BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir string, defaultChannelID *uint, ttl time.Duration, pythonVersion string) (map[string]string, error) {
 	var envVarRecords []model.EnvVar
 	// 按稳定顺序读取：置顶 > 组内位置 > 创建时间 > id；避免无 ORDER BY 导致同名变量的相对顺序抖动
 	database.DB.Where("enabled = ?", true).
@@ -97,7 +101,10 @@ func BuildManagedRuntimeEnvMap(workDir, scriptsDir string, defaultChannelID *uin
 
 	loadConfigShellVars(envMap)
 
-	runtimePaths := currentManagedRuntimePaths()
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	envMap["DAIDAI_PYTHON_VERSION"] = pythonVersion
+
+	runtimePaths := currentManagedRuntimePathsForPythonVersion(pythonVersion)
 	if runtimePaths.NodeModules != "" {
 		envMap["NODE_PATH"] = runtimePaths.NodeModules
 	}
@@ -125,11 +132,21 @@ func buildManagedPythonPath(existingPythonPath, workDir, scriptsDir, venvSitePac
 }
 
 func CreateManagedCommand(interpreter, scriptPath string, scriptArgs []string, workDir string, envVars map[string]string) (*exec.Cmd, func(), error) {
-	runtimePaths := currentManagedRuntimePaths()
+	pythonVersion := ResolvePythonVersionFromEnv(envVars)
+	if versionFromInterpreter := ResolvePythonVersionFromInterpreter(interpreter); versionFromInterpreter != "" {
+		pythonVersion = versionFromInterpreter
+		if envVars != nil {
+			envVars["DAIDAI_PYTHON_VERSION"] = pythonVersion
+		}
+	}
+	runtimePaths := currentManagedRuntimePathsForPythonVersion(pythonVersion)
+
+	switch {
+	case IsPythonInterpreter(interpreter):
+		return createManagedPythonCommand(scriptPath, scriptArgs, workDir, envVars, runtimePaths, pythonVersion)
+	}
 
 	switch interpreter {
-	case "python", "python3":
-		return createManagedPythonCommand(scriptPath, scriptArgs, workDir, envVars, runtimePaths)
 	case "node":
 		return createManagedNodeCommand(scriptPath, scriptArgs, workDir, envVars, runtimePaths)
 	case "ts-node":
@@ -140,12 +157,17 @@ func CreateManagedCommand(interpreter, scriptPath string, scriptArgs []string, w
 }
 
 func currentManagedRuntimePaths() managedRuntimePaths {
+	return currentManagedRuntimePathsForPythonVersion("")
+}
+
+func currentManagedRuntimePathsForPythonVersion(pythonVersion string) managedRuntimePaths {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
 	dataDir := ""
 	if config.C != nil {
 		dataDir = config.C.Data.Dir
 	}
 	depsDir := filepath.Join(dataDir, "deps")
-	venvDir := filepath.Join(depsDir, "python", "venv")
+	venvDir := ManagedPythonVenvDir(pythonVersion)
 	venvBin := resolveManagedVenvBin(venvDir)
 	nodeBin := filepath.Join(depsDir, "nodejs", "node_modules", ".bin")
 	sanitizedPath := sanitizeManagedPath(os.Getenv("PATH"), nodeBin, venvBin)
@@ -161,11 +183,19 @@ func currentManagedRuntimePaths() managedRuntimePaths {
 }
 
 func managedPythonVenvHealthy(venvDir string) bool {
+	return managedPythonVenvHealthyForVersion(venvDir, "")
+}
+
+func managedPythonVenvHealthyForVersion(venvDir, pythonVersion string) bool {
 	venvBin := resolveManagedVenvBin(venvDir)
 	if info, err := os.Stat(venvBin); err != nil || !info.IsDir() {
 		return false
 	}
-	if resolveManagedPythonBinaryInVenv(venvDir) == "" {
+	pythonBin := resolveManagedPythonBinaryInVenv(venvDir)
+	if pythonBin == "" {
+		return false
+	}
+	if version := strings.TrimSpace(pythonVersion); version != "" && !managedPythonBinaryMatchesVersion(pythonBin, version) {
 		return false
 	}
 
@@ -178,6 +208,14 @@ func managedPythonVenvHealthy(venvDir string) bool {
 	cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
 	out, err := cmd.CombinedOutput()
 	return err == nil && strings.Contains(strings.ToLower(string(out)), "pip")
+}
+
+func managedPythonBinaryMatchesVersion(pythonBin, pythonVersion string) bool {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	cmd := exec.Command(pythonBin, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+	cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
+	out, err := cmd.CombinedOutput()
+	return err == nil && strings.TrimSpace(string(out)) == pythonVersion
 }
 
 func resolveManagedPythonBinaryInVenv(venvDir string) string {
@@ -236,6 +274,11 @@ func quarantineManagedPythonVenv(venvDir string) {
 }
 
 func ensureManagedPythonVenv(syncCreate bool) bool {
+	return ensureManagedPythonVenvForVersion("", syncCreate)
+}
+
+func ensureManagedPythonVenvForVersion(pythonVersion string, syncCreate bool) bool {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
 	dataDir := ""
 	if config.C != nil {
 		dataDir = config.C.Data.Dir
@@ -244,25 +287,25 @@ func ensureManagedPythonVenv(syncCreate bool) bool {
 		return false
 	}
 
-	venvDir := filepath.Join(dataDir, "deps", "python", "venv")
-	if managedPythonVenvHealthy(venvDir) {
+	venvDir := ManagedPythonVenvDir(pythonVersion)
+	if managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
 		return true
 	}
 
 	if !syncCreate {
-		go ensureManagedPythonVenv(true)
+		go ensureManagedPythonVenvForVersion(pythonVersion, true)
 		return false
 	}
 
 	managedPythonVenvMu.Lock()
 	defer managedPythonVenvMu.Unlock()
 
-	if managedPythonVenvHealthy(venvDir) {
+	if managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
 		return true
 	}
 
 	if info, err := os.Stat(resolveManagedVenvBin(venvDir)); err == nil && info.IsDir() {
-		if repairManagedPythonVenvPip(venvDir) {
+		if repairManagedPythonVenvPip(venvDir) && managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
 			log.Printf("managed python venv pip repaired at %s", venvDir)
 			return true
 		}
@@ -271,7 +314,10 @@ func ensureManagedPythonVenv(syncCreate bool) bool {
 
 	_ = os.MkdirAll(filepath.Dir(venvDir), 0o755)
 	var lastErr error
-	for _, candidate := range managedPythonBootstrapCommands() {
+	for _, candidate := range managedPythonBootstrapCommandsForVersion(pythonVersion) {
+		if !managedBootstrapCommandMatchesVersion(candidate, pythonVersion) {
+			continue
+		}
 		// v2.2.4 重构 bootstrap 命令表时漏了把 venvDir 拼到 args 末尾，
 		// 导致执行的是 `python3 -m venv`（不带目标路径）必然失败。venv 永远建不出来，
 		// ResolveManagedPipBinary 返回空，自动安装 fallback 到系统 pip3，
@@ -281,12 +327,12 @@ func ensureManagedPythonVenv(syncCreate bool) bool {
 		cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
 		out, runErr := cmd.CombinedOutput()
 		if runErr == nil {
-			if managedPythonVenvHealthy(venvDir) {
-				log.Printf("managed python venv created at %s using %s", venvDir, candidate.binary)
+			if managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
+				log.Printf("managed python %s venv created at %s using %s", pythonVersion, venvDir, candidate.binary)
 				return true
 			}
-			if repairManagedPythonVenvPip(venvDir) {
-				log.Printf("managed python venv created and pip repaired at %s using %s", venvDir, candidate.binary)
+			if repairManagedPythonVenvPip(venvDir) && managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
+				log.Printf("managed python %s venv created and pip repaired at %s using %s", pythonVersion, venvDir, candidate.binary)
 				return true
 			}
 			lastErr = fmt.Errorf("%s %v created venv but pip is unavailable", candidate.binary, args)
@@ -297,17 +343,25 @@ func ensureManagedPythonVenv(syncCreate bool) bool {
 		quarantineManagedPythonVenv(venvDir)
 	}
 	if lastErr != nil {
-		log.Printf("warn: managed python venv create failed: %v (auto-install will fall back to system pip with --break-system-packages)", lastErr)
+		log.Printf("warn: managed python %s venv create failed: %v (auto-install will fall back to system pip with --break-system-packages)", pythonVersion, lastErr)
 	}
 	return false
 }
 
 func EnsureManagedPythonVenv() bool {
-	return ensureManagedPythonVenv(true)
+	return EnsureManagedPythonVenvForVersion("")
+}
+
+func EnsureManagedPythonVenvForVersion(pythonVersion string) bool {
+	return ensureManagedPythonVenvForVersion(pythonVersion, true)
 }
 
 func WarmManagedPythonVenv() {
-	ensureManagedPythonVenv(false)
+	WarmManagedPythonVenvForVersion("")
+}
+
+func WarmManagedPythonVenvForVersion(pythonVersion string) {
+	ensureManagedPythonVenvForVersion(pythonVersion, false)
 }
 
 func resolveManagedVenvBin(venvDir string) string {
@@ -337,28 +391,34 @@ func resolveManagedVenvBin(venvDir string) string {
 }
 
 func ResolveManagedPipBinary() string {
-	EnsureManagedPythonVenv()
-	dataDir := ""
-	if config.C != nil {
-		dataDir = config.C.Data.Dir
-	}
-	venvDir := filepath.Join(dataDir, "deps", "python", "venv")
-	if !managedPythonVenvHealthy(venvDir) {
+	return ResolveManagedPipBinaryForPythonVersion("")
+}
+
+func ResolveManagedPipBinaryForPythonVersion(pythonVersion string) string {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	EnsureManagedPythonVenvForVersion(pythonVersion)
+	venvDir := ManagedPythonVenvDir(pythonVersion)
+	if !managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
 		return ""
 	}
 	return resolveManagedPipBinaryInVenv(venvDir)
 }
 
-func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths) (*exec.Cmd, func(), error) {
-	EnsureManagedPythonVenv()
-	runtimePaths = currentManagedRuntimePaths()
-	preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirs...)
-	pythonBin, err := resolveManagedBinary("python", preferredDirs, runtimePaths.searchDirs)
-	if err != nil {
-		pythonBin, err = resolveManagedBinary("python3", preferredDirs, runtimePaths.searchDirs)
-		if err != nil {
-			return nil, nil, err
+func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths, pythonVersion string) (*exec.Cmd, func(), error) {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	EnsureManagedPythonVenvForVersion(pythonVersion)
+	runtimePaths = currentManagedRuntimePathsForPythonVersion(pythonVersion)
+	preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)
+	pythonBin := ""
+	for _, name := range []string{"python", "python3", "python" + pythonVersion} {
+		candidate, err := resolveManagedBinary(name, preferredDirs, runtimePaths.searchDirs)
+		if err == nil && managedPythonBinaryMatchesVersion(candidate, pythonVersion) {
+			pythonBin = candidate
+			break
 		}
+	}
+	if pythonBin == "" {
+		return nil, nil, fmt.Errorf("Python %s 不可用，请先安装对应版本，或切换任务 Python 版本", pythonVersion)
 	}
 
 	tempDir, envFile, cleanup, err := writeManagedRuntimeEnvFile(envVars)
@@ -486,18 +546,27 @@ func standardBinaryPreferredDirs(interpreter string, runtimePaths managedRuntime
 }
 
 type managedBootstrapCommand struct {
-	binary string
-	args   []string
+	binary            string
+	versionArgsPrefix []string
+	args              []string
 }
 
 func managedPythonBootstrapCommands() []managedBootstrapCommand {
+	return managedPythonBootstrapCommandsForVersion("")
+}
+
+func managedPythonBootstrapCommandsForVersion(pythonVersion string) []managedBootstrapCommand {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
 	commands := []managedBootstrapCommand{
-		{binary: "python3", args: []string{"-m", "venv"}},
-		{binary: "python", args: []string{"-m", "venv"}},
+		{binary: "python" + pythonVersion, args: []string{"-m", "venv"}},
+		{binary: "python3", args: []string{"-m", "venv"}, versionArgsPrefix: []string{}},
+		{binary: "python", args: []string{"-m", "venv"}, versionArgsPrefix: []string{}},
 	}
 	if runtime.GOOS == "windows" {
-		commands = append(commands, managedBootstrapCommand{binary: "py", args: []string{"-3", "-m", "venv"}})
-		commands = append(commands, managedBootstrapCommand{binary: "py", args: []string{"-m", "venv"}})
+		commands = append([]managedBootstrapCommand{
+			{binary: "py", versionArgsPrefix: []string{"-" + pythonVersion}, args: []string{"-" + pythonVersion, "-m", "venv"}},
+			{binary: "py", versionArgsPrefix: []string{"-3"}, args: []string{"-3", "-m", "venv"}},
+		}, commands...)
 	}
 	return commands
 }

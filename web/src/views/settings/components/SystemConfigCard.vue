@@ -95,6 +95,7 @@ defineProps<{
         >
           <div class="log-bg-preview__content">任务输出预览：日志背景将应用到所有日志查看器</div>
         </div>
+        <span class="form-hint">支持常见图片格式，单张最大 10MB</span>
       </div>
     </div>
   </el-card>

@@ -741,7 +741,7 @@ func TestTaskImportPreservesRandomDelaySettings(t *testing.T) {
 		engine,
 		http.MethodPost,
 		"/api/v1/tasks/import",
-		`{"tasks":[{"name":"imported delay task","command":"task imported.py","cron_expression":"0 0 * * *","task_type":"cron","random_delay_seconds":12}]}`,
+		`{"tasks":[{"name":"imported delay task","command":"task imported.py","python_version":"3.11","cron_expression":"0 0 * * *","task_type":"cron","random_delay_seconds":12}]}`,
 		map[string]string{"Authorization": "Bearer " + accessToken},
 		"",
 	)
@@ -755,6 +755,9 @@ func TestTaskImportPreservesRandomDelaySettings(t *testing.T) {
 	}
 	if task.RandomDelaySeconds == nil || *task.RandomDelaySeconds != 12 {
 		t.Fatalf("expected imported random_delay_seconds=12, got %#v", task.RandomDelaySeconds)
+	}
+	if task.PythonVersion != "3.11" {
+		t.Fatalf("expected imported python_version=3.11, got %q", task.PythonVersion)
 	}
 }
 

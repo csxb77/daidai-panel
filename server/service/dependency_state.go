@@ -27,6 +27,10 @@ func SnapshotDepsToHost() {
 }
 
 func DependencyInstalled(depType, name string) bool {
+	return DependencyInstalledForPythonVersion(depType, name, "")
+}
+
+func DependencyInstalledForPythonVersion(depType, name, pythonVersion string) bool {
 	name = strings.TrimSpace(name)
 	if depType == "" || name == "" {
 		return false
@@ -35,17 +39,18 @@ func DependencyInstalled(depType, name string) bool {
 	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	switch depType {
 	case model.DepTypeNodeJS:
-		modDir := filepath.Join(depsDir, "nodejs", "node_modules", filepath.FromSlash(name))
+		modDir := filepath.Join(depsDir, "nodejs", "node_modules", filepath.FromSlash(NormalizeNodeDependencyPackageName(name)))
 		if info, err := os.Stat(modDir); err == nil {
 			return info.IsDir()
 		}
 	case model.DepTypePython:
+		pythonVersion = NormalizeDependencyPythonVersion(pythonVersion)
 		candidates := []string{
-			ResolveManagedPipBinary(),
-			filepath.Join(depsDir, "python", "venv", "bin", "pip"),
-			filepath.Join(depsDir, "python", "venv", "bin", "pip3"),
-			filepath.Join(depsDir, "python", "venv", "Scripts", "pip.exe"),
-			filepath.Join(depsDir, "python", "venv", "Scripts", "pip3.exe"),
+			ResolveManagedPipBinaryForPythonVersion(pythonVersion),
+			filepath.Join(ManagedPythonVenvDir(pythonVersion), "bin", "pip"),
+			filepath.Join(ManagedPythonVenvDir(pythonVersion), "bin", "pip3"),
+			filepath.Join(ManagedPythonVenvDir(pythonVersion), "Scripts", "pip.exe"),
+			filepath.Join(ManagedPythonVenvDir(pythonVersion), "Scripts", "pip3.exe"),
 		}
 		for _, pipBin := range candidates {
 			pipBin = strings.TrimSpace(pipBin)
@@ -59,6 +64,14 @@ func DependencyInstalled(depType, name string) bool {
 					return true
 				}
 			}
+		}
+		showCmd, err := NewPipCommandForPythonVersion(pythonVersion, []string{"show", name})
+		if err != nil {
+			return false
+		}
+		showCmd.Env = SanitizePipEnv(os.Environ())
+		if out, err := showCmd.CombinedOutput(); err == nil && strings.Contains(string(out), "Name:") {
+			return true
 		}
 	case model.DepTypeLinux:
 		if _, err := exec.LookPath(name); err == nil {
@@ -84,4 +97,35 @@ func DependencyInstalled(depType, name string) bool {
 	}
 
 	return false
+}
+
+func NormalizeNodeDependencyPackageName(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(spec, "@") {
+		parts := strings.SplitN(spec, "/", 2)
+		if len(parts) != 2 {
+			return spec
+		}
+		scope := strings.TrimSpace(parts[0])
+		rest := strings.TrimSpace(parts[1])
+		if scope == "" || rest == "" {
+			return spec
+		}
+		if idx := strings.LastIndex(rest, "@"); idx > 0 {
+			rest = rest[:idx]
+		}
+		if rest == "" {
+			return spec
+		}
+		return scope + "/" + rest
+	}
+
+	if idx := strings.LastIndex(spec, "@"); idx > 0 {
+		return spec[:idx]
+	}
+	return spec
 }

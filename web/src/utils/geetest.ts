@@ -12,6 +12,7 @@ interface GeeTestCaptchaObject {
   onReady: (callback: () => void) => GeeTestCaptchaObject
   onSuccess: (callback: () => void) => GeeTestCaptchaObject
   onError: (callback: (error?: unknown) => void) => GeeTestCaptchaObject
+  onClose?: (callback: () => void) => GeeTestCaptchaObject
 }
 
 interface GeeTestWindow extends Window {
@@ -42,6 +43,7 @@ export interface GeeTestInstanceHandlers {
   onReady?: () => void
   onSuccess?: (result: GeeTestValidateResult) => void
   onError?: (error: Error) => void
+  onClose?: () => void
 }
 
 const geetestSdkUrl = 'https://static.geetest.com/v4/gt4.js'
@@ -131,6 +133,10 @@ export async function createGeeTestInstance(
             .onError((error) => {
               handlers.onError?.(toError(error))
             })
+
+          captchaObj.onClose?.(() => {
+            handlers.onClose?.()
+          })
         }
       )
     } catch (error) {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"daidai-panel/config"
+	"daidai-panel/model"
 	"daidai-panel/service"
 )
 
@@ -121,7 +122,7 @@ func executeBinaryPanelUpdateWithOptions(plan *panelUpdatePlan, options panelUpd
 
 	archivePath := filepath.Join(workDir, sanitizeUpdateFileName(plan.AssetName))
 	panelUpdater.setRunning("downloading", fmt.Sprintf("正在下载二进制更新包 %s", plan.AssetName))
-	if err := downloadBinaryUpdateAsset(plan.AssetURL, archivePath); err != nil {
+	if err := downloadBinaryUpdateAsset(resolveBinaryUpdateDownloadURL(plan.AssetURL), archivePath); err != nil {
 		failPanelBinaryUpdate(options, err)
 		return
 	}
@@ -222,6 +223,20 @@ func downloadBinaryUpdateAsset(assetURL, archivePath string) error {
 		return fmt.Errorf("保存二进制更新包失败: %w", err)
 	}
 	return nil
+}
+
+func resolveBinaryUpdateDownloadURL(assetURL string) string {
+	assetURL = strings.TrimSpace(assetURL)
+	if assetURL == "" {
+		return ""
+	}
+
+	proxyBase := strings.TrimSpace(model.GetRegisteredConfig("binary_update_proxy"))
+	if proxyBase == "" {
+		return assetURL
+	}
+	proxyBase = strings.TrimRight(proxyBase, "/") + "/"
+	return proxyBase + assetURL
 }
 
 func extractBinaryUpdateArchive(archivePath, extractDir string) error {

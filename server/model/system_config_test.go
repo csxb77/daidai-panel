@@ -47,6 +47,13 @@ func TestSetConfigNormalizesRegisteredValues(t *testing.T) {
 		t.Fatalf("expected canonical update_image_mirror docker.1ms.run, got %q", got)
 	}
 
+	if err := model.SetConfig("binary_update_proxy", "gh-proxy.org"); err != nil {
+		t.Fatalf("set binary_update_proxy: %v", err)
+	}
+	if got := model.GetRegisteredConfig("binary_update_proxy"); got != "https://gh-proxy.org/" {
+		t.Fatalf("expected canonical binary_update_proxy https://gh-proxy.org/, got %q", got)
+	}
+
 	if err := model.SetConfig("default_cron_rule", "invalid cron"); err == nil {
 		t.Fatal("expected invalid default_cron_rule to be rejected")
 	}
@@ -55,6 +62,9 @@ func TestSetConfigNormalizesRegisteredValues(t *testing.T) {
 	}
 	if err := model.SetConfig("update_image_mirror", "https://docker.1ms.run/proxy"); err == nil {
 		t.Fatal("expected update_image_mirror with path to be rejected")
+	}
+	if err := model.SetConfig("binary_update_proxy", "https://gh-proxy.org/?url=x"); err == nil {
+		t.Fatal("expected binary_update_proxy with query to be rejected")
 	}
 }
 
@@ -66,10 +76,45 @@ func TestRegisteredConfigUsesRegistryDefaults(t *testing.T) {
 	if got := model.GetRegisteredConfig("panel_title"); got != "呆呆面板" {
 		t.Fatalf("expected registry default panel_title, got %q", got)
 	}
-	if got := model.GetRegisteredConfigInt("command_timeout"); got != 86400 {
-		t.Fatalf("expected registry default command_timeout 86400, got %d", got)
-	}
 	if got := model.GetRegisteredConfigBool("notify_on_login"); got {
 		t.Fatalf("expected registry default notify_on_login to be false")
+	}
+}
+
+func TestInitDefaultConfigsRemovesDeprecatedCommandTimeout(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if err := database.DB.Create(&model.SystemConfig{
+		Key:         "command_timeout",
+		Value:       "86400",
+		Description: "全局默认超时（秒）",
+	}).Error; err != nil {
+		t.Fatalf("create deprecated config: %v", err)
+	}
+
+	model.InitDefaultConfigs()
+
+	var count int64
+	if err := database.DB.Model(&model.SystemConfig{}).Where("`key` = ?", "command_timeout").Count(&count).Error; err != nil {
+		t.Fatalf("count deprecated config: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected deprecated command_timeout config to be removed, got count=%d", count)
+	}
+}
+
+func TestSetConfigIgnoresDeprecatedCommandTimeout(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if err := model.SetConfig("command_timeout", "600"); err != nil {
+		t.Fatalf("set deprecated command_timeout: %v", err)
+	}
+
+	var count int64
+	if err := database.DB.Model(&model.SystemConfig{}).Where("`key` = ?", "command_timeout").Count(&count).Error; err != nil {
+		t.Fatalf("count deprecated config: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected deprecated command_timeout config to stay absent, got count=%d", count)
 	}
 }

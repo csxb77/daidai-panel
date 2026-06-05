@@ -21,9 +21,10 @@ const emit = defineEmits<{
 const form = ref({
   name: '',
   command: '',
+  python_version: '3.12',
   cron_expression: '0 0 * * *',
   task_type: 'cron',
-  timeout: 86400,
+  timeout: 0,
   random_delay_seconds: null as number | null,
   max_retries: 0,
   retry_interval: 60,
@@ -64,9 +65,10 @@ watch(() => props.visible, (val) => {
     form.value = {
       name: props.task.name || '',
       command: props.task.command || '',
+      python_version: props.task.python_version || '3.12',
       cron_expression: props.task.cron_expression || '* * * * *',
       task_type: props.task.task_type || 'cron',
-      timeout: props.task.timeout ?? 86400,
+      timeout: props.task.timeout ?? 0,
       random_delay_seconds: taskRandomDelay,
       max_retries: props.task.max_retries ?? 0,
       retry_interval: props.task.retry_interval ?? 60,
@@ -87,9 +89,10 @@ watch(() => props.visible, (val) => {
     randomDelayMode.value = 'inherit'
     form.value = {
       name: p?.name || '', command: p?.command || '',
+      python_version: p?.python_version || '3.12',
       cron_expression: p?.cron_expression || '* * * * *',
       task_type: p?.task_type || 'cron',
-      timeout: 86400, random_delay_seconds: null, max_retries: 0, retry_interval: 60,
+      timeout: 0, random_delay_seconds: null, max_retries: 0, retry_interval: 60,
       notify_on_failure: false, notify_on_success: false, notification_channel_id: null, labels: [], depends_on: null,
       task_before: '', task_after: '', allow_multiple_instances: false, group_name: '', stop_schedule: '',
     }
@@ -174,6 +177,13 @@ function handleSubmit() {
             <div style="font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px">
               支持 task 脚本名 格式,自动根据扩展名选择解释器 (.py/.js/.ts/.sh)
             </div>
+          </el-form-item>
+          <el-form-item label="Python版本">
+            <el-select v-model="form.python_version" style="width: 100%">
+              <el-option label="Python 3.10" value="3.10" />
+              <el-option label="Python 3.11" value="3.11" />
+              <el-option label="Python 3.12" value="3.12" />
+            </el-select>
           </el-form-item>
           <el-form-item label="定时类型" required>
             <el-select v-model="form.task_type" style="width: 100%">
@@ -288,13 +298,26 @@ function handleSubmit() {
         </el-form>
       </el-tab-pane>
 
-      <el-tab-pane label="钩子脚本" name="hooks">
+      <el-tab-pane label="前后置脚本" name="hooks">
         <el-form :model="form" :label-width="dialogFullscreen ? 'auto' : '100px'" :label-position="dialogFullscreen ? 'top' : 'right'">
+          <div class="hooks-help">
+            当前任务专属的 shell 脚本。前置脚本会在目标脚本执行前运行，后置脚本会在目标脚本结束后运行；如果任务命令传入了参数，这里也可以通过 $1、$2 等读取同一份参数。
+          </div>
           <el-form-item label="前置脚本">
-            <el-input v-model="form.task_before" type="textarea" :rows="4" placeholder="任务执行前运行的 shell 脚本" />
+            <el-input
+              v-model="form.task_before"
+              type="textarea"
+              :rows="4"
+              placeholder="任务执行前运行，例如设置代理、准备环境变量、创建临时目录；可用 $1、$2 读取任务参数"
+            />
           </el-form-item>
           <el-form-item label="后置脚本">
-            <el-input v-model="form.task_after" type="textarea" :rows="4" placeholder="任务执行后运行的 shell 脚本" />
+            <el-input
+              v-model="form.task_after"
+              type="textarea"
+              :rows="4"
+              placeholder="任务执行后运行，例如清理临时文件、输出收尾日志、恢复环境；可用 $1、$2 读取任务参数"
+            />
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -332,6 +355,17 @@ function handleSubmit() {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   line-height: 1.6;
+}
+
+.hooks-help {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-lighter);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 @media (max-width: 768px) {

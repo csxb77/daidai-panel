@@ -109,7 +109,7 @@ func EnsureColumns() {
 		{"task_after", "TEXT"},
 		{"task_type", "VARCHAR(16) DEFAULT 'cron'"},
 		{"allow_multiple_instances", "BOOLEAN DEFAULT 0"},
-		{"timeout", "INTEGER DEFAULT 300"},
+		{"timeout", "INTEGER DEFAULT 0"},
 		{"random_delay_seconds", "INTEGER"},
 		{"max_retries", "INTEGER DEFAULT 0"},
 		{"retry_interval", "INTEGER DEFAULT 60"},
@@ -119,6 +119,7 @@ func EnsureColumns() {
 		{"depends_on", "INTEGER"},
 		{"sort_order", "INTEGER DEFAULT 0"},
 		{"is_pinned", "BOOLEAN DEFAULT 0"},
+		{"python_version", "VARCHAR(16) DEFAULT ''"},
 	})
 	migrateLegacyTaskPIDColumn()
 
@@ -183,6 +184,11 @@ func EnsureColumns() {
 		{"sort_order", "INTEGER DEFAULT 0"},
 	})
 
+	ensureTableColumns("dependencies", []columnDef{
+		{"python_version", "VARCHAR(16) DEFAULT ''"},
+	})
+	normalizeLegacyPythonVersionColumns()
+
 	ensureTableColumns("users", []columnDef{
 		{"avatar_url", "VARCHAR(512) DEFAULT ''"},
 	})
@@ -190,6 +196,15 @@ func EnsureColumns() {
 	dropEnvVarUniqueIndex()
 
 	log.Printf("column check completed")
+}
+
+func normalizeLegacyPythonVersionColumns() {
+	if err := DB.Exec("UPDATE dependencies SET python_version = '3.12' WHERE type = 'python' AND (python_version IS NULL OR python_version = '')").Error; err != nil {
+		log.Printf("warn: failed to normalize legacy python dependency versions: %v", err)
+	}
+	if err := DB.Exec("UPDATE tasks SET python_version = '3.12' WHERE python_version IS NULL OR python_version = ''").Error; err != nil {
+		log.Printf("warn: failed to normalize legacy task python versions: %v", err)
+	}
 }
 
 // migrateLegacyTaskPIDColumn copies values from the old GORM-derived p_id column

@@ -44,6 +44,7 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	var req struct {
 		Name                   string   `json:"name" binding:"required"`
 		Command                string   `json:"command" binding:"required"`
+		PythonVersion          string   `json:"python_version"`
 		CronExpression         string   `json:"cron_expression"`
 		TaskType               string   `json:"task_type"`
 		Timeout                *int     `json:"timeout"`
@@ -79,14 +80,20 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	} else {
 		req.CronExpression = ""
 	}
+	pythonVersion, err := service.NormalizePythonVersionStrict(req.PythonVersion)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 
 	task := model.Task{
 		Name:            req.Name,
 		Command:         req.Command,
+		PythonVersion:   pythonVersion,
 		CronExpression:  req.CronExpression,
 		TaskType:        taskType,
 		Status:          model.TaskStatusEnabled,
-		Timeout:         86400,
+		Timeout:         0,
 		RetryInterval:   60,
 		NotifyOnFailure: false,
 	}
@@ -209,9 +216,22 @@ func (h *TaskHandler) Update(c *gin.Context) {
 	} else {
 		req["cron_expression"] = ""
 	}
+	if rawPythonVersion, exists := req["python_version"]; exists {
+		value, ok := rawPythonVersion.(string)
+		if !ok {
+			response.BadRequest(c, "无效的 Python 版本")
+			return
+		}
+		pythonVersion, err := service.NormalizePythonVersionStrict(value)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		req["python_version"] = pythonVersion
+	}
 
 	allowedFields := map[string]bool{
-		"name": true, "command": true, "cron_expression": true,
+		"name": true, "command": true, "python_version": true, "cron_expression": true,
 		"task_type": true,
 		"timeout":   true, "random_delay_seconds": true, "max_retries": true, "retry_interval": true,
 		"notify_on_failure": true, "notify_on_success": true, "notification_channel_id": true, "labels": true, "depends_on": true,
@@ -305,6 +325,7 @@ func (h *TaskHandler) Copy(c *gin.Context) {
 	newTask := model.Task{
 		Name:                   task.Name + " (副本)",
 		Command:                task.Command,
+		PythonVersion:          task.PythonVersion,
 		CronExpression:         task.CronExpression,
 		TaskType:               task.GetTaskType(),
 		Status:                 model.TaskStatusDisabled,

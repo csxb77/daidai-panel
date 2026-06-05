@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"daidai-panel/testutil"
 )
 
 func TestDetectAutoInstallCandidate(t *testing.T) {
@@ -175,5 +177,17 @@ func TestBuildPipUninstallArgsDropsUserFlag(t *testing.T) {
 	}
 	if !hasBreak || !hasNoDeps || !hasPkg {
 		t.Fatalf("expected --break-system-packages, --no-deps, requests all present, got %v", got)
+	}
+}
+
+func TestPipCommandForRequestedVersionDoesNotFallbackToPip3(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	t.Setenv("PATH", t.TempDir())
+
+	if _, err := NewPipCommandForPythonVersion("3.10", []string{"list"}); err == nil {
+		t.Fatal("expected missing Python 3.10 to return an error instead of falling back to pip3")
+	}
+	if binary, _, _ := ResolvePipInstallCommandForPythonVersion("3.10"); binary != "" {
+		t.Fatalf("expected no pip binary for missing Python 3.10, got %q", binary)
 	}
 }

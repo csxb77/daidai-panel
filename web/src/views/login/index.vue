@@ -32,7 +32,7 @@ const captchaConfig = ref({
   captcha_id: '',
   configured: false,
   required: false,
-  require_after_failures: 3,
+  require_after_failures: 0,
   message: ''
 })
 const captchaVisible = ref(false)
@@ -128,7 +128,7 @@ async function loadCaptchaConfig(username = form.value.username, silent = true) 
       captcha_id: res.captcha_id || '',
       configured: res.configured,
       required: res.required,
-      require_after_failures: res.require_after_failures || 3,
+      require_after_failures: res.require_after_failures ?? 0,
       message: res.message || ''
     }
 
@@ -138,14 +138,8 @@ async function loadCaptchaConfig(username = form.value.username, silent = true) 
       return captchaConfig.value
     }
 
-    if (res.required) {
-      captchaVisible.value = true
-      if (!captchaVerified.value) {
-        captchaStatusText.value = `连续失败达到 ${res.require_after_failures || 3} 次，请先完成人机验证`
-      }
-    } else if (!captchaVerified.value) {
-      captchaVisible.value = false
-      captchaStatusText.value = res.message || ''
+    if (!captchaVerified.value) {
+      captchaStatusText.value = res.required ? '请先完成滑块验证，验证成功后会自动登录' : (res.message || '')
     }
 
     return captchaConfig.value
@@ -176,14 +170,14 @@ async function ensureCaptchaInstance() {
       {
         onReady() {
           captchaReady.value = true
-          captchaStatusText.value = '验证码已就绪，请完成验证'
+          captchaStatusText.value = '请拖动滑块完成拼图'
         },
         onSuccess(result) {
           captchaResult.value = result
           captchaVerified.value = true
-          captchaVisible.value = true
-          captchaStatusText.value = '人机验证已完成，本次登录可继续提交'
-          ElMessage.success('验证码验证成功')
+          captchaVisible.value = false
+          captchaStatusText.value = '验证成功，正在登录'
+          ElMessage.success('验证成功，正在登录')
 
           if (pendingSubmitAfterCaptcha) {
             pendingSubmitAfterCaptcha = false
@@ -193,8 +187,16 @@ async function ensureCaptchaInstance() {
         onError(error) {
           captchaVerified.value = false
           captchaResult.value = null
+          captchaVisible.value = false
+          pendingSubmitAfterCaptcha = false
           captchaStatusText.value = error.message || '验证码异常，请重试'
           ElMessage.error(captchaStatusText.value)
+        },
+        onClose() {
+          if (captchaVerified.value) return
+          captchaVisible.value = false
+          pendingSubmitAfterCaptcha = false
+          captchaStatusText.value = '验证已取消'
         }
       }
     ).then((instance) => {
@@ -211,21 +213,25 @@ async function ensureCaptchaInstance() {
 
 async function triggerCaptcha() {
   captchaVisible.value = true
-
-  if (!captchaConfig.value.enabled) {
-    const latest = await loadCaptchaConfig(form.value.username, false)
-    if (!latest?.enabled) {
-      throw new Error(latest?.message || '验证码未启用')
+  try {
+    if (!captchaConfig.value.enabled || !captchaConfig.value.captcha_id) {
+      const latest = await loadCaptchaConfig(form.value.username, false)
+      if (!latest?.enabled) {
+        throw new Error(latest?.message || '验证码未启用')
+      }
     }
-  }
 
-  if (captchaVerified.value) {
-    resetCaptchaProof(true)
-  }
+    if (captchaVerified.value) {
+      resetCaptchaProof(true)
+    }
 
-  captchaStatusText.value = captchaStatusText.value || '正在准备验证码'
-  const instance = await ensureCaptchaInstance()
-  instance.show()
+    captchaStatusText.value = '请拖动滑块完成拼图'
+    const instance = await ensureCaptchaInstance()
+    instance.show()
+  } catch (error) {
+    captchaVisible.value = false
+    throw error
+  }
 }
 
 function handleUsernameFocus() {
@@ -333,9 +339,9 @@ async function handleSubmit() {
     }
 
     const latestCaptchaConfig = await loadCaptchaConfig(form.value.username)
-    if (latestCaptchaConfig?.enabled && latestCaptchaConfig.required && !captchaVerified.value) {
+    if (latestCaptchaConfig?.enabled && !captchaVerified.value) {
       captchaVisible.value = true
-      captchaStatusText.value = `连续失败达到 ${latestCaptchaConfig.require_after_failures} 次，请先完成人机验证`
+      captchaStatusText.value = '请先完成滑块验证，验证成功后会自动登录'
       pendingSubmitAfterCaptcha = true
       await triggerCaptcha()
       return
@@ -361,6 +367,9 @@ async function handleSubmit() {
     if (data?.two_factor_required) {
       require2FA.value = true
       show2FADialog.value = true
+      resetCaptchaProof(false)
+      pendingSubmitAfterCaptcha = false
+      captchaConfig.value.required = Boolean(captchaConfig.value.enabled)
       if (form.value.totp_code) {
         totpError.value = data?.error || '两步验证码错误'
         form.value.totp_code = ''
@@ -381,14 +390,14 @@ async function handleSubmit() {
       captchaConfig.value.enabled = true
       captchaConfig.value.required = true
       captchaVisible.value = true
-      pendingSubmitAfterCaptcha = false
+      pendingSubmitAfterCaptcha = !data?.captcha_service_unavailable
       if (data?.captcha_service_unavailable) {
         resetCaptchaProof(true)
         captchaStatusText.value = data?.error || '验证码服务暂时不可用，请稍后重试'
       } else {
         captchaStatusText.value = data?.captcha_invalid
-          ? '验证码已失效，请重新完成人机验证'
-          : `连续失败达到 ${data?.require_after_failures || captchaConfig.value.require_after_failures || 3} 次，请先完成人机验证`
+          ? '验证码已失效，请重新完成滑块验证'
+          : '请先完成滑块验证，验证成功后会自动登录'
         resetCaptchaProof(true)
         void triggerCaptcha().catch((err: any) => {
           captchaStatusText.value = err?.message || '验证码加载失败，请检查网络后刷新重试'
@@ -415,25 +424,6 @@ const titleText = computed(() => isInit.value ? '欢迎回来!' : '初始化管�
 const subtitleText = computed(() => isInit.value ? '请输入您的登录信息' : '首次使用，请设置管理员账号')
 const btnText = computed(() => isInit.value ? '登 录' : '初始化并登录')
 const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
-const showCaptchaPanel = computed(() => captchaVisible.value || captchaVerified.value)
-const captchaActionText = computed(() => {
-  if (captchaPreparing.value) return '加载中...'
-  if (captchaVerified.value) return '重新验证'
-  if (captchaReady.value) return '开始验证'
-  return '加载验证码'
-})
-const captchaHintText = computed(() => {
-  if (captchaVerified.value) {
-    return '已完成人机验证，本次登录可继续提交。'
-  }
-  if (captchaStatusText.value) {
-    return captchaStatusText.value
-  }
-  if (captchaConfig.value.enabled) {
-    return `连续失败达到 ${captchaConfig.value.require_after_failures} 次后，需要先完成人机验证。`
-  }
-  return '当前未启用验证码。'
-})
 </script>
 
 <template>
@@ -510,35 +500,6 @@ const captchaHintText = computed(() => {
                 @blur="handleBlur"
                 @keyup.enter="handleSubmit"
               />
-            </el-form-item>
-            <el-form-item v-if="showCaptchaPanel" class="captcha-form-item">
-              <div class="captcha-panel">
-                <div class="captcha-panel__header">
-                  <span class="captcha-panel__title">极验人机验证</span>
-                  <el-tag v-if="captchaVerified" type="success" size="small" effect="plain">已完成</el-tag>
-                  <el-tag v-else type="warning" size="small" effect="plain">待验证</el-tag>
-                </div>
-                <p class="captcha-panel__hint">{{ captchaHintText }}</p>
-                <div class="captcha-panel__actions">
-                  <el-button
-                    type="primary"
-                    plain
-                    size="large"
-                    :loading="captchaPreparing"
-                    @click="triggerCaptcha"
-                  >
-                    {{ captchaActionText }}
-                  </el-button>
-                  <el-button
-                    v-if="captchaVerified"
-                    text
-                    size="large"
-                    @click="resetCaptchaProof(true)"
-                  >
-                    清空结果
-                  </el-button>
-                </div>
-              </div>
             </el-form-item>
             <el-form-item>
               <el-button
@@ -880,41 +841,6 @@ const captchaHintText = computed(() => {
   }
 }
 
-.captcha-panel {
-  width: 100%;
-  border: 1px solid rgba(31, 31, 31, 0.08);
-  border-radius: 12px;
-  background: #fafafc;
-  padding: 14px 16px;
-}
-
-.captcha-panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.captcha-panel__title {
-  font-size: 14px;
-  font-weight: 600;
-  color: #1f1f1f;
-}
-
-.captcha-panel__hint {
-  margin: 10px 0 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: #6b7280;
-}
-
-.captcha-panel__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-}
-
 .pwd-toggle {
   cursor: pointer;
   color: #8c8c8c;
@@ -1044,19 +970,6 @@ html.dark {
     .el-input__suffix .el-icon {
       color: #555568;
     }
-  }
-
-  .captcha-panel {
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.08);
-  }
-
-  .captcha-panel__title {
-    color: #e8e8ec;
-  }
-
-  .captcha-panel__hint {
-    color: #9da3b4;
   }
 
   .pwd-toggle {

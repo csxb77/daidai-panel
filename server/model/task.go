@@ -23,13 +23,14 @@ type Task struct {
 	ID                     uint       `gorm:"primarykey" json:"id"`
 	Name                   string     `gorm:"size:128;not null" json:"name"`
 	Command                string     `gorm:"type:text;not null" json:"command"`
+	PythonVersion          string     `gorm:"size:16;default:''" json:"python_version"`
 	CronExpression         string     `gorm:"type:text;not null" json:"cron_expression"`
 	TaskType               string     `gorm:"size:16;not null;default:'cron'" json:"task_type"`
 	Status                 float64    `gorm:"not null" json:"status"`
 	Labels                 string     `gorm:"size:256;default:''" json:"-"`
 	LastRunAt              *time.Time `json:"last_run_at"`
 	LastRunStatus          *int       `json:"last_run_status"`
-	Timeout                int        `json:"timeout"`
+	Timeout                int        `gorm:"default:0" json:"timeout"`
 	RandomDelaySeconds     *int       `json:"random_delay_seconds"`
 	MaxRetries             int        `json:"max_retries"`
 	RetryInterval          int        `json:"retry_interval"`
@@ -65,6 +66,7 @@ func (t *Task) ToDict() map[string]interface{} {
 		"id":                       t.ID,
 		"name":                     t.Name,
 		"command":                  t.Command,
+		"python_version":           t.PythonVersion,
 		"cron_expression":          t.CronExpression,
 		"cron_expressions":         cronExpressions,
 		"task_type":                t.GetTaskType(),

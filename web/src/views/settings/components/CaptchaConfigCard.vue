@@ -25,7 +25,7 @@ defineProps<{
     </template>
 
     <el-alert
-      title="开启后，同一 IP 对同一用户名连续登录失败 3 次时，后续登录会先要求完成人机验证。"
+      title="开启后，每次登录都会先要求完成极验滑块验证，验证通过后才继续校验账号密码。"
       type="info"
       :closable="false"
       style="margin-bottom: 16px"
@@ -46,7 +46,7 @@ defineProps<{
         <el-radio value="strict">严格拦截</el-radio>
       </el-radio-group>
       <span class="form-hint">
-        当已触发验证码且极验请求超时、上游 5xx、返回异常结构时：
+        当登录验证码已启用且极验请求超时、上游 5xx、返回异常结构时：
         “宽松放行”会允许本次登录继续校验用户名密码，“严格拦截”会直接阻止登录并提示稍后重试。
       </span>
     </div>

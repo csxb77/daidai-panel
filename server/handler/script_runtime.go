@@ -14,12 +14,12 @@ import (
 )
 
 var scriptInterpreterMap = map[string][]string{
-	".py": {"python", "-u"},
-	".js": {"node"},
+	".py":  {"python", "-u"},
+	".js":  {"node"},
 	".mjs": {"node"},
-	".ts": {"npx", "ts-node"},
-	".sh": {"bash"},
-	".go": {"go", "run"},
+	".ts":  {"npx", "ts-node"},
+	".sh":  {"bash"},
+	".go":  {"go", "run"},
 }
 
 var scriptLanguageExtMap = map[string]string{
@@ -205,7 +205,7 @@ func scriptRuntimeInterpreter(ext string) (string, error) {
 }
 
 func buildScriptExecEnv(workDir string) map[string]string {
-	envMap, err := service.BuildManagedRuntimeEnvMap(workDir, config.C.Data.ScriptsDir, nil, 2*time.Hour)
+	envMap, err := service.BuildManagedRuntimeEnvMapForPythonVersion(workDir, config.C.Data.ScriptsDir, nil, 2*time.Hour, "")
 	if err != nil {
 		return envMap
 	}

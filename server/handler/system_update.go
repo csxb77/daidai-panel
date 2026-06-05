@@ -319,7 +319,7 @@ func buildDockerPanelUpdatePlan() (*panelUpdatePlan, error) {
 	}
 
 	if _, err := os.Stat(dockerSocketPath); err != nil {
-		return nil, fmt.Errorf("未检测到 %s，当前 Docker 部署不能在容器内直接重建自身；请改为在宿主机执行 docker compose pull && docker compose up -d，或临时挂载 Docker Socket 后再使用面板内一键更新", dockerSocketPath)
+		return nil, fmt.Errorf("当前 Docker 部署未检测到可用的更新托管方式。推荐使用 Watchtower 托管自动更新；如需立即手动更新，请在宿主机执行 docker compose pull && docker compose up -d。早期版本若仍使用面板内 Docker Socket 一键更新，请确认已挂载 %s", dockerSocketPath)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -865,7 +865,7 @@ func buildPanelUpdateNetworkHint(plan *panelUpdatePlan) string {
 	if strings.TrimSpace(plan.MirrorHost) != "" {
 		return fmt.Sprintf("当前系统更新镜像源为 %s，请检查该镜像源是否可访问；如需恢复直连，可在“系统设置 / 网络代理”中清空系统更新镜像源。", plan.MirrorHost)
 	}
-	return "当前将直连 Docker Hub；如宿主机访问 Docker Hub 较慢，可在“系统设置 / 网络代理”中填写系统更新镜像源，例如 docker.1ms.run。"
+	return "当前将直连 Docker Hub；如宿主机访问 Docker Hub 较慢，可在“系统设置 / 网络代理”中配置系统更新镜像源。"
 }
 
 func uniqueNonEmptyStrings(values ...string) []string {

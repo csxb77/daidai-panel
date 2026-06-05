@@ -40,13 +40,23 @@ type systemConfigSpec struct {
 
 var registeredSystemConfigSpecs = []systemConfigSpec{
 	newIntConfig("max_concurrent_tasks", "5", "定时任务最大并发数", "tasks", 1, 128),
-	newIntConfig("command_timeout", "86400", "全局默认超时（秒）", "tasks", 1, 604800),
 	newIntConfig("log_retention_days", "7", "日志保留天数", "tasks", 1, 3650),
 	newIntConfig("max_log_content_size", "102400000", "任务日志内容最大保留字节数", "tasks", 1024, 524288000),
 	newBoolConfig("auto_update_enabled", "false", "静默更新开关（每 24 小时自动检查并在有新版本时尝试更新）", "network"),
 	newIntConfig("random_delay", "0", "任务执行前随机延迟最大秒数", "tasks", 0, 86400),
 	newTrimmedStringConfig("random_delay_extensions", "", "随机延迟仅对指定脚本后缀生效", "tasks"),
 	newBoolConfig("auto_install_deps", "true", "脚本缺依赖时自动尝试安装", "tasks"),
+	newEnumConfig(
+		"python_default_version",
+		"3.12",
+		"默认 Python 运行版本",
+		"tasks",
+		[]SystemConfigOption{
+			{Value: "3.10", Label: "Python 3.10"},
+			{Value: "3.11", Label: "Python 3.11"},
+			{Value: "3.12", Label: "Python 3.12"},
+		},
+	),
 	newIntConfig("cpu_warn", "80", "CPU 告警阈值（%）", "alerts", 1, 100),
 	newIntConfig("memory_warn", "80", "内存告警阈值（%）", "alerts", 1, 100),
 	newIntConfig("disk_warn", "90", "磁盘告警阈值（%）", "alerts", 1, 100),
@@ -59,6 +69,7 @@ var registeredSystemConfigSpecs = []systemConfigSpec{
 	newBoolConfig("notify_on_login", "false", "登录成功发送通知", "security"),
 	newValidatedStringConfig("proxy_url", "", "出站请求代理地址", "network", normalizeProxyURL),
 	newValidatedStringConfig("update_image_mirror", "", "系统更新拉取镜像时使用的可选镜像源（留空直连 Docker Hub）", "network", normalizeUpdateImageMirror),
+	newValidatedStringConfig("binary_update_proxy", "", "二进制更新下载加速源（留空直连 GitHub Release）", "network", normalizeBinaryUpdateProxy),
 	newValidatedStringConfig(
 		"trusted_proxy_cidrs",
 		strings.Join(netutil.DefaultTrustedProxyCIDRs(), "\n"),
@@ -133,7 +144,7 @@ var registeredSystemConfigSpecs = []systemConfigSpec{
 	newTrimmedStringConfig("panel_service_name", "daidai-panel", "systemd 服务名称", "branding"),
 	newIntConfig("max_web_sessions", "1", "同一用户最大网页端会话数（多设备同时在线）", "security", 1, 20),
 	newIntConfig("max_app_sessions", "1", "同一用户最大 APP 端会话数（多设备同时在线）", "security", 1, 20),
-	newBoolConfig("captcha_enabled", "false", "极验验证码开关（连续失败 3 次后触发）", "security"),
+	newBoolConfig("captcha_enabled", "false", "极验验证码开关（开启后每次登录触发）", "security"),
 	newTrimmedStringConfig("captcha_id", "", "验证码平台 ID", "security"),
 	newTrimmedStringConfig("captcha_key", "", "验证码平台密钥（服务端 Key）", "security"),
 	newEnumConfig(
@@ -347,6 +358,39 @@ func normalizeUpdateImageMirror(value string) (string, error) {
 	}
 
 	return parsed.Host, nil
+}
+
+func normalizeBinaryUpdateProxy(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" {
+		return "", fmt.Errorf("二进制更新加速源格式无效")
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("二进制更新加速源仅支持 http/https")
+	}
+
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("二进制更新加速源不能带查询参数或片段")
+	}
+
+	pathValue := strings.TrimRight(parsed.EscapedPath(), "/")
+	normalized := parsed.Scheme + "://" + parsed.Host
+	if pathValue != "" {
+		normalized += pathValue
+	}
+	return normalized + "/", nil
 }
 
 func normalizeHTTPBaseURLValue(value, defaultValue string) (string, error) {

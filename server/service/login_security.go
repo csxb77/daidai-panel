@@ -17,7 +17,6 @@ import (
 const (
 	MaxLoginAttempts = 5
 	LockDuration     = 15 * time.Minute
-	CaptchaThreshold = 3
 )
 
 func RecordLoginLog(userID uint, username, ip, clientName, userAgent string, status int, message string) {
@@ -60,10 +59,6 @@ func GetLoginAttemptCount(ip, username string) int {
 		return 0
 	}
 	return attempt.Count
-}
-
-func ShouldRequireCaptchaByAttempts(failedAttempts int) bool {
-	return failedAttempts >= CaptchaThreshold
 }
 
 func RecordFailedLogin(ip, username string) int {

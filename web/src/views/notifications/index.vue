@@ -111,6 +111,11 @@ const configFields = computed(() => {
     case 'email': return [
       { key: 'smtp_host', label: 'SMTP 主机', type: 'input', placeholder: 'smtp.qq.com' },
       { key: 'smtp_port', label: 'SMTP 端口', type: 'input', placeholder: '465' },
+      { key: 'smtp_ssl', label: 'SSL 连接', type: 'select', placeholder: '自动：465 端口启用', options: [
+        { label: '自动 (465 启用)', value: 'auto' },
+        { label: '启用 SSL', value: 'true' },
+        { label: '关闭 SSL', value: 'false' },
+      ]},
       { key: 'smtp_user', label: '邮箱账号', type: 'input', placeholder: 'user@example.com' },
       { key: 'smtp_pass', label: '邮箱密码/授权码', type: 'password', placeholder: 'SMTP 授权码' },
       { key: 'to', label: '收件人', type: 'input', placeholder: '多个收件人用逗号分隔' },
@@ -540,7 +545,21 @@ function getChannelConfigSummary(row: any): string[] {
       if (config.webhook) lines.push(`地址 ${extractDisplayHost(config.webhook)}`)
       break
     case 'email':
-      if (config.smtp_host) lines.push(`SMTP ${String(config.smtp_host)}`)
+      if (config.smtp_host) {
+        const port = String(config.smtp_port ?? '').trim()
+        lines.push(`SMTP ${String(config.smtp_host)}${port ? `:${port}` : ''}`)
+      }
+      {
+        const sslMode = String(config.smtp_ssl ?? '').trim()
+        const port = String(config.smtp_port ?? '').trim()
+        if (sslMode === 'true' || ((!sslMode || sslMode === 'auto') && port === '465')) {
+          lines.push('SSL 已启用')
+        } else if (sslMode === 'false') {
+          lines.push('SSL 已关闭')
+        } else if (sslMode === 'auto') {
+          lines.push('SSL 自动')
+        }
+      }
       if (splitConfigTargets(config.to).length > 0) lines.push(`收件人 ${splitConfigTargets(config.to).length} 个`)
       break
     case 'telegram':

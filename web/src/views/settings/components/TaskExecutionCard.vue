@@ -22,11 +22,6 @@ defineProps<{
     </template>
 
     <div class="form-field">
-      <label>全局默认超时（秒）</label>
-      <el-input v-model.number="form.command_timeout" />
-      <span class="form-hint">单个任务未设超时时使用此值</span>
-    </div>
-    <div class="form-field">
       <label>定时任务并发数</label>
       <el-input v-model.number="form.max_concurrent_tasks" />
       <span class="form-hint">同时执行的最大任务数量</span>

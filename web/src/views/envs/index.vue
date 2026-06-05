@@ -49,7 +49,7 @@ const currentPageOffset = computed(() => (showAllEnvs.value ? 0 : (page.value - 
 const statusFilter = ref<'' | 'enabled' | 'disabled'>('')
 const showFooterBar = computed(() => total.value > 0 || selectedCountInCurrentPage.value > 0)
 const showPager = computed(() => !showAllEnvs.value && total.value > pageSize.value)
-const sortableEnabled = computed(() => !showAllEnvs.value && envList.value.length >= 2)
+const sortableEnabled = computed(() => envList.value.length >= 2)
 const pageSizeOptions: Array<{ label: string; value: EnvPageSizeSelection }> = [
   { label: '20 / 页', value: '20' },
   { label: '50 / 页', value: '50' },

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/smtp"
 	"reflect"
 	"strings"
 	"testing"
@@ -34,6 +35,80 @@ func TestSplitNotificationIntTargets(t *testing.T) {
 func TestSplitNotificationIntTargetsRejectsInvalidValue(t *testing.T) {
 	if _, err := splitNotificationIntTargets("101;abc"); err == nil {
 		t.Fatal("expected invalid topic id to return an error")
+	}
+}
+
+func TestSendEmailSelectsSSLMode(t *testing.T) {
+	oldPlain := smtpSendMail
+	oldTLS := smtpSendMailWithImplicitTLS
+	defer func() {
+		smtpSendMail = oldPlain
+		smtpSendMailWithImplicitTLS = oldTLS
+	}()
+
+	cases := []struct {
+		name string
+		port string
+		ssl  string
+		want string
+	}{
+		{name: "auto 465 uses implicit TLS", port: "465", want: "tls"},
+		{name: "explicit true uses implicit TLS", port: "587", ssl: "true", want: "tls"},
+		{name: "explicit false keeps plain smtp", port: "465", ssl: "false", want: "plain"},
+		{name: "auto non-465 keeps plain smtp", port: "587", ssl: "auto", want: "plain"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := []string{}
+			assertPayload := func(addr, host, from string, to []string, msg []byte) {
+				if addr != "smtp.example.com:"+tc.port {
+					t.Fatalf("unexpected addr: %s", addr)
+				}
+				if host != "smtp.example.com" {
+					t.Fatalf("unexpected host: %s", host)
+				}
+				if from != "sender@example.com" {
+					t.Fatalf("unexpected from: %s", from)
+				}
+				wantTo := []string{"one@example.com", "two@example.com"}
+				if !reflect.DeepEqual(to, wantTo) {
+					t.Fatalf("unexpected recipients: got %v want %v", to, wantTo)
+				}
+				body := string(msg)
+				if !strings.Contains(body, "Subject: 标题") || !strings.Contains(body, "正文") {
+					t.Fatalf("unexpected message body: %q", body)
+				}
+			}
+			smtpSendMail = func(addr string, auth smtp.Auth, from string, to []string, msg []byte) error {
+				calls = append(calls, "plain")
+				assertPayload(addr, "smtp.example.com", from, to, msg)
+				return nil
+			}
+			smtpSendMailWithImplicitTLS = func(addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+				calls = append(calls, "tls")
+				assertPayload(addr, host, from, to, msg)
+				return nil
+			}
+
+			cfg := map[string]string{
+				"smtp_host": "smtp.example.com",
+				"smtp_port": tc.port,
+				"smtp_user": "sender@example.com",
+				"smtp_pass": "secret",
+				"from":      "sender@example.com",
+				"to":        "one@example.com, two@example.com",
+			}
+			if tc.ssl != "" {
+				cfg["smtp_ssl"] = tc.ssl
+			}
+			if err := sendEmail(cfg, "标题", "正文"); err != nil {
+				t.Fatalf("send email: %v", err)
+			}
+			if !reflect.DeepEqual(calls, []string{tc.want}) {
+				t.Fatalf("unexpected send mode calls: got %v want %v", calls, []string{tc.want})
+			}
+		})
 	}
 }
 

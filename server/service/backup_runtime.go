@@ -170,8 +170,9 @@ func buildBackupManifest(selection BackupSelection) (BackupManifest, error) {
 		}
 		for _, dep := range deps {
 			manifest.Data.Dependencies = append(manifest.Data.Dependencies, BackupDependency{
-				Type: dep.Type,
-				Name: dep.Name,
+				Type:          dep.Type,
+				Name:          dep.Name,
+				PythonVersion: dep.PythonVersion,
 			})
 		}
 	}
@@ -571,8 +572,9 @@ func restoreLegacyJSONBytes(data []byte) error {
 
 	for _, dep := range legacy.Deps {
 		manifest.Data.Dependencies = append(manifest.Data.Dependencies, BackupDependency{
-			Type: dep.Type,
-			Name: dep.Name,
+			Type:          dep.Type,
+			Name:          dep.Name,
+			PythonVersion: dep.PythonVersion,
 		})
 	}
 
@@ -1089,21 +1091,26 @@ func restoreDependencies(tx *gorm.DB, deps []BackupDependency) ([]model.Dependen
 	for _, item := range deps {
 		depType := strings.TrimSpace(item.Type)
 		name := strings.TrimSpace(item.Name)
+		pythonVersion := ""
 		if depType == "" || name == "" {
 			continue
 		}
+		if depType == model.DepTypePython {
+			pythonVersion = NormalizeDependencyPythonVersion(item.PythonVersion)
+		}
 
-		key := depType + "::" + strings.ToLower(name)
+		key := depType + "::" + pythonVersion + "::" + strings.ToLower(name)
 		if _, exists := seen[key]; exists {
 			continue
 		}
 		seen[key] = struct{}{}
 
 		dep := model.Dependency{
-			Type: depType,
-			Name: name,
+			Type:          depType,
+			Name:          name,
+			PythonVersion: pythonVersion,
 		}
-		if DependencyInstalled(depType, name) {
+		if DependencyInstalledForPythonVersion(depType, name, pythonVersion) {
 			dep.Status = model.DepStatusInstalled
 			dep.Log = "[恢复备份] 已检测到依赖已存在，无需重装"
 		} else {
@@ -1240,7 +1247,11 @@ func reinstallDependenciesAsyncWithLogPrefix(deps []model.Dependency, logPrefix 
 
 func reinstallDependency(dep model.Dependency, logPrefix string) {
 	depsDir := filepath.Join(config.C.Data.Dir, "deps")
-	database.DB.Model(&model.Dependency{}).Where("id = ?", dep.ID).Update("log", fmt.Sprintf("%s 正在安装 %s 依赖 %s", logPrefix, dep.Type, dep.Name))
+	logText := fmt.Sprintf("%s 正在安装 %s 依赖 %s", logPrefix, dep.Type, dep.Name)
+	if dep.Type == model.DepTypePython {
+		logText = fmt.Sprintf("%s 正在安装 Python %s 依赖 %s", logPrefix, NormalizeDependencyPythonVersion(dep.PythonVersion), dep.Name)
+	}
+	database.DB.Model(&model.Dependency{}).Where("id = ?", dep.ID).Update("log", logText)
 
 	var cmd *exec.Cmd
 	switch dep.Type {
@@ -1248,8 +1259,15 @@ func reinstallDependency(dep model.Dependency, logPrefix string) {
 		cmd = exec.Command("npm", "install", "--prefix", filepath.Join(depsDir, "nodejs"), dep.Name)
 		cmd.Env = NpmInstallEnv(AppendProxyEnv(os.Environ()), CurrentNpmMirror())
 	case model.DepTypePython:
-		pipBin, extraFlags, _ := ResolvePipInstallCommand()
-		cmd = exec.Command(pipBin, BuildPipInstallArgs(extraFlags, dep.Name)...)
+		var err error
+		cmd, err = NewPipInstallCommandForPythonVersion(dep.PythonVersion, dep.Name)
+		if err != nil {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", dep.ID).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    logPrefix + " " + err.Error(),
+			})
+			return
+		}
 		cmd.Env = append(PipInstallEnv(AppendProxyEnv(os.Environ()), CurrentPipMirror()), "TMPDIR=/tmp")
 	case model.DepTypeLinux:
 		var err error

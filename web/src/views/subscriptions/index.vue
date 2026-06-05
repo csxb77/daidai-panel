@@ -1010,7 +1010,6 @@ function viewLogDetail(log: any) {
         </el-form-item>
         <el-form-item label="覆盖拉取">
           <el-switch v-model="settingsForm.subscription_force_overwrite" inline-prompt active-text="开" inactive-text="关" />
-          <div class="settings-hint">开启后拉取时用远端内容覆盖本地修改并清理多余文件；关闭后尝试保留本地修改。</div>
         </el-form-item>
         <el-form-item label="默认 Cron 规则">
           <el-input v-model="settingsForm.default_cron_rule" placeholder="0 9 * * *" />

@@ -129,6 +129,20 @@ func NewDepsHandler() *DepsHandler {
 	return &DepsHandler{}
 }
 
+func normalizeDependencyPythonVersion(depType, raw string) (string, error) {
+	if depType != model.DepTypePython {
+		return "", nil
+	}
+	return service.NormalizePythonVersionStrict(raw)
+}
+
+func dependencyPythonInstallVersions(depType string) []string {
+	if depType != model.DepTypePython {
+		return []string{""}
+	}
+	return service.SupportedPythonVersions()
+}
+
 func (h *DepsHandler) List(c *gin.Context) {
 	depType := c.DefaultQuery("type", "nodejs")
 
@@ -143,7 +157,16 @@ func (h *DepsHandler) List(c *gin.Context) {
 	}
 
 	var deps []model.Dependency
-	database.DB.Where("type = ?", depType).Order("created_at DESC").Find(&deps)
+	query := database.DB.Where("type = ?", depType)
+	if depType == model.DepTypePython {
+		pythonVersion, err := normalizeDependencyPythonVersion(depType, c.Query("python_version"))
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		query = query.Where("COALESCE(NULLIF(python_version, ''), ?) = ?", service.LegacyPythonVersion(), pythonVersion)
+	}
+	query.Order("created_at DESC").Find(&deps)
 
 	data := make([]map[string]interface{}, len(deps))
 	for i, d := range deps {
@@ -155,8 +178,9 @@ func (h *DepsHandler) List(c *gin.Context) {
 
 func (h *DepsHandler) Create(c *gin.Context) {
 	var req struct {
-		Type  string   `json:"type" binding:"required"`
-		Names []string `json:"names" binding:"required"`
+		Type          string   `json:"type" binding:"required"`
+		Names         []string `json:"names" binding:"required"`
+		PythonVersion string   `json:"python_version"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
@@ -172,7 +196,6 @@ func (h *DepsHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "无效的依赖类型")
 		return
 	}
-
 	created := []map[string]interface{}{}
 	for _, name := range req.Names {
 		name = strings.TrimSpace(name)
@@ -183,21 +206,28 @@ func (h *DepsHandler) Create(c *gin.Context) {
 			continue
 		}
 
-		dep := model.Dependency{
-			Type:   req.Type,
-			Name:   name,
-			Status: model.DepStatusInstalling,
-		}
-		if err := database.DB.Create(&dep).Error; err != nil {
-			continue
-		}
-		created = append(created, dep.ToDict())
+		for _, pythonVersion := range dependencyPythonInstallVersions(req.Type) {
+			dep := model.Dependency{
+				Type:          req.Type,
+				Name:          name,
+				PythonVersion: pythonVersion,
+				Status:        model.DepStatusInstalling,
+			}
+			if err := database.DB.Create(&dep).Error; err != nil {
+				continue
+			}
+			created = append(created, dep.ToDict())
 
-		go dependencyInstallRunner(dep.ID, req.Type, name)
+			go dependencyInstallRunner(dep.ID, req.Type, name)
+		}
 	}
 
+	message := fmt.Sprintf("已提交 %d 个依赖安装", len(created))
+	if req.Type == model.DepTypePython && len(created) > 0 {
+		message = fmt.Sprintf("已提交 %d 个 Python 版本依赖安装", len(created))
+	}
 	response.Created(c, gin.H{
-		"message": fmt.Sprintf("已提交 %d 个依赖安装", len(created)),
+		"message": message,
 		"data":    created,
 	})
 }
@@ -218,14 +248,14 @@ func (h *DepsHandler) Delete(c *gin.Context) {
 
 	if c.Query("force") == "true" {
 		database.DB.Delete(&dep)
-		go forceUninstallDependency(dep.Type, dep.Name)
+		go forceUninstallDependency(dep.Type, dep.Name, dep.PythonVersion)
 		response.Success(c, gin.H{"message": "强制卸载中"})
 		return
 	}
 
 	database.DB.Model(&dep).Update("status", model.DepStatusRemoving)
 
-	go uninstallDependency(dep.ID, dep.Type, dep.Name)
+	go uninstallDependency(dep.ID, dep.Type, dep.Name, dep.PythonVersion)
 
 	response.Success(c, gin.H{"message": "卸载中"})
 }
@@ -244,7 +274,7 @@ func (h *DepsHandler) BatchDelete(c *gin.Context) {
 
 	for _, dep := range deps {
 		database.DB.Delete(&dep)
-		go forceUninstallDependency(dep.Type, dep.Name)
+		go forceUninstallDependency(dep.Type, dep.Name, dep.PythonVersion)
 	}
 
 	response.Success(c, gin.H{"message": fmt.Sprintf("已提交 %d 个依赖卸载", len(deps))})
@@ -454,18 +484,22 @@ func (h *DepsHandler) Cancel(c *gin.Context) {
 }
 
 func (h *DepsHandler) PipList(c *gin.Context) {
+	pythonVersion, err := service.NormalizePythonVersionStrict(c.Query("python_version"))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	pipEnv := service.SanitizePipEnv(os.Environ())
-	listCmd := exec.Command("pip3", "list", "--format=json")
+	listCmd, err := service.NewPipCommandForPythonVersion(pythonVersion, []string{"list", "--format=json"})
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	listCmd.Env = pipEnv
 	out, err := listCmd.Output()
 	if err != nil {
-		fallback := exec.Command("pip", "list", "--format=json")
-		fallback.Env = pipEnv
-		out, err = fallback.Output()
-		if err != nil {
-			response.InternalError(c, "pip 不可用")
-			return
-		}
+		response.InternalError(c, "pip 不可用")
+		return
 	}
 	c.Data(200, "application/json", out)
 }
@@ -484,7 +518,18 @@ func (h *DepsHandler) Export(c *gin.Context) {
 	}
 
 	var deps []model.Dependency
-	database.DB.Where("type = ? AND status = ?", depType, model.DepStatusInstalled).Order("name ASC").Find(&deps)
+	query := database.DB.Where("type = ? AND status = ?", depType, model.DepStatusInstalled)
+	filenameType := depType
+	if depType == model.DepTypePython {
+		pythonVersion, err := normalizeDependencyPythonVersion(depType, c.Query("python_version"))
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		query = query.Where("COALESCE(NULLIF(python_version, ''), ?) = ?", service.LegacyPythonVersion(), pythonVersion)
+		filenameType = depType + "-" + strings.ReplaceAll(pythonVersion, ".", "")
+	}
+	query.Order("name ASC").Find(&deps)
 
 	text, err := dependencyExportTextFunc(depType, deps)
 	if err != nil {
@@ -492,10 +537,37 @@ func (h *DepsHandler) Export(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("dependencies-%s-%s.txt", depType, time.Now().Format("20060102-150405"))
+	filename := fmt.Sprintf("dependencies-%s-%s.txt", filenameType, time.Now().Format("20060102-150405"))
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 	c.String(200, text)
+}
+
+func (h *DepsHandler) PythonRuntimes(c *gin.Context) {
+	response.Success(c, gin.H{
+		"data":            service.PythonRuntimeInfos(),
+		"default_version": service.DefaultPythonVersion(),
+	})
+}
+
+func (h *DepsHandler) SetDefaultPythonRuntime(c *gin.Context) {
+	var req struct {
+		Version string `json:"version" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+	version, err := service.NormalizePythonVersionStrict(req.Version)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	if err := model.SetConfig("python_default_version", version); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	response.Success(c, gin.H{"message": "默认 Python 版本已更新", "default_version": version})
 }
 
 func (h *DepsHandler) NpmList(c *gin.Context) {
@@ -763,13 +835,29 @@ func installDependency(id uint, depType, name string) {
 	ensureTmpDir()
 	var cmd *exec.Cmd
 	depsDir := filepath.Join(config.C.Data.Dir, "deps")
+	pythonVersion := ""
+	if depType == model.DepTypePython {
+		var dep model.Dependency
+		if err := database.DB.Select("python_version").First(&dep, id).Error; err == nil {
+			pythonVersion = dep.PythonVersion
+		}
+		pythonVersion = service.NormalizePythonVersionOrDefault(pythonVersion)
+		database.DB.Model(&model.Dependency{}).Where("id = ?", id).Update("python_version", pythonVersion)
+	}
 	switch depType {
 	case model.DepTypeNodeJS:
 		cmd = exec.Command("npm", "install", "--prefix", filepath.Join(depsDir, "nodejs"), name)
 		cmd.Env = service.NpmInstallEnv(service.AppendProxyEnv(os.Environ()), service.CurrentNpmMirror())
 	case model.DepTypePython:
-		pipBin, extraFlags, _ := service.ResolvePipInstallCommand()
-		cmd = exec.Command(pipBin, service.BuildPipInstallArgs(extraFlags, name)...)
+		var err error
+		cmd, err = service.NewPipInstallCommandForPythonVersion(pythonVersion, name)
+		if err != nil {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", id).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    err.Error(),
+			})
+			return
+		}
 		cmd.Env = append(service.PipInstallEnv(service.AppendProxyEnv(os.Environ()), service.CurrentPipMirror()), "TMPDIR=/tmp")
 	case model.DepTypeLinux:
 		linuxPackageOperationMu.Lock()
@@ -806,7 +894,7 @@ func installDependency(id uint, depType, name string) {
 	runCmdWithSSE(cmd, id, model.DepStatusInstalled, false)
 }
 
-func uninstallDependency(id uint, depType, name string) {
+func uninstallDependency(id uint, depType, name, pythonVersion string) {
 	var cmd *exec.Cmd
 	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	switch depType {
@@ -814,8 +902,15 @@ func uninstallDependency(id uint, depType, name string) {
 		cmd = exec.Command("npm", "uninstall", "--prefix", filepath.Join(depsDir, "nodejs"), name)
 		cmd.Env = service.AppendProxyEnv(os.Environ())
 	case model.DepTypePython:
-		pipBin, extraFlags, _ := service.ResolvePipInstallCommand()
-		cmd = exec.Command(pipBin, service.BuildPipUninstallArgs(extraFlags, name)...)
+		var err error
+		cmd, err = service.NewPipUninstallCommandForPythonVersion(pythonVersion, name)
+		if err != nil {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", id).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    err.Error(),
+			})
+			return
+		}
 		cmd.Env = service.SanitizePipEnv(service.AppendProxyEnv(os.Environ()))
 	case model.DepTypeLinux:
 		linuxPackageOperationMu.Lock()
@@ -840,7 +935,7 @@ func uninstallDependency(id uint, depType, name string) {
 	runCmdWithSSE(cmd, id, model.DepStatusInstalled, true)
 }
 
-func forceUninstallDependency(depType, name string) {
+func forceUninstallDependency(depType, name, pythonVersion string) {
 	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	var cmd *exec.Cmd
 	switch depType {
@@ -848,8 +943,11 @@ func forceUninstallDependency(depType, name string) {
 		cmd = exec.Command("npm", "uninstall", "--prefix", filepath.Join(depsDir, "nodejs"), "--force", name)
 		cmd.Env = service.AppendProxyEnv(os.Environ())
 	case model.DepTypePython:
-		pipBin, extraFlags, _ := service.ResolvePipInstallCommand()
-		cmd = exec.Command(pipBin, service.BuildPipUninstallArgs(extraFlags, name, "--no-deps")...)
+		var err error
+		cmd, err = service.NewPipUninstallCommandForPythonVersion(pythonVersion, name, "--no-deps")
+		if err != nil {
+			return
+		}
 		cmd.Env = service.SanitizePipEnv(service.AppendProxyEnv(os.Environ()))
 	case model.DepTypeLinux:
 		linuxPackageOperationMu.Lock()
@@ -884,6 +982,8 @@ func (h *DepsHandler) RegisterRoutes(r *gin.RouterGroup) {
 		deps.PUT("/:id/reinstall", h.Reinstall)
 		deps.GET("/export", h.Export)
 
+		deps.GET("/python-runtimes", h.PythonRuntimes)
+		deps.PUT("/python-runtime-default", h.SetDefaultPythonRuntime)
 		deps.GET("/pip", h.PipList)
 		deps.GET("/npm", h.NpmList)
 

@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -299,14 +300,49 @@ func (h *SystemHandler) UploadBackup(c *gin.Context) {
 func (h *SystemHandler) DownloadBackup(c *gin.Context) {
 	filename := c.Param("filename")
 	if filename == "" {
+		filename = c.Query("filename")
+	}
+	if filename == "" {
 		response.BadRequest(c, "文件名不能为空")
 		return
 	}
 
-	backupDir := filepath.Join(config.C.Data.Dir, "backups")
-	filePath := filepath.Join(backupDir, filepath.Base(filename))
+	baseName := filepath.Base(filename)
+	if baseName != filename || strings.TrimSpace(baseName) == "." || strings.TrimSpace(baseName) == string(filepath.Separator) {
+		response.BadRequest(c, "备份文件名无效")
+		return
+	}
 
-	c.FileAttachment(filePath, filename)
+	lowerName := strings.ToLower(baseName)
+	if !strings.HasSuffix(lowerName, ".json") &&
+		!strings.HasSuffix(lowerName, ".enc") &&
+		!strings.HasSuffix(lowerName, ".tgz") &&
+		!strings.HasSuffix(lowerName, ".tar.gz") {
+		response.BadRequest(c, "仅支持下载 .json、.enc、.tgz 或 .tar.gz 备份文件")
+		return
+	}
+
+	backupDir := filepath.Join(config.C.Data.Dir, "backups")
+	filePath := filepath.Join(backupDir, baseName)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			response.NotFound(c, "备份文件不存在")
+			return
+		}
+		response.InternalError(c, "读取备份文件失败")
+		return
+	}
+	if info.IsDir() {
+		response.BadRequest(c, "备份文件名无效")
+		return
+	}
+
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.Header("Content-Length", fmt.Sprintf("%d", info.Size()))
+	c.FileAttachment(filePath, baseName)
 }
 
 func (h *SystemHandler) Version(c *gin.Context) {
@@ -340,14 +376,14 @@ func (h *SystemHandler) PanelSettings(c *gin.Context) {
 	panelServiceName := model.GetRegisteredConfig("panel_service_name")
 	response.Success(c, gin.H{
 		"data": gin.H{
-		"panel_title":             title,
-		"panel_icon":              icon,
-		"editor_background_color": editorBackgroundColor,
-		"log_background_color":    logBackgroundColor,
-		"log_background_image":    logBackgroundImage,
-		"panel_runtime_mode":      panelRuntimeMode,
-		"panel_service_manager":   panelServiceManager,
-		"panel_service_name":      panelServiceName,
+			"panel_title":             title,
+			"panel_icon":              icon,
+			"editor_background_color": editorBackgroundColor,
+			"log_background_color":    logBackgroundColor,
+			"log_background_image":    logBackgroundImage,
+			"panel_runtime_mode":      panelRuntimeMode,
+			"panel_service_manager":   panelServiceManager,
+			"panel_service_name":      panelServiceName,
 		},
 	})
 }
@@ -411,11 +447,11 @@ func (h *SystemHandler) UpdatePanel(c *gin.Context) {
 		response.Success(c, gin.H{
 			"message": "已触发 Watchtower 检查更新",
 			"data": gin.H{
-				"status":         "running",
-				"phase":          "watchtower-triggered",
-				"message":        "已请求 Watchtower 立即检查并执行容器更新",
-				"deployment_type": "docker",
-				"update_manager": panelUpdateManagerWatchtower,
+				"status":              "running",
+				"phase":               "watchtower-triggered",
+				"message":             "已请求 Watchtower 立即检查并执行容器更新",
+				"deployment_type":     "docker",
+				"update_manager":      panelUpdateManagerWatchtower,
 				"watchtower_response": result,
 			},
 		})
@@ -644,6 +680,7 @@ func (h *SystemHandler) RegisterRoutes(r *gin.RouterGroup) {
 		sys.POST("/backup", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.Backup)
 		sys.POST("/backup/upload", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.UploadBackup)
 		sys.GET("/backups", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.BackupList)
+		sys.GET("/backup/download", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.DownloadBackup)
 		sys.GET("/backup/download/:filename", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.DownloadBackup)
 		sys.GET("/restore/progress", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.RestoreProgress)
 		sys.POST("/restore", middleware.OpenAPIAccess("backup"), middleware.RequireRole("admin"), h.Restore)

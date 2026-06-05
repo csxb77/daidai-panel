@@ -177,6 +177,29 @@
         </el-button>
       </div>
       <div class="toolbar__right">
+        <el-select
+          v-if="activeTab === 'python'"
+          v-model="pythonVersion"
+          class="toolbar__python-version"
+          placeholder="Python 版本"
+          @change="handlePythonVersionChange"
+        >
+          <el-option
+            v-for="runtime in pythonRuntimes"
+            :key="runtime.version"
+            :label="runtime.default ? `${runtime.label}（默认）` : runtime.label"
+            :value="runtime.version"
+          >
+            <div class="python-runtime-option">
+              <span>{{ runtime.label }}</span>
+              <el-tag v-if="runtime.default" size="small" type="success">默认</el-tag>
+              <el-tag v-else-if="runtime.venv_healthy" size="small" type="info">已初始化</el-tag>
+            </div>
+          </el-option>
+        </el-select>
+        <el-button v-if="activeTab === 'python'" @click="setCurrentPythonDefault" :disabled="pythonVersion === pythonDefaultVersion">
+          设为默认
+        </el-button>
         <el-input v-model="searchKeyword" placeholder="搜索依赖包名称..." clearable class="toolbar__search" @keyup.enter="depsPage = 1" @clear="depsPage = 1">
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
@@ -193,6 +216,30 @@
         </el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="activeTab === 'python'"
+      class="python-runtime-hint"
+      type="info"
+      :closable="false"
+      show-icon
+    >
+      <template #title>Python 多版本说明</template>
+      <div class="python-runtime-hint__body">
+        二进制部署不会内置三个 Python，只需要在服务器安装实际要用的版本；面板会为可用版本创建独立依赖环境，未安装版本会明确提示不可用，不影响其他版本运行。
+      </div>
+      <div class="python-runtime-hint__status">
+        <el-tag
+          v-for="runtime in pythonRuntimes"
+          :key="runtime.version"
+          size="small"
+          :type="runtime.available ? 'success' : 'warning'"
+          effect="plain"
+        >
+          {{ runtime.label }}：{{ runtime.available ? '可用' : '需先安装' }}
+        </el-tag>
+      </div>
+    </el-alert>
 
     <div v-if="isMobile" class="dd-mobile-list">
       <div
@@ -222,6 +269,10 @@
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">创建时间</span>
               <span class="dd-mobile-card__value">{{ new Date(row.created_at).toLocaleString('zh-CN') }}</span>
+            </div>
+            <div v-if="activeTab === 'python'" class="dd-mobile-card__field">
+              <span class="dd-mobile-card__label">Python</span>
+              <span class="dd-mobile-card__value">{{ row.python_version || pythonDefaultVersion }}</span>
             </div>
           </div>
           <div class="dd-mobile-card__actions deps-card__actions">
@@ -290,6 +341,11 @@
             <span class="version-text">{{ row.version || '-' }}</span>
           </template>
         </el-table-column>
+        <el-table-column v-if="activeTab === 'python'" prop="python_version" label="Python" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" type="info">{{ row.python_version || pythonDefaultVersion }}</el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
             <el-tag :type="statusType(row.status)" size="small" effect="light" round>{{ statusLabel(row.status) }}</el-tag>
@@ -344,6 +400,14 @@
             <el-radio value="python">Python3</el-radio>
             <el-radio value="linux">Linux</el-radio>
           </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="createType === 'python'" label="版本">
+          <el-alert
+            title="会尝试同步安装到 Python 3.10 / 3.11 / 3.12；未安装的版本会提示先安装对应 Python"
+            type="info"
+            :closable="false"
+            show-icon
+          />
         </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="createNames" type="textarea" :rows="5" placeholder="每行一个依赖名称，支持换行/空格/逗号分隔" />
@@ -462,7 +526,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, watch, computed } from 'vue'
-import { depsApi, type MirrorsResponse } from '@/api/deps'
+import { depsApi, type MirrorsResponse, type PythonRuntimeInfo } from '@/api/deps'
 import {
   androidRuntimeApi,
   type AndroidRuntimeStatus,
@@ -576,6 +640,10 @@ async function uninstallAndroidRuntime(name: string) {
 // ---------- /Android 面具版 ----------
 
 const activeTab = ref('nodejs')
+const pythonRuntimes = ref<PythonRuntimeInfo[]>([])
+const pythonDefaultVersion = ref('3.12')
+const pythonVersion = ref('3.12')
+const createPythonVersion = ref('3.12')
 const depsList = ref<any[]>([])
 const loading = ref(false)
 const showCreateDialog = ref(false)
@@ -723,7 +791,7 @@ const linuxMirrorOptions = computed(() => {
 async function loadData() {
   loading.value = true
   try {
-    const res = await depsApi.list(activeTab.value)
+    const res = await depsApi.list(activeTab.value, activeTab.value === 'python' ? pythonVersion.value : undefined)
     depsList.value = res.data || []
     selectedIds.value = selectedIds.value.filter(id => depsList.value.some(dep => dep.id === id))
     const countMap: Record<string, (v: number) => void> = {
@@ -762,6 +830,42 @@ function syncPendingRefresh() {
   stopRefreshTimer()
 }
 
+async function loadPythonRuntimes() {
+  try {
+    const res = await depsApi.pythonRuntimes()
+    pythonRuntimes.value = res.data || []
+    pythonDefaultVersion.value = res.default_version || '3.12'
+    pythonVersion.value = pythonVersion.value || pythonDefaultVersion.value
+    createPythonVersion.value = createPythonVersion.value || pythonVersion.value
+  } catch {
+    pythonRuntimes.value = [
+      { version: '3.10', label: 'Python 3.10', default: false, venv_path: '', venv_healthy: false, python_path: '', pip_path: '', available: false, message: '' },
+      { version: '3.11', label: 'Python 3.11', default: false, venv_path: '', venv_healthy: false, python_path: '', pip_path: '', available: false, message: '' },
+      { version: '3.12', label: 'Python 3.12', default: true, venv_path: '', venv_healthy: false, python_path: '', pip_path: '', available: false, message: '' },
+    ]
+  }
+}
+
+function handlePythonVersionChange() {
+  depsPage.value = 1
+  createPythonVersion.value = pythonVersion.value
+  void loadData()
+}
+
+async function setCurrentPythonDefault() {
+  try {
+    const res = await depsApi.setDefaultPythonRuntime(pythonVersion.value)
+    pythonDefaultVersion.value = res.default_version || pythonVersion.value
+    pythonRuntimes.value = pythonRuntimes.value.map(item => ({
+      ...item,
+      default: item.version === pythonDefaultVersion.value,
+    }))
+    ElMessage.success('默认 Python 版本已更新')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || '设置默认 Python 版本失败')
+  }
+}
+
 function parseNames(text: string): string[] {
   if (!autoSplit.value) return [text.trim()].filter(Boolean)
   return text.split(/[\n,\s]+/).map(s => s.trim()).filter(Boolean)
@@ -772,11 +876,14 @@ async function handleCreate() {
   if (names.length === 0) { ElMessage.warning('请输入依赖名称'); return }
   creating.value = true
   try {
-    await depsApi.create(createType.value, names)
-    ElMessage.success(`已提交 ${names.length} 个依赖安装`)
+    await depsApi.create(createType.value, names, createType.value === 'python' ? createPythonVersion.value : undefined)
+    ElMessage.success(createType.value === 'python'
+      ? `已提交 ${names.length} 个依赖到 3 个 Python 版本安装`
+      : `已提交 ${names.length} 个依赖安装`)
     showCreateDialog.value = false
     createNames.value = ''
     activeTab.value = createType.value
+    if (activeTab.value === 'python') pythonVersion.value = createPythonVersion.value
     loadData()
   } catch { ElMessage.error('提交安装失败') }
   finally { creating.value = false }
@@ -876,12 +983,13 @@ async function handleReinstall(row: any) {
 async function handleExport() {
   exporting.value = true
   try {
-    const blob = await depsApi.exportList(activeTab.value)
+    const blob = await depsApi.exportList(activeTab.value, activeTab.value === 'python' ? pythonVersion.value : undefined)
     const url = window.URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     const timestamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')
     anchor.href = url
-    anchor.download = `dependencies-${activeTab.value}-${timestamp}.txt`
+    const typeName = activeTab.value === 'python' ? `${activeTab.value}-${pythonVersion.value.replace('.', '')}` : activeTab.value
+    anchor.download = `dependencies-${typeName}-${timestamp}.txt`
     document.body.appendChild(anchor)
     anchor.click()
     document.body.removeChild(anchor)
@@ -1007,13 +1115,15 @@ function getLetterColor(name: string): string {
 onMounted(async () => {
   mounted = true
   createType.value = activeTab.value
+  await loadPythonRuntimes()
+  createPythonVersion.value = pythonVersion.value || pythonDefaultVersion.value
   loadData()
   loadAndroidStatus()
   const types = ['nodejs', 'python', 'linux'] as const
   const countRefs = { nodejs: nodejsCount, python: pythonCount, linux: linuxCount }
   for (const t of types) {
     if (t !== activeTab.value) {
-      depsApi.list(t).then(res => { countRefs[t].value = (res.data || []).length }).catch(() => {})
+      depsApi.list(t, t === 'python' ? pythonVersion.value : undefined).then(res => { countRefs[t].value = (res.data || []).length }).catch(() => {})
     }
   }
 })
@@ -1123,6 +1233,30 @@ onBeforeUnmount(() => {
   &__right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   &__search { width: 240px; }
   &__filter { width: 140px; }
+  &__python-version { width: 150px; }
+}
+
+.python-runtime-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.python-runtime-hint {
+  margin-bottom: 14px;
+}
+
+.python-runtime-hint__body {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.python-runtime-hint__status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 // ---------- Table Card ----------

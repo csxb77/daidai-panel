@@ -31,6 +31,7 @@ func (h *TaskHandler) Export(c *gin.Context) {
 		data[i] = map[string]interface{}{
 			"name":                      task.Name,
 			"command":                   task.Command,
+			"python_version":            task.PythonVersion,
 			"cron_expression":           task.CronExpression,
 			"task_type":                 task.GetTaskType(),
 			"status":                    task.Status,
@@ -103,6 +104,7 @@ func (h *TaskHandler) Import(c *gin.Context) {
 	for i, taskData := range req.Tasks {
 		name, _ := taskData["name"].(string)
 		command, _ := taskData["command"].(string)
+		pythonVersionRaw, _ := taskData["python_version"].(string)
 		cronExpr, _ := taskData["cron_expression"].(string)
 		taskType := model.TaskTypeCron
 		if rawTaskType, ok := taskData["task_type"].(string); ok && strings.TrimSpace(rawTaskType) != "" {
@@ -128,14 +130,20 @@ func (h *TaskHandler) Import(c *gin.Context) {
 		} else {
 			cronExpr = ""
 		}
+		pythonVersion, err := service.NormalizePythonVersionStrict(pythonVersionRaw)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("任务 %d: %s", i+1, err.Error()))
+			continue
+		}
 
 		task := model.Task{
 			Name:            name,
 			Command:         command,
+			PythonVersion:   pythonVersion,
 			CronExpression:  cronExpr,
 			TaskType:        taskType,
 			Status:          model.TaskStatusDisabled,
-			Timeout:         86400,
+			Timeout:         0,
 			RetryInterval:   60,
 			NotifyOnFailure: true,
 		}

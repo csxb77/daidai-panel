@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,12 +10,13 @@ import {
   Document,
   Download,
   Edit,
+  MagicStick,
   MoreFilled,
   Plus,
   VideoPlay
 } from '@element-plus/icons-vue'
-
-const MonacoEditor = defineAsyncComponent(() => import('@/components/MonacoEditor.vue'))
+import MonacoEditor from '@/components/MonacoEditor.vue'
+import { loadMonacoEditor } from '@/utils/monaco'
 
 const fileContent = defineModel<string>('fileContent', { required: true })
 const isEditing = defineModel<boolean>('isEditing', { required: true })
@@ -95,38 +96,13 @@ function startEdit() {
   isEditing.value = true
 }
 
-const previewRef = ref<HTMLElement | null>(null)
 const monacoEditorRef = ref<{ focus?: () => void } | null>(null)
 
-// Ctrl+A / Cmd+A while the preview is focused selects only the script content,
-// not the whole page. Monaco handles its own selection natively, so this only
-// applies to the read-only preview mode.
-function handlePreviewKeydown(event: KeyboardEvent) {
-  const isSelectAll = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a'
-  if (!isSelectAll || event.altKey || event.shiftKey) return
-  if (!previewRef.value) return
-  event.preventDefault()
-  const selection = window.getSelection()
-  if (!selection) return
-  selection.removeAllRanges()
-  const range = document.createRange()
-  range.selectNodeContents(previewRef.value)
-  selection.addRange(range)
-}
-
-// When a script is opened in preview mode we give its pane focus so Ctrl+A
-// immediately targets the script content without the user having to click the
-// pane first. Editing mode defers focus to Monaco.
-watch(
-  [() => props.selectedFile, () => props.isBinary, isEditing, () => props.loading],
-  ([file, binary, editing, loading]) => {
-    if (!file || binary || editing || loading) return
-    void nextTick(() => {
-      previewRef.value?.focus({ preventScroll: true })
-    })
-  },
-  { immediate: true }
-)
+onMounted(() => {
+  void loadMonacoEditor().catch((error) => {
+    console.warn('Monaco 编辑器预加载失败，将在打开文件时重试。', error)
+  })
+})
 
 watch(
   () => [isEditing.value, props.editorAutoFocusTicket, props.loading, props.isBinary, props.selectedFile] as const,
@@ -273,13 +249,6 @@ watch(
           <div class="binary-card-title">二进制文件</div>
           <p class="binary-card-text">该文件为二进制格式，无法在线编辑。可通过右上角「更多 → 下载」取回文件。</p>
         </div>
-        <pre
-          v-else-if="!isEditing"
-          ref="previewRef"
-          class="code-preview"
-          tabindex="0"
-          @keydown="handlePreviewKeydown"
-        >{{ fileContent }}</pre>
         <MonacoEditor
           ref="monacoEditorRef"
           v-else
@@ -612,32 +581,6 @@ watch(
     flex: 1;
     height: 100%;
     min-height: 0;
-  }
-}
-
-.code-preview {
-  margin: 0;
-  flex: 1;
-  height: 100%;
-  min-height: 0;
-  overflow: auto;
-  padding: 18px 22px;
-  background: var(--dd-editor-bg-color, #1e1e1e);
-  color: var(--dd-editor-fg-color, #d4d4d4);
-  font-size: 13px;
-  line-height: 1.6;
-  font-family: var(--dd-font-mono);
-  white-space: pre;
-  outline: none;
-  cursor: text;
-
-  &::selection,
-  *::selection {
-    background: rgba(64, 158, 255, 0.3);
-  }
-
-  &:focus-visible {
-    box-shadow: inset 0 0 0 2px rgba(64, 158, 255, 0.4);
   }
 }
 

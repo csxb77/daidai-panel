@@ -84,21 +84,21 @@ func RunCommandWithPlan(plan *CommandExecutionPlan, timeout int, envVars map[str
 }
 
 var extInterpreterMap = map[string]string{
-	".py": "python3",
-	".js": "node",
+	".py":  "python3",
+	".js":  "node",
 	".mjs": "node",
-	".ts": "ts-node",
-	".sh": "bash",
-	".go": "go",
+	".ts":  "ts-node",
+	".sh":  "bash",
+	".go":  "go",
 }
 
 var desiInterpreterMap = map[string]string{
-	".js": "node",
+	".js":  "node",
 	".mjs": "node",
-	".py": "python3",
-	".ts": "ts-node",
-	".sh": "bash",
-	".go": "go",
+	".py":  "python3",
+	".ts":  "ts-node",
+	".sh":  "bash",
+	".go":  "go",
 }
 
 func ParseCommandExecutionPlan(command, scriptsDir string) (*CommandExecutionPlan, error) {
@@ -115,7 +115,7 @@ func ParseCommandExecutionPlan(command, scriptsDir string) (*CommandExecutionPla
 		return parseTaskCommandPlan(tokens[1:], scriptsDir, "")
 	case "desi":
 		return parseTaskCommandPlan(tokens[1:], scriptsDir, commandModeDesi)
-	case "python", "python3", "node", "ts-node", "bash", "go":
+	case "python", "python3", "python3.10", "python3.11", "python3.12", "node", "ts-node", "bash", "go":
 		return parseInterpreterCommandPlan(tokens[0], tokens[1:], scriptsDir)
 	default:
 		return nil, fmt.Errorf("不支持的解释器: %s", tokens[0])
@@ -934,14 +934,15 @@ func buildEnv(envVars map[string]string) []string {
 	return AppendProxyEnv(env)
 }
 
-func RunInlineScript(content, scriptsDir string, envVars map[string]string, timeout int, onOutput OnOutputFunc) error {
+func RunInlineScript(content, scriptsDir string, envVars map[string]string, timeout int, onOutput OnOutputFunc, scriptArgs ...string) error {
 	tmpFile := filepath.Join(scriptsDir, fmt.Sprintf(".hook_%d.sh", time.Now().UnixNano()))
 	if err := os.WriteFile(tmpFile, NormalizeShellLineEndings([]byte(content)), 0755); err != nil {
 		return err
 	}
 	defer os.Remove(tmpFile)
 
-	cmd := exec.Command("bash", tmpFile)
+	cmdArgs := append([]string{tmpFile}, cleanProcessArgs(scriptArgs)...)
+	cmd := exec.Command("bash", cmdArgs...)
 	cmd.Dir = scriptsDir
 	cmd.Env = buildEnv(envVars)
 	setPgid(cmd)
@@ -984,7 +985,7 @@ func RunInlineScript(content, scriptsDir string, envVars map[string]string, time
 	}
 }
 
-func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onOutput OnOutputFunc) {
+func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onOutput OnOutputFunc, scriptArgs ...string) {
 	hookPath, err := pathutil.ResolveWithinBase(scriptsDir, scriptName, true)
 	if os.IsNotExist(err) {
 		return
@@ -999,7 +1000,8 @@ func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onO
 		return
 	}
 
-	cmd := exec.Command("bash", hookPath)
+	cmdArgs := append([]string{hookPath}, cleanProcessArgs(scriptArgs)...)
+	cmd := exec.Command("bash", cmdArgs...)
 	cmd.Dir = scriptsDir
 	cmd.Env = buildEnv(envVars)
 	setPgid(cmd)
@@ -1038,4 +1040,15 @@ func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onO
 		KillProcessGroup(cmd.Process)
 		<-waitCh
 	}
+}
+
+func cleanProcessArgs(args []string) []string {
+	cleaned := make([]string, 0, len(args))
+	for _, arg := range args {
+		if strings.ContainsRune(arg, 0) {
+			continue
+		}
+		cleaned = append(cleaned, arg)
+	}
+	return cleaned
 }

@@ -18,7 +18,13 @@ func (h *ScriptHandler) List(c *gin.Context) {
 	var files []map[string]interface{}
 
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if shouldSkipScriptTreeDir(info.Name()) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(info.Name()))
@@ -53,7 +59,7 @@ func (h *ScriptHandler) Tree(c *gin.Context) {
 
 func shouldSkipScriptTreeDir(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "node_modules":
+	case "node_modules", "__pycache__":
 		return true
 	default:
 		return false
@@ -77,9 +83,6 @@ func buildTree(baseDir, prefix string) []map[string]interface{} {
 
 	for _, entry := range sorted {
 		name := entry.Name()
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
 
 		rel := name
 		if prefix != "" {

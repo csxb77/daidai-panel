@@ -191,12 +191,6 @@ func mapQingLongConfigToSystemConfig(key, value string) (string, string, bool) {
 		return buildNormalizedSystemConfig("random_delay", value)
 	case "RandomDelayFileExtensions":
 		return buildNormalizedSystemConfig("random_delay_extensions", value)
-	case "CommandTimeoutTime":
-		seconds, ok := parseQingLongDurationSeconds(value)
-		if !ok {
-			return "", "", false
-		}
-		return buildNormalizedSystemConfig("command_timeout", strconv.Itoa(seconds))
 	default:
 		return "", "", false
 	}
@@ -477,7 +471,7 @@ func buildQingLongEmailConfig(env map[string]string) map[string]string {
 		return nil
 	}
 
-	return map[string]string{
+	cfg := map[string]string{
 		"smtp_host": host,
 		"smtp_port": port,
 		"smtp_user": email,
@@ -485,6 +479,10 @@ func buildQingLongEmailConfig(env map[string]string) map[string]string {
 		"to":        email,
 		"from":      email,
 	}
+	if port == "465" {
+		cfg["smtp_ssl"] = "true"
+	}
+	return cfg
 }
 
 func buildQingLongWecomAppConfig(env map[string]string) map[string]string {
@@ -702,7 +700,7 @@ func loadQingLongTasks(db *sql.DB) ([]model.Task, error) {
 			CronExpression:         schedule,
 			TaskType:               model.TaskTypeCron,
 			Status:                 model.TaskStatusEnabled,
-			Timeout:                300,
+			Timeout:                0,
 			MaxRetries:             0,
 			RetryInterval:          60,
 			NotifyOnFailure:        true,
@@ -831,8 +829,9 @@ func loadQingLongDependencies(db *sql.DB) ([]BackupDependency, error) {
 		}
 		seen[key] = struct{}{}
 		result = append(result, BackupDependency{
-			Type: mappedType,
-			Name: name,
+			Type:          mappedType,
+			Name:          name,
+			PythonVersion: "",
 		})
 	}
 

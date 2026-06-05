@@ -75,7 +75,7 @@ export function useScriptWorkspaceBrowser() {
     return path
       .split('/')
       .map(segment => segment.trim().toLowerCase())
-      .some(segment => segment === 'node_modules')
+      .some(segment => segment === 'node_modules' || segment === '__pycache__')
   }
 
   function normalizeTreeNodes(nodes: TreeNode[]): TreeNode[] {

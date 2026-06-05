@@ -8,7 +8,7 @@ import (
 	"daidai-panel/model"
 )
 
-var dependencyInstalledFunc = DependencyInstalled
+var dependencyInstalledFunc = DependencyInstalledForPythonVersion
 var dependencyReinstallBatchFunc = reinstallDependenciesAsync
 var dependencyRestartReinstallBatchFunc = reinstallDependenciesAfterRestartAsync
 
@@ -19,7 +19,7 @@ func ReconcileDependenciesAfterRestart() {
 	scheduledRestartReinstallIDs := make(map[uint]struct{})
 
 	for _, dep := range installed {
-		if dependencyInstalledFunc(dep.Type, dep.Name) {
+		if dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion) {
 			continue
 		}
 
@@ -61,7 +61,7 @@ func ReconcileDependenciesAfterRestart() {
 			continue
 		}
 
-		if dependencyInstalledFunc(dep.Type, dep.Name) {
+		if dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion) {
 			nextLog := appendDependencyLog(dep.Log, "[启动校验] 检测到依赖已安装，已同步状态为已安装")
 			database.DB.Model(&dep).Updates(map[string]interface{}{
 				"status": model.DepStatusInstalled,

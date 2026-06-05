@@ -168,7 +168,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			c.JSON(401, gin.H{
 				"error":                  "用户名或密码错误",
 				"failed_attempts":        failedAttempts,
-				"captcha_required":       captchaCfg.Enabled && service.ShouldRequireCaptchaByAttempts(failedAttempts),
+				"captcha_required":       captchaCfg.Enabled,
 				"captcha_id":             captchaCfg.CaptchaID,
 				"captcha_threshold":      captchaCfg.RequireAfterFailures,
 				"require_after_failures": captchaCfg.RequireAfterFailures,

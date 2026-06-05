@@ -139,23 +139,20 @@ async function startStream(isReconnect = false) {
         }, 500)
         return
       }
-      if (!hasLogs.value) {
-        void fetchLatestLog()
-      }
+      void fetchLatestLog(0, autoScroll.value ? 'bottom' : 'preserve')
     },
     onError() {
       flushBufferedLogs()
       loading.value = false
       done.value = true
       cleanup()
-      if (!hasLogs.value) {
-        void fetchLatestLog()
-      }
+      void fetchLatestLog(0, hasLogs.value ? 'preserve' : 'top')
     }
   })
 }
 
-async function fetchLatestLog(retryCount = 0) {
+async function fetchLatestLog(retryCount = 0, scrollMode: 'top' | 'bottom' | 'preserve' = 'top') {
+  const previousScrollTop = logContainerRef.value?.scrollTop ?? 0
   try {
     const res = await taskApi.latestLog(props.taskId!) as any
     if (!res) {
@@ -165,7 +162,17 @@ async function fetchLatestLog(retryCount = 0) {
     if (res.content) {
       resetLogOutput()
       appendLogChunk(String(res.content))
-      scheduleScrollToTop()
+      if (scrollMode === 'bottom') {
+        scheduleScrollToBottom()
+      } else if (scrollMode === 'preserve') {
+        void nextTick(() => {
+          if (logContainerRef.value) {
+            logContainerRef.value.scrollTop = previousScrollTop
+          }
+        })
+      } else {
+        scheduleScrollToTop()
+      }
     } else {
       emptyMessage.value = '日志已过期，文件已被清理'
     }
@@ -174,7 +181,7 @@ async function fetchLatestLog(retryCount = 0) {
       if (retryCount < 5 && props.visible) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
-          void fetchLatestLog(retryCount + 1)
+          void fetchLatestLog(retryCount + 1, scrollMode)
         }, 500)
         return
       }

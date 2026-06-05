@@ -6,6 +6,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"daidai-panel/model"
+	"daidai-panel/testutil"
 )
 
 func TestResolveUpdateImageTargetUsesMirrorForDockerHubImage(t *testing.T) {
@@ -19,6 +22,23 @@ func TestResolveUpdateImageTargetUsesMirrorForDockerHubImage(t *testing.T) {
 	}
 	if registryURL != "https://docker.1ms.run/v2/" {
 		t.Fatalf("expected mirror registry url, got %q", registryURL)
+	}
+}
+
+func TestResolveBinaryUpdateDownloadURLUsesConfiguredProxy(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	assetURL := "https://github.com/linzixuanzz/daidai-panel/releases/download/v2.2.17/daidai-linux-amd64.tar.gz"
+	if got := resolveBinaryUpdateDownloadURL(assetURL); got != assetURL {
+		t.Fatalf("expected direct asset URL without proxy, got %q", got)
+	}
+
+	if err := model.SetConfig("binary_update_proxy", "https://gh-proxy.org/"); err != nil {
+		t.Fatalf("set binary_update_proxy: %v", err)
+	}
+	expected := "https://gh-proxy.org/" + assetURL
+	if got := resolveBinaryUpdateDownloadURL(assetURL); got != expected {
+		t.Fatalf("expected proxied asset URL %q, got %q", expected, got)
 	}
 }
 

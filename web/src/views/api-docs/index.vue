@@ -133,8 +133,7 @@ function methodClass(method: string) {
   <div class="api-docs-page dd-fixed-page">
     <div class="page-header">
       <h3 class="page-title">
-        <el-icon><Connection /></el-icon>
-        📖 开发接口文档
+        开发接口文档
       </h3>
       <el-button class="mobile-menu-btn" @click="mobileMenuOpen = true">
         <el-icon><Menu /></el-icon>

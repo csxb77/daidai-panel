@@ -82,7 +82,7 @@ defineProps<{
             </p>
             <p v-if="!updateInfo.auto_update_supported" class="hero-meta">{{ updateInfo.update_disabled_reason || '当前部署暂不支持一键更新' }}</p>
             <p v-if="!updateInfo.auto_update_supported && updateInfo.update_target?.deployment_type !== 'binary'" class="hero-meta">
-              可改为在宿主机执行：`docker compose pull && docker compose up -d`
+              推荐使用 Watchtower 托管自动更新；需要立即手动更新时，在宿主机执行 docker compose pull && docker compose up -d。
             </p>
             <div class="hero-alert-actions">
               <el-button v-if="isAdmin && updateInfo.auto_update_supported" type="primary" size="small" round :loading="updatingPanel" @click="onStartUpdate">

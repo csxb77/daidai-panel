@@ -29,6 +29,34 @@ func TestBuildManagedRuntimeEnvMapDoesNotWritePythonPreCheckEnv(t *testing.T) {
 	}
 }
 
+func TestBuildManagedRuntimeEnvMapUsesRequestedPythonVersion(t *testing.T) {
+	root := testutil.SetupTestEnv(t)
+
+	envMap, err := BuildManagedRuntimeEnvMapForPythonVersion(root, root, nil, time.Hour, "3.10")
+	if err != nil {
+		t.Fatalf("build managed runtime env map: %v", err)
+	}
+	if envMap["DAIDAI_PYTHON_VERSION"] != "3.10" {
+		t.Fatalf("expected DAIDAI_PYTHON_VERSION=3.10, got %q", envMap["DAIDAI_PYTHON_VERSION"])
+	}
+	expectedVenvBin := resolveManagedVenvBin(ManagedPythonVenvDir("3.10"))
+	if !strings.Contains(envMap["PATH"], expectedVenvBin) {
+		t.Fatalf("expected PATH to contain python 3.10 venv bin %q, got %q", expectedVenvBin, envMap["PATH"])
+	}
+}
+
+func TestManagedPythonVenvDirKeepsLegacy312Path(t *testing.T) {
+	root := testutil.SetupTestEnv(t)
+	dataDir := filepath.Join(root, "data")
+
+	if got := ManagedPythonVenvDir("3.12"); got != filepath.Join(dataDir, "deps", "python", "venv") {
+		t.Fatalf("expected legacy 3.12 venv path, got %q", got)
+	}
+	if got := ManagedPythonVenvDir("3.10"); got != filepath.Join(dataDir, "deps", "python", "3.10", "venv") {
+		t.Fatalf("expected versioned 3.10 venv path, got %q", got)
+	}
+}
+
 func TestBuildManagedPythonPathPrioritizesWorkDirAndScriptsDir(t *testing.T) {
 	got := buildManagedPythonPath(
 		filepath.Clean("/custom/pythonpath"),

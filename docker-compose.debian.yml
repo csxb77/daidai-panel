@@ -2,7 +2,7 @@ name: daidai-panel
 
 services:
   daidai-panel:
-    image: docker.1ms.run/linzixuanzz/daidai-panel:debian
+    image: linzixuanzz/daidai-panel:debian
     container_name: daidai-panel
     restart: unless-stopped
     ports:
@@ -12,7 +12,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - CONTAINER_NAME=daidai-panel
-      - IMAGE_NAME=docker.1ms.run/linzixuanzz/daidai-panel:debian
+      - IMAGE_NAME=linzixuanzz/daidai-panel:debian
       - PANEL_UPDATE_MANAGER=watchtower
       # === 飞牛 OS / 群晖 / 绿联等 NAS 可选环境变量 ===========================
       # 让容器以宿主机用户身份运行，使 SMB/NFS 共享的目录权限一致。

@@ -11,13 +11,25 @@ export interface MirrorsResponse {
   linux_mirror_message: string
 }
 
+export interface PythonRuntimeInfo {
+  version: string
+  label: string
+  default: boolean
+  venv_path: string
+  venv_healthy: boolean
+  python_path: string
+  pip_path: string
+  available: boolean
+  message: string
+}
+
 export const depsApi = {
-  list(type: string) {
-    return request.get('/deps', { params: { type } }) as Promise<{ data: any[]; total: number }>
+  list(type: string, pythonVersion?: string) {
+    return request.get('/deps', { params: { type, python_version: pythonVersion } }) as Promise<{ data: any[]; total: number }>
   },
 
-  create(type: string, names: string[]) {
-    return request.post('/deps', { type, names }) as Promise<{ message: string; data: any[] }>
+  create(type: string, names: string[], pythonVersion?: string) {
+    return request.post('/deps', { type, names, python_version: pythonVersion }) as Promise<{ message: string; data: any[] }>
   },
 
   delete(id: number, force?: boolean) {
@@ -40,16 +52,24 @@ export const depsApi = {
     return request.put(`/deps/${id}/reinstall`) as Promise<{ message: string }>
   },
 
-  exportList(type: string) {
-    return request.get('/deps/export', { params: { type }, responseType: 'blob' }) as Promise<Blob>
+  exportList(type: string, pythonVersion?: string) {
+    return request.get('/deps/export', { params: { type, python_version: pythonVersion }, responseType: 'blob' }) as Promise<Blob>
   },
 
   cancel(id: number) {
     return request.put(`/deps/${id}/cancel`) as Promise<{ message: string }>
   },
 
-  pipList: () => request.get('/deps/pip'),
+  pipList: (pythonVersion?: string) => request.get('/deps/pip', { params: { python_version: pythonVersion } }),
   npmList: () => request.get('/deps/npm'),
+
+  pythonRuntimes() {
+    return request.get('/deps/python-runtimes') as Promise<{ data: PythonRuntimeInfo[]; default_version: string }>
+  },
+
+  setDefaultPythonRuntime(version: string) {
+    return request.put('/deps/python-runtime-default', { version }) as Promise<{ message: string; default_version: string }>
+  },
 
   getMirrors() {
     return request.get('/deps/mirrors') as Promise<MirrorsResponse>

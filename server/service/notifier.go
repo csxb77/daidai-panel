@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"net/url"
@@ -24,6 +26,9 @@ import (
 var (
 	wecomAppTokenURL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
 	wecomAppSendURL  = "https://qyapi.weixin.qq.com/cgi-bin/message/send"
+
+	smtpSendMail                = smtp.SendMail
+	smtpSendMailWithImplicitTLS = sendSMTPMailWithImplicitTLS
 )
 
 type NotificationDispatchOptions struct {
@@ -263,23 +268,115 @@ func sendWebhook(cfg map[string]string, title, content string) error {
 }
 
 func sendEmail(cfg map[string]string, title, content string) error {
-	host := cfg["smtp_host"]
-	port := cfg["smtp_port"]
-	user := cfg["smtp_user"]
+	host := strings.TrimSpace(cfg["smtp_host"])
+	port := strings.TrimSpace(cfg["smtp_port"])
+	user := strings.TrimSpace(cfg["smtp_user"])
 	pass := cfg["smtp_pass"]
-	to := cfg["to"]
-	from := cfg["from"]
+	to := strings.TrimSpace(cfg["to"])
+	from := strings.TrimSpace(cfg["from"])
 	if from == "" {
 		from = user
 	}
+	if host == "" {
+		return fmt.Errorf("SMTP 主机为空")
+	}
+	if port == "" {
+		return fmt.Errorf("SMTP 端口为空")
+	}
+	recipients := splitEmailRecipients(to)
+	if len(recipients) == 0 {
+		return fmt.Errorf("收件人为空")
+	}
+	if from == "" {
+		return fmt.Errorf("发件人为空")
+	}
 
-	addr := host + ":" + port
+	addr := net.JoinHostPort(host, port)
 	auth := smtp.PlainAuth("", user, pass, host)
 
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		from, to, title, content)
 
-	return smtp.SendMail(addr, auth, from, strings.Split(to, ","), []byte(msg))
+	if smtpImplicitSSLEnabled(cfg, port) {
+		return smtpSendMailWithImplicitTLS(addr, host, auth, from, recipients, []byte(msg))
+	}
+	return smtpSendMail(addr, auth, from, recipients, []byte(msg))
+}
+
+func sendSMTPMailWithImplicitTLS(addr, host string, auth smtp.Auth, from string, to []string, msg []byte) error {
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, &tls.Config{
+		ServerName: host,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		return err
+	}
+
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	defer client.Close()
+
+	if auth != nil {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return fmt.Errorf("smtp: server doesn't support AUTH")
+		}
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(from); err != nil {
+		return err
+	}
+	for _, recipient := range to {
+		if err := client.Rcpt(recipient); err != nil {
+			return err
+		}
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(msg); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
+}
+
+func smtpImplicitSSLEnabled(cfg map[string]string, port string) bool {
+	for _, key := range []string{"smtp_ssl", "smtp_use_ssl", "use_ssl", "enable_ssl", "ssl"} {
+		raw, exists := cfg[key]
+		if !exists {
+			continue
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.EqualFold(raw, "auto") {
+			return strings.TrimSpace(port) == "465"
+		}
+		return notificationConfigBool(raw, false)
+	}
+	return strings.TrimSpace(port) == "465"
+}
+
+func splitEmailRecipients(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t'
+	})
+
+	result := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			result = append(result, field)
+		}
+	}
+	return result
 }
 
 func sendTelegram(cfg map[string]string, title, content string) error {
@@ -1143,6 +1240,18 @@ func notificationConfigInt(raw string, defaultValue int) int {
 		return defaultValue
 	}
 	return value
+}
+
+func notificationConfigBool(raw string, defaultValue bool) bool {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch raw {
+	case "1", "true", "yes", "on", "enable", "enabled":
+		return true
+	case "0", "false", "no", "off", "disable", "disabled":
+		return false
+	default:
+		return defaultValue
+	}
 }
 
 func renderNotificationTemplate(template, title, content, fallback string) string {

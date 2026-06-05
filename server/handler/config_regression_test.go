@@ -79,7 +79,7 @@ func TestConfigBatchSetUsesRegistryValidation(t *testing.T) {
 	token := testutil.MustCreateAccessToken(t, admin.Username, admin.Role)
 	engine := newProtectedRouter()
 
-	body := `{"configs":{"auto_install_deps":"0","captcha_fail_mode":" strict ","command_timeout":"600","update_image_mirror":"https://docker.1ms.run/"}}`
+	body := `{"configs":{"auto_install_deps":"0","captcha_fail_mode":" strict ","update_image_mirror":"https://docker.1ms.run/","binary_update_proxy":"gh-proxy.org"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/configs/batch", bytes.NewBufferString(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -95,11 +95,11 @@ func TestConfigBatchSetUsesRegistryValidation(t *testing.T) {
 	if got := model.GetRegisteredConfig("captcha_fail_mode"); got != "strict" {
 		t.Fatalf("expected captcha_fail_mode strict, got %q", got)
 	}
-	if got := model.GetRegisteredConfigInt("command_timeout"); got != 600 {
-		t.Fatalf("expected command_timeout 600, got %d", got)
-	}
 	if got := model.GetRegisteredConfig("update_image_mirror"); got != "docker.1ms.run" {
 		t.Fatalf("expected update_image_mirror docker.1ms.run, got %q", got)
+	}
+	if got := model.GetRegisteredConfig("binary_update_proxy"); got != "https://gh-proxy.org/" {
+		t.Fatalf("expected binary_update_proxy https://gh-proxy.org/, got %q", got)
 	}
 
 	trustedProxyBody := `{"configs":{"trusted_proxy_cidrs":"127.0.0.1,203.0.113.0/24"}}`

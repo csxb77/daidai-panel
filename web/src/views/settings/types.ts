@@ -2,7 +2,6 @@ export type CaptchaFailMode = 'open' | 'strict'
 
 export interface SettingsConfigForm {
   max_concurrent_tasks: number
-  command_timeout: number
   log_retention_days: number
   max_log_content_size: number
   random_delay: string
@@ -19,6 +18,7 @@ export interface SettingsConfigForm {
   notify_on_login: boolean
   proxy_url: string
   update_image_mirror: string
+  binary_update_proxy: string
   auto_update_enabled: boolean
   trusted_proxy_cidrs: string
   captcha_enabled: boolean

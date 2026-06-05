@@ -2,7 +2,7 @@ name: daidai-panel-prod
 
 services:
   daidai-panel:
-    image: ${DAIDAI_PANEL_IMAGE:-docker.1ms.run/linzixuanzz/daidai-panel:latest}
+    image: ${DAIDAI_PANEL_IMAGE:-linzixuanzz/daidai-panel:latest}
     container_name: ${DAIDAI_PANEL_CONTAINER_NAME:-daidai-panel}
     restart: unless-stopped
     ports:
@@ -12,7 +12,7 @@ services:
     environment:
       TZ: ${PANEL_TZ:-Asia/Shanghai}
       CONTAINER_NAME: ${DAIDAI_PANEL_CONTAINER_NAME:-daidai-panel}
-      IMAGE_NAME: ${DAIDAI_PANEL_IMAGE:-docker.1ms.run/linzixuanzz/daidai-panel:latest}
+      IMAGE_NAME: ${DAIDAI_PANEL_IMAGE:-linzixuanzz/daidai-panel:latest}
       PANEL_UPDATE_MANAGER: watchtower
       WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_HTTP_API_TOKEN:-}
       WATCHTOWER_HTTP_API_URL: ${WATCHTOWER_HTTP_API_URL:-http://daidai-watchtower:8080}

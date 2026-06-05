@@ -170,6 +170,22 @@ export function useSettingsSecurity() {
     }
   }
 
+  async function readBlobErrorMessage(err: any, fallback: string) {
+    const data = err?.response?.data
+    if (data instanceof Blob) {
+      const text = await data.text().catch(() => '')
+      if (text) {
+        try {
+          const parsed = JSON.parse(text)
+          return parsed?.error || parsed?.message || text
+        } catch {
+          return text
+        }
+      }
+    }
+    return err?.response?.data?.error || err?.message || fallback
+  }
+
   async function handleDownloadBackup(filename: string) {
     try {
       const blob = await systemApi.downloadBackup(filename)
@@ -181,8 +197,8 @@ export function useSettingsSecurity() {
       link.click()
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
-    } catch {
-      ElMessage.error('下载备份失败')
+    } catch (err: any) {
+      ElMessage.error(await readBlobErrorMessage(err, '下载备份失败'))
     }
   }
 

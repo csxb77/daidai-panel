@@ -235,7 +235,6 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		return
 	}
 
-	commandTimeout := model.GetRegisteredConfigInt("command_timeout")
 	maxLogSize := model.GetRegisteredConfigInt("max_log_content_size")
 
 	if randomDelay := resolveTaskRandomDelaySeconds(&task, commandPlan); randomDelay > 0 {
@@ -263,8 +262,8 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 	}
 
 	timeout := task.Timeout
-	if timeout <= 0 {
-		timeout = commandTimeout
+	if timeout < 0 {
+		timeout = 0
 	}
 	if commandPlan.TimeoutOverride != nil && *commandPlan.TimeoutOverride > 0 {
 		timeout = *commandPlan.TimeoutOverride
@@ -307,10 +306,10 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 
 	if task.TaskBefore != nil && *task.TaskBefore != "" {
 		onOutput("[执行前置脚本]")
-		RunInlineScript(*task.TaskBefore, s.scriptsDir, envVars, 60, onOutput)
+		RunInlineScript(*task.TaskBefore, s.scriptsDir, envVars, 60, onOutput, commandPlan.ScriptArgs...)
 	}
 
-	RunHookScript("task_before.sh", s.scriptsDir, envVars, onOutput)
+	RunHookScript("task_before.sh", s.scriptsDir, envVars, onOutput, commandPlan.ScriptArgs...)
 
 	success := false
 	retries := 0
@@ -348,11 +347,11 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 
 	if task.TaskAfter != nil && *task.TaskAfter != "" {
 		onOutput("[执行后置脚本]")
-		RunInlineScript(*task.TaskAfter, s.scriptsDir, envVars, 60, onOutput)
+		RunInlineScript(*task.TaskAfter, s.scriptsDir, envVars, 60, onOutput, commandPlan.ScriptArgs...)
 	}
 
-	RunHookScript("task_after.sh", s.scriptsDir, envVars, onOutput)
-	RunHookScript("extra.sh", s.scriptsDir, envVars, onOutput)
+	RunHookScript("task_after.sh", s.scriptsDir, envVars, onOutput, commandPlan.ScriptArgs...)
+	RunHookScript("extra.sh", s.scriptsDir, envVars, onOutput, commandPlan.ScriptArgs...)
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()

@@ -93,7 +93,7 @@ func GetCaptchaRuntimeConfig() CaptchaRuntimeConfig {
 		CaptchaID:            captchaID,
 		CaptchaKey:           captchaKey,
 		FailMode:             failMode,
-		RequireAfterFailures: CaptchaThreshold,
+		RequireAfterFailures: 0,
 	}
 }
 
@@ -109,7 +109,7 @@ func BuildCaptchaStatusMessage(cfg CaptchaRuntimeConfig) string {
 	case !cfg.Configured:
 		return "验证码已开启，但 Captcha ID 或 Captcha Key 未配置完整，当前不会生效"
 	default:
-		return fmt.Sprintf("验证码已启用：同一 IP 对同一用户名连续失败 3 次后，后续登录需先完成人机验证；当前策略：%s", modeText)
+		return fmt.Sprintf("验证码已启用：每次登录都需要先完成人机验证；当前策略：%s", modeText)
 	}
 }
 
@@ -133,12 +133,7 @@ func IsCaptchaFailModeValid(value string) bool {
 
 func IsCaptchaRequired(ip, username string) bool {
 	cfg := GetCaptchaRuntimeConfig()
-	username = strings.TrimSpace(username)
-	if !cfg.Enabled || username == "" {
-		return false
-	}
-
-	return ShouldRequireCaptchaByAttempts(GetLoginAttemptCount(ip, username))
+	return cfg.Enabled
 }
 
 func VerifyLoginCaptcha(payload CaptchaPayload) (*CaptchaVerificationResult, error) {

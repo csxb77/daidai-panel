@@ -74,8 +74,9 @@ type BackupTwoFactorAuth struct {
 }
 
 type BackupDependency struct {
-	Type string `json:"type"`
-	Name string `json:"name"`
+	Type          string `json:"type"`
+	Name          string `json:"name"`
+	PythonVersion string `json:"python_version,omitempty"`
 }
 
 type BackupTaskLog struct {

@@ -86,11 +86,7 @@ func (h *LogHandler) Stream(c *gin.Context) {
 	if tl != nil {
 		history, _ := tl.ReadAll()
 		if len(history) > 0 {
-			for _, line := range strings.Split(string(history), "\n") {
-				if line != "" {
-					fmt.Fprintf(c.Writer, "data: %s\n\n", line)
-				}
-			}
+			writeSSEData(c.Writer, string(history))
 			c.Writer.Flush()
 		}
 
@@ -106,11 +102,7 @@ func (h *LogHandler) Stream(c *gin.Context) {
 					c.Writer.Flush()
 					return
 				}
-				for _, line := range strings.Split(string(data), "\n") {
-					if line != "" {
-						fmt.Fprintf(c.Writer, "data: %s\n\n", line)
-					}
-				}
+				writeSSEData(c.Writer, string(data))
 				c.Writer.Flush()
 			case <-ctx.Done():
 				return
@@ -130,11 +122,7 @@ func (h *LogHandler) Stream(c *gin.Context) {
 		if tl != nil {
 			history, _ := tl.ReadAll()
 			if len(history) > 0 {
-				for _, line := range strings.Split(string(history), "\n") {
-					if line != "" {
-						fmt.Fprintf(c.Writer, "data: %s\n\n", line)
-					}
-				}
+				writeSSEData(c.Writer, string(history))
 				c.Writer.Flush()
 			}
 		}
@@ -147,7 +135,7 @@ func (h *LogHandler) Stream(c *gin.Context) {
 			if tl != nil {
 				history, _ := tl.ReadAll()
 				if len(history) > 0 {
-					fmt.Fprintf(w, "data: %s\n\n", string(history))
+					writeSSEData(w, string(history))
 					c.Writer.Flush()
 				}
 				fmt.Fprintf(w, "event: done\ndata: reconnect\n\n")
@@ -166,6 +154,15 @@ func (h *LogHandler) Stream(c *gin.Context) {
 			return true
 		})
 	}
+}
+
+func writeSSEData(w io.Writer, data string) {
+	data = strings.ReplaceAll(data, "\r\n", "\n")
+	data = strings.ReplaceAll(data, "\r", "\n")
+	for _, line := range strings.Split(data, "\n") {
+		fmt.Fprintf(w, "data: %s\n", line)
+	}
+	fmt.Fprint(w, "\n")
 }
 
 func (h *LogHandler) Detail(c *gin.Context) {

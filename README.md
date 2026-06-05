@@ -20,8 +20,9 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v2.2.16` · [更新日志](./docs/release-notes/v2.2.16.md)<br>
-> 本次重点：任务导入状态修复、Python 环境自愈、Alpine 32 位镜像构建恢复、Docker 更新旧镜像清理。
+> 最新稳定版：`v2.2.17` · [更新日志](./docs/release-notes/v2.2.17.md)<br>
+> 本次重点：SMTP SSL、备份包下载、脚本隐藏文件显示、Python 3.10/3.11/3.12 多版本依赖环境。<br>
+> APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 功能特性
 
@@ -126,7 +127,7 @@ name: daidai-panel
 
 services:
   daidai-panel:
-    image: docker.1ms.run/linzixuanzz/daidai-panel:latest
+    image: linzixuanzz/daidai-panel:latest
     container_name: daidai-panel
     restart: unless-stopped
     ports:
@@ -136,7 +137,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - CONTAINER_NAME=daidai-panel
-      - IMAGE_NAME=docker.1ms.run/linzixuanzz/daidai-panel:latest
+      - IMAGE_NAME=linzixuanzz/daidai-panel:latest
+      - PANEL_UPDATE_MANAGER=watchtower
     labels:
       - com.centurylinklabs.watchtower.enable=true
 
@@ -148,8 +150,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
       - com.centurylinklabs.watchtower.enable=false
-    environment:
-      - PANEL_UPDATE_MANAGER=watchtower
     command:
       - --label-enable
       - --cleanup
@@ -163,7 +163,7 @@ docker compose up -d
 
 首次访问 `http://localhost:5700` 会进入管理员初始化。
 
-> `docker.1ms.run/` 是 Docker Hub 镜像加速前缀，实际仓库仍是 `linzixuanzz/daidai-panel`。需要换源就改这段。
+如果 Docker Hub 访问慢，可以把 `image` 和 `IMAGE_NAME` 改成你自己信任的镜像加速地址；README 默认不再内置固定第三方镜像源。也可以到 [容器镜像监控](https://status.anye.xyz/) 查看更多 Docker Hub 镜像加速源状态，再选择可用地址填写。
 
 这份 compose 已经是推荐的可直接上线版本：
 
@@ -175,7 +175,7 @@ docker compose up -d
 6. `--interval 3600` 表示每 1 小时检查一次更新
 7. 当前默认使用 `nickfedor/watchtower:latest`，用于兼容新版 Docker API
 
-如果你不想自动更新，可以直接删除 `watchtower` 服务和 `labels`，然后改成在宿主机手动执行：
+如果你不想自动更新，可以删除 `watchtower` 服务、`labels` 和 `PANEL_UPDATE_MANAGER=watchtower`，然后改成在宿主机手动执行：
 
 ```bash
 docker compose pull
@@ -192,9 +192,10 @@ docker run -d --pull=always \
   -v $(pwd)/Dumb-Panel:/app/Dumb-Panel \
   -e TZ=Asia/Shanghai \
   -e CONTAINER_NAME=daidai-panel \
-  -e IMAGE_NAME=docker.1ms.run/linzixuanzz/daidai-panel:latest \
+  -e IMAGE_NAME=linzixuanzz/daidai-panel:latest \
+  -e PANEL_UPDATE_MANAGER=watchtower \
   --label com.centurylinklabs.watchtower.enable=true \
-  docker.1ms.run/linzixuanzz/daidai-panel:latest
+  linzixuanzz/daidai-panel:latest
 
 docker run -d \
   --name daidai-watchtower \
@@ -206,76 +207,6 @@ docker run -d \
   --cleanup \
   --interval 3600
 ```
-
-### 生产版 Watchtower（定时窗口 + 通知 + 滚动更新）
-
-仓库里另外提供了一份更稳妥的生产版配置：
-
-- [docker-compose.watchtower.prod.yml](./docker-compose.watchtower.prod.yml)
-- [.env.watchtower.prod.example](./.env.watchtower.prod.example)
-
-推荐用法：
-
-```bash
-cp .env.watchtower.prod.example .env.watchtower.prod
-# 按你的环境修改 .env.watchtower.prod
-docker compose -f docker-compose.watchtower.prod.yml --env-file .env.watchtower.prod up -d
-```
-
-仓库里也直接附带了一份默认成品配置：
-
-- [.env.watchtower.prod](./.env.watchtower.prod)
-
-这份默认值已经按“**每天凌晨 04:00 维护窗口检查更新 + Push Plus 通知占位**”写好。你只需要把里面的 `PUSHPLUS_TOKEN` 改成自己的 token，就可以直接启动：
-
-```bash
-docker compose -f docker-compose.watchtower.prod.yml --env-file .env.watchtower.prod up -d
-```
-
-这份生产版和基础版的区别：
-
-1. 用 `WATCHTOWER_SCHEDULE` 固定在维护窗口更新，而不是按固定秒数轮询
-2. 开启 `WATCHTOWER_NOTIFICATION_REPORT=true`，每次更新会发汇总通知
-3. 预留 `WATCHTOWER_NOTIFICATION_URL`，可以直接接 Slack / Discord / Gotify 等 Shoutrrr 通道，也可以接 Push Plus
-4. 预留 `WATCHTOWER_HTTP_API_TOKEN` 与 `WATCHTOWER_HTTP_API_URL`，用于面板后台手动触发 Watchtower 立即检查更新
-5. 开启 `--rolling-restart`，Watchtower 会按容器逐个更新，而不是一次性把所有被它管理的容器一起停掉
-6. 配置了 `--stop-timeout 30s`、`healthcheck` 和 `--http-api-update`，更适合生产环境下的优雅停机、手动触发与状态探测
-
-Push Plus 说明：
-
-1. Watchtower 使用的是 Shoutrrr 通知层，Shoutrrr 没有原生 Push Plus 服务名
-2. 但可以通过 **Generic Webhook** 正常接入 Push Plus 的 `POST https://www.pushplus.plus/send`
-3. 示例地址已经写在 [.env.watchtower.prod.example](./.env.watchtower.prod.example) 和默认成品 [.env.watchtower.prod](./.env.watchtower.prod) 里，替换 token 即可使用
-
-Watchtower 托管说明：
-
-1. 当前推荐的 Watchtower 镜像为：
-   - `nickfedor/watchtower:latest`
-2. 这样做的原因是部分旧版 Watchtower 在新版 Docker daemon 上会报：
-   - `client version 1.25 is too old. Minimum supported API version is 1.40`
-3. 生产版配置已预留 HTTP API 参数，面板后台可在识别到 Watchtower 托管模式后提供“手动触发一次检查”的入口
-
-关于 `--rolling-restart`，这里有个边界要说明：
-
-- 如果你让 Watchtower 同时管理多个业务容器，它会一个一个更新，避免“全部同时重启”
-- 但如果你当前只有**单实例**的 `daidai-panel`，升级时依然会有一次短暂重启中断
-- 真正接近零停机，需要反向代理 + 多实例 / 蓝绿发布，而不是只靠 Watchtower
-
-#### 生产运维建议
-
-1. 单实例部署建议把维护窗口放在业务低峰期，比如每天凌晨 `04:00`
-2. 如果你对稳定性要求更高，可以先把镜像 tag 固定到明确版本，再由你手动切换版本号，Watchtower 只负责执行已确认版本的重启
-3. 建议至少保留一种外部通知渠道，避免更新失败后只有容器日志里能看到
-4. 单实例场景下，更新前用户正在打开的页面会经历一次短暂中断，这是正常现象
-5. 如果你还托管了反向代理、数据库、监控等多个容器，`--rolling-restart` 能避免它们被 Watchtower 同时重启
-6. 如果你后续准备追求更低中断时间，下一步应考虑“反向代理 + 双实例/蓝绿发布”，而不是继续在单实例上堆参数
-
-#### 更新前后通知说明
-
-1. Watchtower 的通知是**事件通知**，会在检查、发现更新、拉取、重启、失败等阶段发出报告
-2. 当前生产版已开启 `WATCHTOWER_NOTIFICATION_REPORT=true`，会尽量发汇总结果
-3. 这不等价于“应用级业务健康验证”，它能告诉你容器是否更新完成，但不能替代你自己的业务巡检
-4. 如果你希望更严格，可以额外加一个宿主机定时任务，在更新窗口结束后请求 `http://127.0.0.1:5700/api/health` 并把结果再次推送到 Push Plus
 
 ### 支持的 CPU 架构
 
@@ -306,7 +237,7 @@ Watchtower 托管说明：
 docker compose -f docker-compose.debian.yml up -d
 
 # 或基于源码本地构建
-docker build --build-arg VERSION=2.2.16 -f Dockerfile.debian -t daidai-panel:debian-local .
+docker build --build-arg VERSION=2.2.17 -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
 ### Windows 单机版（不走 Docker）
@@ -331,6 +262,8 @@ daidai-panel-windows-amd64/
 ```
 
 **可选：脚本执行环境**。如需面板调度 Python / Node.js 脚本，请自行安装 Python 3.10+ 和 Node.js 20 LTS 并勾选 "Add to PATH"，重启 `start.bat` 即可（`ddp.exe`、脚本执行器会从 PATH 找到对应的 `python` / `node`）。
+
+**Python 多版本说明**：二进制部署包不会内置 Python 3.10 / 3.11 / 3.12 三个解释器，用户只需要安装实际要使用的版本。面板会为已检测到的 Python 版本创建独立依赖环境；未安装的版本会在依赖管理里提示不可用，不影响其他版本的脚本运行。Windows 建议安装官方 Python 并保留 `py` 启动器，Linux 需要确保 `python3.10` / `python3.11` / `python3.12` 能在 PATH 中被找到。
 
 **升级**：优先在面板后台进入「系统设置」→「概览」→「检查系统更新」→「立即更新」。二进制后台更新会自动下载对应平台的 Release 包，替换程序与前端文件，并保留现有 `config.yaml`、`Dumb-Panel\`、`data\`、`logs\`、`backups\` 等本地配置和数据目录。只有在程序目录没有写入权限、网络无法访问 GitHub Release，或后台更新失败时，才需要手动下载新版 zip 后迁移数据。
 
@@ -482,25 +415,25 @@ server {
 
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
-- **Docker 部署**：需要在 `docker-compose.yml` 里挂载 `/var/run/docker.sock`，更新时拉取最新镜像并按当前容器参数重建。
+- **Docker 部署**：推荐交给 Watchtower 自动拉取并重建容器；面板会识别 `PANEL_UPDATE_MANAGER=watchtower` 的托管状态。早期挂载 Docker Socket 的部署仍可继续使用面板内一键更新。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 
 ### 手动更新
 
 ```bash
 # Alpine 运行时
-docker pull docker.1ms.run/linzixuanzz/daidai-panel:latest
+docker pull linzixuanzz/daidai-panel:latest
 docker compose up -d
 
 # Debian 运行时
-docker pull docker.1ms.run/linzixuanzz/daidai-panel:debian
+docker pull linzixuanzz/daidai-panel:debian
 docker compose -f docker-compose.debian.yml up -d
 ```
 
 本地基于源码自己构建的镜像，重新 build 即可：
 
 ```bash
-docker build --build-arg VERSION=2.2.16 -f Dockerfile.debian -t daidai-panel:debian-local .
+docker build --build-arg VERSION=2.2.17 -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
 ## 容器命令 `ddp`
@@ -572,16 +505,20 @@ ddp reset-password admin NewPass123         # 单用户时可省略用户名
 ddp reset-username admin newadmin
 ddp disable-2fa admin                       # 传 --all 则全员禁用
 ddp reset-login --all                       # 清登录失败次数，解锁被锁账号
+ddp ip-whitelist list                       # 查看当前 IP 白名单
+ddp ip-whitelist clear                      # IP 白名单填错进不去面板时，清空后恢复所有 IP 可访问
+ddp ip-whitelist set 203.0.113.10           # 直接重设白名单，也支持 CIDR / IPv4 通配格式
 ```
 
 > **忘记密码怎么办**：`docker exec -it daidai-panel ddp list-users` 查出用户名，再 `ddp reset-password <用户名> <新密码>`，不需要删数据重装。
+> **IP 白名单填错怎么办**：进入容器执行 `docker exec -it daidai-panel ddp ip-whitelist clear`，清空后登录页会恢复所有 IP 可访问，再回面板重新添加正确白名单。
 
 命令也支持直接跑完就退出的一次性形态：
 
 ```bash
 docker run --rm \
   -v $(pwd)/Dumb-Panel:/app/Dumb-Panel \
-  docker.1ms.run/linzixuanzz/daidai-panel:latest \
+  linzixuanzz/daidai-panel:latest \
   ddp version
 ```
 

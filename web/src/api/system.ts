@@ -75,7 +75,8 @@ export const systemApi = {
   backup: (password?: string, selection?: Partial<BackupSelection>, name?: string) => request.post('/system/backup', { password, selection, name }),
   backupList: () => request.get('/system/backups'),
   downloadBackup: (filename: string) =>
-    request.get(`/system/backup/download/${encodeURIComponent(filename)}`, {
+    request.get('/system/backup/download', {
+      params: { filename },
       responseType: 'blob',
     }) as Promise<Blob>,
   restoreProgress: () => request.get('/system/restore/progress'),

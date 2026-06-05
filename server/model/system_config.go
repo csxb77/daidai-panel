@@ -19,6 +19,10 @@ type SystemConfig struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+var deprecatedSystemConfigKeys = map[string]bool{
+	"command_timeout": true,
+}
+
 func (SystemConfig) TableName() string {
 	return "system_configs"
 }
@@ -74,6 +78,10 @@ func GetConfigBool(key string, defaultValue bool) bool {
 }
 
 func SetConfig(key, value string) error {
+	if deprecatedSystemConfigKeys[key] {
+		return removeDeprecatedSystemConfigs(key)
+	}
+
 	normalized, err := NormalizeSystemConfigValue(key, value)
 	if err != nil {
 		return err
@@ -132,4 +140,15 @@ func InitDefaultConfigs() {
 			database.DB.Model(&existing).Updates(updates)
 		}
 	}
+
+	removeDeprecatedSystemConfigs("command_timeout")
+}
+
+func removeDeprecatedSystemConfigs(keys ...string) error {
+	for _, key := range keys {
+		if err := database.DB.Where("`key` = ?", key).Delete(&SystemConfig{}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

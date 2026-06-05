@@ -236,18 +236,17 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	lastFailureOutput := ""
 	lastSuccessOutput := ""
 
-	commandTimeout := model.GetRegisteredConfigInt("command_timeout")
 	maxLogSize := model.GetRegisteredConfigInt("max_log_content_size")
 
 	timeout := task.Timeout
 	if timeout < 0 {
-		timeout = commandTimeout
+		timeout = 0
 	}
 	envTTL := time.Duration(timeout)*time.Second + time.Hour
 	if timeout == 0 {
 		envTTL = 365 * 24 * time.Hour
 	}
-	envVars, envErr := BuildManagedRuntimeEnvMap(e.scriptsDir, e.scriptsDir, task.NotificationChannelID, envTTL)
+	envVars, envErr := BuildManagedRuntimeEnvMapForPythonVersion(e.scriptsDir, e.scriptsDir, task.NotificationChannelID, envTTL, task.PythonVersion)
 	if envErr != nil {
 		log.Printf("prepare task runtime env failed: %v", envErr)
 	}
@@ -356,10 +355,10 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	if task.TaskBefore != nil && *task.TaskBefore != "" {
 		onOutput("[执行前置脚本]")
-		RunInlineScript(*task.TaskBefore, e.scriptsDir, envVars, 60, onOutput)
+		RunInlineScript(*task.TaskBefore, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...)
 	}
 
-	RunHookScript("task_before.sh", e.scriptsDir, envVars, onOutput)
+	RunHookScript("task_before.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
 
 	retries := 0
 	var lastExitCode int
@@ -435,11 +434,11 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	if task.TaskAfter != nil && *task.TaskAfter != "" {
 		onOutput("[执行后置脚本]")
-		RunInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput)
+		RunInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...)
 	}
 
-	RunHookScript("task_after.sh", e.scriptsDir, envVars, onOutput)
-	RunHookScript("extra.sh", e.scriptsDir, envVars, onOutput)
+	RunHookScript("task_after.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
+	RunHookScript("extra.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
@@ -937,19 +936,34 @@ func (e *TaskExecutor) detectAndInstallDeps(plan *CommandExecutionPlan, output s
 }
 
 func RecordAutoInstalledDep(depType, name, installLog string) {
+	RecordAutoInstalledDepForPythonVersion(depType, name, installLog, "")
+}
+
+func RecordAutoInstalledDepForPythonVersion(depType, name, installLog, pythonVersion string) {
+	if depType == model.DepTypePython {
+		pythonVersion = NormalizeDependencyPythonVersion(pythonVersion)
+	} else {
+		pythonVersion = ""
+	}
 	var existing model.Dependency
-	if err := database.DB.Where("type = ? AND name = ?", depType, name).First(&existing).Error; err == nil {
+	query := database.DB.Where("type = ? AND name = ?", depType, name)
+	if depType == model.DepTypePython {
+		query = query.Where("COALESCE(NULLIF(python_version, ''), ?) = ?", LegacyPythonVersion(), pythonVersion)
+	}
+	if err := query.First(&existing).Error; err == nil {
 		database.DB.Model(&existing).Updates(map[string]interface{}{
-			"status": model.DepStatusInstalled,
-			"log":    installLog,
+			"status":         model.DepStatusInstalled,
+			"log":            installLog,
+			"python_version": pythonVersion,
 		})
 		return
 	}
 	dep := model.Dependency{
-		Type:   depType,
-		Name:   name,
-		Status: model.DepStatusInstalled,
-		Log:    installLog,
+		Type:          depType,
+		Name:          name,
+		PythonVersion: pythonVersion,
+		Status:        model.DepStatusInstalled,
+		Log:           installLog,
 	}
 	database.DB.Create(&dep)
 }
@@ -1024,7 +1038,7 @@ func extractTaskScriptPath(command string) string {
 			}
 		}
 		return ""
-	case "desi", "python", "python3", "node", "ts-node", "bash", "go":
+	case "desi", "python", "python3", "python3.10", "python3.11", "python3.12", "node", "ts-node", "bash", "go":
 		for count := len(tokens) - 1; count >= 2; count-- {
 			candidate := strings.Join(tokens[1:count], " ")
 			if isSupportedScriptExtension(candidate) {
