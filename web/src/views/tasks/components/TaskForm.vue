@@ -10,6 +10,7 @@ const props = defineProps<{
   visible: boolean
   task?: any
   prefill?: any
+  defaultPythonVersion?: string
   notificationChannels?: { id: number; name: string; type: string; enabled: boolean }[]
 }>()
 
@@ -46,6 +47,12 @@ const internalLabels = ref<string[]>([])
 const randomDelayMode = ref<'inherit' | 'disabled' | 'custom'>('inherit')
 const { dialogFullscreen } = useResponsive()
 
+function getDefaultPythonVersion() {
+  return ['3.10', '3.11', '3.12'].includes(props.defaultPythonVersion || '')
+    ? props.defaultPythonVersion!
+    : '3.12'
+}
+
 watch(() => props.visible, (val) => {
   if (val && props.task) {
     const { editableLabels, internalLabels: hiddenLabels, groupName } = splitTaskLabels(props.task.labels || [])
@@ -65,7 +72,7 @@ watch(() => props.visible, (val) => {
     form.value = {
       name: props.task.name || '',
       command: props.task.command || '',
-      python_version: props.task.python_version || '3.12',
+      python_version: props.task.python_version || getDefaultPythonVersion(),
       cron_expression: props.task.cron_expression || '* * * * *',
       task_type: props.task.task_type || 'cron',
       timeout: props.task.timeout ?? 0,
@@ -89,7 +96,7 @@ watch(() => props.visible, (val) => {
     randomDelayMode.value = 'inherit'
     form.value = {
       name: p?.name || '', command: p?.command || '',
-      python_version: p?.python_version || '3.12',
+      python_version: p?.python_version || getDefaultPythonVersion(),
       cron_expression: p?.cron_expression || '* * * * *',
       task_type: p?.task_type || 'cron',
       timeout: 0, random_delay_seconds: null, max_retries: 0, retry_interval: 60,
@@ -98,6 +105,12 @@ watch(() => props.visible, (val) => {
     }
   }
   activeTab.value = 'basic'
+})
+
+watch(() => props.defaultPythonVersion, () => {
+  if (props.visible && !props.task && !props.prefill?.python_version) {
+    form.value.python_version = getDefaultPythonVersion()
+  }
 })
 
 watch(() => form.value.task_type, (value) => {

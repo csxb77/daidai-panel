@@ -408,7 +408,7 @@ async function browseLogFiles(log: any) {
 
 async function viewLogFile(file: any) {
   try {
-    const res = await taskApi.logFileContent(currentTaskId.value, file.filename)
+    const res = await taskApi.logFileContent(currentTaskId.value, file.filename, file.path)
     fileContentData.value = res.content || '(空文件)'
     fileContentName.value = file.filename
     showFileContent.value = true
@@ -428,9 +428,9 @@ async function deleteLogFile(file: any) {
     return
   }
   try {
-    await taskApi.deleteLogFile(currentTaskId.value, file.filename)
+    await taskApi.deleteLogFile(currentTaskId.value, file.filename, file.path)
     ElMessage.success('已删除')
-    logFiles.value = logFiles.value.filter((f: any) => f.filename !== file.filename)
+    logFiles.value = logFiles.value.filter((f: any) => (f.path || f.filename) !== (file.path || file.filename))
   } catch (err) {
     ElMessage.error(extractError(err, '删除失败'))
   }

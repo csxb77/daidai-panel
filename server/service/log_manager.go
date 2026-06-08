@@ -8,7 +8,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
+	"daidai-panel/model"
 	"daidai-panel/pkg/pathutil"
 )
 
@@ -99,6 +101,15 @@ func GetRelativeLogPath(taskID uint) string {
 	return fmt.Sprintf("task_%d/%s.log", taskID, ts)
 }
 
+func GetRelativeLogPathForTask(task *model.Task) string {
+	if task == nil {
+		return GetRelativeLogPath(0)
+	}
+
+	ts := time.Now().Format("2006-01-02-15-04-05-000")
+	return filepath.ToSlash(filepath.Join(getTaskLogDirName(task), ts+".log"))
+}
+
 func ReadLogFile(logPath, logDir string) (string, error) {
 	fullPath := logPath
 	if !filepath.IsAbs(logPath) {
@@ -128,35 +139,67 @@ type LogFileInfo struct {
 }
 
 func ListLogFiles(taskID uint, logDir string) []LogFileInfo {
-	dir := filepath.Join(logDir, fmt.Sprintf("task_%d", taskID))
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return []LogFileInfo{}
-	}
-
 	files := make([]LogFileInfo, 0)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-			continue
-		}
-		info, err := entry.Info()
+	for _, taskDir := range listTaskLogDirs(taskID, logDir) {
+		entries, err := os.ReadDir(filepath.Join(logDir, taskDir))
 		if err != nil {
 			continue
 		}
-		relPath := fmt.Sprintf("task_%d/%s", taskID, entry.Name())
-		files = append(files, LogFileInfo{
-			Filename:  entry.Name(),
-			Path:      relPath,
-			Size:      info.Size(),
-			CreatedAt: info.ModTime().Format(time.RFC3339),
-		})
+
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			relPath := filepath.ToSlash(filepath.Join(taskDir, entry.Name()))
+			files = append(files, LogFileInfo{
+				Filename:  entry.Name(),
+				Path:      relPath,
+				Size:      info.Size(),
+				CreatedAt: info.ModTime().Format(time.RFC3339),
+			})
+		}
 	}
 
 	sort.Slice(files, func(i, j int) bool {
-		return files[i].Filename > files[j].Filename
+		if files[i].CreatedAt == files[j].CreatedAt {
+			return files[i].Path > files[j].Path
+		}
+		return files[i].CreatedAt > files[j].CreatedAt
 	})
 
 	return files
+}
+
+func ResolveTaskLogPath(taskID uint, filenameOrPath, logDir string) (string, error) {
+	name := strings.TrimSpace(filenameOrPath)
+	if name == "" || filepath.IsAbs(name) {
+		return "", os.ErrNotExist
+	}
+
+	normalized := filepath.ToSlash(filepath.Clean(name))
+	if strings.Contains(normalized, "/") {
+		dir := strings.Split(normalized, "/")[0]
+		if !isTaskLogDirForTask(dir, taskID) {
+			return "", os.ErrNotExist
+		}
+		if _, err := pathutil.ResolveWithinBase(logDir, filepath.Join(logDir, normalized), true); err != nil {
+			return "", err
+		}
+		return normalized, nil
+	}
+
+	for _, taskDir := range listTaskLogDirs(taskID, logDir) {
+		relPath := filepath.ToSlash(filepath.Join(taskDir, normalized))
+		if _, err := pathutil.ResolveWithinBase(logDir, filepath.Join(logDir, relPath), true); err == nil {
+			return relPath, nil
+		}
+	}
+
+	return "", os.ErrNotExist
 }
 
 func DeleteLogFile(logPath, logDir string) error {
@@ -207,4 +250,98 @@ func CleanOldLogs(logDir string, days int) int {
 	}
 
 	return count
+}
+
+func getTaskLogDirName(task *model.Task) string {
+	return formatTaskLogDirName(task.ID, resolveTaskLogDirLabel(task))
+}
+
+func formatTaskLogDirName(taskID uint, label string) string {
+	base := fmt.Sprintf("task_%d", taskID)
+	label = sanitizeTaskLogDirLabel(label)
+	if label == "" {
+		return base
+	}
+	return base + "_" + label
+}
+
+func resolveTaskLogDirLabel(task *model.Task) string {
+	for _, candidate := range []string{
+		task.Name,
+		filepath.Base(extractTaskScriptPath(task.Command)),
+	} {
+		label := sanitizeTaskLogDirLabel(candidate)
+		if label != "" {
+			return label
+		}
+	}
+	return "task"
+}
+
+func sanitizeTaskLogDirLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	lastWasSep := false
+	runeCount := 0
+	for _, r := range value {
+		if runeCount >= 48 {
+			break
+		}
+		if isTaskLogDirUnsafeRune(r) {
+			if !lastWasSep && b.Len() > 0 {
+				b.WriteByte('_')
+				lastWasSep = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastWasSep = false
+		runeCount++
+	}
+
+	return strings.Trim(strings.TrimSpace(b.String()), "._-")
+}
+
+func isTaskLogDirUnsafeRune(r rune) bool {
+	switch r {
+	case '<', '>', ':', '"', '/', '\\', '|', '?', '*':
+		return true
+	default:
+		return unicode.IsControl(r) || unicode.IsSpace(r)
+	}
+}
+
+func listTaskLogDirs(taskID uint, logDir string) []string {
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return []string{}
+	}
+
+	dirs := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() && isTaskLogDirForTask(entry.Name(), taskID) {
+			dirs = append(dirs, entry.Name())
+		}
+	}
+
+	sort.SliceStable(dirs, func(i, j int) bool {
+		if dirs[i] == fmt.Sprintf("task_%d", taskID) {
+			return false
+		}
+		if dirs[j] == fmt.Sprintf("task_%d", taskID) {
+			return true
+		}
+		return dirs[i] > dirs[j]
+	})
+
+	return dirs
+}
+
+func isTaskLogDirForTask(dirName string, taskID uint) bool {
+	base := fmt.Sprintf("task_%d", taskID)
+	return dirName == base || strings.HasPrefix(dirName, base+"_")
 }

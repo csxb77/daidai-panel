@@ -20,8 +20,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v2.2.17` · [更新日志](./docs/release-notes/v2.2.17.md)<br>
-> 本次重点：SMTP SSL、备份包下载、脚本隐藏文件显示、Python 3.10/3.11/3.12 多版本依赖环境。<br>
+> 最新稳定版：`v2.2.18` · [更新日志](./docs/release-notes/v2.2.18.md)<br>
+> 本次重点：Docker Python 3.10/3.11/3.12 多版本依赖环境、长脚本执行稳定性、任务日志目录可读性、环境变量编辑体验。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 功能特性
@@ -219,6 +219,8 @@ docker run -d \
 | `linux/386` | **v2.0.9 新增**：32 位 x86 老 PC、瘦客户端（仅 `:latest` 有，`:debian` 无） |
 | `linux/arm/v7` | **v2.0.9 新增**：树莓派 2 / 3 / Zero 2W、老 ARMv7 盒子 / 路由器 / NAS |
 
+> Python 多版本运行时说明：`linux/amd64`、`linux/arm64` 的官方 Docker 镜像会内置 `python3.10`、`python3.11`、`python3.12`，依赖管理可直接切换版本并创建独立依赖环境。32 位 `linux/386` / `linux/arm/v7` 镜像保留基础 `python3`，如需特定 Python 小版本建议使用 amd64 / arm64 设备或自行构建镜像。
+
 ### Alpine vs Debian 运行时
 
 面板提供两套运行时镜像，差别只在容器内的包管理器：
@@ -237,7 +239,7 @@ docker run -d \
 docker compose -f docker-compose.debian.yml up -d
 
 # 或基于源码本地构建
-docker build --build-arg VERSION=2.2.17 -f Dockerfile.debian -t daidai-panel:debian-local .
+docker build --build-arg VERSION=2.2.18 -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
 ### Windows 单机版（不走 Docker）
@@ -433,7 +435,7 @@ docker compose -f docker-compose.debian.yml up -d
 本地基于源码自己构建的镜像，重新 build 即可：
 
 ```bash
-docker build --build-arg VERSION=2.2.17 -f Dockerfile.debian -t daidai-panel:debian-local .
+docker build --build-arg VERSION=2.2.18 -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
 ## 容器命令 `ddp`

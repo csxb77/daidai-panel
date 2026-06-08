@@ -187,7 +187,6 @@ func EnsureColumns() {
 	ensureTableColumns("dependencies", []columnDef{
 		{"python_version", "VARCHAR(16) DEFAULT ''"},
 	})
-	normalizeLegacyPythonVersionColumns()
 
 	ensureTableColumns("users", []columnDef{
 		{"avatar_url", "VARCHAR(512) DEFAULT ''"},
@@ -196,15 +195,6 @@ func EnsureColumns() {
 	dropEnvVarUniqueIndex()
 
 	log.Printf("column check completed")
-}
-
-func normalizeLegacyPythonVersionColumns() {
-	if err := DB.Exec("UPDATE dependencies SET python_version = '3.12' WHERE type = 'python' AND (python_version IS NULL OR python_version = '')").Error; err != nil {
-		log.Printf("warn: failed to normalize legacy python dependency versions: %v", err)
-	}
-	if err := DB.Exec("UPDATE tasks SET python_version = '3.12' WHERE python_version IS NULL OR python_version = ''").Error; err != nil {
-		log.Printf("warn: failed to normalize legacy task python versions: %v", err)
-	}
 }
 
 // migrateLegacyTaskPIDColumn copies values from the old GORM-derived p_id column

@@ -61,12 +61,12 @@ export const taskApi = {
     return request.get(`/tasks/${id}/log-files`) as Promise<any[]>
   },
 
-  logFileContent(id: number, filename: string) {
-    return request.get(`/tasks/${id}/log-files/${filename}`) as Promise<{ filename: string; content: string }>
+  logFileContent(id: number, filename: string, path?: string) {
+    return request.get(`/tasks/${id}/log-files/${encodeURIComponent(filename)}`, { params: path ? { path } : undefined }) as Promise<{ filename: string; content: string }>
   },
 
-  deleteLogFile(id: number, filename: string) {
-    return request.delete(`/tasks/${id}/log-files/${filename}`) as Promise<{ message: string }>
+  deleteLogFile(id: number, filename: string, path?: string) {
+    return request.delete(`/tasks/${id}/log-files/${encodeURIComponent(filename)}`, { params: path ? { path } : undefined }) as Promise<{ message: string }>
   },
 
   stats(id: number, days?: number) {

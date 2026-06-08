@@ -941,11 +941,11 @@ func RunInlineScript(content, scriptsDir string, envVars map[string]string, time
 	}
 	defer os.Remove(tmpFile)
 
-	cmdArgs := append([]string{tmpFile}, cleanProcessArgs(scriptArgs)...)
-	cmd := exec.Command("bash", cmdArgs...)
-	cmd.Dir = scriptsDir
-	cmd.Env = buildEnv(envVars)
-	setPgid(cmd)
+	cmd, cleanup, err := CreateManagedCommand("bash", tmpFile, scriptArgs, scriptsDir, envVars)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1000,11 +1000,14 @@ func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onO
 		return
 	}
 
-	cmdArgs := append([]string{hookPath}, cleanProcessArgs(scriptArgs)...)
-	cmd := exec.Command("bash", cmdArgs...)
-	cmd.Dir = scriptsDir
-	cmd.Env = buildEnv(envVars)
-	setPgid(cmd)
+	cmd, cleanup, err := CreateManagedCommand("bash", hookPath, scriptArgs, scriptsDir, envVars)
+	if err != nil {
+		if onOutput != nil {
+			onOutput(fmt.Sprintf("[hook %s failed to prepare: %s]", scriptName, err))
+		}
+		return
+	}
+	defer cleanup()
 
 	stdout, _ := cmd.StdoutPipe()
 	cmd.Stderr = cmd.Stdout

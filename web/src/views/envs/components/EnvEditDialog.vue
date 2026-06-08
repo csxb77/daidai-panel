@@ -121,13 +121,20 @@ watch(
   <el-dialog
     :model-value="modelValue"
     :title="dialogTitle"
-    width="500px"
+    width="760px"
+    top="8vh"
+    class="env-edit-dialog"
     :fullscreen="dialogFullscreen"
     :close-on-click-modal="false"
     destroy-on-close
     @update:model-value="emit('update:modelValue', $event)"
   >
-    <el-form :model="form" :label-width="dialogFullscreen ? 'auto' : '80px'" :label-position="dialogFullscreen ? 'top' : 'right'">
+    <el-form
+      class="env-edit-dialog__form"
+      :model="form"
+      :label-width="dialogFullscreen ? 'auto' : '84px'"
+      :label-position="dialogFullscreen ? 'top' : 'right'"
+    >
       <el-form-item label="变量名">
         <el-input v-model="form.name" placeholder="变量名 (如: API_KEY)" />
       </el-form-item>
@@ -139,8 +146,13 @@ watch(
           </span>
         </div>
       </el-form-item>
-      <el-form-item label="值">
-        <el-input v-model="form.value" type="textarea" :rows="isCreate ? 5 : 3" :placeholder="splitMode ? '每行一个值' : '变量值'" />
+      <el-form-item class="env-edit-dialog__value-item" label="值">
+        <el-input
+          v-model="form.value"
+          type="textarea"
+          :rows="isCreate ? 10 : 12"
+          :placeholder="splitMode ? '每行一个值' : '变量值'"
+        />
       </el-form-item>
       <el-form-item label="备注">
         <el-input v-model="form.remarks" placeholder="备注说明" />
@@ -168,3 +180,76 @@ watch(
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+:deep(.env-edit-dialog) {
+  max-width: calc(100vw - 48px);
+}
+
+:deep(.env-edit-dialog .el-dialog__header) {
+  padding: 20px 24px 14px;
+  margin-right: 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+:deep(.env-edit-dialog .el-dialog__body) {
+  max-height: calc(78vh - 128px);
+  padding: 0 24px;
+  overflow-y: auto;
+}
+
+:deep(.env-edit-dialog .el-dialog__footer) {
+  padding: 14px 24px 18px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.env-edit-dialog__form {
+  padding: 18px 0 20px;
+}
+
+.env-edit-dialog__form :deep(.el-form-item__label) {
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+.env-edit-dialog__value-item :deep(.el-form-item__label) {
+  align-self: flex-start;
+}
+
+.env-edit-dialog__value-item :deep(.el-textarea__inner) {
+  min-height: 280px;
+  max-height: 42vh;
+  overflow: auto;
+  resize: vertical;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+@media (max-width: 768px) {
+  :deep(.env-edit-dialog) {
+    max-width: 100vw;
+  }
+
+  :deep(.env-edit-dialog .el-dialog__header) {
+    padding: 16px 18px 12px;
+  }
+
+  :deep(.env-edit-dialog .el-dialog__body) {
+    max-height: none;
+    padding: 0 18px;
+  }
+
+  :deep(.env-edit-dialog .el-dialog__footer) {
+    padding: 12px 18px 16px;
+  }
+
+  .env-edit-dialog__form {
+    padding: 14px 0 18px;
+  }
+
+  .env-edit-dialog__value-item :deep(.el-textarea__inner) {
+    min-height: 45vh;
+    max-height: none;
+  }
+}
+</style>

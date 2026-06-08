@@ -269,7 +269,7 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		timeout = *commandPlan.TimeoutOverride
 	}
 
-	logRelPath := GetRelativeLogPath(taskID)
+	logRelPath := GetRelativeLogPathForTask(&task)
 	logFullPath := filepath.Join(s.logDir, logRelPath)
 
 	status := model.LogStatusRunning

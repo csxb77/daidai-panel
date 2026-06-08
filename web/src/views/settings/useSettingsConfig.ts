@@ -5,6 +5,79 @@ import { applyPanelAppearance } from '@/utils/panelAppearance'
 import type { SettingsConfigForm } from './types'
 
 const logBackgroundImageMaxBytes = 10 * 1024 * 1024
+const logBackgroundImageTargetDataUrlBytes = 1600 * 1024
+const logBackgroundImageMaxDimensions = [1920, 1600, 1280, 1024, 900, 768, 640]
+const logBackgroundImageQualities = [0.82, 0.72, 0.62, 0.52, 0.42, 0.34, 0.28]
+
+function getTextBytes(value: string) {
+  return new Blob([value]).size
+}
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('read failed'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function loadImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('image load failed'))
+    image.src = dataUrl
+  })
+}
+
+function canvasToDataURL(canvas: HTMLCanvasElement, mimeType: string, quality: number) {
+  const dataUrl = canvas.toDataURL(mimeType, quality)
+  if (mimeType === 'image/webp' && !dataUrl.startsWith('data:image/webp')) {
+    return canvas.toDataURL('image/jpeg', quality)
+  }
+  return dataUrl
+}
+
+async function compressLogBackgroundImage(file: File) {
+  const originalDataUrl = await readFileAsDataURL(file)
+  if (getTextBytes(originalDataUrl) <= logBackgroundImageTargetDataUrlBytes) {
+    return { dataUrl: originalDataUrl, compressed: false }
+  }
+
+  const image = await loadImage(originalDataUrl)
+  const sourceWidth = image.naturalWidth || image.width
+  const sourceHeight = image.naturalHeight || image.height
+  if (!sourceWidth || !sourceHeight) {
+    throw new Error('invalid image')
+  }
+
+  for (const maxDimension of logBackgroundImageMaxDimensions) {
+    const scale = Math.min(1, maxDimension / Math.max(sourceWidth, sourceHeight))
+    const width = Math.max(1, Math.round(sourceWidth * scale))
+    const height = Math.max(1, Math.round(sourceHeight * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+
+    const context = canvas.getContext('2d', { alpha: true })
+    if (!context) {
+      throw new Error('canvas unsupported')
+    }
+    context.clearRect(0, 0, width, height)
+    context.drawImage(image, 0, 0, width, height)
+
+    for (const quality of logBackgroundImageQualities) {
+      const dataUrl = canvasToDataURL(canvas, 'image/webp', quality)
+      const size = getTextBytes(dataUrl)
+      if (size <= logBackgroundImageTargetDataUrlBytes) {
+        return { dataUrl, compressed: true }
+      }
+    }
+  }
+
+  throw new Error('compressed image too large')
+}
 
 export function useSettingsConfig() {
   // 此开关原为功能上线门控，当前已全量启用（保留常量以兼容消费方）
@@ -188,12 +261,18 @@ export function useSettingsConfig() {
       return false
     }
 
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      configForm.value.log_background_image = e.target?.result as string
-      applyPanelAppearance(configForm.value)
-    }
-    reader.readAsDataURL(file)
+    void (async () => {
+      try {
+        const result = await compressLogBackgroundImage(file)
+        configForm.value.log_background_image = result.dataUrl
+        applyPanelAppearance(configForm.value)
+        if (result.compressed) {
+          ElMessage.success('背景图片已自动压缩，请保存配置后生效')
+        }
+      } catch {
+        ElMessage.error('背景图片压缩失败，请换一张尺寸更小的图片')
+      }
+    })()
     return false
   }
 

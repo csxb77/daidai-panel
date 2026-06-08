@@ -79,7 +79,7 @@ func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 		req.LogID = logID
 	}
 
-	relLogPath := GetRelativeLogPath(task.ID)
+	relLogPath := GetRelativeLogPathForTask(task)
 	runningStatus := model.LogStatusRunning
 	taskLog := &model.TaskLog{
 		TaskID:    task.ID,

@@ -45,15 +45,38 @@ func TestBuildManagedRuntimeEnvMapUsesRequestedPythonVersion(t *testing.T) {
 	}
 }
 
-func TestManagedPythonVenvDirKeepsLegacy312Path(t *testing.T) {
+func TestManagedPythonVenvDirUsesFlatVersionedPaths(t *testing.T) {
 	root := testutil.SetupTestEnv(t)
 	dataDir := filepath.Join(root, "data")
 
-	if got := ManagedPythonVenvDir("3.12"); got != filepath.Join(dataDir, "deps", "python", "venv") {
-		t.Fatalf("expected legacy 3.12 venv path, got %q", got)
+	if got := ManagedPythonVenvDir("3.12"); got != filepath.Join(dataDir, "deps", "python", "3.12") {
+		t.Fatalf("expected flat 3.12 venv path, got %q", got)
 	}
-	if got := ManagedPythonVenvDir("3.10"); got != filepath.Join(dataDir, "deps", "python", "3.10", "venv") {
-		t.Fatalf("expected versioned 3.10 venv path, got %q", got)
+	if got := ManagedPythonVenvDir("3.10"); got != filepath.Join(dataDir, "deps", "python", "3.10") {
+		t.Fatalf("expected flat 3.10 venv path, got %q", got)
+	}
+}
+
+func TestWarmManagedPythonVenvWarmsAllSupportedVersions(t *testing.T) {
+	var warmed []string
+	original := warmManagedPythonVenvForVersionFunc
+	warmManagedPythonVenvForVersionFunc = func(version string) {
+		warmed = append(warmed, version)
+	}
+	t.Cleanup(func() {
+		warmManagedPythonVenvForVersionFunc = original
+	})
+
+	WarmManagedPythonVenv()
+
+	want := []string{"3.10", "3.11", "3.12"}
+	if len(warmed) != len(want) {
+		t.Fatalf("expected warmed versions %v, got %v", want, warmed)
+	}
+	for idx, version := range want {
+		if warmed[idx] != version {
+			t.Fatalf("expected warmed versions %v, got %v", want, warmed)
+		}
 	}
 }
 
@@ -80,6 +103,43 @@ func TestBuildManagedPythonPathPrioritizesWorkDirAndScriptsDir(t *testing.T) {
 		if parts[idx] != expected {
 			t.Fatalf("python path order mismatch at %d: got=%q want=%q (all=%v)", idx, parts[idx], expected, parts)
 		}
+	}
+}
+
+func TestMigrateLegacyManagedPythonVenvUsesDetectedVersion(t *testing.T) {
+	root := testutil.SetupTestEnv(t)
+	dataDir := filepath.Join(root, "data")
+	legacyDir := filepath.Join(dataDir, "deps", "python", "venv")
+	writeFakeExecutable(t, resolveManagedVenvBin(legacyDir), "python", []string{"echo 3.11"})
+	writeFakeExecutable(t, resolveManagedVenvBin(legacyDir), "pip3", []string{"echo pip 24.0 from test"})
+
+	version := MigrateLegacyManagedPythonVenv()
+	if version != "3.11" {
+		t.Fatalf("expected legacy venv to be detected as 3.11, got %q", version)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "deps", "python", "3.11")); err != nil {
+		t.Fatalf("expected legacy venv to move to 3.11: %v", err)
+	}
+	if _, err := os.Stat(legacyDir); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy venv path to be removed, err=%v", err)
+	}
+}
+
+func TestMigrateLegacyManagedPythonVenvFlattensVersionedNestedVenv(t *testing.T) {
+	root := testutil.SetupTestEnv(t)
+	dataDir := filepath.Join(root, "data")
+	nestedDir := filepath.Join(dataDir, "deps", "python", "3.10", "venv")
+	writeFakeExecutable(t, resolveManagedVenvBin(nestedDir), "python", []string{"echo 3.10"})
+	writeFakeExecutable(t, resolveManagedVenvBin(nestedDir), "pip3", []string{"echo pip 24.0 from test"})
+
+	MigrateLegacyManagedPythonVenv()
+
+	flatDir := filepath.Join(dataDir, "deps", "python", "3.10")
+	if _, err := os.Stat(resolveManagedVenvBin(flatDir)); err != nil {
+		t.Fatalf("expected nested 3.10 venv to be flattened: %v", err)
+	}
+	if _, err := os.Stat(nestedDir); !os.IsNotExist(err) {
+		t.Fatalf("expected nested venv path to be removed, err=%v", err)
 	}
 }
 

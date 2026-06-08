@@ -2,6 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { taskApi } from '@/api/task'
+import { depsApi } from '@/api/deps'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import TaskForm from './components/TaskForm.vue'
@@ -54,6 +55,7 @@ const loading = ref(false)
 const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
 const notificationChannels = ref<{ id: number; name: string; type: string; enabled: boolean }[]>([])
+const defaultPythonVersion = ref('3.12')
 const formVisible = ref(false)
 const editingTask = ref<any>(null)
 const prefillData = ref<any>(null)
@@ -191,6 +193,17 @@ async function loadNotificationChannels() {
   }
 }
 
+async function loadDefaultPythonVersion() {
+  try {
+    const res = await depsApi.pythonRuntimes()
+    if (['3.10', '3.11', '3.12'].includes(res.default_version)) {
+      defaultPythonVersion.value = res.default_version
+    }
+  } catch {
+    defaultPythonVersion.value = '3.12'
+  }
+}
+
 function clearTaskRouteQuery() {
   return router.replace({ path: '/tasks' })
 }
@@ -239,7 +252,7 @@ async function handleRouteQueryAction() {
 let skipInitialActivated = true
 
 onMounted(async () => {
-  await Promise.all([loadTasks(), loadNotificationChannels()])
+  await Promise.all([loadTasks(), loadNotificationChannels(), loadDefaultPythonVersion()])
   await handleRouteQueryAction()
 })
 
@@ -248,7 +261,7 @@ onActivated(async () => {
     skipInitialActivated = false
     return
   }
-  await Promise.all([loadTasks(), loadNotificationChannels()])
+  await Promise.all([loadTasks(), loadNotificationChannels(), loadDefaultPythonVersion()])
   await handleRouteQueryAction()
 })
 
@@ -952,6 +965,7 @@ async function handleImport(event: Event) {
       v-model:visible="formVisible"
       :task="editingTask"
       :prefill="prefillData"
+      :default-python-version="defaultPythonVersion"
       :notification-channels="notificationChannels"
       @submit="handleFormSubmit"
     />

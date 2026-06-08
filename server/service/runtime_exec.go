@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,10 @@ type managedRuntimePaths struct {
 }
 
 var managedPythonVenvMu sync.Mutex
+
+var warmManagedPythonVenvForVersionFunc = func(version string) {
+	ensureManagedPythonVenvForVersion(version, false)
+}
 
 var windowsShellSearchDirs = []string{
 	filepath.Join(os.Getenv("ProgramFiles"), "Git", "bin"),
@@ -70,6 +75,44 @@ for entry in reversed([item for item in extra_path_raw.split(os.pathsep) if item
         sys.path.insert(0, entry)
 sys.argv = [script_path] + script_args
 runpy.run_path(script_path, run_name="__main__")
+`
+
+const shellEnvBootstrap = `__dd_env_file=$1
+__dd_script=$2
+shift 2
+if [ -f "$__dd_env_file" ]; then
+  . "$__dd_env_file"
+fi
+. "$__dd_script" "$@"
+`
+
+const goEnvBootstrapSource = `package main
+
+import (
+	"encoding/json"
+	"os"
+)
+
+func init() {
+	envFile := os.Getenv("DAIDAI_RUNTIME_ENV_FILE")
+	if envFile == "" {
+		return
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		return
+	}
+	payload := map[string]string{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return
+	}
+	for key, value := range payload {
+		if key == "" {
+			continue
+		}
+		_ = os.Setenv(key, value)
+	}
+}
 `
 
 func BuildManagedRuntimeEnvMap(workDir, scriptsDir string, defaultChannelID *uint, ttl time.Duration) (map[string]string, error) {
@@ -273,6 +316,138 @@ func quarantineManagedPythonVenv(venvDir string) {
 	}
 }
 
+func detectManagedPythonVenvVersion(venvDir string) string {
+	pythonBin := resolveManagedPythonBinaryInVenv(venvDir)
+	if pythonBin == "" {
+		return ""
+	}
+
+	cmd := exec.Command(pythonBin, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+	cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+
+	version, err := NormalizePythonVersionStrict(strings.TrimSpace(string(out)))
+	if err != nil {
+		return ""
+	}
+	return version
+}
+
+type LegacyPythonVenvMigration struct {
+	Version               string
+	FoundRoot             bool
+	MigratedRoot          bool
+	DefaultVersionExisted bool
+}
+
+func managedPythonVersionDir(version string) string {
+	dataDir := ""
+	if config.C != nil {
+		dataDir = config.C.Data.Dir
+	}
+	return filepath.Join(dataDir, "deps", "python", NormalizePythonVersionOrDefault(version))
+}
+
+func directoryExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func flattenLegacyVersionedManagedPythonVenvsLocked() {
+	for _, version := range supportedPythonRuntimeVersions {
+		versionDir := managedPythonVersionDir(version)
+		nestedVenvDir := filepath.Join(versionDir, "venv")
+		if !directoryExists(nestedVenvDir) {
+			continue
+		}
+		if directoryExists(resolveManagedVenvBin(versionDir)) {
+			backup := nestedVenvDir + ".nested-" + time.Now().Format("20060102150405")
+			if err := os.Rename(nestedVenvDir, backup); err == nil {
+				log.Printf("legacy nested managed python %s venv moved aside because flat target already exists: %s -> %s", version, nestedVenvDir, backup)
+			} else {
+				log.Printf("warn: failed to move nested managed python %s venv aside %s: %v", version, nestedVenvDir, err)
+			}
+			continue
+		}
+
+		backupDir := versionDir + ".pre-2218-" + time.Now().Format("20060102150405")
+		if err := os.Rename(versionDir, backupDir); err != nil {
+			log.Printf("warn: failed to prepare legacy managed python %s venv flatten %s: %v", version, versionDir, err)
+			continue
+		}
+		if err := os.Rename(filepath.Join(backupDir, "venv"), versionDir); err != nil {
+			log.Printf("warn: failed to flatten legacy managed python %s venv %s -> %s: %v", version, filepath.Join(backupDir, "venv"), versionDir, err)
+			_ = os.Rename(backupDir, versionDir)
+			continue
+		}
+		_ = os.Remove(backupDir)
+		log.Printf("legacy managed python %s venv flattened: %s -> %s", version, filepath.Join(backupDir, "venv"), versionDir)
+	}
+}
+
+func migrateLegacyManagedPythonVenvLocked() LegacyPythonVenvMigration {
+	flattenLegacyVersionedManagedPythonVenvsLocked()
+
+	result := LegacyPythonVenvMigration{
+		DefaultVersionExisted: directoryExists(ManagedPythonVenvDir(defaultPythonRuntimeVersion)),
+	}
+
+	legacyDir := legacyManagedPythonVenvDir()
+	if strings.TrimSpace(legacyDir) == "" {
+		return result
+	}
+	if info, err := os.Stat(legacyDir); err != nil || !info.IsDir() {
+		return result
+	}
+
+	version := detectManagedPythonVenvVersion(legacyDir)
+	if version == "" {
+		version = defaultPythonRuntimeVersion
+		log.Printf("warn: legacy managed python venv version detection failed at %s, assuming Python %s", legacyDir, version)
+	}
+	result.Version = version
+	result.FoundRoot = true
+
+	targetDir := ManagedPythonVenvDir(version)
+	if filepath.Clean(targetDir) == filepath.Clean(legacyDir) {
+		return result
+	}
+	if info, err := os.Stat(targetDir); err == nil && info.IsDir() {
+		backup := legacyDir + ".migrated-" + time.Now().Format("20060102150405")
+		if err := os.Rename(legacyDir, backup); err == nil {
+			log.Printf("legacy managed python venv kept aside because target already exists: %s -> %s", legacyDir, backup)
+		} else {
+			log.Printf("warn: failed to move legacy managed python venv aside %s: %v", legacyDir, err)
+		}
+		return result
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetDir), 0o755); err != nil {
+		log.Printf("warn: failed to create managed python version dir parent %s: %v", filepath.Dir(targetDir), err)
+		return result
+	}
+	if err := os.Rename(legacyDir, targetDir); err != nil {
+		log.Printf("warn: failed to migrate legacy managed python venv %s -> %s: %v", legacyDir, targetDir, err)
+		return result
+	}
+	log.Printf("legacy managed python venv migrated: %s -> %s (Python %s)", legacyDir, targetDir, version)
+	result.MigratedRoot = true
+	return result
+}
+
+func MigrateLegacyManagedPythonVenv() string {
+	return MigrateLegacyManagedPythonVenvInfo().Version
+}
+
+func MigrateLegacyManagedPythonVenvInfo() LegacyPythonVenvMigration {
+	managedPythonVenvMu.Lock()
+	defer managedPythonVenvMu.Unlock()
+	return migrateLegacyManagedPythonVenvLocked()
+}
+
 func ensureManagedPythonVenv(syncCreate bool) bool {
 	return ensureManagedPythonVenvForVersion("", syncCreate)
 }
@@ -299,6 +474,8 @@ func ensureManagedPythonVenvForVersion(pythonVersion string, syncCreate bool) bo
 
 	managedPythonVenvMu.Lock()
 	defer managedPythonVenvMu.Unlock()
+
+	migrateLegacyManagedPythonVenvLocked()
 
 	if managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
 		return true
@@ -357,11 +534,13 @@ func EnsureManagedPythonVenvForVersion(pythonVersion string) bool {
 }
 
 func WarmManagedPythonVenv() {
-	WarmManagedPythonVenvForVersion("")
+	for _, version := range supportedPythonRuntimeVersions {
+		WarmManagedPythonVenvForVersion(version)
+	}
 }
 
 func WarmManagedPythonVenvForVersion(pythonVersion string) {
-	ensureManagedPythonVenvForVersion(pythonVersion, false)
+	warmManagedPythonVenvForVersionFunc(pythonVersion)
 }
 
 func resolveManagedVenvBin(venvDir string) string {
@@ -509,26 +688,82 @@ func createManagedTSNodeCommand(scriptPath string, scriptArgs []string, workDir 
 }
 
 func createStandardManagedCommand(interpreter, scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths) (*exec.Cmd, func(), error) {
+	switch interpreter {
+	case "bash":
+		return createManagedShellCommand(scriptPath, scriptArgs, workDir, envVars, runtimePaths)
+	case "go":
+		return createManagedGoCommand(scriptPath, scriptArgs, workDir, envVars, runtimePaths)
+	}
+
 	binary, err := resolveManagedBinary(interpreter, standardBinaryPreferredDirs(interpreter, runtimePaths), runtimePaths.searchDirs)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var args []string
-	switch interpreter {
-	case "go":
-		args = append([]string{"run", scriptPath}, scriptArgs...)
-	case "bash":
-		args = append([]string{scriptPath}, scriptArgs...)
-	default:
-		args = append([]string{scriptPath}, scriptArgs...)
-	}
+	args := append([]string{scriptPath}, cleanManagedProcessArgs(scriptArgs)...)
 
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = workDir
-	cmd.Env = buildEnv(envVars)
+	cmd.Env = buildBootstrapProcessEnv(envVars)
 	setPgid(cmd)
 	return cmd, func() {}, nil
+}
+
+func createManagedShellCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths) (*exec.Cmd, func(), error) {
+	if err := NormalizeShellScriptFile(scriptPath); err != nil {
+		return nil, nil, fmt.Errorf("脚本换行规范化失败: %w", err)
+	}
+
+	binary, err := resolveManagedBinary("bash", standardBinaryPreferredDirs("bash", runtimePaths), runtimePaths.searchDirs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	_, envFile, cleanup, err := writeManagedRuntimeShellEnvFile(envVars)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	args := []string{"-c", shellEnvBootstrap, scriptPath, envFile, scriptPath}
+	args = append(args, cleanManagedProcessArgs(scriptArgs)...)
+
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = workDir
+	cmd.Env = buildBootstrapProcessEnv(envVars)
+	setPgid(cmd)
+	return cmd, cleanup, nil
+}
+
+func createManagedGoCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths) (*exec.Cmd, func(), error) {
+	binary, err := resolveManagedBinary("go", standardBinaryPreferredDirs("go", runtimePaths), runtimePaths.searchDirs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	_, envFile, envCleanup, err := writeManagedRuntimeEnvFile(envVars)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	wrapperPath := filepath.Join(filepath.Dir(scriptPath), fmt.Sprintf("000000_daidai_env_bootstrap_%d.go", time.Now().UnixNano()))
+	if err := os.WriteFile(wrapperPath, []byte(goEnvBootstrapSource), 0o600); err != nil {
+		envCleanup()
+		return nil, nil, err
+	}
+
+	cleanup := func() {
+		_ = os.Remove(wrapperPath)
+		envCleanup()
+	}
+
+	args := []string{"run", wrapperPath, scriptPath}
+	args = append(args, cleanManagedProcessArgs(scriptArgs)...)
+
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = workDir
+	cmd.Env = append(buildBootstrapProcessEnv(envVars), "DAIDAI_RUNTIME_ENV_FILE="+envFile)
+	setPgid(cmd)
+	return cmd, cleanup, nil
 }
 
 func standardBinaryPreferredDirs(interpreter string, runtimePaths managedRuntimePaths) []string {
@@ -572,7 +807,7 @@ func managedPythonBootstrapCommandsForVersion(pythonVersion string) []managedBoo
 }
 
 func buildBootstrapProcessEnv(envVars map[string]string) []string {
-	safeKeys := []string{"PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ"}
+	safeKeys := []string{"PATH", "HOME", "USER", "LANG", "LC_ALL", "TZ", "LD_LIBRARY_PATH"}
 	if runtime.GOOS == "windows" {
 		safeKeys = append(safeKeys, "SYSTEMROOT", "PATHEXT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "USERPROFILE")
 	}
@@ -643,6 +878,90 @@ func writeManagedRuntimeEnvFile(envVars map[string]string) (string, string, func
 	}
 
 	return tempDir, envFile, cleanup, nil
+}
+
+func writeManagedRuntimeShellEnvFile(envVars map[string]string) (string, string, func(), error) {
+	tempDir, err := os.MkdirTemp("", "daidai-runtime-*")
+	if err != nil {
+		return "", "", nil, err
+	}
+
+	cleanup := func() {
+		_ = os.RemoveAll(tempDir)
+	}
+
+	var b strings.Builder
+	b.WriteString("# daidai runtime environment\n")
+	keys := make([]string, 0, len(envVars))
+	for key := range envVars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := envVars[key]
+		if !isValidShellEnvName(key) || isDangerousShellEnvName(key) || strings.ContainsRune(value, 0) {
+			continue
+		}
+		b.WriteString("export ")
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(shellSingleQuote(value))
+		b.WriteByte('\n')
+	}
+
+	envFile := filepath.Join(tempDir, "env.sh")
+	if err := os.WriteFile(envFile, []byte(b.String()), 0o600); err != nil {
+		cleanup()
+		return "", "", nil, err
+	}
+
+	return tempDir, envFile, cleanup, nil
+}
+
+func isValidShellEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for idx, r := range name {
+		if idx == 0 {
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || r == '_' {
+				continue
+			}
+			return false
+		}
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isDangerousShellEnvName(name string) bool {
+	switch name {
+	case "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES":
+		return true
+	default:
+		return false
+	}
+}
+
+func shellSingleQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func cleanManagedProcessArgs(args []string) []string {
+	cleaned := make([]string, 0, len(args))
+	for _, arg := range args {
+		if strings.ContainsRune(arg, 0) {
+			continue
+		}
+		cleaned = append(cleaned, arg)
+	}
+	return cleaned
 }
 
 func writeNodePreloadScript(tempDir, envFile string, envVars map[string]string) (string, error) {

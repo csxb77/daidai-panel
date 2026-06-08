@@ -1,6 +1,15 @@
 package handler
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"daidai-panel/config"
+	"daidai-panel/testutil"
+)
 
 func TestScriptCommandParts(t *testing.T) {
 	parts, err := scriptCommandParts(".py", "demo.py")
@@ -69,5 +78,48 @@ func TestDebugRunFinishDoesNotOverrideStoppedStatus(t *testing.T) {
 	}
 	if got := len(run.Logs); got != 1 {
 		t.Fatalf("expected finish to avoid appending logs for stopped run, got %d entries", got)
+	}
+}
+
+func TestNewScriptCommandLoadsLargeShellEnvFromFile(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+
+	scriptPath := filepath.Join(config.C.Data.ScriptsDir, "large-env.sh")
+	outputPath := filepath.Join(config.C.Data.ScriptsDir, "large-env.out")
+	if err := os.WriteFile(scriptPath, []byte(`printf '%s' "${#BIG_ENV}" > large-env.out`+"\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	cmd, cleanup, err := newScriptCommand(
+		"bash",
+		scriptPath,
+		nil,
+		config.C.Data.ScriptsDir,
+		map[string]string{"BIG_ENV": strings.Repeat("x", 3*1024*1024)},
+	)
+	if err != nil {
+		t.Fatalf("new script command: %v", err)
+	}
+	defer cleanup()
+
+	for _, entry := range cmd.Env {
+		if strings.HasPrefix(entry, "BIG_ENV=") {
+			t.Fatalf("large env must not be passed through process environment")
+		}
+	}
+
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run script: %v: %s", err, out)
+	}
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	if got := string(content); got != "3145728" {
+		t.Fatalf("expected large env length 3145728, got %q", got)
 	}
 }

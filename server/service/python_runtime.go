@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,10 +126,50 @@ func ManagedPythonVenvDir(version string) string {
 		dataDir = config.C.Data.Dir
 	}
 	pythonDir := filepath.Join(dataDir, "deps", "python")
-	if version == defaultPythonRuntimeVersion {
-		return filepath.Join(pythonDir, "venv")
+	return filepath.Join(pythonDir, version)
+}
+
+func legacyManagedPythonVenvDir() string {
+	dataDir := ""
+	if config.C != nil {
+		dataDir = config.C.Data.Dir
 	}
-	return filepath.Join(pythonDir, version, "venv")
+	return filepath.Join(dataDir, "deps", "python", "venv")
+}
+
+func NormalizeLegacyPythonVersionColumns(version string) {
+	if database.DB == nil {
+		return
+	}
+
+	version = NormalizePythonVersionOrDefault(version)
+	if err := database.DB.Exec("UPDATE dependencies SET python_version = ? WHERE type = ? AND (python_version IS NULL OR python_version = '')", version, model.DepTypePython).Error; err != nil {
+		log.Printf("warn: failed to normalize legacy python dependency versions: %v", err)
+	}
+	if err := database.DB.Exec("UPDATE tasks SET python_version = ? WHERE python_version IS NULL OR python_version = ''", version).Error; err != nil {
+		log.Printf("warn: failed to normalize legacy task python versions: %v", err)
+	}
+}
+
+func NormalizeLegacyPythonVersionColumnsAfterVenvMigration(migration LegacyPythonVenvMigration) {
+	version := NormalizePythonVersionOrDefault(migration.Version)
+	NormalizeLegacyPythonVersionColumns(version)
+
+	if !migration.MigratedRoot || version == defaultPythonRuntimeVersion || migration.DefaultVersionExisted || database.DB == nil {
+		return
+	}
+
+	if err := database.DB.Exec("UPDATE dependencies SET python_version = ? WHERE type = ? AND python_version = ?", version, model.DepTypePython, defaultPythonRuntimeVersion).Error; err != nil {
+		log.Printf("warn: failed to move legacy python dependency records to detected version %s: %v", version, err)
+	}
+	if err := database.DB.Exec("UPDATE tasks SET python_version = ? WHERE python_version = ?", version, defaultPythonRuntimeVersion).Error; err != nil {
+		log.Printf("warn: failed to move legacy python task records to detected version %s: %v", version, err)
+	}
+	if strings.TrimSpace(model.GetRegisteredConfig("python_default_version")) == defaultPythonRuntimeVersion {
+		if err := model.SetConfig("python_default_version", version); err != nil {
+			log.Printf("warn: failed to update default python version to detected legacy version %s: %v", version, err)
+		}
+	}
 }
 
 func PythonRuntimeInfos() []PythonRuntimeInfo {

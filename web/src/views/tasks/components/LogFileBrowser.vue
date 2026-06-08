@@ -22,6 +22,10 @@ const fileContent = ref('')
 const contentLoading = ref(false)
 const { dialogFullscreen } = useResponsive()
 
+function getFileKey(file: any) {
+  return file?.path || file?.filename
+}
+
 const renderedFileContent = computed(() => {
   let currentLine = ''
   const lines: string[] = []
@@ -81,11 +85,13 @@ async function loadLogFiles() {
   }
 }
 
-async function viewFile(filename: string) {
-  selectedFile.value = filename
+async function viewFile(file: any) {
+  const filename = file.filename
+  const fileKey = getFileKey(file)
+  selectedFile.value = fileKey
   contentLoading.value = true
   try {
-    const res = await taskApi.logFileContent(props.taskId!, filename)
+    const res = await taskApi.logFileContent(props.taskId!, filename, file.path)
     fileContent.value = res.content || ''
   } catch {
     ElMessage.error('加载文件内容失败')
@@ -95,13 +101,15 @@ async function viewFile(filename: string) {
   }
 }
 
-async function deleteFile(filename: string) {
+async function deleteFile(file: any) {
+  const filename = file.filename
+  const fileKey = getFileKey(file)
   try {
     await ElMessageBox.confirm(`确定删除日志文件 "${filename}"？`, '确认删除', { type: 'warning' })
-    await taskApi.deleteLogFile(props.taskId!, filename)
+    await taskApi.deleteLogFile(props.taskId!, filename, file.path)
     ElMessage.success('删除成功')
     loadLogFiles()
-    if (selectedFile.value === filename) {
+    if (selectedFile.value === fileKey) {
       selectedFile.value = null
       fileContent.value = ''
     }
@@ -136,10 +144,10 @@ function handleClose() {
         <div v-if="logFiles.length === 0" class="empty-hint">暂无日志文件</div>
         <div
           v-for="file in logFiles"
-          :key="file.filename"
+          :key="getFileKey(file)"
           class="file-item"
-          :class="{ active: selectedFile === file.filename }"
-          @click="viewFile(file.filename)"
+          :class="{ active: selectedFile === getFileKey(file) }"
+          @click="viewFile(file)"
         >
           <div class="file-info">
             <el-icon><Document /></el-icon>
@@ -151,7 +159,7 @@ function handleClose() {
               type="danger"
               text
               size="small"
-              @click.stop="deleteFile(file.filename)"
+              @click.stop="deleteFile(file)"
             >
               <el-icon><Delete /></el-icon>
             </el-button>

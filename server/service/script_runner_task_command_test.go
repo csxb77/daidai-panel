@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"daidai-panel/config"
@@ -180,6 +181,38 @@ func TestHookScriptsReceiveTaskScriptArgs(t *testing.T) {
 	}
 	if got, want := string(content), "http://127.0.0.1:7890|two words|value3"; got != want {
 		t.Fatalf("expected hook args %q, got %q", want, got)
+	}
+}
+
+func TestRunHookScriptHandlesLargeEnvWithoutExecArgLimit(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+
+	outputFile := filepath.Join(config.C.Data.ScriptsDir, "hook-large-env.out")
+	hookPath := filepath.Join(config.C.Data.ScriptsDir, "task_before.sh")
+	hookContent := []byte(`printf '%s|%s|%s' "${#BIG_ENV}" "$1" "$2" > hook-large-env.out` + "\n")
+	if err := os.WriteFile(hookPath, hookContent, 0755); err != nil {
+		t.Fatalf("write hook script: %v", err)
+	}
+
+	RunHookScript(
+		"task_before.sh",
+		config.C.Data.ScriptsDir,
+		map[string]string{"BIG_ENV": strings.Repeat("x", 3*1024*1024)},
+		nil,
+		"arg-one",
+		"arg two",
+	)
+
+	content, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("read hook output: %v", err)
+	}
+	if got, want := string(content), "3145728|arg-one|arg two"; got != want {
+		t.Fatalf("expected large env and args %q, got %q", want, got)
 	}
 }
 

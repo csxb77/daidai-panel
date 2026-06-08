@@ -16,7 +16,7 @@ COPY server/go.mod server/go.sum ./
 ENV GOPROXY=https://goproxy.cn,direct
 RUN go mod download
 COPY server/ ./
-ARG VERSION=2.2.17
+ARG VERSION=2.2.18
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -29,6 +29,13 @@ RUN GOARM=$(case "${TARGETVARIANT}" in v7) echo 7;; v6) echo 6;; v5) echo 5;; *)
 
 FROM alpine:3.22
 
+ARG TARGETARCH
+ARG TARGETVARIANT
+ARG PYTHON_STANDALONE_RELEASE=20260602
+ARG PYTHON_RUNTIME_310=3.10.20
+ARG PYTHON_RUNTIME_311=3.11.15
+ARG PYTHON_RUNTIME_312=3.12.13
+
 RUN apk add --no-cache \
     ca-certificates tzdata bash curl wget \
     gcompat libstdc++ \
@@ -39,6 +46,10 @@ RUN apk add --no-cache \
     git openssh-client-default \
     docker-cli \
     su-exec shadow
+
+COPY docker/install-python-runtimes.sh /tmp/install-python-runtimes.sh
+RUN sh /tmp/install-python-runtimes.sh alpine "${TARGETARCH}" "${TARGETVARIANT}" "${PYTHON_STANDALONE_RELEASE}" "${PYTHON_RUNTIME_310}" "${PYTHON_RUNTIME_311}" "${PYTHON_RUNTIME_312}" \
+    && rm -f /tmp/install-python-runtimes.sh
 
 RUN mkdir -p /app/Dumb-Panel/scripts /app/Dumb-Panel/logs /app/Dumb-Panel/backups /run/nginx /tmp && chmod 1777 /tmp
 

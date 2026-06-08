@@ -78,8 +78,13 @@ func (h *TaskHandler) LogFiles(c *gin.Context) {
 func (h *TaskHandler) LogFileContent(c *gin.Context) {
 	taskID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	filename := c.Param("filename")
+	filenameOrPath := c.DefaultQuery("path", filename)
 
-	logPath := fmt.Sprintf("task_%d/%s", taskID, filename)
+	logPath, err := service.ResolveTaskLogPath(uint(taskID), filenameOrPath, config.C.Data.LogDir)
+	if err != nil {
+		response.NotFound(c, "日志文件不存在")
+		return
+	}
 	content, err := service.ReadLogFile(logPath, config.C.Data.LogDir)
 	if err != nil {
 		response.NotFound(c, "日志文件不存在")
@@ -92,8 +97,13 @@ func (h *TaskHandler) LogFileContent(c *gin.Context) {
 func (h *TaskHandler) DeleteLogFile(c *gin.Context) {
 	taskID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	filename := c.Param("filename")
+	filenameOrPath := c.DefaultQuery("path", filename)
 
-	logPath := fmt.Sprintf("task_%d/%s", taskID, filename)
+	logPath, err := service.ResolveTaskLogPath(uint(taskID), filenameOrPath, config.C.Data.LogDir)
+	if err != nil {
+		response.NotFound(c, "日志文件不存在")
+		return
+	}
 	if err := service.DeleteLogFile(logPath, config.C.Data.LogDir); err != nil {
 		response.InternalError(c, "删除日志文件失败")
 		return
@@ -104,8 +114,13 @@ func (h *TaskHandler) DeleteLogFile(c *gin.Context) {
 func (h *TaskHandler) DownloadLogFile(c *gin.Context) {
 	taskID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	filename := c.Param("filename")
+	filenameOrPath := c.DefaultQuery("path", filename)
 
-	logPath := fmt.Sprintf("task_%d/%s", taskID, filename)
+	logPath, err := service.ResolveTaskLogPath(uint(taskID), filenameOrPath, config.C.Data.LogDir)
+	if err != nil {
+		response.NotFound(c, "日志文件不存在")
+		return
+	}
 	content, err := service.ReadLogFile(logPath, config.C.Data.LogDir)
 	if err != nil {
 		response.NotFound(c, "日志文件不存在")

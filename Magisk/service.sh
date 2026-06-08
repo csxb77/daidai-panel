@@ -160,8 +160,8 @@ mkdir -p $DAIDAI_DIR/scripts $DAIDAI_DIR/logs $DAIDAI_DIR/deps/nodejs $DAIDAI_DI
 chmod 777 $DAIDAI_DIR
 
 # Python 虚拟环境（第一次进入时创建）
-if [ ! -d "$DAIDAI_DIR/deps/python/venv" ]; then
-  python3 -m venv $DAIDAI_DIR/deps/python/venv 2>/dev/null || true
+if [ ! -d "$DAIDAI_DIR/deps/python/3.12" ]; then
+  python3 -m venv $DAIDAI_DIR/deps/python/3.12 2>/dev/null || true
 fi
 
 # 按配置写入 config.yaml（每次启动都覆盖，保证端口与 ports.conf 一致）

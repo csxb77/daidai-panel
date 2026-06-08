@@ -88,12 +88,28 @@ rm -f "${WRITE_PROBE}" 2>/dev/null || true
 
 # --- PATH / NODE_PATH ------------------------------------------------------
 export NODE_PATH="${DATA_DIR}/deps/nodejs/node_modules"
-export PATH="${DATA_DIR}/deps/nodejs/node_modules/.bin:${DATA_DIR}/deps/python/venv/bin:${PATH}"
+export DAIDAI_PYTHON_RUNTIME_ROOT="${DAIDAI_PYTHON_RUNTIME_ROOT:-/opt/daidai-python}"
+DAIDAI_PYTHON_BIN_PATH=""
+DAIDAI_PYTHON_LIB_PATH=""
+for py_ver in 3.12 3.11 3.10; do
+  py_root="${DAIDAI_PYTHON_RUNTIME_ROOT}/${py_ver}"
+  if [ -d "${py_root}/bin" ]; then
+    DAIDAI_PYTHON_BIN_PATH="${DAIDAI_PYTHON_BIN_PATH:+${DAIDAI_PYTHON_BIN_PATH}:}${py_root}/bin"
+  fi
+  if [ -d "${py_root}/lib" ]; then
+    DAIDAI_PYTHON_LIB_PATH="${DAIDAI_PYTHON_LIB_PATH:+${DAIDAI_PYTHON_LIB_PATH}:}${py_root}/lib"
+  fi
+done
+DEFAULT_PYTHON_VERSION="${DAIDAI_PYTHON_VERSION:-3.12}"
+export PATH="${DATA_DIR}/deps/nodejs/node_modules/.bin:${DATA_DIR}/deps/python/${DEFAULT_PYTHON_VERSION}/bin:${DAIDAI_PYTHON_BIN_PATH:+${DAIDAI_PYTHON_BIN_PATH}:}${PATH}"
+if [ -n "${DAIDAI_PYTHON_LIB_PATH}" ]; then
+  export LD_LIBRARY_PATH="${DAIDAI_PYTHON_LIB_PATH}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 
-if [ -d "${DATA_DIR}/deps/python/venv" ]; then
+if [ -d "${DATA_DIR}/deps/python/${DEFAULT_PYTHON_VERSION}" ]; then
   PY_MINOR=$(python3 -c 'import sys;print(f"{sys.version_info.minor}")' 2>/dev/null || echo "")
   if [ -n "${PY_MINOR}" ]; then
-    PY_SITE="${DATA_DIR}/deps/python/venv/lib/python3.${PY_MINOR}/site-packages"
+    PY_SITE="${DATA_DIR}/deps/python/${DEFAULT_PYTHON_VERSION}/lib/python3.${PY_MINOR}/site-packages"
     if [ -d "${PY_SITE}" ]; then
       export PYTHONPATH="${PY_SITE}"
     fi

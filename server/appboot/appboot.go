@@ -9,6 +9,7 @@ import (
 	"daidai-panel/database"
 	"daidai-panel/middleware"
 	"daidai-panel/model"
+	"daidai-panel/service"
 )
 
 // ResolveConfigPath 查找 config.yaml，覆盖 Docker / 二进制 / Windows 双击 / cwd 漂移等场景。
@@ -54,12 +55,16 @@ func InitWithConfig(cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("配置为空")
 	}
+	config.C = cfg
 
 	database.Init(&cfg.Database)
 	database.AutoMigrate(allModels()...)
 	database.EnsureColumns()
 
+	legacyPythonVenvMigration := service.MigrateLegacyManagedPythonVenvInfo()
+
 	model.InitDefaultConfigs()
+	service.NormalizeLegacyPythonVersionColumnsAfterVenvMigration(legacyPythonVenvMigration)
 	if err := middleware.ConfigureTrustedProxyCIDRs(model.GetRegisteredConfig("trusted_proxy_cidrs")); err != nil {
 		return fmt.Errorf("failed to configure trusted proxies: %w", err)
 	}
