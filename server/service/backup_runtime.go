@@ -386,6 +386,14 @@ func addDirectoryToTar(tw *tar.Writer, sourceDir, archiveRoot string) error {
 			return err
 		}
 		if info.IsDir() {
+			// 脚本目录打包时也要复用统一的异常目录过滤规则，
+			// 避免已被隔离/应忽略的污染目录重新进入备份包。
+			if strings.HasSuffix(filepath.Clean(archiveRoot), filepath.Clean("files"+string(os.PathSeparator)+"scripts")) && ShouldIgnoreScriptPath(sourceDir, path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(filepath.Clean(archiveRoot), filepath.Clean("files"+string(os.PathSeparator)+"scripts")) && ShouldIgnoreScriptPath(sourceDir, path) {
 			return nil
 		}
 

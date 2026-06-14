@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"daidai-panel/config"
 	"daidai-panel/database"
 	"daidai-panel/model"
 	"daidai-panel/testutil"
@@ -628,5 +629,72 @@ func TestCreateBackupIncludesSelectedContentInArchive(t *testing.T) {
 	}
 	if !foundPanelTitle {
 		t.Fatalf("expected selected config panel_title to be included, got %+v", manifest.Data.Configs.SystemConfigs)
+	}
+}
+
+func TestCreateBackupSkipsQuarantinedScriptEntriesInArchive(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	normalScriptPath := filepath.Join(config.C.Data.ScriptsDir, "demo", "keep.py")
+	if err := os.MkdirAll(filepath.Dir(normalScriptPath), 0o755); err != nil {
+		t.Fatalf("create normal script dir: %v", err)
+	}
+	if err := os.WriteFile(normalScriptPath, []byte("print('keep')\n"), 0o755); err != nil {
+		t.Fatalf("write normal script: %v", err)
+	}
+
+	quarantinedScriptPath := filepath.Join(config.C.Data.ScriptsDir, "%SystemDrive%", "ProgramData", "skip.py")
+	if err := os.MkdirAll(filepath.Dir(quarantinedScriptPath), 0o755); err != nil {
+		t.Fatalf("create quarantined script dir: %v", err)
+	}
+	if err := os.WriteFile(quarantinedScriptPath, []byte("print('skip')\n"), 0o755); err != nil {
+		t.Fatalf("write quarantined script: %v", err)
+	}
+
+	filePath, err := CreateBackup(BackupCreateOptions{
+		Selection: BackupSelection{
+			Scripts: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create backup: %v", err)
+	}
+
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read backup file: %v", err)
+	}
+
+	gzipReader, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("open gzip backup: %v", err)
+	}
+	defer gzipReader.Close()
+
+	tarReader := tar.NewReader(gzipReader)
+	var foundNormal bool
+	var foundQuarantined bool
+	for {
+		header, err := tarReader.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			t.Fatalf("read tar entry: %v", err)
+		}
+
+		if header.Name == "files/scripts/demo/keep.py" {
+			foundNormal = true
+		}
+		if strings.HasPrefix(header.Name, "files/scripts/%SystemDrive%/") {
+			foundQuarantined = true
+		}
+	}
+
+	if !foundNormal {
+		t.Fatal("expected normal script to be included in backup archive")
+	}
+	if foundQuarantined {
+		t.Fatal("expected quarantined script entry to be excluded from backup archive")
 	}
 }
