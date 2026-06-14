@@ -384,8 +384,7 @@ func shouldRequireDockerPanelUpdate() bool {
 	if _, err := os.Stat("/.dockerenv"); err == nil {
 		return true
 	}
-	return strings.TrimSpace(os.Getenv("IMAGE_NAME")) != "" ||
-		strings.TrimSpace(os.Getenv("CONTAINER_NAME")) != ""
+	return false
 }
 
 func inspectCurrentPanelContainer() (*dockerInspectInfo, error) {

@@ -453,3 +453,39 @@ func TestTriggerWatchtowerUpdateReturnsErrorPayloadMessage(t *testing.T) {
 		t.Fatalf("expected error payload message to surface, got %v", err)
 	}
 }
+
+func TestShouldRequireDockerPanelUpdateIgnoresDockerEnvVarsOutsideContainer(t *testing.T) {
+	t.Setenv("IMAGE_NAME", "linzixuanzz/daidai-panel:latest")
+	t.Setenv("CONTAINER_NAME", "daidai-panel")
+
+	if shouldRequireDockerPanelUpdate() {
+		t.Fatal("expected docker env vars alone to not force docker-only update path outside container")
+	}
+}
+
+func TestBuildPanelUpdatePlanForReleaseFallsBackToBinaryWhenDockerEnvVarsLeak(t *testing.T) {
+	t.Setenv("IMAGE_NAME", "linzixuanzz/daidai-panel:latest")
+	t.Setenv("CONTAINER_NAME", "daidai-panel")
+
+	release := &panelReleaseInfo{
+		TagName: "v2.2.19",
+		Name:    "v2.2.19",
+		Assets: []panelReleaseAsset{
+			{
+				Name:               "daidai-windows-amd64.zip",
+				BrowserDownloadURL: "https://example.com/daidai-windows-amd64.zip",
+			},
+		},
+	}
+
+	plan, err := buildPanelUpdatePlanForRelease(release)
+	if err != nil {
+		t.Fatalf("expected binary fallback when only docker env vars leak, got %v", err)
+	}
+	if plan.DeploymentType != panelUpdateDeploymentBinary {
+		t.Fatalf("expected binary fallback plan, got %#v", plan)
+	}
+	if plan.AssetName != "daidai-windows-amd64.zip" {
+		t.Fatalf("expected windows binary asset fallback, got %#v", plan)
+	}
+}
