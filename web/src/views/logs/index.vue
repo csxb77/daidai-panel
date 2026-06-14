@@ -189,8 +189,9 @@ function formatDuration(d: number | null) {
 }
 
 function formatTime(t: string | null) {
+  // 日志时间统一输出中文格式，避免浏览器按本地语言各自发挥
   if (!t) return '-'
-  return new Date(t).toLocaleString()
+  return new Date(t).toLocaleString('zh-CN', { hour12: false })
 }
 
 async function viewDetail(log: any) {
@@ -455,7 +456,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="logs-page dd-fixed-page dd-page-hide-heading">
     <!-- ======= Stat Cards + Trend Chart ======= -->
-    <div class="stat-cards">
+    <div class="stat-cards animate-fade-in-up">
       <div class="stat-card">
         <div class="stat-card__content">
           <span class="stat-card__label">当前页记录</span>
@@ -499,9 +500,9 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- ======= Toolbar ======= -->
-    <div class="toolbar">
+    <div class="toolbar animate-fade-in-up delay-50">
       <div class="toolbar__left">
-        <div class="status-tabs">
+        <div class="status-tabs status-tabs--cinematic">
           <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
           <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
           <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
@@ -533,9 +534,10 @@ onBeforeUnmount(() => {
     <!-- ======= Mobile Card Layout ======= -->
     <div v-if="isMobile" class="dd-mobile-list" v-loading="loading">
       <div
-        v-for="row in logs"
+        v-for="(row, cardIndex) in logs"
         :key="row.id"
-        class="dd-mobile-card log-card"
+        class="dd-mobile-card log-card log-card--cinematic"
+        :style="{ animationDelay: `${cardIndex * 36}ms` }"
       >
         <div class="dd-mobile-card__header">
           <div class="dd-mobile-card__title-wrap">
@@ -578,8 +580,9 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- ======= Desktop Table ======= -->
-    <div v-else class="table-card">
+    <div v-else class="table-card animate-fade-in-up delay-100">
       <el-table
+        class="logs-table-cinematic"
         v-loading="loading"
         :data="logs"
         style="width: 100%"
@@ -730,7 +733,7 @@ onBeforeUnmount(() => {
           <template #default="{ row }">{{ formatFileSize(row.size) }}</template>
         </el-table-column>
         <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ new Date(row.created_at).toLocaleString() }}</template>
+          <template #default="{ row }">{{ new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
@@ -804,11 +807,12 @@ onBeforeUnmount(() => {
   gap: 12px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
   border: 1px solid var(--el-border-color-lighter);
-  transition: transform 0.22s ease, box-shadow 0.22s ease;
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
 
   &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+    transform: translateY(-3px);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.1);
+    border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
   }
 
   &__content {
@@ -902,17 +906,18 @@ onBeforeUnmount(() => {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition: all 0.18s, transform 0.18s ease;
   white-space: nowrap;
 
   &:hover {
     color: var(--el-text-color-primary);
+    transform: translateY(-1px);
   }
 
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    box-shadow: 0 6px 16px rgba(64, 158, 255, 0.12);
     font-weight: 600;
   }
 }
@@ -987,6 +992,11 @@ onBeforeUnmount(() => {
 
   .el-table__row td {
     border-bottom: 1px solid #f5f5f5;
+    transition: background-color 0.18s ease;
+  }
+
+  .el-table__body tr:hover > td {
+    background: color-mix(in srgb, var(--el-color-primary-light-9) 76%, white);
   }
 
   .el-table__cell {
@@ -1377,4 +1387,43 @@ onBeforeUnmount(() => {
 
   .detail-hero-title { font-size: 15.5px; }
 }
+
+
+.log-card--cinematic {
+  animation: dd-log-card-in 320ms var(--dd-ease-emphasized) both;
+}
+
+.logs-table-cinematic {
+  animation: dd-log-table-in 340ms var(--dd-ease-emphasized) both;
+}
+
+@keyframes dd-log-card-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale3d(0.988, 0.988, 1);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+}
+
+@keyframes dd-log-table-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .log-card--cinematic,
+  .logs-table-cinematic {
+    animation: none;
+  }
+}
+
 </style>

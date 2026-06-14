@@ -354,7 +354,7 @@ async function loadVersion() {
       <main class="layout-main">
         <div class="route-shell">
           <router-view v-slot="{ Component, route: viewRoute }">
-            <transition name="page-fade" mode="out-in">
+            <transition name="page-shell" mode="out-in">
               <keep-alive :max="3">
                 <component :is="Component" :key="viewRoute.path" />
               </keep-alive>
@@ -570,7 +570,12 @@ async function loadVersion() {
   justify-content: center;
   cursor: pointer;
   color: var(--el-text-color-placeholder);
-  transition: all 0.2s;
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard),
+    transform var(--dd-motion-fast) var(--dd-ease-emphasized),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     border-color: var(--el-color-primary);
@@ -597,6 +602,8 @@ async function loadVersion() {
 
   &:hover {
     background: var(--el-fill-color-light);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
   }
 }
 
@@ -713,12 +720,17 @@ async function loadVersion() {
   cursor: pointer;
   color: var(--el-text-color-secondary);
   font-size: 12px;
-  transition: all 0.2s;
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    transform var(--dd-motion-fast) var(--dd-ease-emphasized),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     background: var(--el-fill-color-light);
     color: var(--el-color-primary);
     border-color: var(--el-color-primary-light-7);
+    transform: translateY(-1px);
   }
 }
 
@@ -866,7 +878,11 @@ async function loadVersion() {
   justify-content: center;
   cursor: pointer;
   color: var(--el-text-color-regular);
-  transition: all 0.25s;
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    transform var(--dd-motion-fast) var(--dd-ease-emphasized),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   position: relative;
 
   &:hover {
@@ -877,7 +893,7 @@ async function loadVersion() {
 
 .theme-toggle {
   &:hover {
-    transform: rotate(20deg) scale(1.1);
+    transform: translateY(-1px) scale(1.03);
   }
 }
 
@@ -1026,24 +1042,38 @@ async function loadVersion() {
 }
 
 // ==================== Page transition ====================
-// 改为纯 opacity 渐变；之前的 translateY 在 0.22s 进场动画里会让页面瞬间高于 .route-shell，
-// 部分 keep-alive 缓存页面切回来时还会触发整页滚动条出现，纯透明度切换不会影响布局尺寸。
-.page-fade-enter-active {
-  animation: pageEnter 0.18s ease-out;
+// 页面切换改成“轻镜头感”方案：少量位移 + 透明度 + 轻微缩放，
+// 既比纯淡入更有质感，又不会像大幅平移动画那样影响布局与滚动体验。
+.page-shell-enter-active {
+  animation: dd-page-shell-enter var(--dd-motion-page) var(--dd-ease-emphasized) both;
 }
 
-.page-fade-leave-active {
-  animation: pageFadeOut 0.12s ease-in;
+.page-shell-leave-active {
+  animation: dd-page-shell-leave 180ms var(--dd-ease-standard) both;
 }
 
-@keyframes pageEnter {
-  from { opacity: 0; }
-  to { opacity: 1; }
+@keyframes dd-page-shell-enter {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0) scale3d(0.992, 0.992, 1);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+    filter: blur(0);
+  }
 }
 
-@keyframes pageFadeOut {
-  from { opacity: 1; }
-  to { opacity: 0; }
+@keyframes dd-page-shell-leave {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, -8px, 0) scale3d(0.996, 0.996, 1);
+  }
 }
 
 // ==================== Mobile drawer ====================

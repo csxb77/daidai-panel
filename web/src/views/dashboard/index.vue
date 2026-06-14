@@ -35,6 +35,7 @@ import {
   View,
   Document,
   More,
+  UserFilled,
 } from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
 import { canAdminister, hasRequiredRole } from "@/utils/roles";
@@ -637,7 +638,7 @@ function rerunLog(log: any) {
 <template>
   <div class="dashboard-page dd-scroll-page">
     <!-- ============ Hero: Welcome banner + Quick actions ============ -->
-    <section class="hero-row">
+    <section class="hero-row animate-fade-in-up">
       <div class="hero-banner">
         <div class="hero-banner__bg">
           <span class="hero-banner__bubble bubble-1"></span>
@@ -647,7 +648,9 @@ function rerunLog(log: any) {
         <div class="hero-banner__content">
           <h2 class="hero-banner__title">
             {{ greeting }}，{{ authStore.user?.username || "User" }}
-            <span class="wave-emoji">👋</span>
+            <span class="hero-banner__user-icon">
+              <el-icon :size="16"><UserFilled /></el-icon>
+            </span>
           </h2>
           <p class="hero-banner__sub">{{ greetingSub }}</p>
         </div>
@@ -806,11 +809,11 @@ function rerunLog(log: any) {
     </section>
 
     <!-- ============ 4 Stat Cards ============ -->
-    <section class="stat-grid">
+    <section class="stat-grid animate-fade-in-up delay-50">
       <div
         v-for="card in statCards"
         :key="card.key"
-        class="stat-card"
+        class="stat-card stat-card--cinematic"
         @click="router.push(card.link)"
       >
         <div class="stat-card__main">
@@ -860,7 +863,7 @@ function rerunLog(log: any) {
     </section>
 
     <!-- ============ Middle row: Trend / Resources / Activity ============ -->
-    <section class="middle-grid">
+    <section class="middle-grid animate-fade-in-up delay-100">
       <!-- 执行趋势 -->
       <div class="panel panel--trend">
         <div class="panel-header">
@@ -1002,7 +1005,7 @@ function rerunLog(log: any) {
           <div
             v-for="(act, idx) in activityList"
             :key="act.id || idx"
-            class="activity-item"
+            class="activity-item activity-item--cinematic"
           >
             <span class="activity-item__icon" :class="`is-${act.type}`">
               <el-icon :size="12">
@@ -1030,7 +1033,7 @@ function rerunLog(log: any) {
     </section>
 
     <!-- ============ Bottom row: Recent task table / Task stats ring ============ -->
-    <section class="bottom-grid">
+    <section class="bottom-grid animate-fade-in-up delay-150">
       <!-- 最近执行任务 -->
       <div class="panel panel--logs">
         <div class="panel-header">
@@ -1118,7 +1121,7 @@ function rerunLog(log: any) {
             <tr v-if="filteredLogs.length === 0">
               <td colspan="7" class="empty-cell">暂无记录</td>
             </tr>
-            <tr v-for="log in filteredLogs" :key="log.id">
+            <tr v-for="(log, rowIndex) in filteredLogs" :key="log.id" :style="{ animationDelay: `${Number(rowIndex) * 36}ms` }" class="log-table__row-cinematic">
               <td>
                 <span class="log-cell-name">{{
                   log.task_name || "未命名任务"
@@ -1297,8 +1300,9 @@ function rerunLog(log: any) {
 
 .hero-banner {
   position: relative;
+  animation: dd-hero-pan-in 420ms var(--dd-ease-emphasized) both;
   border-radius: 16px;
-  padding: 22px 26px;
+  padding: 24px 28px;
   overflow: hidden;
   contain: layout paint;
   background: linear-gradient(135deg, #ecfeff 0%, #e0f2fe 46%, #dbeafe 100%);
@@ -1307,7 +1311,7 @@ function rerunLog(log: any) {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  min-height: 130px;
+  min-height: 138px;
 }
 
 .hero-banner__bg {
@@ -1362,36 +1366,25 @@ function rerunLog(log: any) {
   line-height: 1.3;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
-.wave-emoji {
-  display: inline-block;
-  animation: wave 1.6s ease-in-out 0.4s 2;
-  transform-origin: 70% 70%;
-}
-
-@keyframes wave {
-  0%,
-  100% {
-    transform: rotate(0deg);
-  }
-  20% {
-    transform: rotate(14deg);
-  }
-  40% {
-    transform: rotate(-10deg);
-  }
-  60% {
-    transform: rotate(12deg);
-  }
-  80% {
-    transform: rotate(-4deg);
-  }
+.hero-banner__user-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #0891b2;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(8, 145, 178, 0.12);
+  box-shadow: 0 4px 12px rgba(8, 145, 178, 0.08);
 }
 
 .hero-banner__sub {
-  margin: 8px 0 0;
+  margin: 10px 0 0;
+  max-width: 680px;
   font-size: 14px;
   color: rgba(30, 41, 59, 0.7);
   line-height: 1.5;
@@ -1412,13 +1405,13 @@ function rerunLog(log: any) {
 
 .hero-quick {
   border-radius: 16px;
-  padding: 16px 18px 12px;
+  padding: 18px 18px 14px;
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .hero-quick__header {
@@ -1441,18 +1434,45 @@ function rerunLog(log: any) {
 
 .quick-tile {
   display: flex;
+  position: relative;
+  overflow: hidden;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 8px 4px;
+  padding: 10px 6px;
   border: none;
   background: transparent;
   border-radius: 10px;
   cursor: pointer;
-  transition: background 0.18s;
+  transition:
+    background 0.18s ease,
+    transform 0.18s ease;
 
   &:hover {
     background: var(--el-fill-color-light);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  }
+
+  &:active {
+    transform: scale(0.985);
+  }
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -40% 0 auto;
+    height: 70%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.34), transparent);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 180ms ease, transform 180ms ease;
+    pointer-events: none;
+  }
+
+  &:hover::after {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -1481,6 +1501,7 @@ function rerunLog(log: any) {
 
 .stat-card {
   background: var(--el-bg-color);
+  position: relative;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 14px;
   padding: 16px 18px;
@@ -1496,11 +1517,24 @@ function rerunLog(log: any) {
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 
   &:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
-    border-color: var(--el-border-color);
+    transform: translateY(-4px);
+    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.1);
+    border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
+  }
+
+  &:active {
+    transform: scale(0.988);
   }
 }
+
+.stat-card--cinematic {
+  animation: dd-card-rise-in 360ms var(--dd-ease-emphasized) both;
+}
+
+.stat-card--cinematic:nth-child(1) { animation-delay: 30ms; }
+.stat-card--cinematic:nth-child(2) { animation-delay: 70ms; }
+.stat-card--cinematic:nth-child(3) { animation-delay: 110ms; }
+.stat-card--cinematic:nth-child(4) { animation-delay: 150ms; }
 
 .stat-card__main {
   display: flex;
@@ -1605,6 +1639,7 @@ function rerunLog(log: any) {
 
 .panel {
   background: var(--el-bg-color);
+  animation: dd-panel-rise-in 420ms var(--dd-ease-emphasized) both;
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 14px;
   display: flex;
@@ -1615,6 +1650,7 @@ function rerunLog(log: any) {
 
 .panel-header {
   display: flex;
+  position: relative;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -1659,10 +1695,11 @@ function rerunLog(log: any) {
   font-size: 12px;
   padding: 4px 6px;
   border-radius: 6px;
-  transition: background 0.15s;
+  transition: background 0.15s, transform 0.18s ease, border-color 0.18s ease;
 
   &:hover {
     background: var(--el-color-primary-light-9);
+    transform: translateX(1px);
   }
 }
 
@@ -1888,6 +1925,7 @@ function rerunLog(log: any) {
 
 .activity-item {
   display: flex;
+  position: relative;
   align-items: flex-start;
   gap: 10px;
   padding: 10px 6px;
@@ -1896,6 +1934,7 @@ function rerunLog(log: any) {
 
   &:hover {
     background: var(--el-fill-color-light);
+    transform: translateX(2px);
   }
 }
 
@@ -1999,24 +2038,29 @@ function rerunLog(log: any) {
   }
 
   tbody tr {
-    transition: background 0.15s;
+    transition: background 0.15s, transform 0.18s ease, box-shadow 0.18s ease;
 
     &:hover {
-      background: var(--el-fill-color-light);
+      background: color-mix(in srgb, var(--el-color-primary-light-9) 76%, white);
+      box-shadow: inset 2px 0 0 var(--el-color-primary);
     }
   }
+}
 
-  td {
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--el-border-color-lighter);
-    color: var(--el-text-color-primary);
-    vertical-align: middle;
-    line-height: 1.35;
-  }
+.log-table__row-cinematic {
+  animation: dd-table-row-in 320ms var(--dd-ease-emphasized) both;
+}
 
-  tbody tr:last-child td {
-    border-bottom: none;
-  }
+.log-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  color: var(--el-text-color-primary);
+  vertical-align: middle;
+  line-height: 1.35;
+}
+
+.log-table tbody tr:last-child td {
+  border-bottom: none;
 }
 
 .log-table .col-center {
@@ -2382,4 +2426,60 @@ function rerunLog(log: any) {
     width: 100%;
   }
 }
+
+
+@keyframes dd-hero-pan-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 14px, 0) scale3d(0.992, 0.992, 1);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+}
+
+@keyframes dd-card-rise-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 18px, 0) scale3d(0.985, 0.985, 1);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+}
+
+@keyframes dd-panel-rise-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 16px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes dd-table-row-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-banner,
+  .stat-card--cinematic,
+  .panel,
+  .log-table__row-cinematic,
+  .activity-item--cinematic {
+    animation: none;
+  }
+}
+
 </style>

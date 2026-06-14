@@ -161,6 +161,15 @@ body {
   --dd-page-padding: 20px;
   --dd-card-radius: 12px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  // 全局动效 token：页面、卡片、按钮、浮层统一走这一套速度与缓动
+  --dd-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --dd-ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
+  --dd-ease-decelerate: cubic-bezier(0.16, 1, 0.3, 1);
+  --dd-motion-fast: 160ms;
+  --dd-motion-normal: 240ms;
+  --dd-motion-page: 280ms;
+  --dd-motion-slow: 360ms;
+  --dd-press-scale: 0.985;
   --dd-font-mono:
     "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
   --dd-font-ui:
@@ -200,18 +209,31 @@ a {
 .el-button {
   border-radius: var(--el-border-radius-base);
   font-weight: 500;
-  transition: all var(--dd-transition);
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard),
+    transform 110ms var(--dd-ease-emphasized);
+
+  &:active {
+    transform: scale(var(--dd-press-scale));
+  }
 }
 
 .el-card {
   border-radius: var(--dd-card-radius);
   border: 1px solid var(--el-border-color-lighter);
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-  transition: all var(--dd-transition);
+  transition:
+    border-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
+    transform var(--dd-motion-fast) var(--dd-ease-emphasized);
   overflow: hidden;
 
   &:hover {
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
   }
 
   .el-card__header {
@@ -227,6 +249,8 @@ a {
 
 .el-dialog {
   --el-dialog-margin-top: clamp(16px, 4vh, 40px);
+  animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized);
+  transform-origin: center top;
   border-radius: 16px;
   overflow: hidden;
   max-height: calc(100dvh - (var(--el-dialog-margin-top) * 2));
@@ -261,6 +285,62 @@ a {
 .el-overlay {
   background-color: rgba(15, 23, 42, 0.24) !important;
   backdrop-filter: blur(1.5px);
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    backdrop-filter var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+// 统一接管 Element Plus 浮层动画，让弹窗、抽屉、遮罩的镜头感一致
+.el-overlay-dialog,
+.v-modal,
+.el-drawer-fade-enter-active,
+.el-drawer-fade-leave-active,
+.dialog-fade-enter-active,
+.dialog-fade-leave-active {
+  animation-duration: var(--dd-motion-normal) !important;
+  animation-timing-function: var(--dd-ease-emphasized) !important;
+}
+
+.dialog-fade-enter-active .el-overlay-dialog {
+  animation: dd-dialog-overlay-in var(--dd-motion-fast) var(--dd-ease-standard) both !important;
+}
+
+.dialog-fade-leave-active .el-overlay-dialog {
+  animation: dd-dialog-overlay-out 180ms var(--dd-ease-standard) both !important;
+}
+
+.dialog-fade-enter-active {
+  animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized) both !important;
+}
+
+.dialog-fade-leave-active {
+  animation: dd-dialog-surface-out 180ms var(--dd-ease-standard) both !important;
+}
+
+.el-drawer-fade-enter-from .rtl,
+.el-drawer-fade-leave-to .rtl {
+  transform: translate3d(100%, 0, 0) !important;
+}
+
+.el-drawer-fade-enter-from .ltr,
+.el-drawer-fade-leave-to .ltr {
+  transform: translate3d(-100%, 0, 0) !important;
+}
+
+.el-drawer-fade-enter-from .ttb,
+.el-drawer-fade-leave-to .ttb {
+  transform: translate3d(0, -100%, 0) !important;
+}
+
+.el-drawer-fade-enter-from .btt,
+.el-drawer-fade-leave-to .btt {
+  transform: translate3d(0, 100%, 0) !important;
+}
+
+.el-drawer {
+  transition:
+    transform var(--dd-motion-normal) var(--dd-ease-emphasized),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard) !important;
 }
 
 .el-table {
@@ -1485,5 +1565,26 @@ html.dark {
     .el-card__body {
       padding: 16px;
     }
+  }
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    // 系统要求减少动态效果时，把动效压缩到几乎不可见
+    --dd-motion-fast: 1ms;
+    --dd-motion-normal: 1ms;
+    --dd-motion-page: 1ms;
+    --dd-motion-slow: 1ms;
+    --dd-press-scale: 1;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
   }
 }

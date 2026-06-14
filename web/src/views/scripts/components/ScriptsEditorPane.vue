@@ -129,7 +129,7 @@ watch(
     v-show="!isMobile || mobileShowEditor"
   >
     <!-- Empty state -->
-    <div v-if="!selectedFile" class="editor-empty">
+    <div v-if="!selectedFile" class="editor-empty animate-fade-in-up">
       <div class="empty-card">
         <div class="empty-aura" aria-hidden="true"></div>
         <div class="empty-badge">
@@ -154,7 +154,7 @@ watch(
 
     <template v-else>
       <!-- Hero header -->
-      <header class="editor-hero">
+      <header class="editor-hero animate-fade-in-up">
         <div class="hero-file">
           <el-button
             v-if="isMobile"
@@ -297,7 +297,7 @@ watch(
       </header>
 
       <!-- Editor body -->
-      <div class="editor-body" v-loading="loading">
+      <div class="editor-body animate-fade-in-up delay-50" v-loading="loading">
         <div v-if="isBinary" class="binary-card">
           <div class="binary-card-title">二进制文件</div>
           <p class="binary-card-text">
@@ -316,7 +316,7 @@ watch(
       </div>
 
       <!-- Status strip -->
-      <footer v-if="!isBinary && selectedFile" class="editor-statusbar">
+      <footer v-if="!isBinary && selectedFile" class="editor-statusbar animate-fade-in-up delay-100">
         <div class="status-group">
           <span v-if="languageLabel" class="status-item status-item--lang">{{
             languageLabel
@@ -351,6 +351,7 @@ watch(
   display: flex;
   flex-direction: column;
   background: #fff;
+  animation: dd-editor-shell-in 360ms var(--dd-ease-emphasized) both;
   font-family: var(--dd-font-ui);
   overflow: hidden;
 }
@@ -437,6 +438,7 @@ watch(
 
 .create-cta {
   background: linear-gradient(135deg, #2563eb, #0ea5e9);
+  transition: transform 0.18s ease, box-shadow 0.2s ease, filter 0.2s ease;
   border: none;
   min-width: 160px;
 
@@ -444,6 +446,9 @@ watch(
   &:focus {
     background: linear-gradient(135deg, #1d4ed8, #0284c7);
     border: none;
+    transform: translateY(-1px);
+    box-shadow: 0 14px 28px rgba(37, 99, 235, 0.2);
+    filter: saturate(1.05);
   }
 }
 
@@ -455,8 +460,10 @@ watch(
   justify-content: space-between;
   gap: 14px;
   border-bottom: 1px solid #f0f0f0;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.03);
   background: #fff;
   flex-shrink: 0;
+  position: relative;
   min-width: 0;
 }
 
@@ -609,6 +616,16 @@ watch(
 .action-btn {
   border-radius: 8px;
   font-weight: 500;
+  transition: transform 0.16s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+
+  &:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  }
+
+  &:active {
+    transform: scale(0.985);
+  }
 }
 
 .action-btn--primary {
@@ -694,6 +711,7 @@ watch(
 /* ---------------- Status bar ---------------- */
 .editor-statusbar {
   flex-shrink: 0;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -780,4 +798,23 @@ watch(
     padding: 28px 20px;
   }
 }
+
+
+@keyframes dd-editor-shell-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scripts-editor {
+    animation: none;
+  }
+}
+
 </style>
