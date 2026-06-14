@@ -665,7 +665,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: linear-gradient(135deg, #1890ff, #36cfc9);
+  background: linear-gradient(135deg, #1677ff, #22c3aa);
   box-shadow: 0 6px 16px -8px rgba(24, 144, 255, 0.45);
   flex-shrink: 0;
 }
@@ -726,13 +726,13 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 .totp-submit-btn {
   border-radius: 10px;
   padding: 0 18px;
-  background: linear-gradient(135deg, #1890ff, #36cfc9);
+  background: linear-gradient(135deg, #1677ff, #22c3aa);
   border: none;
-  box-shadow: 0 8px 20px -12px rgba(24, 144, 255, 0.45);
+  box-shadow: 0 8px 20px -12px rgba(22, 119, 255, 0.35);
 
   &:hover,
   &:focus {
-    background: linear-gradient(135deg, #1677ff, #13c2c2);
+    background: linear-gradient(135deg, #1565d8, #1da98f);
     border: none;
   }
 
@@ -772,16 +772,16 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 
     &:hover {
       background: rgba(255, 255, 255, 0.9);
-      transform: rotate(20deg);
+      transform: translateY(-1px);
     }
   }
 }
 
 .login-container {
   display: flex;
-  width: 900px;
+  width: 940px;
   max-width: 100%;
-  min-height: 540px;
+  min-height: 560px;
   border-radius: 24px;
   overflow: hidden;
   box-shadow:
@@ -804,13 +804,13 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 
 .login-left {
   flex: 1;
-  background: linear-gradient(135deg, #f5f5f5, #e8e8e8);
+  background: linear-gradient(180deg, #f7fafc 0%, #eef4f8 100%);
   display: flex;
   align-items: flex-end;
   justify-content: center;
   position: relative;
   overflow: hidden;
-  padding: 40px 20px 0;
+  padding: 32px 24px 0;
   cursor: default;
   transition: background 0.4s ease;
 }
@@ -827,7 +827,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 48px 40px;
+  padding: 52px 44px;
   transition: background 0.4s ease;
 }
 
@@ -842,12 +842,12 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 
 .login-header {
   text-align: center;
-  margin-bottom: 32px;
+  margin-bottom: 36px;
 
   .login-logo {
     width: 48px;
     height: 48px;
-    margin: 0 auto 20px;
+    margin: 0 auto 18px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -858,10 +858,10 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   }
 
   h2 {
-    font-size: 26px;
+    font-size: 28px;
     font-weight: 700;
     color: #1f1f1f;
-    margin: 0 0 6px;
+    margin: 0 0 8px;
     transition: color 0.4s;
   }
 
@@ -875,7 +875,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 
 .login-form {
   :deep(.el-form-item) {
-    margin-bottom: 20px;
+    margin-bottom: 18px;
   }
 
   :deep(.el-input__wrapper) {
@@ -960,7 +960,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 <style lang="scss">
 html.dark {
   .login-page {
-    background: #1a1a2e;
+    background: #101828;
   }
 
   .theme-toggle .theme-toggle-btn {
@@ -979,11 +979,11 @@ html.dark {
   }
 
   .login-left {
-    background: linear-gradient(135deg, #2a2a3e, #232338);
+    background: linear-gradient(180deg, #17212f 0%, #111927 100%);
   }
 
   .login-right {
-    background: #1e1e30;
+    background: #111827;
   }
 
   .login-loading {

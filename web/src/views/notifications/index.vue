@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { notificationApi } from '@/api/notification'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Bell, Check, CircleClose, Message, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
 
 const { isMobile, dialogFullscreen } = useResponsive()
@@ -73,18 +74,18 @@ const typeColorMap: Record<string, { bg: string; color: string; badge: string }>
   wecom: { bg: '#e8f5e9', color: '#4caf50', badge: 'success' },
   wecom_app: { bg: '#e8f5e9', color: '#4caf50', badge: 'success' },
   pushplus: { bg: '#e3f2fd', color: '#2196f3', badge: '' },
-  feishu: { bg: '#e8eaf6', color: '#3f51b5', badge: '' },
+  feishu: { bg: '#eff6ff', color: '#2563eb', badge: '' },
   dingtalk: { bg: '#fff3e0', color: '#ff9800', badge: 'warning' },
   email: { bg: '#fce4ec', color: '#e91e63', badge: 'danger' },
-  webhook: { bg: '#f3e5f5', color: '#9c27b0', badge: 'warning' },
-  custom: { bg: '#f3e5f5', color: '#9c27b0', badge: 'warning' },
+  webhook: { bg: '#eff6ff', color: '#2563eb', badge: 'warning' },
+  custom: { bg: '#ecfeff', color: '#0891b2', badge: 'warning' },
   telegram: { bg: '#e3f2fd', color: '#2196f3', badge: '' },
   bark: { bg: '#fff8e1', color: '#ffc107', badge: 'warning' },
   serverchan: { bg: '#e0f7fa', color: '#00bcd4', badge: '' },
   gotify: { bg: '#e8f5e9', color: '#4caf50', badge: 'success' },
   pushdeer: { bg: '#fff3e0', color: '#ff9800', badge: 'warning' },
   pushme: { bg: '#e3f2fd', color: '#2196f3', badge: '' },
-  discord: { bg: '#ede7f6', color: '#673ab7', badge: '' },
+  discord: { bg: '#e0f2fe', color: '#0284c7', badge: '' },
   slack: { bg: '#fce4ec', color: '#e91e63', badge: 'danger' },
   ntfy: { bg: '#e0f2f1', color: '#009688', badge: 'success' },
   wxpusher: { bg: '#e8f5e9', color: '#4caf50', badge: 'success' },
@@ -604,7 +605,7 @@ function getChannelConfigSummary(row: any): string[] {
     <!-- Page Header -->
     <div class="page-header">
       <div>
-        <h2>🔔 通知渠道</h2>
+        <h2 class="page-title-with-icon"><el-icon><Bell /></el-icon><span>通知渠道</span></h2>
         <p class="page-subtitle">配置任务执行结果的通知渠道</p>
       </div>
     </div>
@@ -714,7 +715,7 @@ function getChannelConfigSummary(row: any): string[] {
                 </div>
                 <div class="dd-mobile-card__field">
                   <span class="dd-mobile-card__label">创建时间</span>
-                  <span class="dd-mobile-card__value">{{ new Date(row.created_at).toLocaleString() }}</span>
+                  <span class="dd-mobile-card__value">{{ new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
                 </div>
               </div>
               <div class="dd-mobile-card__actions notification-card__actions">
@@ -779,7 +780,7 @@ function getChannelConfigSummary(row: any): string[] {
                   >
                     {{ row.last_test_status === 'success' ? '测试通过' : row.last_test_status === 'error' || row.last_test_status === 'failed' ? '测试未通过' : '未测试' }}
                   </el-tag>
-                  <span class="time-text">{{ new Date(row.last_test_at).toLocaleDateString() }}</span>
+                  <span class="time-text">{{ new Date(row.last_test_at).toLocaleDateString('zh-CN') }}</span>
                 </div>
                 <span v-else class="text-muted">未测试</span>
               </template>
@@ -787,7 +788,7 @@ function getChannelConfigSummary(row: any): string[] {
             <el-table-column prop="created_at" label="创建时间" width="170">
               <template #default="{ row }">
                 <div class="time-cell">
-                  <span class="time-text">{{ new Date(row.created_at).toLocaleString() }}</span>
+                  <span class="time-text">{{ new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
                 </div>
               </template>
             </el-table-column>
@@ -874,8 +875,11 @@ function getChannelConfigSummary(row: any): string[] {
   margin-bottom: 18px;
   gap: 16px;
 
+  .page-title-with-icon { display: inline-flex; align-items: center; gap: 8px; }
+  .page-title-with-icon :deep(.el-icon) { color: var(--el-color-primary); }
+
   h2 { margin: 0; font-size: 22px; font-weight: 700; color: var(--el-text-color-primary); line-height: 1.3; }
-  .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 4px 0 0; }
+  .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 6px 0 0; line-height: 1.6; max-width: 720px; }
 }
 
 .stat-cards {
@@ -913,7 +917,6 @@ function getChannelConfigSummary(row: any): string[] {
     &--green { color: #10b981; }
     &--orange { color: #f59e0b; }
     &--red { color: #ef4444; }
-    &--purple { color: #8b5cf6; }
   }
   &__sub { font-size: 12px; color: var(--el-text-color-placeholder); }
   &__icon {

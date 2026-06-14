@@ -2,7 +2,7 @@
   <div class="deps-page dd-scroll-page dd-page-hide-heading">
     <div class="page-header">
       <div>
-        <h2>📚 依赖管理</h2>
+        <h2 class="page-title-with-icon"><el-icon><Box /></el-icon><span>依赖管理</span></h2>
         <p class="page-subtitle">
           管理运行时所需的依赖包和系统软件，确保依赖版本和任务稳定运行
         </p>
@@ -890,6 +890,19 @@ import {
 } from "@/api/androidRuntime";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
+  ArrowDown,
+  Box,
+  CircleClose,
+  Cpu,
+  Delete,
+  Download,
+  Plus,
+  Refresh,
+  RefreshRight,
+  Search,
+  Setting,
+} from "@element-plus/icons-vue";
+import {
   openAuthorizedEventStream,
   type EventStreamConnection,
 } from "@/utils/sse";
@@ -1632,21 +1645,21 @@ const letterColors: Record<string, string> = {
   d: "#67c23a",
   e: "#f56c6c",
   f: "#909399",
-  g: "#b37feb",
+  g: "#2f7df6",
   h: "#36cfc9",
   i: "#409eff",
-  j: "#ff85c0",
+  j: "#0ea5e9",
   k: "#ffc53d",
-  l: "#b37feb",
+  l: "#10b981",
   m: "#e6a23c",
   n: "#409eff",
   o: "#36cfc9",
   p: "#67c23a",
   q: "#f56c6c",
-  r: "#ff85c0",
+  r: "#06b6d4",
   s: "#ffc53d",
   t: "#409eff",
-  u: "#b37feb",
+  u: "#22c55e",
   v: "#36cfc9",
   w: "#e6a23c",
   x: "#909399",
@@ -1719,8 +1732,20 @@ onBeforeUnmount(() => {
   .page-subtitle {
     font-size: 13px;
     color: var(--el-text-color-secondary);
-    margin: 4px 0 0;
+    margin: 6px 0 0;
+    line-height: 1.6;
+    max-width: 720px;
   }
+}
+
+.page-title-with-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.page-title-with-icon :deep(.el-icon) {
+  color: var(--el-color-primary);
 }
 
 // ---------- Stat Cards ----------
@@ -1786,9 +1811,6 @@ onBeforeUnmount(() => {
     }
     &--red {
       color: #ef4444;
-    }
-    &--purple {
-      color: #8b5cf6;
     }
   }
   &__label,

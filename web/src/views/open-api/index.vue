@@ -2,7 +2,7 @@
   <div class="open-api-page dd-scroll-page dd-page-hide-heading">
     <div class="page-header">
       <div>
-        <h2>🔑 Open API 管理</h2>
+        <h2 class="page-title-with-icon"><el-icon><Key /></el-icon><span>Open API 管理</span></h2>
         <p class="page-subtitle">
           创建和管理外部 API 调用应用密钥，控制接口访问权限和速率。
         </p>
@@ -425,7 +425,7 @@
           <template #default="{ row }">
             <span class="time-text">{{
               row.created_at
-                ? new Date(row.created_at).toLocaleString("zh-CN")
+                ? formatDateTime(row.created_at)
                 : "-"
             }}</span>
           </template>
@@ -622,7 +622,7 @@
         <el-table-column prop="ip" label="IP" width="140" />
         <el-table-column prop="created_at" label="时间" width="170">
           <template #default="{ row }">
-            {{ new Date(row.created_at).toLocaleString("zh-CN") }}
+            {{ formatDateTime(row.created_at) }}
           </template>
         </el-table-column>
       </el-table>
@@ -643,6 +643,17 @@
 import { ref, reactive, computed, onMounted } from "vue";
 import { openApiApi } from "@/api/open-api";
 import { ElMessage, ElMessageBox } from "element-plus";
+import {
+  Connection,
+  DocumentCopy,
+  Hide,
+  Key,
+  Lock,
+  Plus,
+  Refresh,
+  Search,
+  View,
+} from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
 
 const apps = ref<any[]>([]);
@@ -732,6 +743,12 @@ const maskKey = (key: string): string => {
   if (key.length <= 8) return key;
   return key.substring(0, 3) + "***" + key.substring(key.length - 5);
 };
+
+function formatDateTime(value?: string | null) {
+  // 统一输出中文时间，避免不同浏览器环境下格式漂移
+  if (!value) return "-";
+  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
 
 const filteredApps = computed(() => {
   let list = apps.value;
@@ -973,7 +990,17 @@ onMounted(loadApps);
   justify-content: space-between;
   align-items: flex-start;
   margin-bottom: 18px;
-  gap: 16px;
+  gap: 14px;
+
+  .page-title-with-icon {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .page-title-with-icon :deep(.el-icon) {
+    color: var(--el-color-primary);
+  }
 
   h2 {
     margin: 0;
@@ -985,7 +1012,9 @@ onMounted(loadApps);
   .page-subtitle {
     font-size: 13px;
     color: var(--el-text-color-secondary);
-    margin: 4px 0 0;
+    margin: 6px 0 0;
+    line-height: 1.6;
+    max-width: 720px;
   }
   .header-actions {
     display: flex;
@@ -1000,6 +1029,7 @@ onMounted(loadApps);
   grid-template-columns: 1fr auto;
   gap: 14px;
   margin-bottom: 18px;
+  align-items: stretch;
 }
 
 .stat-cards {
@@ -1087,10 +1117,10 @@ onMounted(loadApps);
 .trend-chart-card {
   background: var(--el-bg-color);
   border-radius: 14px;
-  padding: 16px 18px;
+  padding: 18px 18px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
   border: 1px solid var(--el-border-color-lighter);
-  width: 320px;
+  width: 300px;
   display: flex;
   flex-direction: column;
 
