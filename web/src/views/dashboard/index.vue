@@ -2387,7 +2387,7 @@ function rerunLog(log: any) {
 
 @media (max-width: 768px) {
   .hero-banner {
-    padding: 16px 18px;
+    padding: 14px 16px;
     min-height: auto;
   }
   .hero-banner__title {
@@ -2401,12 +2401,17 @@ function rerunLog(log: any) {
   }
 
   .hero-quick__grid {
-    grid-template-columns: repeat(5, 1fr);
-    gap: 4px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
   }
   .quick-tile__icon {
     width: 34px;
     height: 34px;
+  }
+
+  .quick-tile {
+    padding: 8px 4px;
+    gap: 5px;
   }
   .quick-tile__label {
     font-size: 11px;
@@ -2427,7 +2432,7 @@ function rerunLog(log: any) {
   }
 
   .panel-header {
-    padding: 12px 14px;
+    padding: 12px 12px;
     flex-wrap: wrap;
   }
   .panel-header__title {
@@ -2440,7 +2445,7 @@ function rerunLog(log: any) {
   }
 
   .resource-list {
-    padding: 14px;
+    padding: 12px;
   }
   .resource-row__top {
     gap: 6px;

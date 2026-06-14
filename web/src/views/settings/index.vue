@@ -496,6 +496,9 @@ watch(
   justify-content: flex-end;
   align-items: center;
   margin-bottom: 12px;
+  padding: 4px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
 }
 
 .page-header {
@@ -506,7 +509,7 @@ watch(
   gap: 16px;
 
   h2 { margin: 0; font-size: 22px; font-weight: 700; color: var(--el-text-color-primary); line-height: 1.3; }
-  .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 4px 0 0; display: block; }
+  .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 6px 0 0; line-height: 1.6; display: block; max-width: 720px; }
 }
 
 .page-title {
@@ -521,10 +524,12 @@ watch(
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  font-weight: 500;
 }
 
 .overview-grid {
   display: grid;
+  animation: fadeInUp 0.34s var(--dd-ease-emphasized) both;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
   margin-bottom: 16px;
@@ -534,14 +539,42 @@ watch(
   .el-tabs__header {
     margin-bottom: 20px;
   }
+
+  .el-tabs__nav-wrap::after {
+    height: 1px;
+    background-color: color-mix(in srgb, var(--el-border-color-lighter) 82%, transparent);
+  }
+
+  .el-tabs__nav-scroll {
+    padding: 4px;
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
+  }
+
   .el-tabs__item {
     font-size: 14px;
-    &.is-active { font-weight: 600; }
+    border-radius: 10px;
+    transition: color 0.18s ease, background-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+
+    &:hover {
+      transform: translateY(-1px);
+    }
+
+    &.is-active {
+      font-weight: 600;
+      background: color-mix(in srgb, var(--el-bg-color) 94%, transparent);
+      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+    }
+  }
+
+  .el-tabs__active-bar {
+    display: none;
   }
 }
 
 .overview-info-grid {
   display: grid;
+  animation: fadeInUp 0.4s var(--dd-ease-emphasized) both;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
 
@@ -572,6 +605,20 @@ watch(
 
   :deep(.el-tabs__item) {
     white-space: nowrap;
+  }
+}
+</style>
+
+
+<style lang="scss">
+html.dark {
+  .settings-page .settings-toolbar,
+  .settings-page :deep(.el-tabs__nav-scroll) {
+    background: color-mix(in srgb, var(--el-fill-color-light) 72%, black);
+  }
+
+  .settings-page :deep(.el-tabs__item.is-active) {
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.26);
   }
 }
 </style>

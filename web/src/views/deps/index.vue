@@ -1758,6 +1758,7 @@ onBeforeUnmount(() => {
 
 .stat-card {
   background: var(--el-bg-color);
+  position: relative;
   border-radius: 14px;
   padding: 16px 18px;
   display: flex;
@@ -1773,8 +1774,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
 
   &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+    transform: translateY(-3px);
+    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
+    border-color: color-mix(in srgb, var(--el-color-primary) 18%, var(--el-border-color));
   }
   &--active {
     border-color: var(--el-color-primary);
@@ -1969,6 +1971,7 @@ onBeforeUnmount(() => {
 }
 .status-tabs {
   display: inline-flex;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
   background: var(--el-fill-color-light);
   border-radius: 10px;
   padding: 3px;

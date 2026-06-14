@@ -1404,17 +1404,26 @@ onBeforeUnmount(() => {
     }
 
     &__right {
-      justify-content: flex-end;
+      justify-content: stretch;
+      flex-wrap: wrap;
+      padding: 0;
+      background: transparent;
+    }
+
+    &__right > * {
+      flex: 1 1 calc(50% - 4px);
     }
   }
 
   .status-tabs {
     width: 100%;
     overflow-x: auto;
+    scrollbar-width: none;
   }
 
   .batch-actions {
     flex-wrap: wrap;
+    width: 100%;
   }
 
   .pagination-bar {

@@ -201,7 +201,7 @@ function getRoleName(role: string) {
   <div class="users-page dd-fixed-page dd-page-hide-heading">
     <div class="page-header">
       <div>
-        <h2>👥 用户管理</h2>
+        <h2 class="page-title-with-icon"><el-icon><User /></el-icon><span>用户管理</span></h2>
         <p class="page-subtitle">管理系统内所有用户的权限和角色，控制用户对系统各功能的访问权限</p>
       </div>
       <div class="header-actions">
@@ -432,7 +432,9 @@ function getRoleName(role: string) {
   gap: 16px;
 
   h2 { margin: 0; font-size: 22px; font-weight: 700; color: var(--el-text-color-primary); line-height: 1.3; }
-  .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 4px 0 0; }
+  .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 6px 0 0; line-height: 1.6; max-width: 720px; }
+  .page-title-with-icon { display: inline-flex; align-items: center; gap: 8px; }
+  .page-title-with-icon :deep(.el-icon) { color: var(--el-color-primary); }
   .header-actions { display: flex; gap: 10px; flex-shrink: 0; }
 }
 
@@ -445,6 +447,7 @@ function getRoleName(role: string) {
 
 .stat-card {
   background: var(--el-bg-color);
+  position: relative;
   border-radius: 14px;
   padding: 16px 18px;
   display: flex;
@@ -456,8 +459,9 @@ function getRoleName(role: string) {
   transition: transform 0.22s ease, box-shadow 0.22s ease;
 
   &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+    transform: translateY(-3px);
+    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
+    border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
   }
 
   &__content { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }

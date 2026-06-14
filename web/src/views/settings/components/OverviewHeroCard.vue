@@ -51,13 +51,13 @@ defineProps<{
 
         <div class="hero-actions">
           <el-button v-if="isAdmin" type="primary" round :loading="checkingUpdate" @click="onCheckUpdate" class="hero-btn hero-btn--primary">
-            <span class="hero-btn-icon">🔍</span> 检查系统更新
+            检查系统更新
           </el-button>
           <el-button v-if="isAdmin" type="warning" round @click="onRestartPanel" class="hero-btn hero-btn--warning">
-            <span class="hero-btn-icon">🔄</span> 重启面板
+            重启面板
           </el-button>
           <el-button round @click="onOpenGitHub" class="hero-btn hero-btn--ghost">
-            <span class="hero-btn-icon">🔗</span> 访问 GitHub
+            访问 GitHub
           </el-button>
         </div>
       </div>

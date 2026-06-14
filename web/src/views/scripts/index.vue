@@ -338,8 +338,9 @@ async function handleCancelEdit() {
 
 /* ---- Mobile layout ---- */
 .scripts-page.mobile {
-  height: auto;
-  overflow: visible;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 
   .page-header {
     flex-direction: column;
@@ -353,11 +354,14 @@ async function handleCancelEdit() {
 
   .scripts-workspace {
     flex-direction: column;
-    height: calc(100dvh - 160px);
+    flex: 1 1 auto;
+    width: 100%;
+    height: 100%;
     min-height: 0;
     border-radius: 0;
     border: none;
     box-shadow: none;
+    overflow: hidden;
 
     :deep(.scripts-sidebar) {
       width: 100%;
@@ -365,6 +369,7 @@ async function handleCancelEdit() {
       flex: 1 1 auto;
       min-height: 0;
       overflow: hidden;
+      overflow: auto;
       border-right: none;
       border-bottom: 1px solid #f0f0f0;
     }
@@ -377,8 +382,14 @@ async function handleCancelEdit() {
   }
 
   .scripts-workspace.mobile-show-editor {
+    :deep(.scripts-sidebar) {
+      display: none !important;
+    }
+
     :deep(.scripts-editor) {
+      display: flex !important;
       height: 100%;
+      min-height: 0;
     }
   }
 }

@@ -198,6 +198,9 @@ watch(() => props.logs, () => {
 }
 
 .panel-log-toolbar__actions {
+  padding: 4px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   display: flex;
   justify-content: flex-end;
   align-items: center;
