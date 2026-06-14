@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"daidai-panel/model"
 	"daidai-panel/testutil"
 )
 
@@ -58,18 +59,32 @@ func TestManagedPythonVenvDirUsesFlatVersionedPaths(t *testing.T) {
 }
 
 func TestWarmManagedPythonVenvWarmsAllSupportedVersions(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
 	var warmed []string
 	original := warmManagedPythonVenvForVersionFunc
+	originalCleanup := cleanupBrokenManagedPythonVenvsFunc
 	warmManagedPythonVenvForVersionFunc = func(version string) {
 		warmed = append(warmed, version)
 	}
+	cleanupBrokenManagedPythonVenvsFunc = func() {}
 	t.Cleanup(func() {
 		warmManagedPythonVenvForVersionFunc = original
+		cleanupBrokenManagedPythonVenvsFunc = originalCleanup
 	})
+
+	if err := model.SetConfig("python_default_version", "3.11"); err != nil {
+		t.Fatalf("set default python version: %v", err)
+	}
+	for _, version := range []string{"3.10", "3.12"} {
+		if err := os.MkdirAll(resolveManagedVenvBin(ManagedPythonVenvDir(version)), 0o755); err != nil {
+			t.Fatalf("mkdir versioned venv %s: %v", version, err)
+		}
+	}
 
 	WarmManagedPythonVenv()
 
-	want := []string{"3.10", "3.11", "3.12"}
+	want := []string{"3.11", "3.10", "3.12"}
 	if len(warmed) != len(want) {
 		t.Fatalf("expected warmed versions %v, got %v", want, warmed)
 	}
@@ -77,6 +92,49 @@ func TestWarmManagedPythonVenvWarmsAllSupportedVersions(t *testing.T) {
 		if warmed[idx] != version {
 			t.Fatalf("expected warmed versions %v, got %v", want, warmed)
 		}
+	}
+}
+
+func TestWarmManagedPythonVenvCleansBrokenBackups(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	brokenDir := ManagedPythonVenvDir("3.12") + ".broken-20260609121849"
+	if err := os.MkdirAll(filepath.Join(brokenDir, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir broken venv dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenDir, "bin", "python3.12"), []byte("stub"), 0o644); err != nil {
+		t.Fatalf("write broken venv stub: %v", err)
+	}
+
+	original := warmManagedPythonVenvForVersionFunc
+	warmManagedPythonVenvForVersionFunc = func(version string) {}
+	t.Cleanup(func() {
+		warmManagedPythonVenvForVersionFunc = original
+	})
+
+	WarmManagedPythonVenv()
+
+	if _, err := os.Stat(brokenDir); !os.IsNotExist(err) {
+		t.Fatalf("expected broken venv backup to be cleaned, stat err=%v", err)
+	}
+}
+
+func TestCleanupManagedPythonArtifactsOnStartupDoesNotWarmAnyVersion(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	called := false
+	originalWarm := warmManagedPythonVenvForVersionFunc
+	warmManagedPythonVenvForVersionFunc = func(version string) {
+		called = true
+	}
+	t.Cleanup(func() {
+		warmManagedPythonVenvForVersionFunc = originalWarm
+	})
+
+	CleanupManagedPythonArtifactsOnStartup()
+
+	if called {
+		t.Fatal("expected startup cleanup to avoid eager python venv warm-up")
 	}
 }
 

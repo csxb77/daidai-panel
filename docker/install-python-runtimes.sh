@@ -102,4 +102,9 @@ install_python "3.10" "$PYTHON_RUNTIME_310" "$PLATFORM"
 install_python "3.11" "$PYTHON_RUNTIME_311" "$PLATFORM"
 install_python "3.12" "$PYTHON_RUNTIME_312" "$PLATFORM"
 
+# 让通用 python3 / pip3 默认落到 3.12，减少运行层对系统 pip 的依赖。
+ln -sf "${INSTALL_ROOT}/3.12/bin/python3.12" "/usr/local/bin/python3"
+ln -sf "${INSTALL_ROOT}/3.12/bin/pip3.12" "/usr/local/bin/pip3"
+ln -sf "${INSTALL_ROOT}/3.12/bin/pip3.12" "/usr/local/bin/pip"
+
 log "Python runtimes installed under ${INSTALL_ROOT}"

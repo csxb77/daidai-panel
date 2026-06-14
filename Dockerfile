@@ -41,7 +41,7 @@ RUN apk add --no-cache \
     gcompat libstdc++ \
     nginx \
     nodejs npm \
-    python3 py3-pip \
+    python3 \
     go \
     git openssh-client-default \
     docker-cli \

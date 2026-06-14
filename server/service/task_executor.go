@@ -235,6 +235,10 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	success := false
 	lastFailureOutput := ""
 	lastSuccessOutput := ""
+	taskWorkDir := e.scriptsDir
+	if plan != nil && strings.TrimSpace(plan.FullPath) != "" {
+		taskWorkDir = filepath.Dir(plan.FullPath)
+	}
 
 	maxLogSize := model.GetRegisteredConfigInt("max_log_content_size")
 
@@ -246,7 +250,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	if timeout == 0 {
 		envTTL = 365 * 24 * time.Hour
 	}
-	envVars, envErr := BuildManagedRuntimeEnvMapForPythonVersion(e.scriptsDir, e.scriptsDir, task.NotificationChannelID, envTTL, task.PythonVersion)
+	envVars, envErr := BuildManagedRuntimeEnvMapForPythonVersion(taskWorkDir, e.scriptsDir, task.NotificationChannelID, envTTL, task.PythonVersion)
 	if envErr != nil {
 		log.Printf("prepare task runtime env failed: %v", envErr)
 	}

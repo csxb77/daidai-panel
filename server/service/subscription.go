@@ -218,7 +218,7 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 			return fullOutput.String(), err
 		}
 
-		if err := applySparseCheckout(ctx, destDir, sub.SubPath, env, emit); err != nil {
+		if err := applySparseCheckout(ctx, destDir, sub, env, emit); err != nil {
 			return fullOutput.String(), err
 		}
 
@@ -329,7 +329,7 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 				return fullOutput.String(), fmt.Errorf("拉取已停止")
 			}
 
-			if err := applySparseCheckout(ctx, destDir, sub.SubPath, env, emit); err != nil {
+			if err := applySparseCheckout(ctx, destDir, sub, env, emit); err != nil {
 				return fullOutput.String(), err
 			}
 
@@ -361,6 +361,13 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 	emit(fmt.Sprintf("[git clone] %s -> %s", authCfg.DisplayURL, saveDir))
 	os.MkdirAll(destDir, 0755)
 	args := []string{"clone", "--depth", "1"}
+	sparsePatterns := buildSubscriptionSparseCheckoutPatterns(sub)
+	if len(sparsePatterns) > 0 {
+		// 有指定子目录/白名单时，先不检出工作区，避免 clone 阶段把整个仓库文件落盘。
+		// --filter=blob:none 对 GitHub 这类支持 partial clone 的远端能少下载无关 blob；
+		// 不支持的远端会退化为普通浅克隆，但工作区仍只会检出匹配路径。
+		args = append(args, "--filter=blob:none", "--no-checkout")
+	}
 	if sub.Branch != "" {
 		args = append(args, "-b", sub.Branch)
 	}
@@ -372,39 +379,112 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 	if err != nil {
 		return output, err
 	}
-	if spErr := applySparseCheckout(ctx, destDir, sub.SubPath, env, emit); spErr != nil {
-		return output, spErr
+	if len(sparsePatterns) > 0 {
+		var fullOutput strings.Builder
+		fullOutput.WriteString(output)
+		if spErr := applySparseCheckout(ctx, destDir, sub, env, emit); spErr != nil {
+			return fullOutput.String(), spErr
+		}
+		emit("[checkout] 正在按子目录/白名单规则检出订阅文件")
+		cmd = exec.CommandContext(ctx, "git", "checkout", "HEAD")
+		cmd.Dir = destDir
+		cmd.Env = env
+		output, err = runCmdWithCallback(ctx, cmd, emit)
+		fullOutput.WriteString(output)
+		return fullOutput.String(), err
 	}
 	return output, nil
 }
 
-func applySparseCheckout(ctx context.Context, repoDir string, subPath string, env []string, emit PullCallback) error {
-	subPath = strings.TrimSpace(subPath)
-	if subPath == "" {
+func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) []string {
+	if sub == nil {
 		return nil
 	}
 
-	var paths []string
-	for _, p := range strings.Split(subPath, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			paths = append(paths, p)
+	var patterns []string
+	seen := map[string]bool{}
+	addPattern := func(pattern string) {
+		pattern = strings.TrimSpace(filepath.ToSlash(pattern))
+		pattern = strings.TrimPrefix(pattern, "./")
+		pattern = strings.TrimPrefix(pattern, "/")
+		if pattern == "" || seen[pattern] {
+			return
+		}
+		seen[pattern] = true
+		patterns = append(patterns, pattern)
+	}
+
+	// 指定子目录优先级最高：它代表用户明确只想要仓库里的某几个目录/文件。
+	hasSubPath := false
+	for _, p := range splitSubscriptionFilterPatterns(sub.SubPath) {
+		p = normalizeSubscriptionFilterTarget(p)
+		if p == "" || isWildcardFilterPattern(p) {
+			continue
+		}
+		hasSubPath = true
+		addPattern(p)
+	}
+
+	// 没有指定子目录时，才用白名单限制真实检出的文件范围。
+	// 白名单历史上是"路径包含匹配"，这里用 **/*xxx* 尽量保持同样的直觉。
+	if !hasSubPath && hasNonWildcardSubscriptionFilter(sub.Whitelist) {
+		for _, p := range splitSubscriptionFilterPatterns(sub.Whitelist) {
+			p = normalizeSubscriptionFilterTarget(p)
+			if p == "" || isWildcardFilterPattern(p) {
+				continue
+			}
+			addPattern("**/*" + p + "*")
 		}
 	}
-	if len(paths) == 0 {
+
+	// 只有黑名单时先包含全部，再用 !pattern 排除，避免"黑名单目录"也落到 scripts 里。
+	if len(patterns) == 0 && hasNonWildcardSubscriptionFilter(sub.Blacklist) {
+		addPattern("*")
+	}
+	if len(patterns) > 0 && hasNonWildcardSubscriptionFilter(sub.Blacklist) {
+		for _, p := range splitSubscriptionFilterPatterns(sub.Blacklist) {
+			p = normalizeSubscriptionFilterTarget(p)
+			if p == "" || isWildcardFilterPattern(p) {
+				continue
+			}
+			addPattern("!**/*" + p + "*")
+		}
+	}
+
+	return patterns
+}
+
+func applySparseCheckout(ctx context.Context, repoDir string, sub *model.Subscription, env []string, emit PullCallback) error {
+	patterns := buildSubscriptionSparseCheckoutPatterns(sub)
+	if len(patterns) == 0 {
+		// 用户清空子目录/白名单后，要把之前的 sparse-checkout 关掉，
+		// 否则旧过滤规则会一直残留，导致后续看起来"仓库文件丢了"。
+		cmd := exec.CommandContext(ctx, "git", "config", "--bool", "core.sparseCheckout")
+		cmd.Dir = repoDir
+		cmd.Env = env
+		output, err := cmd.Output()
+		if err == nil && strings.TrimSpace(string(output)) == "true" {
+			emit("[sparse-checkout] 当前未配置子目录/白名单，正在恢复完整仓库检出")
+			cmd = exec.CommandContext(ctx, "git", "sparse-checkout", "disable")
+			cmd.Dir = repoDir
+			cmd.Env = env
+			if _, runErr := runCmdWithCallback(ctx, cmd, emit); runErr != nil {
+				return fmt.Errorf("关闭 sparse-checkout 失败: %w", runErr)
+			}
+		}
 		return nil
 	}
 
-	emit(fmt.Sprintf("[sparse-checkout] 设置子目录过滤: %s", strings.Join(paths, ", ")))
+	emit(fmt.Sprintf("[sparse-checkout] 设置订阅路径过滤: %s", strings.Join(patterns, ", ")))
 
-	cmd := exec.CommandContext(ctx, "git", "sparse-checkout", "init", "--cone")
+	cmd := exec.CommandContext(ctx, "git", "sparse-checkout", "init", "--no-cone")
 	cmd.Dir = repoDir
 	cmd.Env = env
 	if _, err := runCmdWithCallback(ctx, cmd, emit); err != nil {
 		return fmt.Errorf("sparse-checkout init 失败: %w", err)
 	}
 
-	args := append([]string{"sparse-checkout", "set"}, paths...)
+	args := append([]string{"sparse-checkout", "set", "--no-cone"}, patterns...)
 	cmd = exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoDir
 	cmd.Env = env

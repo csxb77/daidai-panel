@@ -35,6 +35,8 @@ var warmManagedPythonVenvForVersionFunc = func(version string) {
 	ensureManagedPythonVenvForVersion(version, false)
 }
 
+var cleanupBrokenManagedPythonVenvsFunc = cleanupBrokenManagedPythonVenvs
+
 var windowsShellSearchDirs = []string{
 	filepath.Join(os.Getenv("ProgramFiles"), "Git", "bin"),
 	filepath.Join(os.Getenv("ProgramFiles"), "Git", "usr", "bin"),
@@ -320,6 +322,46 @@ func quarantineManagedPythonVenv(venvDir string) {
 	}
 }
 
+func cleanupBrokenManagedPythonVenvs() {
+	dataDir := ""
+	if config.C != nil {
+		dataDir = config.C.Data.Dir
+	}
+	if strings.TrimSpace(dataDir) == "" {
+		return
+	}
+
+	pythonDir := filepath.Join(dataDir, "deps", "python")
+	entries, err := os.ReadDir(pythonDir)
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if !strings.Contains(name, ".broken-") {
+			continue
+		}
+		fullPath := filepath.Join(pythonDir, name)
+		if err := os.RemoveAll(fullPath); err != nil {
+			log.Printf("warn: failed to cleanup broken managed python venv backup %s: %v", fullPath, err)
+			continue
+		}
+		log.Printf("cleanup broken managed python venv backup: %s", fullPath)
+	}
+}
+
+func CleanupManagedPythonArtifactsOnStartup() {
+	managedPythonVenvMu.Lock()
+	defer managedPythonVenvMu.Unlock()
+
+	migrateLegacyManagedPythonVenvLocked()
+	cleanupBrokenManagedPythonVenvs()
+}
+
 func detectManagedPythonVenvVersion(venvDir string) string {
 	pythonBin := resolveManagedPythonBinaryInVenv(venvDir)
 	if pythonBin == "" {
@@ -538,8 +580,22 @@ func EnsureManagedPythonVenvForVersion(pythonVersion string) bool {
 }
 
 func WarmManagedPythonVenv() {
+	cleanupBrokenManagedPythonVenvsFunc()
+
+	defaultVersion := DefaultPythonVersion()
+	warmed := map[string]bool{}
+	if strings.TrimSpace(defaultVersion) != "" {
+		WarmManagedPythonVenvForVersion(defaultVersion)
+		warmed[defaultVersion] = true
+	}
+
 	for _, version := range supportedPythonRuntimeVersions {
-		WarmManagedPythonVenvForVersion(version)
+		if warmed[version] {
+			continue
+		}
+		if directoryExists(ManagedPythonVenvDir(version)) {
+			WarmManagedPythonVenvForVersion(version)
+		}
 	}
 }
 

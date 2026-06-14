@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -55,6 +56,15 @@ func SetupTestEnv(t *testing.T) string {
 		CORS: config.CORSConfig{
 			Origins: []string{"https://allowed.example.com"},
 		},
+	}
+
+	// 大多数后端测试会直接往 scripts/logs 目录写文件。
+	// 测试环境初始化时先建好目录，避免每个用例重复 mkdir，也避免 Windows 下直接写文件时报路径不存在。
+	if err := os.MkdirAll(config.C.Data.ScriptsDir, 0o755); err != nil {
+		t.Fatalf("create test scripts dir: %v", err)
+	}
+	if err := os.MkdirAll(config.C.Data.LogDir, 0o755); err != nil {
+		t.Fatalf("create test log dir: %v", err)
 	}
 
 	database.Init(&config.C.Database)

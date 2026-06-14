@@ -30,33 +30,24 @@ type linuxMirrorInfo struct {
 
 var linuxPackageOperationMu sync.Mutex
 
-const aptPackageListTTL = 6 * time.Hour
-
 func detectLinuxPackageManager() (linuxPackageManager, error) {
-	return detectLinuxPackageManagerWithLookPath(exec.LookPath)
+	manager, err := service.DetectLinuxPackageManager()
+	if err != nil {
+		return linuxPackageManager{}, err
+	}
+	return linuxPackageManager{Name: manager.Name, Binary: manager.Binary}, nil
 }
 
 func detectLinuxPackageManagerWithLookPath(lookPath func(string) (string, error)) (linuxPackageManager, error) {
-	candidates := []linuxPackageManager{
-		{Name: "apk", Binary: "apk"},
-		{Name: "apt", Binary: "apt-get"},
-		{Name: "dnf", Binary: "dnf"},
-		{Name: "yum", Binary: "yum"},
-		{Name: "microdnf", Binary: "microdnf"},
-		{Name: "zypper", Binary: "zypper"},
+	manager, err := service.DetectLinuxPackageManagerWithLookPath(lookPath)
+	if err != nil {
+		return linuxPackageManager{}, err
 	}
-
-	for _, candidate := range candidates {
-		if _, err := lookPath(candidate.Binary); err == nil {
-			return candidate, nil
-		}
-	}
-
-	return linuxPackageManager{}, errors.New("未检测到可用的 Linux 包管理器（支持 apk/apt/dnf/yum/microdnf/zypper）")
+	return linuxPackageManager{Name: manager.Name, Binary: manager.Binary}, nil
 }
 
 func shouldRefreshAptPackageLists() bool {
-	return shouldRefreshAptPackageListsFromDir("/var/lib/apt/lists", time.Now(), aptPackageListTTL)
+	return shouldRefreshAptPackageListsFromDir("/var/lib/apt/lists", time.Now(), service.AptPackageListTTL)
 }
 
 func shouldRefreshAptPackageListsFromDir(dir string, now time.Time, ttl time.Duration) bool {
@@ -142,49 +133,20 @@ func linuxRemoveCommandSpec(manager linuxPackageManager, packageName string, for
 }
 
 func buildLinuxPackageCommand(manager linuxPackageManager, action, packageName string, force bool) (*exec.Cmd, error) {
-	switch action {
-	case "install":
-		refreshApt := manager.Name == "apt" && shouldRefreshAptPackageLists()
-		if mirrorErr := ensureDefaultLinuxMirror(manager, detectLinuxDistribution()); mirrorErr != nil {
-			return nil, mirrorErr
-		}
-		bin, args, err := linuxInstallCommandSpec(manager, packageName, refreshApt)
-		if err != nil {
-			return nil, err
-		}
-		cmd := exec.Command(bin, args...)
-		cmd.Env = service.AppendProxyEnv(append(os.Environ(), "TMPDIR=/tmp"))
-		return cmd, nil
-	case "remove":
-		bin, args, err := linuxRemoveCommandSpec(manager, packageName, force)
-		if err != nil {
-			return nil, err
-		}
-		cmd := exec.Command(bin, args...)
-		cmd.Env = service.AppendProxyEnv(append(os.Environ(), "TMPDIR=/tmp", "DEBIAN_FRONTEND=noninteractive"))
-		return cmd, nil
-	default:
-		return nil, errors.New("不支持的 Linux 依赖操作")
-	}
+	return service.BuildLinuxPackageCommand(
+		service.LinuxPackageManager{Name: manager.Name, Binary: manager.Binary},
+		action,
+		packageName,
+		force,
+		detectLinuxDistribution(),
+		func(m service.LinuxPackageManager, distribution string) error {
+			return ensureDefaultLinuxMirror(linuxPackageManager{Name: m.Name, Binary: m.Binary}, distribution)
+		},
+	)
 }
 
 func detectLinuxDistribution() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return ""
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "ID=") {
-			continue
-		}
-		value := strings.TrimSpace(strings.TrimPrefix(line, "ID="))
-		value = strings.Trim(value, `"'`)
-		return strings.ToLower(value)
-	}
-
-	return ""
+	return service.DetectLinuxDistribution()
 }
 
 func getLinuxMirrorInfo() linuxMirrorInfo {

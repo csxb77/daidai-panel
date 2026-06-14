@@ -1237,6 +1237,8 @@ func reinstallDependenciesAfterRestartAsync(deps []model.Dependency) {
 	reinstallDependenciesAsyncWithLogPrefix(deps, "[启动校验]")
 }
 
+var buildLinuxDependencyInstallCommandFunc = buildLinuxDependencyInstallCommand
+
 func reinstallDependenciesAsyncWithLogPrefix(deps []model.Dependency, logPrefix string) {
 	go func() {
 		for _, dep := range deps {
@@ -1270,8 +1272,11 @@ func reinstallDependency(dep model.Dependency, logPrefix string) {
 		}
 		cmd.Env = append(PipInstallEnv(AppendProxyEnv(os.Environ()), CurrentPipMirror()), "TMPDIR=/tmp")
 	case model.DepTypeLinux:
+		// 重启后的 Linux 依赖恢复必须复用当前主依赖安装路径的包管理器策略，
+		// 避免 Debian 继续走旧的裸 apt-get update/install 分支，导致与
+		// 依赖管理页的真实行为分叉，表现为“等待重启安装”后状态长期不收敛。
 		var err error
-		cmd, err = buildLinuxDependencyInstallCommand(dep.Name)
+		cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
 		if err != nil {
 			database.DB.Model(&model.Dependency{}).Where("id = ?", dep.ID).Updates(map[string]interface{}{
 				"status": model.DepStatusFailed,
@@ -1303,35 +1308,9 @@ func reinstallDependency(dep model.Dependency, logPrefix string) {
 }
 
 func buildLinuxDependencyInstallCommand(packageName string) (*exec.Cmd, error) {
-	for _, binary := range []string{"apk", "apt-get", "dnf", "yum", "microdnf", "zypper"} {
-		if _, err := exec.LookPath(binary); err != nil {
-			continue
-		}
-
-		switch binary {
-		case "apk":
-			cmd := exec.Command(binary, "add", "--no-cache", packageName)
-			cmd.Env = AppendProxyEnv(append(os.Environ(), "TMPDIR=/tmp"))
-			return cmd, nil
-		case "apt-get":
-			script := "export DEBIAN_FRONTEND=noninteractive; apt-get update; apt-get install -y --no-install-recommends " + shellQuoteForBackup(packageName)
-			cmd := exec.Command("sh", "-lc", script)
-			cmd.Env = AppendProxyEnv(append(os.Environ(), "TMPDIR=/tmp"))
-			return cmd, nil
-		case "dnf", "yum", "microdnf":
-			cmd := exec.Command(binary, "install", "-y", packageName)
-			cmd.Env = AppendProxyEnv(append(os.Environ(), "TMPDIR=/tmp"))
-			return cmd, nil
-		case "zypper":
-			cmd := exec.Command(binary, "--non-interactive", "install", packageName)
-			cmd.Env = AppendProxyEnv(append(os.Environ(), "TMPDIR=/tmp"))
-			return cmd, nil
-		}
+	manager, err := DetectLinuxPackageManager()
+	if err != nil {
+		return nil, err
 	}
-
-	return nil, fmt.Errorf("未检测到可用的 Linux 包管理器")
-}
-
-func shellQuoteForBackup(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	return BuildLinuxPackageCommand(manager, "install", packageName, false, DetectLinuxDistribution(), nil)
 }

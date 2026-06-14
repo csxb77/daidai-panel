@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,6 +114,88 @@ func TestReconcileDependenciesAfterRestartReinstallsMissingLinuxDeps(t *testing.
 	}
 	if !strings.Contains(updated.Log, "已在重启后自动重新安装") {
 		t.Fatalf("expected automatic reinstall log, got %q", updated.Log)
+	}
+}
+
+func TestReconcileDependenciesAfterRestartMarksLinuxInstalledWhenDetected(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	dep := &model.Dependency{
+		Type:   model.DepTypeLinux,
+		Name:   "curl",
+		Status: model.DepStatusInstalling,
+		Log:    "[启动校验] 检测到 Linux 依赖在容器重建后丢失，已在重启后自动重新安装",
+	}
+	if err := database.DB.Create(dep).Error; err != nil {
+		t.Fatalf("create dependency: %v", err)
+	}
+
+	originalInstalled := dependencyInstalledFunc
+	originalReinstallBatch := dependencyReinstallBatchFunc
+	t.Cleanup(func() {
+		dependencyInstalledFunc = originalInstalled
+		dependencyReinstallBatchFunc = originalReinstallBatch
+	})
+
+	dependencyInstalledFunc = func(depType, name, pythonVersion string) bool {
+		return depType == model.DepTypeLinux && name == "curl"
+	}
+
+	reinstallCalled := false
+	dependencyReinstallBatchFunc = func(deps []model.Dependency) {
+		reinstallCalled = true
+	}
+
+	ReconcileDependenciesAfterRestart()
+
+	if reinstallCalled {
+		t.Fatal("expected no reinstall batch when linux dependency is already detected")
+	}
+
+	var updated model.Dependency
+	if err := database.DB.First(&updated, dep.ID).Error; err != nil {
+		t.Fatalf("reload dependency: %v", err)
+	}
+	if updated.Status != model.DepStatusInstalled {
+		t.Fatalf("expected dependency to reconcile to installed, got %q", updated.Status)
+	}
+	if !strings.Contains(updated.Log, "已同步状态为已安装") {
+		t.Fatalf("expected installed reconcile log, got %q", updated.Log)
+	}
+}
+
+func TestReinstallDependencyUsesCurrentLinuxPackageManagerFlowOnApt(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	dep := model.Dependency{
+		Type:   model.DepTypeLinux,
+		Name:   "curl",
+		Status: model.DepStatusInstalling,
+		Log:    "[启动校验] 检测到 Linux 依赖在容器重建后丢失，已在重启后自动重新安装",
+	}
+	if err := database.DB.Create(&dep).Error; err != nil {
+		t.Fatalf("create dependency: %v", err)
+	}
+
+	originalBuild := buildLinuxDependencyInstallCommandFunc
+	t.Cleanup(func() {
+		buildLinuxDependencyInstallCommandFunc = originalBuild
+	})
+
+	called := false
+	buildLinuxDependencyInstallCommandFunc = func(packageName string) (*exec.Cmd, error) {
+		called = true
+		cmd := exec.Command("cmd", "/c", "exit", "0")
+		if _, err := exec.LookPath("cmd"); err != nil {
+			cmd = exec.Command("sh", "-c", "exit 0")
+		}
+		return cmd, nil
+	}
+
+	reinstallDependency(dep, "[启动校验]")
+
+	if !called {
+		t.Fatal("expected restart reinstall path to use linux package manager builder")
 	}
 }
 

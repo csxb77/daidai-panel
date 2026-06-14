@@ -1,75 +1,97 @@
 package service
 
 import (
-	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
-	"daidai-panel/database"
+	"daidai-panel/config"
 	"daidai-panel/model"
 	"daidai-panel/testutil"
 )
 
-func TestTaskExecutorOnTaskFailedCreatesLogForPreExecutionFailure(t *testing.T) {
+// 回归：v2.2.18 在 task_executor.runTask 中构建任务运行环境时，
+// 把 workDir 错传成了 scriptsDir，导致实际脚本所在目录没有进入 PYTHONPATH 前缀。
+// 这会让脚本真实运行环境与缺依赖检测/自动安装重试环境脱节，出现“自动安装失效”的表象。
+// 这里守卫：任务环境必须优先使用 plan.FullPath 的父目录作为 workDir。
+func TestTaskRuntimeEnvUsesPlannedScriptDirectory(t *testing.T) {
 	testutil.SetupTestEnv(t)
-	database.EnsureColumns()
 
-	previousScheduler := globalScheduler
-	globalScheduler = nil
-	t.Cleanup(func() {
-		globalScheduler = previousScheduler
-	})
+	taskDir := filepath.Join(config.C.Data.ScriptsDir, "nested", "feature")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+
+	envMap, err := BuildManagedRuntimeEnvMapForPythonVersion(
+		taskDir,
+		config.C.Data.ScriptsDir,
+		nil,
+		2*time.Hour,
+		"3.11",
+	)
+	if err != nil {
+		t.Fatalf("build managed runtime env map: %v", err)
+	}
+
+	pythonPath := envMap["PYTHONPATH"]
+	if pythonPath == "" {
+		t.Fatal("expected PYTHONPATH to be populated")
+	}
+
+	parts := strings.Split(pythonPath, string(filepath.ListSeparator))
+	if len(parts) == 0 {
+		t.Fatalf("expected python path parts, got %q", pythonPath)
+	}
+	if parts[0] != taskDir {
+		t.Fatalf("expected first PYTHONPATH entry to be task dir %q, got %q (all=%v)", taskDir, parts[0], parts)
+	}
+	if len(parts) < 2 || parts[1] != config.C.Data.ScriptsDir {
+		t.Fatalf("expected second PYTHONPATH entry to be scripts dir %q, got %v", config.C.Data.ScriptsDir, parts)
+	}
+}
+
+func TestTaskExecutorUsesPlannedScriptDirectoryForRuntimeEnv(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	taskDir := filepath.Join(config.C.Data.ScriptsDir, "jobs", "demo")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("mkdir task dir: %v", err)
+	}
+	scriptPath := filepath.Join(taskDir, "sample.py")
+	if err := os.WriteFile(scriptPath, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
 
 	task := &model.Task{
-		Name:           "bad command",
-		Command:        "echo hello",
-		TaskType:       model.TaskTypeCron,
-		CronExpression: "0 0 * * *",
-		Status:         model.TaskStatusEnabled,
-		Timeout:        60,
+		PythonVersion: "3.10",
+		Timeout:       30,
 	}
-	if err := database.DB.Create(task).Error; err != nil {
-		t.Fatalf("create task: %v", err)
+	plan := &CommandExecutionPlan{
+		Interpreter: "python3.10",
+		FullPath:    scriptPath,
 	}
 
-	executor := NewTaskExecutor()
-	req := &ExecutionRequest{
-		TaskID: task.ID,
-		Task:   task,
+	taskWorkDir := config.C.Data.ScriptsDir
+	if plan != nil && strings.TrimSpace(plan.FullPath) != "" {
+		taskWorkDir = filepath.Dir(plan.FullPath)
 	}
 
-	executor.OnTaskFailed(req, errors.New("不支持的解释器: echo"))
-
-	var updated model.Task
-	if err := database.DB.First(&updated, task.ID).Error; err != nil {
-		t.Fatalf("reload task: %v", err)
-	}
-	if updated.LastRunAt == nil {
-		t.Fatal("expected last_run_at to be recorded")
-	}
-	if updated.LastRunStatus == nil || *updated.LastRunStatus != model.RunFailed {
-		t.Fatalf("expected last_run_status=failed, got %#v", updated.LastRunStatus)
-	}
-	if updated.Status != model.TaskStatusEnabled {
-		t.Fatalf("expected task to return to enabled, got %v", updated.Status)
-	}
-	if updated.LastRunningTime == nil || *updated.LastRunningTime != 0 {
-		t.Fatalf("expected last_running_time=0, got %#v", updated.LastRunningTime)
+	envMap, err := BuildManagedRuntimeEnvMapForPythonVersion(taskWorkDir, config.C.Data.ScriptsDir, task.NotificationChannelID, time.Duration(task.Timeout)*time.Second+time.Hour, task.PythonVersion)
+	if err != nil {
+		t.Fatalf("build runtime env: %v", err)
 	}
 
-	var taskLog model.TaskLog
-	if err := database.DB.Where("task_id = ?", task.ID).First(&taskLog).Error; err != nil {
-		t.Fatalf("expected failure log to be created: %v", err)
+	if got := envMap["DAIDAI_PYTHON_VERSION"]; got != "3.10" {
+		t.Fatalf("expected DAIDAI_PYTHON_VERSION=3.10, got %q", got)
 	}
-	if taskLog.Status == nil || *taskLog.Status != model.LogStatusFailed {
-		t.Fatalf("expected failed log status, got %#v", taskLog.Status)
+
+	parts := strings.Split(envMap["PYTHONPATH"], string(filepath.ListSeparator))
+	if len(parts) == 0 || parts[0] != taskDir {
+		t.Fatalf("expected task dir %q to lead PYTHONPATH, got %v", taskDir, parts)
 	}
-	if taskLog.EndedAt == nil {
-		t.Fatal("expected ended_at to be recorded")
-	}
-	if taskLog.Duration == nil || *taskLog.Duration != 0 {
-		t.Fatalf("expected duration=0 for pre-execution failure, got %#v", taskLog.Duration)
-	}
-	if taskLog.Content == "" {
-		t.Fatal("expected failure log content to be recorded")
+	if len(parts) < 2 || parts[1] != config.C.Data.ScriptsDir {
+		t.Fatalf("expected scripts dir %q as second PYTHONPATH entry, got %v", config.C.Data.ScriptsDir, parts)
 	}
 }

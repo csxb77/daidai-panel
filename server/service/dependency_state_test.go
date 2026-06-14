@@ -47,3 +47,21 @@ func TestDependencyInstalledNodeJSAcceptsVersionSpec(t *testing.T) {
 		t.Fatal("expected scoped versioned node dependency to be detected as installed")
 	}
 }
+
+func TestDependencyInstalledLinuxAcceptsDpkgQueryInstalledStatus(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	dir := t.TempDir()
+	dpkgQuery := filepath.Join(dir, "dpkg-query")
+	script := "#!/bin/sh\nif [ \"$1\" = \"-W\" ]; then\n  printf 'install ok installed'\n  exit 0\nfi\nexit 1\n"
+	if err := os.WriteFile(dpkgQuery, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dpkg-query: %v", err)
+	}
+
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+originalPath)
+
+	if !DependencyInstalledForPythonVersion(model.DepTypeLinux, "curl", "") {
+		t.Fatal("expected linux dependency to be detected as installed from dpkg-query")
+	}
+}
