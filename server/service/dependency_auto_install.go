@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"strings"
 
-	"daidai-panel/config"
 	"daidai-panel/model"
 )
 
@@ -146,8 +145,6 @@ func InstallAutoDependency(candidate *AutoInstallCandidate, envVars map[string]s
 	}
 
 	baseEnv := buildEnvSlice(envVars)
-	depsDir := filepath.Join(config.C.Data.Dir, "deps")
-
 	switch candidate.Manager {
 	case "python":
 		pipEnv := PipInstallEnv(baseEnv, CurrentPipMirror())
@@ -179,9 +176,13 @@ func InstallAutoDependency(candidate *AutoInstallCandidate, envVars map[string]s
 
 		return completeAutoInstall(candidate, out, err)
 	case "nodejs":
-		nodeDir := filepath.Join(depsDir, "nodejs")
-		_ = os.MkdirAll(nodeDir, 0755)
-		cmd := exec.Command("npm", "install", candidate.PackageName, "--prefix", nodeDir)
+		unlock := LockNodePackageOperation()
+		defer unlock()
+
+		cmd, err := NewNpmInstallCommand(candidate.PackageName)
+		if err != nil {
+			return AutoInstallResult{Error: err.Error()}
+		}
 		cmd.Env = NpmInstallEnv(baseEnv, CurrentNpmMirror())
 		out, err := cmd.CombinedOutput()
 		return completeAutoInstall(candidate, out, err)

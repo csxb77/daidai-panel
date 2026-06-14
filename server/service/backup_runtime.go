@@ -1248,7 +1248,6 @@ func reinstallDependenciesAsyncWithLogPrefix(deps []model.Dependency, logPrefix 
 }
 
 func reinstallDependency(dep model.Dependency, logPrefix string) {
-	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	logText := fmt.Sprintf("%s 正在安装 %s 依赖 %s", logPrefix, dep.Type, dep.Name)
 	if dep.Type == model.DepTypePython {
 		logText = fmt.Sprintf("%s 正在安装 Python %s 依赖 %s", logPrefix, NormalizeDependencyPythonVersion(dep.PythonVersion), dep.Name)
@@ -1258,8 +1257,18 @@ func reinstallDependency(dep model.Dependency, logPrefix string) {
 	var cmd *exec.Cmd
 	switch dep.Type {
 	case model.DepTypeNodeJS:
-		cmd = exec.Command("npm", "install", "--prefix", filepath.Join(depsDir, "nodejs"), dep.Name)
-		cmd.Env = NpmInstallEnv(AppendProxyEnv(os.Environ()), CurrentNpmMirror())
+		unlock := LockNodePackageOperation()
+		defer unlock()
+
+		var err error
+		cmd, err = NewNpmInstallCommand(dep.Name)
+		if err != nil {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", dep.ID).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    logPrefix + " " + err.Error(),
+			})
+			return
+		}
 	case model.DepTypePython:
 		var err error
 		cmd, err = NewPipInstallCommandForPythonVersion(dep.PythonVersion, dep.Name)

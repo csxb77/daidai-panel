@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"daidai-panel/config"
 	"daidai-panel/database"
 	"daidai-panel/middleware"
 	"daidai-panel/model"
@@ -834,7 +832,6 @@ func ensureTmpDir() {
 func installDependency(id uint, depType, name string) {
 	ensureTmpDir()
 	var cmd *exec.Cmd
-	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	pythonVersion := ""
 	if depType == model.DepTypePython {
 		var dep model.Dependency
@@ -846,8 +843,18 @@ func installDependency(id uint, depType, name string) {
 	}
 	switch depType {
 	case model.DepTypeNodeJS:
-		cmd = exec.Command("npm", "install", "--prefix", filepath.Join(depsDir, "nodejs"), name)
-		cmd.Env = service.NpmInstallEnv(service.AppendProxyEnv(os.Environ()), service.CurrentNpmMirror())
+		nodeUnlock := service.LockNodePackageOperation()
+		defer nodeUnlock()
+
+		var err error
+		cmd, err = service.NewNpmInstallCommand(name)
+		if err != nil {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", id).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    err.Error(),
+			})
+			return
+		}
 	case model.DepTypePython:
 		var err error
 		cmd, err = service.NewPipInstallCommandForPythonVersion(pythonVersion, name)
@@ -896,11 +903,20 @@ func installDependency(id uint, depType, name string) {
 
 func uninstallDependency(id uint, depType, name, pythonVersion string) {
 	var cmd *exec.Cmd
-	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	switch depType {
 	case model.DepTypeNodeJS:
-		cmd = exec.Command("npm", "uninstall", "--prefix", filepath.Join(depsDir, "nodejs"), name)
-		cmd.Env = service.AppendProxyEnv(os.Environ())
+		nodeUnlock := service.LockNodePackageOperation()
+		defer nodeUnlock()
+
+		var err error
+		cmd, err = service.NewNpmUninstallCommand(name, false)
+		if err != nil {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", id).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    err.Error(),
+			})
+			return
+		}
 	case model.DepTypePython:
 		var err error
 		cmd, err = service.NewPipUninstallCommandForPythonVersion(pythonVersion, name)
@@ -936,12 +952,17 @@ func uninstallDependency(id uint, depType, name, pythonVersion string) {
 }
 
 func forceUninstallDependency(depType, name, pythonVersion string) {
-	depsDir := filepath.Join(config.C.Data.Dir, "deps")
 	var cmd *exec.Cmd
 	switch depType {
 	case model.DepTypeNodeJS:
-		cmd = exec.Command("npm", "uninstall", "--prefix", filepath.Join(depsDir, "nodejs"), "--force", name)
-		cmd.Env = service.AppendProxyEnv(os.Environ())
+		nodeUnlock := service.LockNodePackageOperation()
+		defer nodeUnlock()
+
+		var err error
+		cmd, err = service.NewNpmUninstallCommand(name, true)
+		if err != nil {
+			return
+		}
 	case model.DepTypePython:
 		var err error
 		cmd, err = service.NewPipUninstallCommandForPythonVersion(pythonVersion, name, "--no-deps")
