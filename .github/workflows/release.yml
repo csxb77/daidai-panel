@@ -48,17 +48,7 @@ jobs:
 
           for candidate in "${candidates[@]}"; do
             if [[ -f "$candidate" ]]; then
-              summary="$(python - "$candidate" <<'PY'
-import re
-import sys
-
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    text = f.read()
-
-match = re.search(r"<!--\s*release-title:\s*(.*?)\s*-->", text, re.IGNORECASE)
-print(match.group(1).strip() if match else "")
-PY
-)"
+              summary="$(grep -oPm1 '(?<=<!--\s*release-title:\s).*?(?=\s*-->)' "$candidate" || true)"
               if [[ -n "$summary" ]]; then
                 RELEASE_TITLE="${GITHUB_REF_NAME}：${summary}"
               fi
