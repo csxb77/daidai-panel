@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -696,5 +697,110 @@ func TestCreateBackupSkipsQuarantinedScriptEntriesInArchive(t *testing.T) {
 	}
 	if foundQuarantined {
 		t.Fatal("expected quarantined script entry to be excluded from backup archive")
+	}
+}
+
+func TestRestoreScriptFilesKeepsLiveDataWhenStageCopyFails(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	liveScriptPath := filepath.Join(config.C.Data.ScriptsDir, "keep", "live.py")
+	if err := os.MkdirAll(filepath.Dir(liveScriptPath), 0o755); err != nil {
+		t.Fatalf("create live script dir: %v", err)
+	}
+	if err := os.WriteFile(liveScriptPath, []byte("print('live-before')\n"), 0o755); err != nil {
+		t.Fatalf("write live script: %v", err)
+	}
+
+	extractedDir := t.TempDir()
+	restoreScriptPath := filepath.Join(extractedDir, "files", "scripts", "keep", "restored.py")
+	if err := os.MkdirAll(filepath.Dir(restoreScriptPath), 0o755); err != nil {
+		t.Fatalf("create restore script dir: %v", err)
+	}
+	if err := os.WriteFile(restoreScriptPath, []byte("print('restored')\n"), 0o755); err != nil {
+		t.Fatalf("write restore script: %v", err)
+	}
+
+	originalCopyDir := copyDirectoryContentsFunc
+	t.Cleanup(func() {
+		copyDirectoryContentsFunc = originalCopyDir
+	})
+
+	copyDirectoryContentsFunc = func(sourceDir, targetDir string) error {
+		if err := originalCopyDir(sourceDir, targetDir); err != nil {
+			return err
+		}
+		return errors.New("inject stage copy failure")
+	}
+
+	err := restoreScriptFiles(extractedDir, "daidai-panel")
+	if err == nil || !strings.Contains(err.Error(), "inject stage copy failure") {
+		t.Fatalf("expected injected stage copy failure, got %v", err)
+	}
+
+	data, err := os.ReadFile(liveScriptPath)
+	if err != nil {
+		t.Fatalf("read live script after failure: %v", err)
+	}
+	if !strings.Contains(string(data), "live-before") {
+		t.Fatalf("expected live script content to stay unchanged, got %q", string(data))
+	}
+
+	if _, err := os.Stat(filepath.Join(config.C.Data.ScriptsDir, "keep", "restored.py")); !os.IsNotExist(err) {
+		t.Fatalf("expected restored script to not replace live dir on failure, stat err=%v", err)
+	}
+}
+
+func TestRestoreLogFilesKeepsLivePanelLogWhenStageCopyFails(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	panelLogPath := filepath.Join(config.C.Data.Dir, "panel.log")
+	if err := os.WriteFile(panelLogPath, []byte("live-panel-log-before\n"), 0o644); err != nil {
+		t.Fatalf("write live panel log: %v", err)
+	}
+
+	extractedDir := t.TempDir()
+	restorePanelLogPath := filepath.Join(extractedDir, "files", "panel.log")
+	if err := os.MkdirAll(filepath.Dir(restorePanelLogPath), 0o755); err != nil {
+		t.Fatalf("create restore panel log dir: %v", err)
+	}
+	if err := os.WriteFile(restorePanelLogPath, []byte("restored-panel-log\n"), 0o644); err != nil {
+		t.Fatalf("write restore panel log: %v", err)
+	}
+
+	restoreLogFile := filepath.Join(extractedDir, "files", "logs", "task.log")
+	if err := os.MkdirAll(filepath.Dir(restoreLogFile), 0o755); err != nil {
+		t.Fatalf("create restore logs dir: %v", err)
+	}
+	if err := os.WriteFile(restoreLogFile, []byte("restored task log\n"), 0o644); err != nil {
+		t.Fatalf("write restore log file: %v", err)
+	}
+
+	originalCopyDir := copyDirectoryContentsFunc
+	t.Cleanup(func() {
+		copyDirectoryContentsFunc = originalCopyDir
+	})
+
+	copyDirectoryContentsFunc = func(sourceDir, targetDir string) error {
+		if err := originalCopyDir(sourceDir, targetDir); err != nil {
+			return err
+		}
+		return errors.New("inject log stage copy failure")
+	}
+
+	err := restoreLogFiles(extractedDir, "daidai-panel")
+	if err == nil || !strings.Contains(err.Error(), "inject log stage copy failure") {
+		t.Fatalf("expected injected log stage copy failure, got %v", err)
+	}
+
+	data, err := os.ReadFile(panelLogPath)
+	if err != nil {
+		t.Fatalf("read live panel log after failure: %v", err)
+	}
+	if !strings.Contains(string(data), "live-panel-log-before") {
+		t.Fatalf("expected live panel log to stay unchanged, got %q", string(data))
+	}
+
+	if _, err := os.Stat(filepath.Join(config.C.Data.LogDir, "task.log")); !os.IsNotExist(err) {
+		t.Fatalf("expected restored log dir to not replace live dir on failure, stat err=%v", err)
 	}
 }

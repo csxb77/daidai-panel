@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1144,35 +1145,35 @@ func restoreScriptFiles(extractedDir, source string) error {
 		if _, err := os.Stat(sourceDir); os.IsNotExist(err) {
 			return nil
 		}
-		if err := clearDirectoryContents(config.C.Data.ScriptsDir); err != nil {
-			return err
-		}
-		return copyDirectoryContents(sourceDir, config.C.Data.ScriptsDir)
+		return restoreDirectoryWithStage(config.C.Data.ScriptsDir, func(stageDir string) error {
+			return copyDirectoryContentsFunc(sourceDir, stageDir)
+		})
 	}
 }
 
 func restoreLogFiles(extractedDir, source string) error {
-	if err := clearDirectoryContents(config.C.Data.LogDir); err != nil {
-		return err
-	}
 	panelLogPath := filepath.Join(config.C.Data.Dir, "panel.log")
-	_ = os.Remove(panelLogPath)
 
 	switch source {
 	case "qinglong":
-		return restoreQingLongLogs(extractedDir)
+		if err := restoreQingLongLogs(extractedDir); err != nil {
+			return err
+		}
+		return removePathIfExists(panelLogPath)
 	default:
 		logDir := filepath.Join(extractedDir, "files", "logs")
-		if err := copyDirectoryContents(logDir, config.C.Data.LogDir); err != nil {
+		if err := restoreDirectoryWithStage(config.C.Data.LogDir, func(stageDir string) error {
+			return copyDirectoryContentsFunc(logDir, stageDir)
+		}); err != nil {
 			return err
 		}
 		panelLogSource := filepath.Join(extractedDir, "files", "panel.log")
 		if _, err := os.Stat(panelLogSource); err == nil {
-			if err := copyFile(panelLogSource, panelLogPath); err != nil {
-				return err
-			}
+			return restoreFileWithStage(panelLogPath, func(stagePath string) error {
+				return copyFileFunc(panelLogSource, stagePath)
+			})
 		}
-		return nil
+		return removePathIfExists(panelLogPath)
 	}
 }
 
@@ -1188,6 +1189,109 @@ func clearDirectoryContents(dir string) error {
 		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+var (
+	// copyDirectoryContentsFunc / copyFileFunc 保留测试替身入口，
+	// 用于验证“恢复 staging 失败时 live 目录仍保持原样”这类高风险回归。
+	copyDirectoryContentsFunc = copyDirectoryContents
+	copyFileFunc              = copyFile
+)
+
+// restoreDirectoryWithStage 先把恢复结果完整写入同目录下的 staging 目录，
+// staging 成功后再原子切换 live 目录，避免“先删 live，再拷贝新内容”导致半失败时旧数据丢失。
+func restoreDirectoryWithStage(targetDir string, fillStage func(stageDir string) error) error {
+	parentDir := filepath.Dir(targetDir)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return err
+	}
+
+	stageDir := filepath.Join(parentDir, ".restore-stage-"+filepath.Base(targetDir)+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	if err := os.MkdirAll(stageDir, 0o755); err != nil {
+		return err
+	}
+
+	cleanupStage := true
+	defer func() {
+		if cleanupStage {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+
+	if err := fillStage(stageDir); err != nil {
+		return err
+	}
+
+	backupDir := filepath.Join(parentDir, ".restore-backup-"+filepath.Base(targetDir)+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	targetExists := false
+	if _, err := os.Stat(targetDir); err == nil {
+		targetExists = true
+		if err := os.Rename(targetDir, backupDir); err != nil {
+			return err
+		}
+	}
+
+	if err := os.Rename(stageDir, targetDir); err != nil {
+		if targetExists {
+			_ = os.Rename(backupDir, targetDir)
+		}
+		return err
+	}
+
+	cleanupStage = false
+	if targetExists {
+		_ = os.RemoveAll(backupDir)
+	}
+	return nil
+}
+
+// restoreFileWithStage 和目录恢复同理，先准备好 staging 文件，再切换 live 文件。
+func restoreFileWithStage(targetPath string, fillStage func(stagePath string) error) error {
+	parentDir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return err
+	}
+
+	stagePath := filepath.Join(parentDir, ".restore-stage-"+filepath.Base(targetPath)+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	cleanupStage := true
+	defer func() {
+		if cleanupStage {
+			_ = os.Remove(stagePath)
+		}
+	}()
+
+	if err := fillStage(stagePath); err != nil {
+		return err
+	}
+
+	backupPath := filepath.Join(parentDir, ".restore-backup-"+filepath.Base(targetPath)+"-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+	targetExists := false
+	if _, err := os.Stat(targetPath); err == nil {
+		targetExists = true
+		if err := os.Rename(targetPath, backupPath); err != nil {
+			return err
+		}
+	}
+
+	if err := os.Rename(stagePath, targetPath); err != nil {
+		if targetExists {
+			_ = os.Rename(backupPath, targetPath)
+		}
+		return err
+	}
+
+	cleanupStage = false
+	if targetExists {
+		_ = os.Remove(backupPath)
+	}
+	return nil
+}
+
+func removePathIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }

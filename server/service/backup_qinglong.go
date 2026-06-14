@@ -920,50 +920,48 @@ func restoreQingLongScripts(extractedDir string) error {
 		return err
 	}
 
-	if err := clearDirectoryContents(config.C.Data.ScriptsDir); err != nil {
-		return err
-	}
-	if err := copyDirectoryContents(filepath.Join(dataDir, "scripts"), config.C.Data.ScriptsDir); err != nil {
-		return err
-	}
+	return restoreDirectoryWithStage(config.C.Data.ScriptsDir, func(stageDir string) error {
+		if err := copyDirectoryContentsFunc(filepath.Join(dataDir, "scripts"), stageDir); err != nil {
+			return err
+		}
 
-	for _, hook := range []string{"extra.sh", "task_before.sh", "task_after.sh"} {
-		sourcePath := filepath.Join(dataDir, "config", hook)
-		if _, err := os.Stat(sourcePath); err == nil {
-			if err := copyFile(sourcePath, filepath.Join(config.C.Data.ScriptsDir, hook)); err != nil {
-				return err
+		for _, hook := range []string{"extra.sh", "task_before.sh", "task_after.sh"} {
+			sourcePath := filepath.Join(dataDir, "config", hook)
+			if _, err := os.Stat(sourcePath); err == nil {
+				if err := copyFileFunc(sourcePath, filepath.Join(stageDir, hook)); err != nil {
+					return err
+				}
 			}
 		}
-	}
 
-	qlConfigDir := filepath.Join(config.C.Data.ScriptsDir, "ql-config")
-	for _, fileName := range []string{"task_before.js", "task_before.py"} {
-		sourcePath := filepath.Join(dataDir, "config", fileName)
-		if _, err := os.Stat(sourcePath); err == nil {
-			if err := copyFile(sourcePath, filepath.Join(qlConfigDir, fileName)); err != nil {
-				return err
+		qlConfigDir := filepath.Join(stageDir, "ql-config")
+		for _, fileName := range []string{"task_before.js", "task_before.py"} {
+			sourcePath := filepath.Join(dataDir, "config", fileName)
+			if _, err := os.Stat(sourcePath); err == nil {
+				if err := copyFileFunc(sourcePath, filepath.Join(qlConfigDir, fileName)); err != nil {
+					return err
+				}
 			}
 		}
-	}
 
-	depsDir := filepath.Join(dataDir, "deps")
-	if entries, err := os.ReadDir(depsDir); err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			sourcePath := filepath.Join(depsDir, entry.Name())
-			targetPath := filepath.Join(config.C.Data.ScriptsDir, entry.Name())
-			if _, err := os.Stat(targetPath); err == nil {
-				continue
-			}
-			if err := copyFile(sourcePath, targetPath); err != nil {
-				return err
+		depsDir := filepath.Join(dataDir, "deps")
+		if entries, err := os.ReadDir(depsDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				sourcePath := filepath.Join(depsDir, entry.Name())
+				targetPath := filepath.Join(stageDir, entry.Name())
+				if _, err := os.Stat(targetPath); err == nil {
+					continue
+				}
+				if err := copyFileFunc(sourcePath, targetPath); err != nil {
+					return err
+				}
 			}
 		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
 func restoreQingLongLogs(extractedDir string) error {

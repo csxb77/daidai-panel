@@ -2,11 +2,15 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"database/sql"
+
+	"daidai-panel/config"
 
 	_ "github.com/glebarez/sqlite"
 )
@@ -301,5 +305,64 @@ export PUSH_KEY="SCT123456"
 	}
 	if !foundServerChan {
 		t.Fatal("expected PUSH_KEY export to become a notification channel")
+	}
+}
+
+func TestRestoreQingLongScriptsKeepsLiveDataWhenStageCopyFails(t *testing.T) {
+	root := t.TempDir()
+	config.C = &config.Config{}
+	config.C.Data.ScriptsDir = filepath.Join(root, "scripts")
+
+	liveScriptPath := filepath.Join(config.C.Data.ScriptsDir, "keep", "live.py")
+	if err := os.MkdirAll(filepath.Dir(liveScriptPath), 0o755); err != nil {
+		t.Fatalf("create live script dir: %v", err)
+	}
+	if err := os.WriteFile(liveScriptPath, []byte("print('live-before')\n"), 0o755); err != nil {
+		t.Fatalf("write live script: %v", err)
+	}
+
+	extractedDir := t.TempDir()
+	dataDir := filepath.Join(extractedDir, "data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "config"), 0o755); err != nil {
+		t.Fatalf("create qinglong config dir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "db"), 0o755); err != nil {
+		t.Fatalf("create qinglong db dir: %v", err)
+	}
+	restoreScriptPath := filepath.Join(dataDir, "scripts", "keep", "restored.py")
+	if err := os.MkdirAll(filepath.Dir(restoreScriptPath), 0o755); err != nil {
+		t.Fatalf("create qinglong restore script dir: %v", err)
+	}
+	if err := os.WriteFile(restoreScriptPath, []byte("print('restored')\n"), 0o755); err != nil {
+		t.Fatalf("write qinglong restore script: %v", err)
+	}
+
+	originalCopyDir := copyDirectoryContentsFunc
+	t.Cleanup(func() {
+		copyDirectoryContentsFunc = originalCopyDir
+	})
+
+	copyDirectoryContentsFunc = func(sourceDir, targetDir string) error {
+		if err := originalCopyDir(sourceDir, targetDir); err != nil {
+			return err
+		}
+		return errors.New("inject qinglong stage copy failure")
+	}
+
+	err := restoreQingLongScripts(extractedDir)
+	if err == nil || !strings.Contains(err.Error(), "inject qinglong stage copy failure") {
+		t.Fatalf("expected injected qinglong stage copy failure, got %v", err)
+	}
+
+	data, err := os.ReadFile(liveScriptPath)
+	if err != nil {
+		t.Fatalf("read live script after qinglong failure: %v", err)
+	}
+	if !strings.Contains(string(data), "live-before") {
+		t.Fatalf("expected live script content to stay unchanged, got %q", string(data))
+	}
+
+	if _, err := os.Stat(filepath.Join(config.C.Data.ScriptsDir, "keep", "restored.py")); !os.IsNotExist(err) {
+		t.Fatalf("expected restored qinglong script to not replace live dir on failure, stat err=%v", err)
 	}
 }
