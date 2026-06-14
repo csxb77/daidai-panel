@@ -62,6 +62,7 @@ const prefillData = ref<any>(null)
 const logViewerVisible = ref(false)
 const logViewerTaskId = ref<number | null>(null)
 const logViewerTaskName = ref('')
+const logViewerMode = ref<'live' | 'latest'>('live')
 const detailVisible = ref(false)
 const detailTask = ref<any>(null)
 const logFilesVisible = ref(false)
@@ -348,12 +349,14 @@ function openDetail(task: any) {
 function openLogViewer(task: any) {
   logViewerTaskId.value = task.id
   logViewerTaskName.value = task.name
+  logViewerMode.value = 'live'
   logViewerVisible.value = true
 }
 
 function openLatestResultLog(task: any) {
   logViewerTaskId.value = task.id
   logViewerTaskName.value = `${task.name} · 最近结果`
+  logViewerMode.value = 'latest'
   logViewerVisible.value = true
 }
 
@@ -1000,6 +1003,7 @@ async function handleImport(event: Event) {
       v-model:visible="logViewerVisible"
       :task-id="logViewerTaskId"
       :task-name="logViewerTaskName"
+      :mode="logViewerMode"
     />
 
     <TaskDetail

@@ -31,6 +31,7 @@ const { dialogFullscreen } = useResponsive()
           </div>
         </template>
         <el-form label-position="top" style="max-width: 420px">
+          <form @submit.prevent="onChangePassword">
           <el-form-item label="* 当前密码">
             <el-input v-model="oldPassword" type="password" show-password placeholder="当前密码" aria-label="当前密码" />
           </el-form-item>
@@ -41,10 +42,11 @@ const { dialogFullscreen } = useResponsive()
             <el-input v-model="confirmPassword" type="password" show-password placeholder="再次输入新密码" aria-label="确认新密码" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" @click="onChangePassword">
+            <el-button type="primary" native-type="submit">
               <el-icon><CircleCheck /></el-icon>修改密码
             </el-button>
           </el-form-item>
+          </form>
         </el-form>
       </el-card>
     </el-col>
@@ -86,7 +88,9 @@ const { dialogFullscreen } = useResponsive()
       </div>
       <div class="setup-2fa-step">
         <div class="step-title">步骤 2：输入验证码</div>
-        <el-input v-model="twoFACode" placeholder="请输入 6 位验证码" maxlength="6" size="large" style="width: 220px" aria-label="双因素验证码" @keyup.enter="onVerify2FA" />
+        <form class="twofa-verify-form" @submit.prevent="onVerify2FA">
+          <el-input v-model="twoFACode" placeholder="请输入 6 位验证码" maxlength="6" size="large" style="width: 220px" aria-label="双因素验证码" @keyup.enter="onVerify2FA" />
+        </form>
       </div>
     </div>
     <template #footer>
@@ -104,6 +108,14 @@ const { dialogFullscreen } = useResponsive()
   font-size: 14px;
   line-height: 1.6;
   margin: 0 0 20px;
+}
+
+form {
+  margin: 0;
+}
+
+.twofa-verify-form {
+  display: inline-block;
 }
 
 .setup-2fa {

@@ -21,6 +21,7 @@ const props = defineProps<{
   visible: boolean
   taskId: number | null
   taskName: string
+  mode?: 'live' | 'latest'
 }>()
 
 const emit = defineEmits<{
@@ -75,7 +76,11 @@ const fontSizeClass = computed(() => `log-font-${fontSize.value}`)
 
 watch(() => props.visible, (visible) => {
   if (visible && props.taskId) {
-    void startStream()
+    if (props.mode === 'latest') {
+      void loadLatestOnly()
+    } else {
+      void startStream()
+    }
   } else {
     cleanup()
   }
@@ -83,7 +88,11 @@ watch(() => props.visible, (visible) => {
 
 watch(() => props.taskId, (taskId, previousTaskId) => {
   if (props.visible && taskId && taskId !== previousTaskId) {
-    void startStream()
+    if (props.mode === 'latest') {
+      void loadLatestOnly()
+    } else {
+      void startStream()
+    }
   }
 })
 
@@ -149,6 +158,25 @@ async function startStream(isReconnect = false) {
       void fetchLatestLog(0, hasLogs.value ? 'preserve' : 'top')
     }
   })
+}
+
+async function loadLatestOnly() {
+  cleanup()
+  resetLogOutput()
+  done.value = true
+  error.value = null
+  emptyMessage.value = null
+  loading.value = true
+  autoScroll.value = false
+  scheduleScrollToTop()
+
+  if (!props.taskId) {
+    loading.value = false
+    return
+  }
+
+  await fetchLatestLog(0, 'top')
+  loading.value = false
 }
 
 async function fetchLatestLog(retryCount = 0, scrollMode: 'top' | 'bottom' | 'preserve' = 'top') {
@@ -521,7 +549,8 @@ function handleClose() {
           <span class="viewer-statusbar-item">Wrap {{ wrap ? 'ON' : 'OFF' }}</span>
         </div>
         <div class="viewer-statusbar-group">
-          <span v-if="!done && !error && !emptyMessage" class="viewer-statusbar-item viewer-statusbar-item--live">实时采集中</span>
+          <span v-if="props.mode === 'latest' && !error && !emptyMessage" class="viewer-statusbar-item">最近结果</span>
+          <span v-else-if="!done && !error && !emptyMessage" class="viewer-statusbar-item viewer-statusbar-item--live">实时采集中</span>
           <span v-else-if="error" class="viewer-statusbar-item viewer-statusbar-item--error">{{ error }}</span>
           <span v-else-if="emptyMessage" class="viewer-statusbar-item viewer-statusbar-item--empty">暂无日志</span>
           <span v-else class="viewer-statusbar-item">UTF-8</span>
