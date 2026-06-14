@@ -73,6 +73,9 @@ if [ -x "$RURIMA" ] && [ -d "$rootfs" ]; then
   ui_print " "
   ui_print "--- 容器运行时 ---"
   "$RURIMA" ruri -p -N -S -A "$rootfs" /bin/ash -c '
+    export DAIDAI_MAGISK_MODULE=1
+    export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
+    export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app
     for c in python3 node npm git curl bash; do
       p=$(command -v $c 2>/dev/null)
       if [ -n "$p" ]; then

@@ -21,8 +21,14 @@ for p in \
   /data/user/0/com.termux/files/usr/bin; do
   [ -d "$p" ] && TERMUX_PATHS="${TERMUX_PATHS:+$TERMUX_PATHS:}$p"
 done
-[ -d "$PANEL_DIR/bin" ] && MODDIR="$PANEL_DIR/bin:$MODDIR"
-export PATH="$MODDIR${TERMUX_PATHS:+:$TERMUX_PATHS}:/sbin:/system/bin:/system/xbin:/vendor/bin:$PATH"
+PANEL_RUNTIME_PATHS=""
+for p in \
+  "$PANEL_DIR/bin/python/bin" \
+  "$PANEL_DIR/bin/node/bin" \
+  "$PANEL_DIR/bin"; do
+  [ -d "$p" ] && PANEL_RUNTIME_PATHS="${PANEL_RUNTIME_PATHS:+$PANEL_RUNTIME_PATHS:}$p"
+done
+export PATH="${PANEL_RUNTIME_PATHS:+$PANEL_RUNTIME_PATHS:}$MODDIR${TERMUX_PATHS:+:$TERMUX_PATHS}:/sbin:/system/bin:/system/xbin:/vendor/bin:$PATH"
 
 say() { echo "$1"; }
 
