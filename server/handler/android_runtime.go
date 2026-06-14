@@ -34,7 +34,7 @@ type AndroidRuntimeHandler struct{}
 func NewAndroidRuntimeHandler() *AndroidRuntimeHandler { return &AndroidRuntimeHandler{} }
 
 // bin 目录约定：Magisk service.sh 会把这里加入 PATH / LD_LIBRARY_PATH。
-const androidBinDir = "/data/adb/daidai-panel/bin"
+const defaultAndroidRuntimeBinDir = "/data/adb/daidai-panel/bin"
 
 // androidRuntimePreset 定义了面板预置的运行时下载源。
 type androidRuntimePreset struct {
@@ -110,15 +110,28 @@ type androidRuntimeItem struct {
 }
 
 // androidSupported 判断当前进程是不是跑在 Android 上（面具版）。
-// 判定方式：runtime.GOOS == "android" 或存在 /data/adb/modules/daidai-panel 目录。
+// 判定方式：
+//   1) 真实 Android 二进制（runtime.GOOS == "android"）
+//   2) Magisk 模块显式注入的环境变量
+//   3) 宿主侧可见的模块目录
 func androidSupported() bool {
 	if runtime.GOOS == "android" {
+		return true
+	}
+	if strings.TrimSpace(os.Getenv("DAIDAI_MAGISK_MODULE")) != "" {
 		return true
 	}
 	if _, err := os.Stat("/data/adb/modules/daidai-panel"); err == nil {
 		return true
 	}
 	return false
+}
+
+func resolveAndroidRuntimeBinDir() string {
+	if dir := strings.TrimSpace(os.Getenv("DAIDAI_ANDROID_RUNTIME_BIN_DIR")); dir != "" {
+		return dir
+	}
+	return defaultAndroidRuntimeBinDir
 }
 
 func detectArch() string {
@@ -146,6 +159,7 @@ func termuxDetected() bool {
 // probeRuntime 在 androidBinDir + Termux PATH 下查找指定命令。
 func probeRuntime(cmdName string) androidRuntimeItem {
 	item := androidRuntimeItem{Name: cmdName}
+	androidBinDir := resolveAndroidRuntimeBinDir()
 
 	candidates := []string{
 		filepath.Join(androidBinDir, cmdName, "bin", cmdName),
@@ -183,6 +197,7 @@ func probeRuntime(cmdName string) androidRuntimeItem {
 }
 
 func (h *AndroidRuntimeHandler) Status(c *gin.Context) {
+	androidBinDir := resolveAndroidRuntimeBinDir()
 	if !androidSupported() {
 		response.Success(c, androidRuntimeStatus{
 			Supported: false,
@@ -224,6 +239,7 @@ type androidInstallRequest struct {
 
 // Install 以 SSE 形式流式返回下载/解压进度。
 func (h *AndroidRuntimeHandler) Install(c *gin.Context) {
+	androidBinDir := resolveAndroidRuntimeBinDir()
 	if !androidSupported() {
 		response.Error(c, http.StatusForbidden, "仅 Android 面具版支持该操作")
 		return
@@ -404,6 +420,7 @@ type androidUninstallRequest struct {
 }
 
 func (h *AndroidRuntimeHandler) Uninstall(c *gin.Context) {
+	androidBinDir := resolveAndroidRuntimeBinDir()
 	if !androidSupported() {
 		response.Error(c, http.StatusForbidden, "仅 Android 面具版支持该操作")
 		return
