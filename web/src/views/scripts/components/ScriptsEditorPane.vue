@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import {
   ArrowLeft,
   ArrowRight,
@@ -13,110 +13,121 @@ import {
   MagicStick,
   MoreFilled,
   Plus,
-  VideoPlay
-} from '@element-plus/icons-vue'
-import MonacoEditor from '@/components/MonacoEditor.vue'
-import { loadMonacoEditor } from '@/utils/monaco'
+  VideoPlay,
+} from "@element-plus/icons-vue";
+import MonacoEditor from "@/components/MonacoEditor.vue";
+import { loadMonacoEditor } from "@/utils/monaco";
 
-const fileContent = defineModel<string>('fileContent', { required: true })
-const isEditing = defineModel<boolean>('isEditing', { required: true })
+const fileContent = defineModel<string>("fileContent", { required: true });
+const isEditing = defineModel<boolean>("isEditing", { required: true });
 
 const props = defineProps<{
-  isMobile: boolean
-  mobileShowEditor: boolean
-  selectedFile: string
-  isBinary: boolean
-  hasChanges: boolean
-  saving: boolean
-  formatting: boolean
-  loading: boolean
-  editorLanguage: string
-  editorAutoFocusTicket?: number
-  onMobileBack: () => void
-  onDebugRun: () => void | Promise<void>
-  onOpenCreateFile: () => void | Promise<void>
-  onAddToTask: () => void
-  onSave: () => void | Promise<void>
-  onCancelEdit: () => void | Promise<void>
-  onFormat: () => void | Promise<void>
-  onLoadVersions: () => void | Promise<void>
-  onOpenRename: () => void
-  onDownload: () => void
-  onDelete: () => void | Promise<void>
-}>()
+  isMobile: boolean;
+  mobileShowEditor: boolean;
+  selectedFile: string;
+  isBinary: boolean;
+  hasChanges: boolean;
+  saving: boolean;
+  formatting: boolean;
+  loading: boolean;
+  editorLanguage: string;
+  editorAutoFocusTicket?: number;
+  onMobileBack: () => void;
+  onDebugRun: () => void | Promise<void>;
+  onOpenCreateFile: () => void | Promise<void>;
+  onAddToTask: () => void;
+  onSave: () => void | Promise<void>;
+  onCancelEdit: () => void | Promise<void>;
+  onFormat: () => void | Promise<void>;
+  onLoadVersions: () => void | Promise<void>;
+  onOpenRename: () => void;
+  onDownload: () => void;
+  onDelete: () => void | Promise<void>;
+}>();
 
 const fileName = computed(() => {
-  if (!props.selectedFile) return ''
-  return props.selectedFile.split('/').pop() || props.selectedFile
-})
+  if (!props.selectedFile) return "";
+  return props.selectedFile.split("/").pop() || props.selectedFile;
+});
 
 const filePath = computed(() => {
-  if (!props.selectedFile) return ''
-  const parts = props.selectedFile.split('/')
-  parts.pop()
-  return parts
-})
+  if (!props.selectedFile) return "";
+  const parts = props.selectedFile.split("/");
+  parts.pop();
+  return parts;
+});
 
 const languageLabel = computed(() => {
-  const lang = (props.editorLanguage || '').toLowerCase()
-  if (!lang) return ''
+  const lang = (props.editorLanguage || "").toLowerCase();
+  if (!lang) return "";
   const map: Record<string, string> = {
-    javascript: 'JS',
-    typescript: 'TS',
-    python: 'PY',
-    shell: 'SH',
-    bash: 'SH',
-    yaml: 'YAML',
-    json: 'JSON',
-    markdown: 'MD',
-    html: 'HTML',
-    css: 'CSS',
-    go: 'GO',
-    plaintext: 'TXT'
-  }
-  return map[lang] || lang.toUpperCase().slice(0, 4)
-})
+    javascript: "JS",
+    typescript: "TS",
+    python: "PY",
+    shell: "SH",
+    bash: "SH",
+    yaml: "YAML",
+    json: "JSON",
+    markdown: "MD",
+    html: "HTML",
+    css: "CSS",
+    go: "GO",
+    plaintext: "TXT",
+  };
+  return map[lang] || lang.toUpperCase().slice(0, 4);
+});
 
 const fileSizeLabel = computed(() => {
-  if (props.isBinary) return ''
-  if (typeof fileContent.value !== 'string') return ''
-  const bytes = new Blob([fileContent.value]).size
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-})
+  if (props.isBinary) return "";
+  if (typeof fileContent.value !== "string") return "";
+  const bytes = new Blob([fileContent.value]).size;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+});
 
 const lineCountLabel = computed(() => {
-  if (props.isBinary || !fileContent.value) return ''
-  const count = fileContent.value.split('\n').length
-  return `${count} 行`
-})
+  if (props.isBinary || !fileContent.value) return "";
+  const count = fileContent.value.split("\n").length;
+  return `${count} 行`;
+});
 
 function startEdit() {
-  isEditing.value = true
+  isEditing.value = true;
 }
 
-const monacoEditorRef = ref<{ focus?: () => void } | null>(null)
+const monacoEditorRef = ref<{ focus?: () => void } | null>(null);
 
 onMounted(() => {
   void loadMonacoEditor().catch((error) => {
-    console.warn('Monaco 编辑器预加载失败，将在打开文件时重试。', error)
-  })
-})
+    console.warn("Monaco 编辑器预加载失败，将在打开文件时重试。", error);
+  });
+});
 
 watch(
-  () => [isEditing.value, props.editorAutoFocusTicket, props.loading, props.isBinary, props.selectedFile] as const,
+  () =>
+    [
+      isEditing.value,
+      props.editorAutoFocusTicket,
+      props.loading,
+      props.isBinary,
+      props.selectedFile,
+    ] as const,
   ([editing, focusTicket, loading, binary, file]) => {
-    if (!editing || loading || binary || !file || !focusTicket) return
+    if (!editing || loading || binary || !file || !focusTicket) return;
     void nextTick(() => {
-      monacoEditorRef.value?.focus?.()
-    })
-  }
-)
+      monacoEditorRef.value?.focus?.();
+    });
+  },
+);
 </script>
 
 <template>
-  <section class="scripts-editor" :class="{ mobile: isMobile }" v-show="!isMobile || mobileShowEditor">
+  <section
+    class="scripts-editor"
+    :class="{ mobile: isMobile }"
+    v-show="!isMobile || mobileShowEditor"
+  >
     <!-- Empty state -->
     <div v-if="!selectedFile" class="editor-empty">
       <div class="empty-card">
@@ -125,9 +136,16 @@ watch(
           <el-icon :size="20"><Plus /></el-icon>
         </div>
         <h2 class="empty-title">新建一个脚本开始使用</h2>
-        <p class="empty-subtitle">从左侧选择已有脚本，或直接创建一个新文件并立即开始编辑、调试和添加任务。</p>
+        <p class="empty-subtitle">
+          从左侧选择已有脚本，或直接创建一个新文件并立即开始编辑、调试和添加任务。
+        </p>
         <div class="empty-actions">
-          <el-button class="create-cta" type="primary" size="large" @click="onOpenCreateFile">
+          <el-button
+            class="create-cta"
+            type="primary"
+            size="large"
+            @click="onOpenCreateFile"
+          >
             <el-icon><Plus /></el-icon>新建脚本
           </el-button>
         </div>
@@ -138,27 +156,54 @@ watch(
       <!-- Hero header -->
       <header class="editor-hero">
         <div class="hero-file">
-          <el-button v-if="isMobile" class="mobile-back" text @click="onMobileBack" aria-label="返回文件列表">
+          <el-button
+            v-if="isMobile"
+            class="mobile-back"
+            text
+            @click="onMobileBack"
+            aria-label="返回文件列表"
+          >
             <el-icon :size="18"><ArrowLeft /></el-icon>
           </el-button>
           <div class="file-icon" aria-hidden="true">
             <el-icon :size="18"><Document /></el-icon>
           </div>
           <div class="file-meta">
-            <nav v-if="filePath.length > 0 && !isMobile" class="breadcrumb" aria-label="路径">
+            <nav
+              v-if="filePath.length > 0 && !isMobile"
+              class="breadcrumb"
+              aria-label="路径"
+            >
               <template v-for="(seg, idx) in filePath" :key="idx">
                 <span class="breadcrumb-seg">{{ seg }}</span>
-                <el-icon v-if="idx < filePath.length - 1" class="breadcrumb-sep" :size="10">
+                <el-icon
+                  v-if="idx < filePath.length - 1"
+                  class="breadcrumb-sep"
+                  :size="10"
+                >
                   <ArrowRight />
                 </el-icon>
               </template>
             </nav>
             <div class="file-title-row">
               <h1 class="file-title" :title="selectedFile">{{ fileName }}</h1>
-              <span v-if="languageLabel" class="file-pill file-pill--lang">{{ languageLabel }}</span>
-              <span v-if="isBinary" class="file-pill file-pill--binary">二进制</span>
-              <span v-else-if="fileSizeLabel && !isMobile" class="file-pill file-pill--muted">{{ fileSizeLabel }}</span>
-              <span v-if="hasChanges" class="unsaved-pulse" role="status" aria-label="文件有未保存的改动">
+              <span v-if="languageLabel" class="file-pill file-pill--lang">{{
+                languageLabel
+              }}</span>
+              <span v-if="isBinary" class="file-pill file-pill--binary"
+                >二进制</span
+              >
+              <span
+                v-else-if="fileSizeLabel && !isMobile"
+                class="file-pill file-pill--muted"
+                >{{ fileSizeLabel }}</span
+              >
+              <span
+                v-if="hasChanges"
+                class="unsaved-pulse"
+                role="status"
+                aria-label="文件有未保存的改动"
+              >
                 <span class="unsaved-dot"></span>
                 <span class="unsaved-label">未保存</span>
               </span>
@@ -216,12 +261,20 @@ watch(
           </el-button>
 
           <el-dropdown trigger="click" placement="bottom-end">
-            <el-button class="action-btn" :size="isMobile ? 'small' : 'default'" aria-label="更多操作">
+            <el-button
+              class="action-btn"
+              :size="isMobile ? 'small' : 'default'"
+              aria-label="更多操作"
+            >
               <el-icon><MoreFilled /></el-icon>
             </el-button>
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item v-if="isEditing" @click="onFormat" :disabled="isBinary">
+                <el-dropdown-item
+                  v-if="isEditing"
+                  @click="onFormat"
+                  :disabled="isBinary"
+                >
                   <el-icon><MagicStick /></el-icon>格式化
                 </el-dropdown-item>
                 <el-dropdown-item @click="onLoadVersions" :disabled="isBinary">
@@ -247,7 +300,10 @@ watch(
       <div class="editor-body" v-loading="loading">
         <div v-if="isBinary" class="binary-card">
           <div class="binary-card-title">二进制文件</div>
-          <p class="binary-card-text">该文件为二进制格式，无法在线编辑。可通过右上角「更多 → 下载」取回文件。</p>
+          <p class="binary-card-text">
+            该文件为二进制格式，无法在线编辑。可通过右上角「更多 →
+            下载」取回文件。
+          </p>
         </div>
         <MonacoEditor
           ref="monacoEditorRef"
@@ -262,15 +318,24 @@ watch(
       <!-- Status strip -->
       <footer v-if="!isBinary && selectedFile" class="editor-statusbar">
         <div class="status-group">
-          <span v-if="languageLabel" class="status-item status-item--lang">{{ languageLabel }}</span>
-          <span v-if="lineCountLabel" class="status-item">{{ lineCountLabel }}</span>
-          <span v-if="fileSizeLabel" class="status-item">{{ fileSizeLabel }}</span>
+          <span v-if="languageLabel" class="status-item status-item--lang">{{
+            languageLabel
+          }}</span>
+          <span v-if="lineCountLabel" class="status-item">{{
+            lineCountLabel
+          }}</span>
+          <span v-if="fileSizeLabel" class="status-item">{{
+            fileSizeLabel
+          }}</span>
         </div>
         <div class="status-group">
           <span class="status-item">UTF-8</span>
           <span class="status-item">LF</span>
-          <span class="status-item" :class="{ 'status-item--accent': isEditing }">
-            {{ isEditing ? '编辑中' : '只读' }}
+          <span
+            class="status-item"
+            :class="{ 'status-item--accent': isEditing }"
+          >
+            {{ isEditing ? "编辑中" : "只读" }}
           </span>
         </div>
       </footer>
@@ -320,13 +385,17 @@ watch(
   z-index: -1;
   padding: 1px;
   border-radius: inherit;
-  background: linear-gradient(135deg,
-      color-mix(in srgb, #409eff 40%, transparent) 0%,
-      color-mix(in srgb, #6366f1 40%, transparent) 50%,
-      color-mix(in srgb, #8b5cf6 35%, transparent) 100%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, #409eff 40%, transparent) 0%,
+    color-mix(in srgb, #36cfc9 30%, transparent) 50%,
+    color-mix(in srgb, #10b981 26%, transparent) 100%
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
-          mask-composite: exclude;
+  mask-composite: exclude;
   opacity: 0.7;
   pointer-events: none;
 }
@@ -340,8 +409,8 @@ watch(
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  box-shadow: 0 6px 18px -8px rgba(99, 102, 241, 0.55);
+  background: linear-gradient(135deg, #1890ff, #36cfc9);
+  box-shadow: 0 6px 18px -8px rgba(24, 144, 255, 0.42);
 }
 
 .empty-title {
@@ -513,12 +582,21 @@ watch(
 }
 
 @keyframes unsaved-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.25); opacity: 0.55; }
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 0.55;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .unsaved-dot { animation: none; }
+  .unsaved-dot {
+    animation: none;
+  }
 }
 
 .hero-actions {
@@ -534,7 +612,8 @@ watch(
 }
 
 .action-btn--primary {
-  box-shadow: 0 4px 12px -6px color-mix(in srgb, var(--el-color-primary) 50%, transparent);
+  box-shadow: 0 4px 12px -6px
+    color-mix(in srgb, var(--el-color-primary) 50%, transparent);
 }
 
 .action-btn--cancel {
@@ -542,7 +621,11 @@ watch(
 
   &:hover:not(.is-disabled) {
     color: var(--el-color-danger);
-    border-color: color-mix(in srgb, var(--el-color-danger) 40%, var(--el-border-color));
+    border-color: color-mix(
+      in srgb,
+      var(--el-color-danger) 40%,
+      var(--el-border-color)
+    );
     background: color-mix(in srgb, var(--el-color-danger) 6%, transparent);
   }
 }

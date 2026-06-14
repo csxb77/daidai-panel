@@ -1,30 +1,32 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed } from "vue";
 
 const props = defineProps<{
-  version: string
-  lastCheckTime: string
-  autoUpdateEnabled: boolean
-}>()
+  version: string;
+  lastCheckTime: string;
+  autoUpdateEnabled: boolean;
+}>();
 
 const emit = defineEmits<{
-  'update:autoUpdateEnabled': [value: boolean]
-}>()
+  "update:autoUpdateEnabled": [value: boolean];
+}>();
 
 const lastCheckDisplay = computed(() => {
-  if (!props.lastCheckTime) return '从未检查'
-  return new Date(props.lastCheckTime).toLocaleString()
-})
+  if (!props.lastCheckTime) return "从未检查";
+  return new Date(props.lastCheckTime).toLocaleString();
+});
 
 const nextCheckDisplay = computed(() => {
-  if (!props.lastCheckTime) return '-'
-  const next = new Date(new Date(props.lastCheckTime).getTime() + 24 * 60 * 60 * 1000)
-  return next.toLocaleString()
-})
+  if (!props.lastCheckTime) return "-";
+  const next = new Date(
+    new Date(props.lastCheckTime).getTime() + 24 * 60 * 60 * 1000,
+  );
+  return next.toLocaleString();
+});
 
 const statusText = computed(() => {
-  return props.autoUpdateEnabled ? '系统已是最新版本' : '未开启自动检查'
-})
+  return props.autoUpdateEnabled ? "系统已是最新版本" : "未开启自动检查";
+});
 </script>
 
 <template>
@@ -32,20 +34,45 @@ const statusText = computed(() => {
     <div class="usc-layout">
       <div class="usc-header">
         <span class="usc-title">系统更新设置</span>
-        <span class="usc-subtitle">保持系统为最新版本以获得更好的稳定性和性能</span>
+        <span class="usc-subtitle"
+          >保持系统为最新版本以获得更好的稳定性和性能</span
+        >
       </div>
 
       <div class="usc-switch-card">
         <div class="usc-switch-icon-wrap">
-          <svg class="usc-switch-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M12 4V2M12 4C7.58 4 4 7.58 4 12H2M12 4C16.42 4 20 7.58 20 12H22M12 22V20M12 20C16.42 20 20 16.42 20 12M12 20C7.58 20 4 16.42 4 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M15 9L9 15M9 9L15 15" stroke="currentColor" stroke-width="0" />
-            <path d="M12 8V12L14 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <svg
+            class="usc-switch-svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
+            <path
+              d="M12 4V2M12 4C7.58 4 4 7.58 4 12H2M12 4C16.42 4 20 7.58 20 12H22M12 22V20M12 20C16.42 20 20 16.42 20 12M12 20C7.58 20 4 16.42 4 12"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+            <path
+              d="M15 9L9 15M9 9L15 15"
+              stroke="currentColor"
+              stroke-width="0"
+            />
+            <path
+              d="M12 8V12L14 14"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
           </svg>
         </div>
         <div class="usc-switch-body">
           <div class="usc-switch-title">自动更新</div>
-          <div class="usc-switch-desc">每 24 小时自动检查一次新版本，检测到新版本后会在空闲时段尝试更新（不下载生效无变化）。</div>
+          <div class="usc-switch-desc">
+            每 24
+            小时自动检查一次新版本，检测到新版本后会在空闲时段尝试更新（不下载生效无变化）。
+          </div>
         </div>
         <el-switch
           :model-value="autoUpdateEnabled"
@@ -68,11 +95,13 @@ const statusText = computed(() => {
           <span class="usc-footer-dot usc-footer-dot--green"></span>
           <div class="usc-footer-content">
             <span class="usc-footer-label">当前状态</span>
-            <span class="usc-footer-value usc-footer-value--status">{{ statusText }}</span>
+            <span class="usc-footer-value usc-footer-value--status">{{
+              statusText
+            }}</span>
           </div>
         </div>
         <div class="usc-footer-item">
-          <span class="usc-footer-dot usc-footer-dot--purple"></span>
+          <span class="usc-footer-dot usc-footer-dot--cyan"></span>
           <div class="usc-footer-content">
             <span class="usc-footer-label">下次检查时间</span>
             <span class="usc-footer-value">{{ nextCheckDisplay }}</span>
@@ -90,7 +119,10 @@ const statusText = computed(() => {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
   height: 100%;
 
-  :deep(.el-card__body) { padding: 0; height: 100%; }
+  :deep(.el-card__body) {
+    padding: 0;
+    height: 100%;
+  }
 }
 
 .usc-layout {
@@ -123,7 +155,11 @@ const statusText = computed(() => {
   gap: 14px;
   padding: 16px;
   border-radius: 12px;
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.06) 0%, rgba(139, 92, 246, 0.04) 100%);
+  background: linear-gradient(
+    135deg,
+    rgba(24, 144, 255, 0.07) 0%,
+    rgba(54, 207, 201, 0.05) 100%
+  );
   border: 1px solid rgba(59, 130, 246, 0.1);
   margin-bottom: 20px;
   flex: 1;
@@ -133,12 +169,12 @@ const statusText = computed(() => {
   width: 40px;
   height: 40px;
   border-radius: 12px;
-  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  background: linear-gradient(135deg, #1890ff, #36cfc9);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 4px 12px rgba(24, 144, 255, 0.28);
 }
 
 .usc-switch-svg {
@@ -185,9 +221,18 @@ const statusText = computed(() => {
   flex-shrink: 0;
   margin-top: 4px;
 
-  &--blue { background: #3b82f6; box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15); }
-  &--green { background: #10b981; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15); }
-  &--purple { background: #8b5cf6; box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.15); }
+  &--blue {
+    background: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  }
+  &--green {
+    background: #10b981;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
+  }
+  &--cyan {
+    background: #36cfc9;
+    box-shadow: 0 0 0 3px rgba(54, 207, 201, 0.18);
+  }
 }
 
 .usc-footer-content {
