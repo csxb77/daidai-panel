@@ -900,6 +900,7 @@ onBeforeUnmount(() => {
 
 .status-tab {
   padding: 6px 14px;
+  position: relative;
   border-radius: 7px;
   border: none;
   background: transparent;
@@ -919,6 +920,18 @@ onBeforeUnmount(() => {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
     box-shadow: 0 6px 16px rgba(64, 158, 255, 0.12);
+
+    &::after {
+      content: "";
+      position: absolute;
+      left: 10px;
+      right: 10px;
+      bottom: 2px;
+      height: 2px;
+      border-radius: 999px;
+      background: var(--el-color-primary);
+      opacity: 0.75;
+    }
     font-weight: 600;
   }
 }
@@ -974,6 +987,7 @@ onBeforeUnmount(() => {
 
 .action-btns {
   display: flex;
+  border: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 86%, transparent);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.5);
   align-items: center;
   justify-content: center;
@@ -1467,4 +1481,19 @@ onBeforeUnmount(() => {
   }
 }
 
+</style>
+
+
+<style lang="scss">
+html.dark {
+  .logs-page .toolbar__right,
+  .logs-page .action-btns {
+    background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black);
+    border-color: rgba(255,255,255,0.08);
+  }
+
+  .logs-page .status-tabs {
+    background: color-mix(in srgb, var(--el-fill-color-light) 72%, black);
+  }
+}
 </style>

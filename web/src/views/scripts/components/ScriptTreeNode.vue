@@ -112,6 +112,7 @@ const extLabel = computed(() => {
 
 .tree-node-label {
   flex: 1;
+  transition: color 0.15s ease;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -177,6 +178,7 @@ const extLabel = computed(() => {
 
 .tree-node:hover {
   background: color-mix(in srgb, var(--el-fill-color-light) 86%, transparent);
+  .tree-node-label { color: var(--el-color-primary); }
   transform: translateX(1px);
 
   .tree-node-dot {

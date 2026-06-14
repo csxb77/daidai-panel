@@ -811,6 +811,9 @@ async function loadVersion() {
 
 .header-breadcrumb {
   display: flex;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 76%, transparent);
   align-items: center;
   gap: 6px;
   font-size: 13px;
@@ -831,6 +834,7 @@ async function loadVersion() {
 
 .breadcrumb-current {
   white-space: nowrap;
+  letter-spacing: 0.1px;
   color: var(--el-text-color-primary);
   font-weight: 600;
 }
@@ -889,6 +893,9 @@ async function loadVersion() {
 
 .header-right {
   display: flex;
+  padding: 4px 6px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
   align-items: center;
   gap: 6px;
 }

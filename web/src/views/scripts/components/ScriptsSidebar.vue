@@ -148,6 +148,8 @@ watch(searchKeyword, (val) => {
 
 .sidebar-top {
   display: flex;
+  border-bottom: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 80%, transparent);
+  padding-bottom: 10px;
   position: relative;
   flex-direction: column;
   gap: 10px;
@@ -199,6 +201,9 @@ watch(searchKeyword, (val) => {
 
 .sidebar-toolbar-actions {
   display: flex;
+  padding: 2px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 6px;
 }
@@ -388,6 +393,7 @@ watch(searchKeyword, (val) => {
 
 .runner-card-icon {
   width: 30px;
+  box-shadow: 0 8px 18px rgba(34, 197, 94, 0.12);
   height: 30px;
   border-radius: 8px;
   display: inline-flex;
@@ -435,6 +441,34 @@ watch(searchKeyword, (val) => {
     .tree-node-ext {
       opacity: 1;
     }
+  }
+}
+</style>
+
+
+<style lang="scss">
+html.dark {
+  .scripts-sidebar {
+    background: #171717;
+    border-right-color: rgba(255,255,255,0.08);
+  }
+
+  .scripts-sidebar .sidebar-top,
+  .scripts-sidebar .sidebar-footer {
+    border-color: rgba(255,255,255,0.08);
+  }
+
+  .scripts-sidebar .sidebar-toolbar-actions,
+  .scripts-sidebar .runner-card {
+    background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black);
+  }
+
+  .scripts-sidebar .primary-new-btn {
+    box-shadow: 0 10px 20px rgba(37, 99, 235, 0.16);
+  }
+
+  .scripts-sidebar .runner-card:hover {
+    box-shadow: 0 14px 26px rgba(0,0,0,0.28);
   }
 }
 </style>
