@@ -3,7 +3,9 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -277,8 +279,14 @@ func triggerWatchtowerUpdate(cfg watchtowerRuntimeConfig) (map[string]interface{
 	defer resp.Body.Close()
 
 	var payload map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil && resp.StatusCode < http.StatusBadRequest {
-		return nil, fmt.Errorf("解析 Watchtower 更新响应失败: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		// Watchtower 手动触发接口在部分部署里会返回 204 No Content 或 200 + 空响应体。
+		// 这类场景代表“触发成功但无额外 JSON”，不能因为 EOF 就误判成失败。
+		if !(resp.StatusCode < http.StatusBadRequest && errors.Is(err, io.EOF)) {
+			if resp.StatusCode < http.StatusBadRequest {
+				return nil, fmt.Errorf("解析 Watchtower 更新响应失败: %w", err)
+			}
+		}
 	}
 
 	if resp.StatusCode >= http.StatusBadRequest {
@@ -288,6 +296,9 @@ func triggerWatchtowerUpdate(cfg watchtowerRuntimeConfig) (map[string]interface{
 		return nil, fmt.Errorf("Watchtower 更新触发失败: HTTP %d", resp.StatusCode)
 	}
 
+	if payload == nil {
+		payload = map[string]interface{}{}
+	}
 	return payload, nil
 }
 

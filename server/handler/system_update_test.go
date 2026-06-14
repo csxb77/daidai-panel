@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -376,5 +379,77 @@ func TestBuildPanelUpdateHelperScriptSkipsInvalidPreviousImageID(t *testing.T) {
 	script := buildPanelUpdateHelperScript(plan)
 	if strings.Contains(script, "docker image rm") {
 		t.Fatalf("expected invalid previous image id to be ignored, got:\n%s", script)
+	}
+}
+
+func TestTriggerWatchtowerUpdateAllowsNoContentSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST request, got %s", r.Method)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer demo-token" {
+			t.Fatalf("expected bearer token header, got %q", got)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	result, err := triggerWatchtowerUpdate(watchtowerRuntimeConfig{
+		Managed:                true,
+		APIURL:                 server.URL,
+		APIToken:               "demo-token",
+		ManualTriggerSupported: true,
+	})
+	if err != nil {
+		t.Fatalf("expected 204 no content to be treated as success, got %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result map on success")
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected empty payload for 204 response, got %#v", result)
+	}
+}
+
+func TestTriggerWatchtowerUpdateAllowsEmpty200Body(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	result, err := triggerWatchtowerUpdate(watchtowerRuntimeConfig{
+		Managed:                true,
+		APIURL:                 server.URL,
+		APIToken:               "demo-token",
+		ManualTriggerSupported: true,
+	})
+	if err != nil {
+		t.Fatalf("expected 200 empty body to be treated as success, got %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result map on success")
+	}
+	if len(result) != 0 {
+		t.Fatalf("expected empty payload for empty 200 body, got %#v", result)
+	}
+}
+
+func TestTriggerWatchtowerUpdateReturnsErrorPayloadMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "watchtower upstream failed",
+		})
+	}))
+	defer server.Close()
+
+	_, err := triggerWatchtowerUpdate(watchtowerRuntimeConfig{
+		Managed:                true,
+		APIURL:                 server.URL,
+		APIToken:               "demo-token",
+		ManualTriggerSupported: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "watchtower upstream failed") {
+		t.Fatalf("expected error payload message to surface, got %v", err)
 	}
 }
