@@ -1430,6 +1430,7 @@ function rerunLog(log: any) {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
   gap: 6px;
+  perspective: 1000px;
 }
 
 .quick-tile {
@@ -1474,10 +1475,16 @@ function rerunLog(log: any) {
     opacity: 1;
     transform: translateY(0);
   }
+
+  &:hover .quick-tile__icon {
+    transform: translateY(-1px) scale(1.04);
+    box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
+  }
 }
 
 .quick-tile__icon {
   width: 38px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
   height: 38px;
   border-radius: 10px;
   display: flex;
@@ -1804,12 +1811,16 @@ function rerunLog(log: any) {
 
 .resource-row {
   display: flex;
+  border-radius: 12px;
+  padding: 8px 10px;
+  transition: background-color 0.18s ease, transform 0.18s ease;
   align-items: flex-start;
   gap: 12px;
 }
 
 .resource-row__icon {
   width: 36px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
   height: 36px;
   border-radius: 10px;
   display: flex;
@@ -1867,7 +1878,18 @@ function rerunLog(log: any) {
 .resource-bar__fill {
   height: 100%;
   border-radius: 999px;
+  position: relative;
+  overflow: hidden;
   transition: width 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+    transform: translateX(-120%);
+    animation: dd-resource-sheen 2.8s ease-in-out infinite;
+  }
 }
 
 .uptime-detail {
@@ -1926,6 +1948,7 @@ function rerunLog(log: any) {
 .activity-item {
   display: flex;
   position: relative;
+  border: 1px solid transparent;
   align-items: flex-start;
   gap: 10px;
   padding: 10px 6px;
@@ -1935,6 +1958,7 @@ function rerunLog(log: any) {
   &:hover {
     background: var(--el-fill-color-light);
     transform: translateX(2px);
+    border-color: color-mix(in srgb, var(--el-color-primary) 16%, transparent);
   }
 }
 
@@ -2156,6 +2180,9 @@ function rerunLog(log: any) {
 
 .log-cell-actions {
   display: inline-flex;
+  border-radius: 999px;
+  padding: 2px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
   align-items: center;
   justify-content: center;
   gap: 2px;
@@ -2163,6 +2190,7 @@ function rerunLog(log: any) {
 
 .icon-btn {
   width: 26px;
+  transition: all 0.15s ease;
   height: 26px;
   border-radius: 6px;
   border: none;
@@ -2177,6 +2205,11 @@ function rerunLog(log: any) {
   &:hover {
     background: var(--el-fill-color);
     color: var(--el-color-primary);
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: scale(0.95);
   }
 }
 
@@ -2472,12 +2505,23 @@ function rerunLog(log: any) {
   }
 }
 
+@keyframes dd-resource-sheen {
+  0%,
+  100% {
+    transform: translateX(-120%);
+  }
+  55% {
+    transform: translateX(120%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-banner,
   .stat-card--cinematic,
   .panel,
   .log-table__row-cinematic,
-  .activity-item--cinematic {
+  .activity-item--cinematic,
+  .resource-bar__fill::after {
     animation: none;
   }
 }

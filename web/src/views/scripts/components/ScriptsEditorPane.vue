@@ -477,6 +477,8 @@ watch(
 
 .file-icon {
   width: 36px;
+  box-shadow: 0 8px 18px rgba(64, 158, 255, 0.08);
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
   height: 36px;
   border-radius: 10px;
   display: inline-flex;
@@ -537,6 +539,7 @@ watch(
 
 .file-pill {
   display: inline-flex;
+  transition: transform 0.16s ease, background-color 0.16s ease, color 0.16s ease;
   align-items: center;
   height: 20px;
   padding: 0 8px;
@@ -565,6 +568,7 @@ watch(
 
 .unsaved-pulse {
   display: inline-flex;
+  box-shadow: inset 0 0 0 1px rgba(230, 162, 60, 0.08);
   align-items: center;
   gap: 5px;
   height: 20px;
@@ -608,6 +612,9 @@ watch(
 
 .hero-actions {
   display: inline-flex;
+  padding: 4px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
@@ -711,6 +718,7 @@ watch(
 /* ---------------- Status bar ---------------- */
 .editor-statusbar {
   flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   position: relative;
   display: flex;
   align-items: center;
@@ -735,6 +743,7 @@ watch(
 
 .status-item {
   letter-spacing: 0.4px;
+  transition: color 0.16s ease, opacity 0.16s ease;
 }
 
 .status-item--lang {
@@ -744,6 +753,7 @@ watch(
 
 .status-item--accent {
   color: #67c23a;
+  font-weight: 600;
 }
 
 /* ---------------- Mobile ---------------- */

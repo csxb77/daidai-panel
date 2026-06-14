@@ -891,6 +891,7 @@ onBeforeUnmount(() => {
 
 .status-tabs {
   display: inline-flex;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   background: var(--el-fill-color-light);
   border-radius: 10px;
   padding: 3px;
@@ -925,6 +926,7 @@ onBeforeUnmount(() => {
 .batch-actions {
   display: flex;
   gap: 8px;
+  animation: dd-batch-actions-in 220ms var(--dd-ease-emphasized) both;
 }
 
 /* =============== Table Card =============== */
@@ -975,6 +977,9 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
 }
 
 :deep(.tag-with-dot) {
@@ -1094,6 +1099,7 @@ onBeforeUnmount(() => {
 
 .detail-hero {
   display: flex;
+  position: relative;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
@@ -1101,6 +1107,18 @@ onBeforeUnmount(() => {
   background: linear-gradient(180deg,
     color-mix(in srgb, var(--logs-accent) 6%, transparent) 0%,
     transparent 100%);
+  overflow: hidden;
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: auto -20% 0 auto;
+    width: 180px;
+    height: 180px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(34, 197, 94, 0.08), transparent 70%);
+    pointer-events: none;
+  }
 }
 
 .detail-hero-main {
@@ -1271,6 +1289,15 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
+
+  :deep(.el-button) {
+    transition: transform 0.16s ease, box-shadow 0.18s ease;
+  }
+
+  :deep(.el-button:hover) {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  }
 }
 
 /* =============== Animations =============== */
@@ -1419,9 +1446,21 @@ onBeforeUnmount(() => {
   }
 }
 
+@keyframes dd-batch-actions-in {
+  from {
+    opacity: 0;
+    transform: translate3d(10px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .log-card--cinematic,
-  .logs-table-cinematic {
+  .logs-table-cinematic,
+  .batch-actions {
     animation: none;
   }
 }
