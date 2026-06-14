@@ -1193,7 +1193,7 @@ function rerunLog(log: any) {
               style="color: #10b981"
               ><TrendCharts
             /></el-icon>
-            <span>任务统计</span>
+            <span>执行统计</span>
             <span class="panel-header__hint">近{{ trendRange }}天</span>
           </div>
           <div class="panel-header__actions">
@@ -1237,7 +1237,7 @@ function rerunLog(log: any) {
               <span class="task-donut__value">
                 <CountUp :end-val="taskStats.total" :duration="1.2" />
               </span>
-              <span class="task-donut__label">总任务数</span>
+              <span class="task-donut__label">总执行数</span>
             </div>
           </div>
           <div class="task-legend">
