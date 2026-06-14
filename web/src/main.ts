@@ -1,9 +1,9 @@
-import { createApp } from 'vue'
-import { createPinia } from 'pinia'
-import 'element-plus/theme-chalk/dark/css-vars.css'
-import 'element-plus/theme-chalk/el-loading.css'
-import 'element-plus/theme-chalk/el-message.css'
-import 'element-plus/theme-chalk/el-message-box.css'
+import { createApp } from "vue";
+import { createPinia } from "pinia";
+import "element-plus/theme-chalk/dark/css-vars.css";
+import "element-plus/theme-chalk/el-loading.css";
+import "element-plus/theme-chalk/el-message.css";
+import "element-plus/theme-chalk/el-message-box.css";
 import {
   ArrowLeft,
   ArrowRight,
@@ -57,20 +57,22 @@ import {
   VideoPause,
   VideoPlay,
   View,
-} from '@element-plus/icons-vue'
-import App from './App.vue'
-import router from './router'
-import { fetchAndApplyPanelAppearance } from './utils/panelAppearance'
-import './styles/global.scss'
-import './styles/animations.css'
-import './styles/visual-enhancements.css'
+} from "@element-plus/icons-vue";
+import App from "./App.vue";
+import LoadingMotion from "./components/LoadingMotion.vue";
+import router from "./router";
+import { fetchAndApplyPanelAppearance } from "./utils/panelAppearance";
+import "./styles/global.scss";
+import "./styles/animations.css";
+import "./styles/visual-enhancements.css";
 
-const app = createApp(App)
+const app = createApp(App);
 
-app.use(createPinia())
-app.use(router)
+app.use(createPinia());
+app.use(router);
+app.component("LoadingMotion", LoadingMotion);
 
-void fetchAndApplyPanelAppearance()
+void fetchAndApplyPanelAppearance();
 
 const globalIcons = {
   ArrowLeft,
@@ -125,10 +127,10 @@ const globalIcons = {
   VideoPause,
   VideoPlay,
   View,
-}
+};
 
 for (const [key, component] of Object.entries(globalIcons)) {
-  app.component(key, component)
+  app.component(key, component);
 }
 
-app.mount('#app')
+app.mount("#app");

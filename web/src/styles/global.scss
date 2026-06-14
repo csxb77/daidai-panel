@@ -5,28 +5,55 @@
 }
 
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes fadeInUp {
-  from { opacity: 0; transform: translateY(14px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 @keyframes pulseDot {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.5); opacity: 0.6; }
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.6;
+  }
 }
 
 @keyframes rippleOut {
-  0% { transform: scale(1); opacity: 0.5; }
-  100% { transform: scale(2.8); opacity: 0; }
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
 }
 
 @keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 .animate-fade-in {
@@ -49,9 +76,12 @@
   will-change: transform, opacity;
 }
 
-html, body {
+html,
+body {
   height: 100%;
-  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  font-family:
+    "Inter", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial,
+    sans-serif;
   font-size: 14px;
   line-height: 1.6;
   letter-spacing: 0.2px;
@@ -61,7 +91,8 @@ html, body {
 }
 
 @media screen and (min-width: 769px) {
-  html, body {
+  html,
+  body {
     overflow: hidden;
   }
 }
@@ -130,8 +161,11 @@ html, body {
   --dd-page-padding: 20px;
   --dd-card-radius: 12px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  --dd-font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  --dd-font-ui: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  --dd-font-mono:
+    "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
+  --dd-font-ui:
+    "Inter", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial,
+    sans-serif;
   --dd-log-bg-color: #f8fafc;
   --dd-log-bg-image: none;
   --dd-log-border-color: rgba(148, 163, 184, 0.18);
@@ -278,7 +312,7 @@ a {
     position: relative;
 
     &::before {
-      content: '';
+      content: "";
       position: absolute;
       inset: -8px;
     }
@@ -321,12 +355,16 @@ a {
     overflow: hidden;
 
     &.is-active {
-      background: linear-gradient(135deg, var(--el-color-primary-light-8), var(--el-color-primary-light-9));
+      background: linear-gradient(
+        135deg,
+        var(--el-color-primary-light-8),
+        var(--el-color-primary-light-9)
+      );
       color: var(--el-color-primary);
       font-weight: 600;
 
       &::before {
-        content: '';
+        content: "";
         position: absolute;
         left: 0;
         top: 20%;
@@ -397,7 +435,8 @@ a {
     font-weight: 500;
   }
 
-  .btn-prev, .btn-next {
+  .btn-prev,
+  .btn-next {
     border-radius: 6px;
   }
 }
@@ -433,7 +472,12 @@ html.dark {
 
   // Dashboard hero 横幅：浅紫蓝渐变改为深色版本
   .hero-banner {
-    background: linear-gradient(135deg, #312e81 0%, #1e293b 55%, #0f172a 100%) !important;
+    background: linear-gradient(
+      135deg,
+      #312e81 0%,
+      #1e293b 55%,
+      #0f172a 100%
+    ) !important;
     border-color: rgba(139, 92, 246, 0.28) !important;
   }
   .hero-banner__title {
@@ -442,9 +486,15 @@ html.dark {
   .hero-banner__sub {
     color: rgba(241, 245, 249, 0.72) !important;
   }
-  .hero-banner__bubble.bubble-1 { background: rgba(255, 255, 255, 0.18); }
-  .hero-banner__bubble.bubble-2 { background: rgba(167, 139, 250, 0.32); }
-  .hero-banner__bubble.bubble-3 { background: rgba(96, 165, 250, 0.32); }
+  .hero-banner__bubble.bubble-1 {
+    background: rgba(255, 255, 255, 0.18);
+  }
+  .hero-banner__bubble.bubble-2 {
+    background: rgba(167, 139, 250, 0.32);
+  }
+  .hero-banner__bubble.bubble-3 {
+    background: rgba(96, 165, 250, 0.32);
+  }
 
   // Profile 页面顶部紫色 hero
   .profile-hero {
@@ -474,7 +524,11 @@ html.dark {
   .update-progress-hero,
   .restore-progress-hero {
     background:
-      radial-gradient(circle at top, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.88)),
+      radial-gradient(
+        circle at top,
+        rgba(30, 41, 59, 0.96),
+        rgba(15, 23, 42, 0.88)
+      ),
       linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(15, 23, 42, 0.24)) !important;
     box-shadow: 0 18px 42px rgba(0, 0, 0, 0.3) !important;
   }
@@ -489,21 +543,33 @@ html.dark {
   .restore-step,
   .update-progress-meta span,
   .restore-progress-meta span {
-    background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black) !important;
+    background: color-mix(
+      in srgb,
+      var(--el-bg-color-overlay) 92%,
+      black
+    ) !important;
     border-color: var(--el-border-color-darker) !important;
     box-shadow: none !important;
   }
 
   .update-step.is-done,
   .restore-step.is-done {
-    background: color-mix(in srgb, var(--el-color-primary) 12%, var(--el-bg-color-overlay)) !important;
+    background: color-mix(
+      in srgb,
+      var(--el-color-primary) 12%,
+      var(--el-bg-color-overlay)
+    ) !important;
   }
 
   .update-step.is-failed,
   .restore-step.is-failed,
   .update-progress-error,
   .restore-progress-error {
-    background: color-mix(in srgb, #7f1d1d 35%, var(--el-bg-color-overlay)) !important;
+    background: color-mix(
+      in srgb,
+      #7f1d1d 35%,
+      var(--el-bg-color-overlay)
+    ) !important;
     border-color: rgba(220, 38, 38, 0.3) !important;
     color: #fecaca !important;
   }
@@ -515,7 +581,11 @@ html.dark {
 
   // 侧边栏 logo 区域：color-mix(..., white) 在暗色下偏亮，覆盖为深色适配
   .sidebar-logo {
-    background: linear-gradient(180deg, var(--el-bg-color-overlay) 0%, var(--el-bg-color) 100%) !important;
+    background: linear-gradient(
+      180deg,
+      var(--el-bg-color-overlay) 0%,
+      var(--el-bg-color) 100%
+    ) !important;
   }
   .logo-inner {
     background: var(--el-bg-color) !important;
@@ -523,7 +593,11 @@ html.dark {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2) !important;
   }
   .logo-version {
-    background: color-mix(in srgb, var(--el-color-primary) 15%, var(--el-bg-color-overlay)) !important;
+    background: color-mix(
+      in srgb,
+      var(--el-color-primary) 15%,
+      var(--el-bg-color-overlay)
+    ) !important;
     color: var(--el-color-primary-light-3) !important;
   }
 
@@ -547,8 +621,16 @@ html.dark {
 
   .sponsor-wall {
     background:
-      radial-gradient(circle at top right, rgba(249, 115, 22, 0.12), transparent 28%),
-      radial-gradient(circle at bottom left, rgba(250, 204, 21, 0.1), transparent 25%),
+      radial-gradient(
+        circle at top right,
+        rgba(249, 115, 22, 0.12),
+        transparent 28%
+      ),
+      radial-gradient(
+        circle at bottom left,
+        rgba(250, 204, 21, 0.1),
+        transparent 25%
+      ),
       linear-gradient(135deg, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.94)) !important;
     border-color: rgba(249, 115, 22, 0.18) !important;
   }
@@ -568,12 +650,20 @@ html.dark {
   .sponsor-wall .podium-card,
   .sponsor-wall .sponsor-card,
   .sponsor-wall .podium-card__rank {
-    background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black) !important;
+    background: color-mix(
+      in srgb,
+      var(--el-bg-color-overlay) 92%,
+      black
+    ) !important;
     border-color: rgba(249, 115, 22, 0.18) !important;
   }
 
   .sponsor-wall .podium-base {
-    background: linear-gradient(180deg, rgba(71, 85, 105, 0.9), rgba(51, 65, 85, 0.88)) !important;
+    background: linear-gradient(
+      180deg,
+      rgba(71, 85, 105, 0.9),
+      rgba(51, 65, 85, 0.88)
+    ) !important;
     border-color: rgba(249, 115, 22, 0.16) !important;
   }
 }
@@ -588,18 +678,28 @@ html.dark {
   background-color: var(--dd-log-bg-color);
   background-image:
     var(--dd-log-bg-image),
-    radial-gradient(circle at top right,
+    radial-gradient(
+      circle at top right,
       color-mix(in srgb, var(--dd-log-text-color) 10%, transparent),
-      transparent 24%),
-    linear-gradient(155deg,
+      transparent 24%
+    ),
+    linear-gradient(
+      155deg,
       color-mix(in srgb, var(--dd-log-bg-color) 96%, white),
-      color-mix(in srgb, var(--dd-log-bg-color) 88%, var(--dd-log-text-color) 8%));
+      color-mix(
+        in srgb,
+        var(--dd-log-bg-color) 88%,
+        var(--dd-log-text-color) 8%
+      )
+    );
   background-position: center, center, center;
   background-repeat: no-repeat, no-repeat, no-repeat;
   background-size: cover, auto, auto;
   border: 1px solid var(--dd-log-border-color);
   border-radius: 16px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 12px 28px rgba(15, 23, 42, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 12px 28px rgba(15, 23, 42, 0.16);
   color: var(--dd-log-text-color);
 }
 
@@ -607,6 +707,186 @@ html.dark {
 .dd-log-surface,
 pre.dd-log-surface {
   color: var(--dd-log-text-color);
+}
+
+// 统一 Element Plus v-loading 动效：方案 A 里的全局主 Loading 使用 Infinity 风格。
+:root {
+  --dd-loading-surface-color: rgba(255, 255, 255, 0.76);
+  --dd-loading-surface-backdrop: blur(8px);
+  --dd-loading-primary: var(--el-color-primary);
+  --dd-loading-secondary: color-mix(
+    in srgb,
+    var(--el-color-primary) 35%,
+    white
+  );
+}
+
+html.dark {
+  --dd-loading-surface-color: rgba(15, 23, 42, 0.62);
+  --dd-loading-primary: color-mix(
+    in srgb,
+    var(--el-color-primary-light-3) 92%,
+    transparent
+  );
+  --dd-loading-secondary: color-mix(
+    in srgb,
+    var(--el-color-primary-light-5) 78%,
+    transparent
+  );
+}
+
+.el-loading-mask {
+  background-color: var(--dd-loading-surface-color) !important;
+  backdrop-filter: var(--dd-loading-surface-backdrop);
+  -webkit-backdrop-filter: var(--dd-loading-surface-backdrop);
+}
+
+.el-loading-spinner {
+  .circular {
+    display: none !important;
+  }
+
+  .el-loading-text {
+    margin-top: 12px !important;
+    color: var(--el-text-color-secondary) !important;
+    font-size: 13px !important;
+    letter-spacing: 0.2px;
+  }
+
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    margin-top: -9px;
+    border: 2.2px solid transparent;
+    border-top-color: var(--dd-loading-primary);
+    border-right-color: var(--dd-loading-primary);
+    border-radius: 999px;
+  }
+
+  &::before {
+    left: calc(50% - 18px);
+    transform: rotate(45deg);
+    animation: dd-global-loading-infinity-left 1.12s ease-in-out infinite;
+  }
+
+  &::after {
+    left: calc(50% + 2px);
+    transform: rotate(-45deg);
+    animation: dd-global-loading-infinity-right 1.12s ease-in-out infinite;
+  }
+}
+
+.el-loading-mask.is-fullscreen .el-loading-spinner {
+  &::before,
+  &::after {
+    width: 22px;
+    height: 22px;
+    margin-top: -11px;
+    border-width: 2.5px;
+  }
+
+  &::before {
+    left: calc(50% - 22px);
+  }
+
+  &::after {
+    left: calc(50% + 3px);
+  }
+}
+
+// 统一按钮 loading：方案 A 的小型操作加载使用更轻的 iPhone Spinner 风格。
+.el-button {
+  .el-icon.is-loading {
+    width: 16px;
+    height: 16px;
+    animation: none !important;
+    position: relative;
+
+    svg {
+      opacity: 0 !important;
+    }
+
+    &::before {
+      content: "";
+      position: absolute;
+      inset: 1px;
+      border-radius: 999px;
+      border: 1.9px solid color-mix(in srgb, currentColor 16%, transparent);
+      border-top-color: color-mix(
+        in srgb,
+        var(--el-color-white, #fff) 96%,
+        transparent
+      );
+      border-right-color: color-mix(
+        in srgb,
+        var(--el-color-white, #fff) 78%,
+        transparent
+      );
+      animation: dd-button-loading-spin 0.78s linear infinite;
+    }
+  }
+
+  &:not(.el-button--primary):not(.el-button--success):not(
+      .el-button--warning
+    ):not(.el-button--danger) {
+    .el-icon.is-loading::before {
+      border-color: color-mix(
+        in srgb,
+        var(--el-color-primary) 18%,
+        transparent
+      );
+      border-top-color: color-mix(
+        in srgb,
+        var(--el-color-primary) 95%,
+        transparent
+      );
+      border-right-color: color-mix(
+        in srgb,
+        var(--el-color-primary-light-3) 84%,
+        transparent
+      );
+    }
+  }
+}
+
+@keyframes dd-button-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes dd-global-loading-infinity-left {
+  0% {
+    transform: rotate(45deg) scale(0.92);
+    opacity: 0.88;
+  }
+  50% {
+    transform: rotate(225deg) scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(405deg) scale(0.92);
+    opacity: 0.88;
+  }
+}
+
+@keyframes dd-global-loading-infinity-right {
+  0% {
+    transform: rotate(-45deg) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: rotate(-225deg) scale(0.92);
+    opacity: 0.88;
+  }
+  100% {
+    transform: rotate(-405deg) scale(1);
+    opacity: 1;
+  }
 }
 
 .dd-page-header {
@@ -646,8 +926,12 @@ pre.dd-log-surface {
   margin-bottom: 18px;
 }
 
-.dd-stat-grid--5 { grid-template-columns: repeat(5, 1fr); }
-.dd-stat-grid--6 { grid-template-columns: repeat(6, 1fr); }
+.dd-stat-grid--5 {
+  grid-template-columns: repeat(5, 1fr);
+}
+.dd-stat-grid--6 {
+  grid-template-columns: repeat(6, 1fr);
+}
 
 .dd-stat-card {
   background: var(--el-bg-color);
@@ -658,7 +942,10 @@ pre.dd-log-surface {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s;
+  transition:
+    transform 0.22s ease,
+    box-shadow 0.22s ease,
+    border-color 0.22s;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 
   &:hover {
@@ -692,7 +979,7 @@ pre.dd-log-surface {
   font-size: 26px;
   font-weight: 700;
   line-height: 1.15;
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   letter-spacing: -0.01em;
@@ -742,13 +1029,34 @@ pre.dd-log-surface {
   justify-content: center;
   flex-shrink: 0;
 
-  &.is-blue { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
-  &.is-green { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-  &.is-orange { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-  &.is-red { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
-  &.is-purple { background: rgba(139, 92, 246, 0.12); color: #8b5cf6; }
-  &.is-cyan { background: rgba(6, 182, 212, 0.12); color: #06b6d4; }
-  &.is-pink { background: rgba(236, 72, 153, 0.12); color: #ec4899; }
+  &.is-blue {
+    background: rgba(59, 130, 246, 0.12);
+    color: #3b82f6;
+  }
+  &.is-green {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+  }
+  &.is-orange {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+  }
+  &.is-red {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+  }
+  &.is-purple {
+    background: rgba(139, 92, 246, 0.12);
+    color: #8b5cf6;
+  }
+  &.is-cyan {
+    background: rgba(6, 182, 212, 0.12);
+    color: #06b6d4;
+  }
+  &.is-pink {
+    background: rgba(236, 72, 153, 0.12);
+    color: #ec4899;
+  }
 }
 
 .dd-seg-group {
@@ -792,14 +1100,32 @@ pre.dd-log-surface {
   font-weight: 600;
   line-height: 1.5;
 
-  &.is-success { background: rgba(16, 185, 129, 0.12); color: #10b981; }
+  &.is-success {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+  }
   &.is-failed,
-  &.is-danger { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+  &.is-danger {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+  }
   &.is-running,
-  &.is-primary { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
-  &.is-warning { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-  &.is-info { background: var(--el-fill-color); color: var(--el-text-color-secondary); }
-  &.is-purple { background: rgba(139, 92, 246, 0.12); color: #8b5cf6; }
+  &.is-primary {
+    background: rgba(59, 130, 246, 0.12);
+    color: #3b82f6;
+  }
+  &.is-warning {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+  }
+  &.is-info {
+    background: var(--el-fill-color);
+    color: var(--el-text-color-secondary);
+  }
+  &.is-purple {
+    background: rgba(139, 92, 246, 0.12);
+    color: #8b5cf6;
+  }
 }
 
 .dd-env-chip {
@@ -811,11 +1137,26 @@ pre.dd-log-surface {
   letter-spacing: 0.02em;
 
   &.is-prod,
-  &.is-production { background: rgba(16, 185, 129, 0.1); color: #10b981; }
-  &.is-staging { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
-  &.is-test { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
-  &.is-local { background: rgba(148, 163, 184, 0.15); color: #64748b; }
-  &.is-default { background: rgba(59, 130, 246, 0.1); color: #3b82f6; }
+  &.is-production {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+  }
+  &.is-staging {
+    background: rgba(245, 158, 11, 0.1);
+    color: #f59e0b;
+  }
+  &.is-test {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+  }
+  &.is-local {
+    background: rgba(148, 163, 184, 0.15);
+    color: #64748b;
+  }
+  &.is-default {
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+  }
 }
 
 .dd-data-card {
@@ -911,8 +1252,11 @@ pre.dd-log-surface {
   padding: var(--dd-mobile-card-padding);
   border-radius: 18px;
   border: 1px solid var(--el-border-color-lighter);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--el-bg-color) 96%, white) 0%, var(--el-bg-color) 100%);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--el-bg-color) 96%, white) 0%,
+    var(--el-bg-color) 100%
+  );
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
 }
 

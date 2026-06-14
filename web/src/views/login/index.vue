@@ -1,429 +1,465 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { useAuthStore } from '@/stores/auth'
-import { useThemeStore } from '@/stores/theme'
-import { authApi } from '@/api/auth'
-import { ElMessage } from 'element-plus'
-import { Hide, Key, Lock, Moon, Sunny, User, View } from '@element-plus/icons-vue'
-import Characters, { type CharacterMood } from './Characters.vue'
-import { createGeeTestInstance, type GeeTestInstance, type GeeTestValidateResult } from '@/utils/geetest'
+import { ref, onMounted, computed, onUnmounted, watch } from "vue";
+import { useRouter } from "vue-router";
+import { useAuthStore } from "@/stores/auth";
+import { useThemeStore } from "@/stores/theme";
+import { authApi } from "@/api/auth";
+import { ElMessage } from "element-plus";
+import {
+  Hide,
+  Key,
+  Lock,
+  Moon,
+  Sunny,
+  User,
+  View,
+} from "@element-plus/icons-vue";
+import Characters, { type CharacterMood } from "./Characters.vue";
+import {
+  createGeeTestInstance,
+  type GeeTestInstance,
+  type GeeTestValidateResult,
+} from "@/utils/geetest";
 
-const router = useRouter()
-const authStore = useAuthStore()
-const themeStore = useThemeStore()
+const router = useRouter();
+const authStore = useAuthStore();
+const themeStore = useThemeStore();
 
-const isInit = ref(false)
-const checkingInit = ref(true)
-const loading = ref(false)
-const mood = ref<CharacterMood>('idle')
-const mousePos = ref({ x: 0, y: 0 })
-const pwdVisible = ref(false)
-const focusField = ref<'none' | 'username' | 'password'>('none')
-const containerRef = ref<HTMLDivElement>()
+const isInit = ref(false);
+const checkingInit = ref(true);
+const loading = ref(false);
+const mood = ref<CharacterMood>("idle");
+const mousePos = ref({ x: 0, y: 0 });
+const pwdVisible = ref(false);
+const focusField = ref<"none" | "username" | "password">("none");
+const containerRef = ref<HTMLDivElement>();
 
-const panelVersion = ref('')
-const require2FA = ref(false)
-const show2FADialog = ref(false)
-const totpError = ref('')
-const totpVerifying = ref(false)
+const panelVersion = ref("");
+const require2FA = ref(false);
+const show2FADialog = ref(false);
+const totpError = ref("");
+const totpVerifying = ref(false);
 const captchaConfig = ref({
   enabled: false,
-  captcha_id: '',
+  captcha_id: "",
   configured: false,
   required: false,
   require_after_failures: 0,
-  message: ''
-})
-const captchaVisible = ref(false)
-const captchaPreparing = ref(false)
-const captchaReady = ref(false)
-const captchaVerified = ref(false)
-const captchaResult = ref<GeeTestValidateResult | null>(null)
-const captchaStatusText = ref('')
-let captchaInstance: GeeTestInstance | null = null
-let captchaInitPromise: Promise<GeeTestInstance> | null = null
-let pendingSubmitAfterCaptcha = false
+  message: "",
+});
+const captchaVisible = ref(false);
+const captchaPreparing = ref(false);
+const captchaReady = ref(false);
+const captchaVerified = ref(false);
+const captchaResult = ref<GeeTestValidateResult | null>(null);
+const captchaStatusText = ref("");
+let captchaInstance: GeeTestInstance | null = null;
+let captchaInitPromise: Promise<GeeTestInstance> | null = null;
+let pendingSubmitAfterCaptcha = false;
 
-const lockCountdown = ref(0)
-let lockTimer: ReturnType<typeof setInterval> | null = null
+const lockCountdown = ref(0);
+let lockTimer: ReturnType<typeof setInterval> | null = null;
 
 function startLockCountdown(seconds: number) {
-  if (lockTimer) clearInterval(lockTimer)
-  lockCountdown.value = seconds
+  if (lockTimer) clearInterval(lockTimer);
+  lockCountdown.value = seconds;
   lockTimer = setInterval(() => {
-    lockCountdown.value--
+    lockCountdown.value--;
     if (lockCountdown.value <= 0) {
-      lockCountdown.value = 0
-      if (lockTimer) { clearInterval(lockTimer); lockTimer = null }
+      lockCountdown.value = 0;
+      if (lockTimer) {
+        clearInterval(lockTimer);
+        lockTimer = null;
+      }
     }
-  }, 1000)
+  }, 1000);
 }
 
 onUnmounted(() => {
-  if (lockTimer) clearInterval(lockTimer)
-  resetCaptchaProof()
-})
+  if (lockTimer) clearInterval(lockTimer);
+  resetCaptchaProof();
+});
 
 const form = ref({
-  username: '',
-  password: '',
-  confirmPassword: '',
-  totp_code: ''
-})
+  username: "",
+  password: "",
+  confirmPassword: "",
+  totp_code: "",
+});
 
-watch(() => form.value.username, () => {
-  captchaConfig.value.required = false
-  pendingSubmitAfterCaptcha = false
-  resetCaptchaProof()
-})
+watch(
+  () => form.value.username,
+  () => {
+    captchaConfig.value.required = false;
+    pendingSubmitAfterCaptcha = false;
+    resetCaptchaProof();
+  },
+);
 
 onMounted(async () => {
   try {
-    const res = await authApi.checkInit()
-    isInit.value = !res.need_init
+    const res = await authApi.checkInit();
+    isInit.value = !res.need_init;
   } catch {
-    isInit.value = true
+    isInit.value = true;
   } finally {
-    checkingInit.value = false
+    checkingInit.value = false;
   }
   if (isInit.value) {
-    await loadCaptchaConfig(form.value.username)
+    await loadCaptchaConfig(form.value.username);
   }
   try {
-    const vRes = await fetch('/api/system/public-version')
-    const vData = await vRes.json()
-    if (vData.version) panelVersion.value = vData.version
+    const vRes = await fetch("/api/system/public-version");
+    const vData = await vRes.json();
+    if (vData.version) panelVersion.value = vData.version;
   } catch {}
-})
+});
 
 function handleMouseMove(e: MouseEvent) {
-  if (!containerRef.value) return
-  const rect = containerRef.value.getBoundingClientRect()
-  const cx = rect.left + rect.width / 2
-  const cy = rect.top + rect.height / 2
-  const x = Math.max(-1, Math.min(1, (e.clientX - cx) / (rect.width / 2)))
-  const y = Math.max(-1, Math.min(1, (e.clientY - cy) / (rect.height / 2)))
-  mousePos.value = { x, y }
+  if (!containerRef.value) return;
+  const rect = containerRef.value.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const x = Math.max(-1, Math.min(1, (e.clientX - cx) / (rect.width / 2)));
+  const y = Math.max(-1, Math.min(1, (e.clientY - cy) / (rect.height / 2)));
+  mousePos.value = { x, y };
 }
 
 function resetCaptchaProof(keepVisible = false) {
-  captchaVerified.value = false
-  captchaResult.value = null
+  captchaVerified.value = false;
+  captchaResult.value = null;
   if (captchaInstance) {
-    captchaInstance.reset()
+    captchaInstance.reset();
   }
-  captchaReady.value = Boolean(captchaInstance)
+  captchaReady.value = Boolean(captchaInstance);
   if (!keepVisible) {
-    captchaVisible.value = false
-    captchaStatusText.value = ''
+    captchaVisible.value = false;
+    captchaStatusText.value = "";
   }
 }
 
-async function loadCaptchaConfig(username = form.value.username, silent = true) {
+async function loadCaptchaConfig(
+  username = form.value.username,
+  silent = true,
+) {
   try {
-    const res = await authApi.captchaConfig(username || undefined)
+    const res = await authApi.captchaConfig(username || undefined);
     captchaConfig.value = {
       enabled: res.enabled,
-      captcha_id: res.captcha_id || '',
+      captcha_id: res.captcha_id || "",
       configured: res.configured,
       required: res.required,
       require_after_failures: res.require_after_failures ?? 0,
-      message: res.message || ''
-    }
+      message: res.message || "",
+    };
 
     if (!res.enabled) {
-      pendingSubmitAfterCaptcha = false
-      resetCaptchaProof()
-      return captchaConfig.value
+      pendingSubmitAfterCaptcha = false;
+      resetCaptchaProof();
+      return captchaConfig.value;
     }
 
     if (!captchaVerified.value) {
-      captchaStatusText.value = res.required ? '请先完成滑块验证，验证成功后会自动登录' : (res.message || '')
+      captchaStatusText.value = res.required
+        ? "请先完成滑块验证，验证成功后会自动登录"
+        : res.message || "";
     }
 
-    return captchaConfig.value
+    return captchaConfig.value;
   } catch (error) {
     if (!silent) {
-      ElMessage.error('加载验证码配置失败')
+      ElMessage.error("加载验证码配置失败");
     }
-    return null
+    return null;
   }
 }
 
 async function ensureCaptchaInstance() {
   if (captchaInstance) {
-    return captchaInstance
+    return captchaInstance;
   }
   if (!captchaConfig.value.enabled || !captchaConfig.value.captcha_id) {
-    throw new Error('验证码未启用或未配置完整')
+    throw new Error("验证码未启用或未配置完整");
   }
 
   if (!captchaInitPromise) {
-    captchaPreparing.value = true
+    captchaPreparing.value = true;
     captchaInitPromise = createGeeTestInstance(
       {
         captchaId: captchaConfig.value.captcha_id,
-        language: 'zho',
-        product: 'bind'
+        language: "zho",
+        product: "bind",
       },
       {
         onReady() {
-          captchaReady.value = true
-          captchaStatusText.value = '请拖动滑块完成拼图'
+          captchaReady.value = true;
+          captchaStatusText.value = "请拖动滑块完成拼图";
         },
         onSuccess(result) {
-          captchaResult.value = result
-          captchaVerified.value = true
-          captchaVisible.value = false
-          captchaStatusText.value = '验证成功，正在登录'
-          ElMessage.success('验证成功，正在登录')
+          captchaResult.value = result;
+          captchaVerified.value = true;
+          captchaVisible.value = false;
+          captchaStatusText.value = "验证成功，正在登录";
+          ElMessage.success("验证成功，正在登录");
 
           if (pendingSubmitAfterCaptcha) {
-            pendingSubmitAfterCaptcha = false
-            void handleSubmit()
+            pendingSubmitAfterCaptcha = false;
+            void handleSubmit();
           }
         },
         onError(error) {
-          captchaVerified.value = false
-          captchaResult.value = null
-          captchaVisible.value = false
-          pendingSubmitAfterCaptcha = false
-          captchaStatusText.value = error.message || '验证码异常，请重试'
-          ElMessage.error(captchaStatusText.value)
+          captchaVerified.value = false;
+          captchaResult.value = null;
+          captchaVisible.value = false;
+          pendingSubmitAfterCaptcha = false;
+          captchaStatusText.value = error.message || "验证码异常，请重试";
+          ElMessage.error(captchaStatusText.value);
         },
         onClose() {
-          if (captchaVerified.value) return
-          captchaVisible.value = false
-          pendingSubmitAfterCaptcha = false
-          captchaStatusText.value = '验证已取消'
-        }
-      }
-    ).then((instance) => {
-      captchaInstance = instance
-      return instance
-    }).finally(() => {
-      captchaPreparing.value = false
-      captchaInitPromise = null
-    })
+          if (captchaVerified.value) return;
+          captchaVisible.value = false;
+          pendingSubmitAfterCaptcha = false;
+          captchaStatusText.value = "验证已取消";
+        },
+      },
+    )
+      .then((instance) => {
+        captchaInstance = instance;
+        return instance;
+      })
+      .finally(() => {
+        captchaPreparing.value = false;
+        captchaInitPromise = null;
+      });
   }
 
-  return captchaInitPromise
+  return captchaInitPromise;
 }
 
 async function triggerCaptcha() {
-  captchaVisible.value = true
+  captchaVisible.value = true;
   try {
     if (!captchaConfig.value.enabled || !captchaConfig.value.captcha_id) {
-      const latest = await loadCaptchaConfig(form.value.username, false)
+      const latest = await loadCaptchaConfig(form.value.username, false);
       if (!latest?.enabled) {
-        throw new Error(latest?.message || '验证码未启用')
+        throw new Error(latest?.message || "验证码未启用");
       }
     }
 
     if (captchaVerified.value) {
-      resetCaptchaProof(true)
+      resetCaptchaProof(true);
     }
 
-    captchaStatusText.value = '请拖动滑块完成拼图'
-    const instance = await ensureCaptchaInstance()
-    instance.show()
+    captchaStatusText.value = "请拖动滑块完成拼图";
+    const instance = await ensureCaptchaInstance();
+    instance.show();
   } catch (error) {
-    captchaVisible.value = false
-    throw error
+    captchaVisible.value = false;
+    throw error;
   }
 }
 
 function handleUsernameFocus() {
-  focusField.value = 'username'
-  mood.value = 'typing'
-  pwdVisible.value = false
+  focusField.value = "username";
+  mood.value = "typing";
+  pwdVisible.value = false;
 }
 
 function handleUsernameBlur() {
-  handleBlur()
-  void loadCaptchaConfig(form.value.username)
+  handleBlur();
+  void loadCaptchaConfig(form.value.username);
 }
 
 function handlePasswordFocus() {
-  focusField.value = 'password'
-  mood.value = pwdVisible.value ? 'peek' : 'password'
+  focusField.value = "password";
+  mood.value = pwdVisible.value ? "peek" : "password";
 }
 
 function handleBlur() {
-  focusField.value = 'none'
-  if (mood.value !== 'success' && mood.value !== 'error') {
-    mood.value = 'idle'
+  focusField.value = "none";
+  if (mood.value !== "success" && mood.value !== "error") {
+    mood.value = "idle";
   }
 }
 
 function togglePwdVisible() {
-  pwdVisible.value = !pwdVisible.value
-  if (focusField.value === 'password') {
-    mood.value = pwdVisible.value ? 'peek' : 'password'
+  pwdVisible.value = !pwdVisible.value;
+  if (focusField.value === "password") {
+    mood.value = pwdVisible.value ? "peek" : "password";
   }
 }
 
 function isGatewayLikeErrorStatus(status?: number) {
-  return status === 502 || status === 503 || status === 504
+  return status === 502 || status === 503 || status === 504;
 }
 
 function resolveLoginErrorMessage(err: any) {
-  const status = err?.response?.status
-  const data = err?.response?.data
+  const status = err?.response?.status;
+  const data = err?.response?.data;
 
-  if (typeof data?.error === 'string' && data.error.trim()) {
-    return data.error.trim()
+  if (typeof data?.error === "string" && data.error.trim()) {
+    return data.error.trim();
   }
 
   if (isGatewayLikeErrorStatus(status)) {
-    return '登录服务暂时不可用或面板正在重启，请稍后重试'
+    return "登录服务暂时不可用或面板正在重启，请稍后重试";
   }
 
-  if (typeof data === 'string' && data.trim()) {
-    return data.trim()
+  if (typeof data === "string" && data.trim()) {
+    return data.trim();
   }
 
-  return err?.message || '操作失败'
+  return err?.message || "操作失败";
 }
 
 function handleTOTPDialogClose() {
-  show2FADialog.value = false
-  require2FA.value = false
-  form.value.totp_code = ''
-  totpError.value = ''
+  show2FADialog.value = false;
+  require2FA.value = false;
+  form.value.totp_code = "";
+  totpError.value = "";
 }
 
 async function handleTOTPSubmit() {
   if (form.value.totp_code.length !== 6) {
-    totpError.value = '请输入 6 位数字'
-    return
+    totpError.value = "请输入 6 位数字";
+    return;
   }
-  totpVerifying.value = true
+  totpVerifying.value = true;
   try {
-    await handleSubmit()
+    await handleSubmit();
   } finally {
-    totpVerifying.value = false
+    totpVerifying.value = false;
   }
 }
 
 async function handleSubmit() {
   if (!form.value.username || !form.value.password) {
-    ElMessage.warning('请输入用户名和密码')
-    return
+    ElMessage.warning("请输入用户名和密码");
+    return;
   }
   if (!isInit.value) {
     if (!form.value.confirmPassword) {
-      ElMessage.warning('请再次输入密码')
-      return
+      ElMessage.warning("请再次输入密码");
+      return;
     }
     if (form.value.password !== form.value.confirmPassword) {
-      ElMessage.error('两次输入的密码不一致')
-      return
+      ElMessage.error("两次输入的密码不一致");
+      return;
     }
   }
   if (require2FA.value && !form.value.totp_code) {
-    ElMessage.warning('请输入两步验证码')
-    return
+    ElMessage.warning("请输入两步验证码");
+    return;
   }
 
-  loading.value = true
-  const submittedCaptcha = captchaResult.value ? { ...captchaResult.value } : null
+  loading.value = true;
+  const submittedCaptcha = captchaResult.value
+    ? { ...captchaResult.value }
+    : null;
   try {
     if (!isInit.value) {
-      await authApi.init(form.value.username, form.value.password)
-      ElMessage.success('初始化成功')
-      isInit.value = true
-      form.value.confirmPassword = ''
-      await loadCaptchaConfig(form.value.username)
+      await authApi.init(form.value.username, form.value.password);
+      ElMessage.success("初始化成功");
+      isInit.value = true;
+      form.value.confirmPassword = "";
+      await loadCaptchaConfig(form.value.username);
     }
 
-    const latestCaptchaConfig = await loadCaptchaConfig(form.value.username)
+    const latestCaptchaConfig = await loadCaptchaConfig(form.value.username);
     if (latestCaptchaConfig?.enabled && !captchaVerified.value) {
-      captchaVisible.value = true
-      captchaStatusText.value = '请先完成滑块验证，验证成功后会自动登录'
-      pendingSubmitAfterCaptcha = true
-      await triggerCaptcha()
-      return
+      captchaVisible.value = true;
+      captchaStatusText.value = "请先完成滑块验证，验证成功后会自动登录";
+      pendingSubmitAfterCaptcha = true;
+      await triggerCaptcha();
+      return;
     }
 
-    await authStore.login(form.value.username, form.value.password, form.value.totp_code, submittedCaptcha)
-    require2FA.value = false
-    show2FADialog.value = false
-    totpError.value = ''
-    form.value.totp_code = ''
-    captchaConfig.value.required = false
-    pendingSubmitAfterCaptcha = false
-    resetCaptchaProof()
-    mood.value = 'success'
-    ElMessage.success('登录成功')
+    await authStore.login(
+      form.value.username,
+      form.value.password,
+      form.value.totp_code,
+      submittedCaptcha,
+    );
+    require2FA.value = false;
+    show2FADialog.value = false;
+    totpError.value = "";
+    form.value.totp_code = "";
+    captchaConfig.value.required = false;
+    pendingSubmitAfterCaptcha = false;
+    resetCaptchaProof();
+    mood.value = "success";
+    ElMessage.success("登录成功");
     setTimeout(() => {
-      router.push('/')
-    }, 600)
+      router.push("/");
+    }, 600);
   } catch (err: any) {
-    mood.value = 'error'
-    const data = err?.response?.data
-    const status = err?.response?.status
+    mood.value = "error";
+    const data = err?.response?.data;
+    const status = err?.response?.status;
     if (data?.two_factor_required) {
-      require2FA.value = true
-      show2FADialog.value = true
-      resetCaptchaProof(false)
-      pendingSubmitAfterCaptcha = false
-      captchaConfig.value.required = Boolean(captchaConfig.value.enabled)
+      require2FA.value = true;
+      show2FADialog.value = true;
+      resetCaptchaProof(false);
+      pendingSubmitAfterCaptcha = false;
+      captchaConfig.value.required = Boolean(captchaConfig.value.enabled);
       if (form.value.totp_code) {
-        totpError.value = data?.error || '两步验证码错误'
-        form.value.totp_code = ''
+        totpError.value = data?.error || "两步验证码错误";
+        form.value.totp_code = "";
       } else {
-        totpError.value = ''
+        totpError.value = "";
       }
     }
     if (data?.locked && data?.remaining_seconds > 0) {
-      startLockCountdown(data.remaining_seconds)
+      startLockCountdown(data.remaining_seconds);
     }
     if (data?.captcha_id) {
-      captchaConfig.value.captcha_id = data.captcha_id
+      captchaConfig.value.captcha_id = data.captcha_id;
     }
-    if (typeof data?.require_after_failures === 'number') {
-      captchaConfig.value.require_after_failures = data.require_after_failures
+    if (typeof data?.require_after_failures === "number") {
+      captchaConfig.value.require_after_failures = data.require_after_failures;
     }
     if (data?.captcha_required) {
-      captchaConfig.value.enabled = true
-      captchaConfig.value.required = true
-      captchaVisible.value = true
-      pendingSubmitAfterCaptcha = !data?.captcha_service_unavailable
+      captchaConfig.value.enabled = true;
+      captchaConfig.value.required = true;
+      captchaVisible.value = true;
+      pendingSubmitAfterCaptcha = !data?.captcha_service_unavailable;
       if (data?.captcha_service_unavailable) {
-        resetCaptchaProof(true)
-        captchaStatusText.value = data?.error || '验证码服务暂时不可用，请稍后重试'
+        resetCaptchaProof(true);
+        captchaStatusText.value =
+          data?.error || "验证码服务暂时不可用，请稍后重试";
       } else {
         captchaStatusText.value = data?.captcha_invalid
-          ? '验证码已失效，请重新完成滑块验证'
-          : '请先完成滑块验证，验证成功后会自动登录'
-        resetCaptchaProof(true)
+          ? "验证码已失效，请重新完成滑块验证"
+          : "请先完成滑块验证，验证成功后会自动登录";
+        resetCaptchaProof(true);
         void triggerCaptcha().catch((err: any) => {
-          captchaStatusText.value = err?.message || '验证码加载失败，请检查网络后刷新重试'
-          ElMessage.error(captchaStatusText.value)
-        })
+          captchaStatusText.value =
+            err?.message || "验证码加载失败，请检查网络后刷新重试";
+          ElMessage.error(captchaStatusText.value);
+        });
       }
     } else if (submittedCaptcha) {
-      resetCaptchaProof(false)
-      pendingSubmitAfterCaptcha = false
+      resetCaptchaProof(false);
+      pendingSubmitAfterCaptcha = false;
     } else if (!data || isGatewayLikeErrorStatus(status)) {
-      pendingSubmitAfterCaptcha = false
+      pendingSubmitAfterCaptcha = false;
     }
-    const msg = resolveLoginErrorMessage(err)
-    ElMessage.error(msg)
+    const msg = resolveLoginErrorMessage(err);
+    ElMessage.error(msg);
     setTimeout(() => {
-      mood.value = 'idle'
-    }, 2000)
+      mood.value = "idle";
+    }, 2000);
   } finally {
-    loading.value = false
+    loading.value = false;
   }
 }
 
-const titleText = computed(() => isInit.value ? '欢迎回来!' : '初始化管理员')
-const subtitleText = computed(() => isInit.value ? '请输入您的登录信息' : '首次使用，请设置管理员账号')
-const btnText = computed(() => isInit.value ? '登 录' : '初始化并登录')
-const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
+const titleText = computed(() => (isInit.value ? "欢迎回来!" : "初始化管理员"));
+const subtitleText = computed(() =>
+  isInit.value ? "请输入您的登录信息" : "首次使用，请设置管理员账号",
+);
+const btnText = computed(() => (isInit.value ? "登 录" : "初始化并登录"));
+const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 </script>
 
 <template>
@@ -448,7 +484,12 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
 
       <div class="login-right">
         <div v-if="checkingInit" class="login-loading">
-          <span>正在加载...</span>
+          <LoadingMotion
+            variant="infinity"
+            size="lg"
+            label="正在加载..."
+            tone="neutral"
+          />
         </div>
         <template v-else>
           <div class="login-header">
@@ -510,13 +551,17 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
                 class="login-btn"
                 @click="handleSubmit"
               >
-                {{ lockCountdown > 0 ? `${Math.floor(lockCountdown / 60)}:${String(lockCountdown % 60).padStart(2, '0')} 后重试` : btnText }}
+                {{
+                  lockCountdown > 0
+                    ? `${Math.floor(lockCountdown / 60)}:${String(lockCountdown % 60).padStart(2, "0")} 后重试`
+                    : btnText
+                }}
               </el-button>
             </el-form-item>
           </el-form>
 
           <div class="login-version">
-            呆呆面板{{ panelVersion ? ` v${panelVersion}` : '' }}
+            呆呆面板{{ panelVersion ? ` v${panelVersion}` : "" }}
           </div>
         </template>
       </div>
@@ -539,7 +584,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
           </div>
           <div>
             <div class="totp-dialog-title">两步验证</div>
-            <div class="totp-dialog-sub">请输入认证器 App 上的 6 位动态验证码</div>
+            <div class="totp-dialog-sub">
+              请输入认证器 App 上的 6 位动态验证码
+            </div>
           </div>
         </div>
       </template>
@@ -557,7 +604,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
         />
         <div class="totp-hint" :class="{ 'totp-hint--error': !!totpError }">
           <template v-if="totpError">{{ totpError }}</template>
-          <template v-else>丢失认证器？请联系管理员在用户管理里重置 2FA。</template>
+          <template v-else
+            >丢失认证器？请联系管理员在用户管理里重置 2FA。</template
+          >
         </div>
       </div>
 
@@ -616,8 +665,8 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
-  box-shadow: 0 6px 16px -8px rgba(99, 102, 241, 0.55);
+  background: linear-gradient(135deg, #1890ff, #36cfc9);
+  box-shadow: 0 6px 16px -8px rgba(24, 144, 255, 0.45);
   flex-shrink: 0;
 }
 
@@ -677,13 +726,13 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
 .totp-submit-btn {
   border-radius: 10px;
   padding: 0 18px;
-  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  background: linear-gradient(135deg, #1890ff, #36cfc9);
   border: none;
-  box-shadow: 0 8px 20px -12px rgba(99, 102, 241, 0.55);
+  box-shadow: 0 8px 20px -12px rgba(24, 144, 255, 0.45);
 
   &:hover,
   &:focus {
-    background: linear-gradient(135deg, #4f46e5, #7c3aed);
+    background: linear-gradient(135deg, #1677ff, #13c2c2);
     border: none;
   }
 
@@ -735,7 +784,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
   min-height: 540px;
   border-radius: 24px;
   overflow: hidden;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04);
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.08),
+    0 4px 12px rgba(0, 0, 0, 0.04);
   animation: loginSlideUp 0.6s ease-out;
   transition: box-shadow 0.4s ease;
 }
@@ -781,7 +832,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
 }
 
 .login-loading {
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 60px 0;
   color: #8c8c8c;
   font-size: 14px;
@@ -832,11 +885,13 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
     transition: all 0.3s;
 
     &:hover {
-      box-shadow: 0 0 0 1px #7B5CFA inset;
+      box-shadow: 0 0 0 1px #1890ff inset;
     }
 
     &.is-focus {
-      box-shadow: 0 0 0 1px #7B5CFA inset, 0 0 0 3px rgba(123, 92, 250, 0.15);
+      box-shadow:
+        0 0 0 1px #1890ff inset,
+        0 0 0 3px rgba(24, 144, 255, 0.15);
     }
   }
 }
@@ -847,7 +902,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
   transition: color 0.3s;
 
   &:hover {
-    color: #7B5CFA;
+    color: #1890ff;
   }
 }
 
@@ -950,11 +1005,13 @@ html.dark {
       box-shadow: 0 0 0 1px #3a3a55 inset;
 
       &:hover {
-        box-shadow: 0 0 0 1px #7B5CFA inset;
+        box-shadow: 0 0 0 1px #1890ff inset;
       }
 
       &.is-focus {
-        box-shadow: 0 0 0 1px #7B5CFA inset, 0 0 0 3px rgba(123, 92, 250, 0.2);
+        box-shadow:
+          0 0 0 1px #1890ff inset,
+          0 0 0 3px rgba(24, 144, 255, 0.2);
       }
     }
 
@@ -976,16 +1033,16 @@ html.dark {
     color: #555568;
 
     &:hover {
-      color: #9B8AFB;
+      color: #36cfc9;
     }
   }
 
   .login-btn {
-    background: #7B5CFA;
+    background: #1890ff;
 
     &:hover {
-      background: #6B4CE6 !important;
-      box-shadow: 0 4px 16px rgba(123, 92, 250, 0.35);
+      background: #1677ff !important;
+      box-shadow: 0 4px 16px rgba(24, 144, 255, 0.35);
     }
   }
 
