@@ -288,15 +288,21 @@ export LANG=C.UTF-8
 export SHELL=/bin/bash
 export PS1='\u@\h:\w\$ '
 export DAIDAI_DIR=/app/Dumb-Panel
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export DAIDAI_MAGISK_MODULE=1
+export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
+export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export NODE_PATH=/usr/local/lib/node_modules
 EOF
 
 # ---- 回填用户数据 -------------------------------------------------------
 if [ -d "$TMPDIR/backup_data" ]; then
   ui_print "- 正在恢复用户数据..."
-  mkdir -p $rootfs/app/Dumb-Panel
-  cp -rf $TMPDIR/backup_data/* $rootfs/app/Dumb-Panel/ 2>/dev/null
+  mkdir -p "$rootfs/app/Dumb-Panel"
+  for item in "$TMPDIR/backup_data"/* "$TMPDIR/backup_data"/.[!.]* "$TMPDIR/backup_data"/..?*; do
+    [ -e "$item" ] || continue
+    cp -rf "$item" "$rootfs/app/Dumb-Panel/" 2>/dev/null || \
+      abort "! 用户数据恢复失败：$(basename "$item") 无法复制回容器数据目录"
+  done
   rm -rf $TMPDIR/backup_data
 fi
 
@@ -407,7 +413,11 @@ sleep 1
 # 回拷（覆盖式 cp，但用 -a 保留属性；不删 TARGET 里的额外文件）
 mkdir -p "\$TARGET"
 log "从快照复制 ..."
-( cd "\$BACKUP_DIR" && cp -af \$(ls -A | grep -v '^BACKUP_INFO.txt\$') "\$TARGET/" )
+for item in "\$BACKUP_DIR"/* "\$BACKUP_DIR"/.[!.]* "\$BACKUP_DIR"/..?*; do
+  [ -e "\$item" ] || continue
+  [ "\$(basename "\$item")" = "BACKUP_INFO.txt" ] && continue
+  cp -af "\$item" "\$TARGET/"
+done
 
 log "恢复完成"
 log "下一步：重启模块（推荐重启设备），或："
