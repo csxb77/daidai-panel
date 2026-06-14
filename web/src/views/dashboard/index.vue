@@ -1,9 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, onActivated, defineComponent, h, watch, defineAsyncComponent } from 'vue'
-import { useRouter } from 'vue-router'
-import { systemApi } from '@/api/system'
-import { useAuthStore } from '@/stores/auth'
-import { ElMessage } from 'element-plus'
+import {
+  ref,
+  computed,
+  onMounted,
+  onUnmounted,
+  onActivated,
+  defineComponent,
+  h,
+  watch,
+  defineAsyncComponent,
+} from "vue";
+import { useRouter } from "vue-router";
+import { systemApi } from "@/api/system";
+import { useAuthStore } from "@/stores/auth";
+import { ElMessage } from "element-plus";
 import {
   Timer,
   CirclePlus,
@@ -25,319 +35,396 @@ import {
   View,
   Document,
   More,
-} from '@element-plus/icons-vue'
-import { useResponsive } from '@/composables/useResponsive'
-import { canAdminister, hasRequiredRole } from '@/utils/roles'
+} from "@element-plus/icons-vue";
+import { useResponsive } from "@/composables/useResponsive";
+import { canAdminister, hasRequiredRole } from "@/utils/roles";
 
-const ExecutionTrendChart = defineAsyncComponent(() => import('./components/ExecutionTrendChart.vue'))
-const router = useRouter()
-const authStore = useAuthStore()
-const { isMobile } = useResponsive()
-const LOG_STATUS_SUCCESS = 0
-const LOG_STATUS_FAILED = 1
-const LOG_STATUS_RUNNING = 2
+const ExecutionTrendChart = defineAsyncComponent(
+  () => import("./components/ExecutionTrendChart.vue"),
+);
+const router = useRouter();
+const authStore = useAuthStore();
+const { isMobile } = useResponsive();
+const LOG_STATUS_SUCCESS = 0;
+const LOG_STATUS_FAILED = 1;
+const LOG_STATUS_RUNNING = 2;
 
-const showTrendChart = ref(false)
-const trendChartHostRef = ref<HTMLElement | null>(null)
-let trendChartObserver: IntersectionObserver | null = null
-let trendChartTimer: number | null = null
+const showTrendChart = ref(false);
+const trendChartHostRef = ref<HTMLElement | null>(null);
+let trendChartObserver: IntersectionObserver | null = null;
+let trendChartTimer: number | null = null;
 
-const trendRange = ref<7 | 30>(7)
-const logFilter = ref<'all' | 'success' | 'failed' | 'running'>('all')
-const refreshTimestamp = ref(new Date())
-const hasLoadedOnce = ref(false)
-const skipInitialActivated = ref(true)
-const canViewSystemDetails = computed(() => canAdminister(authStore.user?.role))
+const trendRange = ref<7 | 30>(7);
+const logFilter = ref<"all" | "success" | "failed" | "running">("all");
+const refreshTimestamp = ref(new Date());
+const hasLoadedOnce = ref(false);
+const skipInitialActivated = ref(true);
+const canViewSystemDetails = computed(() =>
+  canAdminister(authStore.user?.role),
+);
 
 const CountUp = defineComponent({
   props: {
     endVal: { type: Number, default: 0 },
     duration: { type: Number, default: 1.2 },
     decimals: { type: Number, default: 0 },
-    suffix: { type: String, default: '' },
-    prefix: { type: String, default: '' },
+    suffix: { type: String, default: "" },
+    prefix: { type: String, default: "" },
   },
   setup(props) {
-    const display = ref('0')
-    let animFrame = 0
+    const display = ref("0");
+    let animFrame = 0;
 
     function animate() {
-      const start = 0
-      const end = props.endVal
-      const dur = props.duration * 1000
-      const startTime = performance.now()
+      const start = 0;
+      const end = props.endVal;
+      const dur = props.duration * 1000;
+      const startTime = performance.now();
 
       function step(now: number) {
-        const elapsed = now - startTime
-        const progress = Math.min(elapsed / dur, 1)
-        const eased = 1 - Math.pow(1 - progress, 3)
-        const current = start + (end - start) * eased
-        display.value = formatNumber(current, props.decimals)
+        const elapsed = now - startTime;
+        const progress = Math.min(elapsed / dur, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const current = start + (end - start) * eased;
+        display.value = formatNumber(current, props.decimals);
         if (progress < 1) {
-          animFrame = requestAnimationFrame(step)
+          animFrame = requestAnimationFrame(step);
         }
       }
-      cancelAnimationFrame(animFrame)
-      animFrame = requestAnimationFrame(step)
+      cancelAnimationFrame(animFrame);
+      animFrame = requestAnimationFrame(step);
     }
 
     function formatNumber(n: number, decimals: number) {
-      const fixed = n.toFixed(decimals)
-      const [intPart = '0', decPart] = fixed.split('.')
-      const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-      return decPart ? grouped + '.' + decPart : grouped
+      const fixed = n.toFixed(decimals);
+      const [intPart = "0", decPart] = fixed.split(".");
+      const grouped = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+      return decPart ? grouped + "." + decPart : grouped;
     }
 
-    watch(() => props.endVal, () => animate(), { immediate: true })
-    onUnmounted(() => cancelAnimationFrame(animFrame))
-    return () => h('span', {}, props.prefix + display.value + props.suffix)
-  }
-})
+    watch(
+      () => props.endVal,
+      () => animate(),
+      { immediate: true },
+    );
+    onUnmounted(() => cancelAnimationFrame(animFrame));
+    return () => h("span", {}, props.prefix + display.value + props.suffix);
+  },
+});
 
-const dashboardData = ref<any>({})
-const sysInfo = ref<any>({})
-const recentLogs = computed(() => dashboardData.value.recent_logs || [])
+const dashboardData = ref<any>({});
+const sysInfo = ref<any>({});
+const recentLogs = computed(() => dashboardData.value.recent_logs || []);
 
 const greeting = computed(() => {
-  const hour = new Date().getHours()
-  if (hour < 6) return '夜深了'
-  if (hour < 12) return '早上好'
-  if (hour < 14) return '中午好'
-  if (hour < 18) return '下午好'
-  return '晚上好'
-})
+  const hour = new Date().getHours();
+  if (hour < 6) return "夜深了";
+  if (hour < 12) return "早上好";
+  if (hour < 14) return "中午好";
+  if (hour < 18) return "下午好";
+  return "晚上好";
+});
 
 const greetingSub = computed(() => {
-  const hour = new Date().getHours()
-  if (hour < 6) return '夜深了，记得早点休息哦~'
-  if (hour < 12) return '欢迎回来！今天又是高效执行任务的一天！'
-  if (hour < 14) return '该吃午饭啦，注意劳逸结合~'
-  if (hour < 18) return '下午也要保持专注哦！'
-  return '辛苦一天啦，看看任务运行情况吧~'
-})
+  const hour = new Date().getHours();
+  if (hour < 6) return "夜深了，记得早点休息哦~";
+  if (hour < 12) return "欢迎回来！今天又是高效执行任务的一天！";
+  if (hour < 14) return "该吃午饭啦，注意劳逸结合~";
+  if (hour < 18) return "下午也要保持专注哦！";
+  return "辛苦一天啦，看看任务运行情况吧~";
+});
 
-const todayLogs = computed(() => Number(dashboardData.value.today_logs) || 0)
-const successLogs = computed(() => Number(dashboardData.value.success_logs) || 0)
-const failedLogs = computed(() => Number(dashboardData.value.failed_logs) || 0)
-const taskCount = computed(() => Number(dashboardData.value.task_count) || 0)
-const prevTaskCount = computed(() => Number(dashboardData.value.prev_task_count) || 0)
-const runningTasks = computed(() => Number(dashboardData.value.running_tasks) || 0)
-const yesterdayLogs = computed(() => Number(dashboardData.value.yesterday_logs) || 0)
-const yesterdaySuccess = computed(() => Number(dashboardData.value.yesterday_success) || 0)
+const todayLogs = computed(() => Number(dashboardData.value.today_logs) || 0);
+const successLogs = computed(
+  () => Number(dashboardData.value.success_logs) || 0,
+);
+const failedLogs = computed(() => Number(dashboardData.value.failed_logs) || 0);
+const taskCount = computed(() => Number(dashboardData.value.task_count) || 0);
+const prevTaskCount = computed(
+  () => Number(dashboardData.value.prev_task_count) || 0,
+);
+const runningTasks = computed(
+  () => Number(dashboardData.value.running_tasks) || 0,
+);
+const yesterdayLogs = computed(
+  () => Number(dashboardData.value.yesterday_logs) || 0,
+);
+const yesterdaySuccess = computed(
+  () => Number(dashboardData.value.yesterday_success) || 0,
+);
 
 const todaySuccessRate = computed(() => {
-  if (!todayLogs.value) return 0
-  return Math.round((successLogs.value / todayLogs.value) * 1000) / 10
-})
+  if (!todayLogs.value) return 0;
+  return Math.round((successLogs.value / todayLogs.value) * 1000) / 10;
+});
 
 const yesterdaySuccessRate = computed(() => {
-  if (!yesterdayLogs.value) return 0
-  return Math.round((yesterdaySuccess.value / yesterdayLogs.value) * 1000) / 10
-})
+  if (!yesterdayLogs.value) return 0;
+  return Math.round((yesterdaySuccess.value / yesterdayLogs.value) * 1000) / 10;
+});
 
-const taskCountDelta = computed(() => taskCount.value - prevTaskCount.value)
-const todayLogsDelta = computed(() => todayLogs.value - yesterdayLogs.value)
+const taskCountDelta = computed(() => taskCount.value - prevTaskCount.value);
+const todayLogsDelta = computed(() => todayLogs.value - yesterdayLogs.value);
 const successRateDelta = computed(() => {
-  return Math.round((todaySuccessRate.value - yesterdaySuccessRate.value) * 10) / 10
-})
+  return (
+    Math.round((todaySuccessRate.value - yesterdaySuccessRate.value) * 10) / 10
+  );
+});
 
 const statCards = computed(() => [
   {
-    key: 'total',
-    label: '任务总数',
+    key: "total",
+    label: "任务总数",
     value: taskCount.value,
-    sub: '已配置任务',
+    sub: "已配置任务",
     delta: taskCountDelta.value,
-    deltaSuffix: '',
+    deltaSuffix: "",
     icon: Tickets,
-    color: '#3b82f6',
-    bgIcon: 'rgba(59, 130, 246, 0.12)',
-    link: '/tasks',
+    color: "#3b82f6",
+    bgIcon: "rgba(59, 130, 246, 0.12)",
+    link: "/tasks",
   },
   {
-    key: 'running',
-    label: '运行中的任务',
+    key: "running",
+    label: "运行中的任务",
     value: runningTasks.value,
-    sub: '实时运行中',
+    sub: "实时运行中",
     delta: null,
     icon: Loading,
-    color: '#10b981',
-    bgIcon: 'rgba(16, 185, 129, 0.12)',
-    link: '/tasks',
+    color: "#10b981",
+    bgIcon: "rgba(16, 185, 129, 0.12)",
+    link: "/tasks",
     spinning: runningTasks.value > 0,
   },
   {
-    key: 'today',
-    label: '今日执行',
+    key: "today",
+    label: "今日执行",
     value: todayLogs.value,
-    sub: '较昨日',
+    sub: "较昨日",
     delta: todayLogsDelta.value,
-    deltaSuffix: '',
+    deltaSuffix: "",
     icon: TrendCharts,
-    color: '#f59e0b',
-    bgIcon: 'rgba(245, 158, 11, 0.12)',
-    link: '/logs',
+    color: "#f59e0b",
+    bgIcon: "rgba(245, 158, 11, 0.12)",
+    link: "/logs",
   },
   {
-    key: 'success-rate',
-    label: '成功率',
+    key: "success-rate",
+    label: "成功率",
     value: todaySuccessRate.value,
-    sub: '较昨日',
+    sub: "较昨日",
     delta: successRateDelta.value,
-    deltaSuffix: '%',
+    deltaSuffix: "%",
     icon: CircleCheck,
-    color: '#8b5cf6',
-    bgIcon: 'rgba(139, 92, 246, 0.12)',
-    link: '/logs',
-    suffix: '%',
+    color: "#06b6d4",
+    bgIcon: "rgba(6, 182, 212, 0.12)",
+    link: "/logs",
+    suffix: "%",
     decimals: 1,
   },
-])
+]);
 
-const quickActions = computed(() => [
-  { key: 'create', label: '新建任务', icon: CirclePlus, color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.1)', minRole: 'operator', action: () => router.push({ path: '/tasks', query: { create: '1' } }) },
-  { key: 'import', label: '导入脚本', icon: Upload, color: '#10b981', bg: 'rgba(16, 185, 129, 0.1)', minRole: 'operator', action: () => router.push({ path: '/scripts', query: { upload: '1' } }) },
-  { key: 'env', label: '环境变量', icon: Setting, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.1)', minRole: 'operator', action: () => router.push('/envs') },
-  { key: 'log', label: '执行日志', icon: Tickets, color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.1)', minRole: 'viewer', action: () => router.push('/logs') },
-  { key: 'api', label: '接口文档', icon: Connection, color: '#8b5cf6', bg: 'rgba(139, 92, 246, 0.1)', minRole: 'viewer', action: () => router.push('/api-docs') },
-].filter(action => hasRequiredRole(authStore.user?.role, action.minRole)))
+const quickActions = computed(() =>
+  [
+    {
+      key: "create",
+      label: "新建任务",
+      icon: CirclePlus,
+      color: "#3b82f6",
+      bg: "rgba(59, 130, 246, 0.1)",
+      minRole: "operator",
+      action: () => router.push({ path: "/tasks", query: { create: "1" } }),
+    },
+    {
+      key: "import",
+      label: "导入脚本",
+      icon: Upload,
+      color: "#10b981",
+      bg: "rgba(16, 185, 129, 0.1)",
+      minRole: "operator",
+      action: () => router.push({ path: "/scripts", query: { upload: "1" } }),
+    },
+    {
+      key: "env",
+      label: "环境变量",
+      icon: Setting,
+      color: "#f59e0b",
+      bg: "rgba(245, 158, 11, 0.1)",
+      minRole: "operator",
+      action: () => router.push("/envs"),
+    },
+    {
+      key: "log",
+      label: "执行日志",
+      icon: Tickets,
+      color: "#06b6d4",
+      bg: "rgba(6, 182, 212, 0.1)",
+      minRole: "viewer",
+      action: () => router.push("/logs"),
+    },
+    {
+      key: "api",
+      label: "接口文档",
+      icon: Connection,
+      color: "#06b6d4",
+      bg: "rgba(6, 182, 212, 0.1)",
+      minRole: "viewer",
+      action: () => router.push("/api-docs"),
+    },
+  ].filter((action) => hasRequiredRole(authStore.user?.role, action.minRole)),
+);
 
 function isRunningLog(status: number | null | undefined) {
-  return status === LOG_STATUS_RUNNING || status === null || status === undefined
+  return (
+    status === LOG_STATUS_RUNNING || status === null || status === undefined
+  );
 }
 
 function isSuccessLog(status: number | null | undefined) {
-  return status === LOG_STATUS_SUCCESS
+  return status === LOG_STATUS_SUCCESS;
 }
 
 function isFailedLog(status: number | null | undefined) {
-  return status === LOG_STATUS_FAILED
+  return status === LOG_STATUS_FAILED;
 }
 
 function normalizeLabels(labels: unknown): string[] {
   if (Array.isArray(labels)) {
-    return labels.map(String).filter(Boolean)
+    return labels.map(String).filter(Boolean);
   }
-  if (typeof labels === 'string') {
-    return labels.split(',').map(item => item.trim()).filter(Boolean)
+  if (typeof labels === "string") {
+    return labels
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
   }
-  return []
+  return [];
 }
 
 function taskTypeOf(log: any) {
-  return log?.task_type || log?.task?.task_type
+  return log?.task_type || log?.task?.task_type;
 }
 
 function labelsOf(log: any) {
-  return normalizeLabels(log?.labels ?? log?.task?.labels)
+  return normalizeLabels(log?.labels ?? log?.task?.labels);
 }
 
 const resourceItems = computed(() => {
-  const s = sysInfo.value
+  const s = sysInfo.value;
   return [
     {
-      key: 'cpu',
-      label: 'CPU',
+      key: "cpu",
+      label: "CPU",
       icon: Cpu,
-      iconColor: '#3b82f6',
-      iconBg: 'rgba(59, 130, 246, 0.12)',
-      detail: `${s.num_cpu || '-'} 核心`,
+      iconColor: "#3b82f6",
+      iconBg: "rgba(59, 130, 246, 0.12)",
+      detail: `${s.num_cpu || "-"} 核心`,
       percent: Number(s.cpu_usage) || 0,
-      barColor: 'linear-gradient(90deg, #3b82f6, #60a5fa)',
+      barColor: "linear-gradient(90deg, #3b82f6, #60a5fa)",
     },
     {
-      key: 'memory',
-      label: '内存',
+      key: "memory",
+      label: "内存",
       icon: Coin,
-      iconColor: '#8b5cf6',
-      iconBg: 'rgba(139, 92, 246, 0.12)',
+      iconColor: "#06b6d4",
+      iconBg: "rgba(6, 182, 212, 0.12)",
       detail: `${formatBytes(s.memory_used)} / ${formatBytes(s.memory_total)}`,
       percent: Number(s.memory_usage) || 0,
-      barColor: 'linear-gradient(90deg, #8b5cf6, #a78bfa)',
+      barColor: "linear-gradient(90deg, #06b6d4, #67e8f9)",
     },
     {
-      key: 'disk',
-      label: '磁盘',
+      key: "disk",
+      label: "磁盘",
       icon: FolderOpened,
-      iconColor: '#10b981',
-      iconBg: 'rgba(16, 185, 129, 0.12)',
+      iconColor: "#10b981",
+      iconBg: "rgba(16, 185, 129, 0.12)",
       detail: `${formatBytes(s.disk_used)} / ${formatBytes(s.disk_total)}`,
       percent: Number(s.disk_usage) || 0,
-      barColor: 'linear-gradient(90deg, #10b981, #34d399)',
+      barColor: "linear-gradient(90deg, #10b981, #34d399)",
     },
-  ]
-})
+  ];
+});
 
 function formatBytes(bytes: number) {
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let i = 0
-  let val = bytes
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let val = bytes;
   while (val >= 1024 && i < units.length - 1) {
-    val /= 1024
-    i++
+    val /= 1024;
+    i++;
   }
-  return val.toFixed(1) + ' ' + units[i]
+  return val.toFixed(1) + " " + units[i];
 }
 
 function formatTime(t: string) {
-  if (!t) return '-'
-  return new Date(t).toLocaleString('zh-CN', { hour12: false })
+  if (!t) return "-";
+  return new Date(t).toLocaleString("zh-CN", { hour12: false });
 }
 
 function relativeTime(t: string) {
-  if (!t) return '-'
-  const diff = (Date.now() - new Date(t).getTime()) / 1000
-  if (diff < 60) return Math.max(1, Math.floor(diff)) + ' 秒前'
-  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前'
-  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前'
-  if (diff < 86400 * 7) return Math.floor(diff / 86400) + ' 天前'
-  return new Date(t).toLocaleDateString('zh-CN')
+  if (!t) return "-";
+  const diff = (Date.now() - new Date(t).getTime()) / 1000;
+  if (diff < 60) return Math.max(1, Math.floor(diff)) + " 秒前";
+  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
+  if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
+  if (diff < 86400 * 7) return Math.floor(diff / 86400) + " 天前";
+  return new Date(t).toLocaleDateString("zh-CN");
 }
 
 function lastUpdatedText() {
-  const diff = (Date.now() - refreshTimestamp.value.getTime()) / 1000
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前'
-  return Math.floor(diff / 3600) + ' 小时前'
+  const diff = (Date.now() - refreshTimestamp.value.getTime()) / 1000;
+  if (diff < 60) return "刚刚";
+  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
+  return Math.floor(diff / 3600) + " 小时前";
 }
 
-const lastUpdatedTick = ref(0)
-let lastUpdatedTimer: number | null = null
+const lastUpdatedTick = ref(0);
+let lastUpdatedTimer: number | null = null;
 
 const filteredLogs = computed(() => {
-  const list = recentLogs.value
-  if (logFilter.value === 'all') return list.slice(0, 5)
-  if (logFilter.value === 'running') return list.filter((l: any) => isRunningLog(l.status)).slice(0, 5)
-  if (logFilter.value === 'success') return list.filter((l: any) => isSuccessLog(l.status)).slice(0, 5)
-  if (logFilter.value === 'failed') return list.filter((l: any) => isFailedLog(l.status)).slice(0, 5)
-  return list.slice(0, 5)
-})
+  const list = recentLogs.value;
+  if (logFilter.value === "all") return list.slice(0, 5);
+  if (logFilter.value === "running")
+    return list.filter((l: any) => isRunningLog(l.status)).slice(0, 5);
+  if (logFilter.value === "success")
+    return list.filter((l: any) => isSuccessLog(l.status)).slice(0, 5);
+  if (logFilter.value === "failed")
+    return list.filter((l: any) => isFailedLog(l.status)).slice(0, 5);
+  return list.slice(0, 5);
+});
 
 const activityList = computed(() => {
   return recentLogs.value.slice(0, 6).map((log: any) => {
-    const isRunning = isRunningLog(log.status)
-    const isSuccess = isSuccessLog(log.status)
+    const isRunning = isRunningLog(log.status);
+    const isSuccess = isSuccessLog(log.status);
     return {
       id: log.id,
-      title: isRunning ? '任务正在运行' : (isSuccess ? '任务执行成功' : '任务执行失败'),
-      desc: log.task_name || '未命名任务',
+      title: isRunning
+        ? "任务正在运行"
+        : isSuccess
+          ? "任务执行成功"
+          : "任务执行失败",
+      desc: log.task_name || "未命名任务",
       time: log.created_at,
-      type: isRunning ? 'running' : (isSuccess ? 'success' : 'failed'),
-    }
-  })
-})
+      type: isRunning ? "running" : isSuccess ? "success" : "failed",
+    };
+  });
+});
 
 const taskStats = computed(() => {
-  const dailyStats = (dashboardData.value.daily_stats || []) as Array<{ success: number; failed: number }>
-  const totalSuccess = dailyStats.reduce((sum, d) => sum + (d.success || 0), 0)
-  const totalFailed = dailyStats.reduce((sum, d) => sum + (d.failed || 0), 0)
-  const running = runningTasks.value
-  const total = totalSuccess + totalFailed + running
+  const dailyStats = (dashboardData.value.daily_stats || []) as Array<{
+    success: number;
+    failed: number;
+  }>;
+  const totalSuccess = dailyStats.reduce((sum, d) => sum + (d.success || 0), 0);
+  const totalFailed = dailyStats.reduce((sum, d) => sum + (d.failed || 0), 0);
+  const running = runningTasks.value;
+  const total = totalSuccess + totalFailed + running;
 
   function pct(n: number) {
-    if (!total) return 0
-    return Math.round((n / total) * 1000) / 10
+    if (!total) return 0;
+    return Math.round((n / total) * 1000) / 10;
   }
 
   return {
@@ -350,181 +437,200 @@ const taskStats = computed(() => {
     failedPct: pct(totalFailed),
     runningPct: pct(running),
     skippedPct: 0,
-  }
-})
+  };
+});
 
 const avgDuration = computed(() => {
-  const list = recentLogs.value
-  if (!list.length) return 0
-  const valid = list.filter((l: any) => l.duration != null)
-  if (!valid.length) return 0
-  const sum = valid.reduce((s: number, l: any) => s + (l.duration || 0), 0)
-  return Math.round((sum / valid.length) * 10) / 10
-})
+  const list = recentLogs.value;
+  if (!list.length) return 0;
+  const valid = list.filter((l: any) => l.duration != null);
+  if (!valid.length) return 0;
+  const sum = valid.reduce((s: number, l: any) => s + (l.duration || 0), 0);
+  return Math.round((sum / valid.length) * 10) / 10;
+});
 
 function donutSegments() {
-  const radius = 50
-  const circ = 2 * Math.PI * radius
-  const stats = taskStats.value
+  const radius = 50;
+  const circ = 2 * Math.PI * radius;
+  const stats = taskStats.value;
   const segs = [
-    { color: '#10b981', percent: stats.successPct },
-    { color: '#3b82f6', percent: stats.runningPct },
-    { color: '#ef4444', percent: stats.failedPct },
-    { color: '#94a3b8', percent: stats.skippedPct },
-  ]
-  let offset = 0
+    { color: "#10b981", percent: stats.successPct },
+    { color: "#3b82f6", percent: stats.runningPct },
+    { color: "#ef4444", percent: stats.failedPct },
+    { color: "#94a3b8", percent: stats.skippedPct },
+  ];
+  let offset = 0;
   return segs.map((s) => {
-    const length = (s.percent / 100) * circ
-    const dasharray = `${length} ${circ - length}`
-    const dashoffset = -offset
-    offset += length
-    return { ...s, dasharray, dashoffset, circ }
-  })
+    const length = (s.percent / 100) * circ;
+    const dasharray = `${length} ${circ - length}`;
+    const dashoffset = -offset;
+    offset += length;
+    return { ...s, dasharray, dashoffset, circ };
+  });
 }
 
 const loadDashboard = async () => {
   try {
-    const res = await systemApi.dashboard(trendRange.value) as any
-    dashboardData.value = res.data || {}
-    refreshTimestamp.value = new Date()
+    const res = (await systemApi.dashboard(trendRange.value)) as any;
+    dashboardData.value = res.data || {};
+    refreshTimestamp.value = new Date();
   } catch {
-    ElMessage.error('加载仪表盘数据失败')
+    ElMessage.error("加载仪表盘数据失败");
   }
-}
+};
 
 const loadSysInfo = async () => {
   try {
-    const res = await systemApi.info() as any
-    sysInfo.value = res.data || {}
+    const res = (await systemApi.info()) as any;
+    sysInfo.value = res.data || {};
   } catch {
-    ElMessage.error('加载系统信息失败')
+    ElMessage.error("加载系统信息失败");
   }
-}
+};
 
 watch(trendRange, () => {
-  loadDashboard()
-})
+  loadDashboard();
+});
 
 function activateTrendChart() {
-  if (showTrendChart.value || trendChartTimer) return
+  if (showTrendChart.value || trendChartTimer) return;
   trendChartTimer = window.setTimeout(() => {
-    showTrendChart.value = true
-    trendChartTimer = null
-  }, 120)
+    showTrendChart.value = true;
+    trendChartTimer = null;
+  }, 120);
 }
 
 function stopObservingTrendChart() {
   if (trendChartObserver) {
-    trendChartObserver.disconnect()
-    trendChartObserver = null
+    trendChartObserver.disconnect();
+    trendChartObserver = null;
   }
 }
 
 function scheduleTrendChartRender() {
-  if (showTrendChart.value || !trendChartHostRef.value) return
-  if (typeof window === 'undefined' || typeof IntersectionObserver === 'undefined') {
-    activateTrendChart()
-    return
+  if (showTrendChart.value || !trendChartHostRef.value) return;
+  if (
+    typeof window === "undefined" ||
+    typeof IntersectionObserver === "undefined"
+  ) {
+    activateTrendChart();
+    return;
   }
-  stopObservingTrendChart()
-  trendChartObserver = new IntersectionObserver((entries) => {
-    if (!entries.some(e => e.isIntersecting)) return
-    stopObservingTrendChart()
-    activateTrendChart()
-  }, { rootMargin: '160px 0px' })
-  trendChartObserver.observe(trendChartHostRef.value)
+  stopObservingTrendChart();
+  trendChartObserver = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      stopObservingTrendChart();
+      activateTrendChart();
+    },
+    { rootMargin: "160px 0px" },
+  );
+  trendChartObserver.observe(trendChartHostRef.value);
 }
 
 function loadDashboardPage() {
-  loadDashboard()
-  loadSysInfo()
+  loadDashboard();
+  loadSysInfo();
 }
 
 function handleRefresh() {
-  loadDashboardPage()
+  loadDashboardPage();
 }
 
 onMounted(() => {
-  loadDashboardPage()
-  hasLoadedOnce.value = true
-  scheduleTrendChartRender()
+  loadDashboardPage();
+  hasLoadedOnce.value = true;
+  scheduleTrendChartRender();
   lastUpdatedTimer = window.setInterval(() => {
-    lastUpdatedTick.value++
-  }, 30 * 1000)
-})
+    lastUpdatedTick.value++;
+  }, 30 * 1000);
+});
 
 onActivated(() => {
   if (skipInitialActivated.value) {
-    skipInitialActivated.value = false
+    skipInitialActivated.value = false;
   } else if (hasLoadedOnce.value) {
-    loadDashboardPage()
+    loadDashboardPage();
   }
-  scheduleTrendChartRender()
-})
+  scheduleTrendChartRender();
+});
 
 onUnmounted(() => {
-  stopObservingTrendChart()
+  stopObservingTrendChart();
   if (trendChartTimer) {
-    clearTimeout(trendChartTimer)
-    trendChartTimer = null
+    clearTimeout(trendChartTimer);
+    trendChartTimer = null;
   }
   if (lastUpdatedTimer) {
-    clearInterval(lastUpdatedTimer)
-    lastUpdatedTimer = null
+    clearInterval(lastUpdatedTimer);
+    lastUpdatedTimer = null;
   }
-})
+});
 
 const updatedHint = computed(() => {
   // 触发重新计算（通过 lastUpdatedTick）
-  void lastUpdatedTick.value
-  return lastUpdatedText()
-})
+  void lastUpdatedTick.value;
+  return lastUpdatedText();
+});
 
 function statusBadgeType(status: number | null | undefined) {
-  if (isRunningLog(status)) return 'primary'
-  if (isSuccessLog(status)) return 'success'
-  return 'danger'
+  if (isRunningLog(status)) return "primary";
+  if (isSuccessLog(status)) return "success";
+  return "danger";
 }
 
 function statusBadgeText(status: number | null | undefined) {
-  if (isRunningLog(status)) return '运行中'
-  if (isSuccessLog(status)) return '成功'
-  return '失败'
+  if (isRunningLog(status)) return "运行中";
+  if (isSuccessLog(status)) return "成功";
+  return "失败";
 }
 
 function triggerLabel(taskType: string | undefined) {
   switch (taskType) {
-    case 'manual': return '手动执行'
-    case 'startup': return '启动执行'
-    default: return '定时任务'
+    case "manual":
+      return "手动执行";
+    case "startup":
+      return "启动执行";
+    default:
+      return "定时任务";
   }
 }
 
 function envLabel(log: any) {
-  const labels = labelsOf(log)
-  if (labels.length > 0) return labels[0] || 'default'
-  return taskTypeOf(log) === 'manual' ? 'manual' : 'cron'
+  const labels = labelsOf(log);
+  if (labels.length > 0) return labels[0] || "default";
+  return taskTypeOf(log) === "manual" ? "manual" : "cron";
 }
 
 function envBadgeColor(env: string) {
   switch (env) {
-    case 'prod':
-    case 'production': return { bg: 'rgba(16, 185, 129, 0.1)', color: '#10b981' }
-    case 'staging': return { bg: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b' }
-    case 'test': return { bg: 'rgba(59, 130, 246, 0.1)', color: '#3b82f6' }
-    case 'local': return { bg: 'rgba(148, 163, 184, 0.15)', color: '#64748b' }
-    case 'manual': return { bg: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b' }
-    case 'cron': return { bg: 'rgba(59, 130, 246, 0.1)', color: '#3b82f6' }
-    default: return { bg: 'rgba(59, 130, 246, 0.1)', color: '#3b82f6' }
+    case "prod":
+    case "production":
+      return { bg: "rgba(16, 185, 129, 0.1)", color: "#10b981" };
+    case "staging":
+      return { bg: "rgba(245, 158, 11, 0.1)", color: "#f59e0b" };
+    case "test":
+      return { bg: "rgba(59, 130, 246, 0.1)", color: "#3b82f6" };
+    case "local":
+      return { bg: "rgba(148, 163, 184, 0.15)", color: "#64748b" };
+    case "manual":
+      return { bg: "rgba(245, 158, 11, 0.1)", color: "#f59e0b" };
+    case "cron":
+      return { bg: "rgba(59, 130, 246, 0.1)", color: "#3b82f6" };
+    default:
+      return { bg: "rgba(59, 130, 246, 0.1)", color: "#3b82f6" };
   }
 }
 
 function viewLog(log: any) {
-  router.push({ path: '/logs', query: { task_id: log.task_id } })
+  router.push({ path: "/logs", query: { task_id: log.task_id } });
 }
 
 function rerunLog(log: any) {
-  router.push({ path: '/tasks', query: { task_id: log.task_id, action: 'run' } })
+  router.push({
+    path: "/tasks",
+    query: { task_id: log.task_id, action: "run" },
+  });
 }
 </script>
 
@@ -540,40 +646,95 @@ function rerunLog(log: any) {
         </div>
         <div class="hero-banner__content">
           <h2 class="hero-banner__title">
-            {{ greeting }}，{{ authStore.user?.username || 'User' }}
+            {{ greeting }}，{{ authStore.user?.username || "User" }}
             <span class="wave-emoji">👋</span>
           </h2>
           <p class="hero-banner__sub">{{ greetingSub }}</p>
         </div>
         <div class="hero-banner__art">
-          <svg viewBox="0 0 220 140" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <svg
+            viewBox="0 0 220 140"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+          >
             <defs>
               <linearGradient id="screenG" x1="0" y1="0" x2="1" y2="1">
                 <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95" />
                 <stop offset="100%" stop-color="#ffffff" stop-opacity="0.55" />
               </linearGradient>
               <linearGradient id="chartG" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#a78bfa" />
-                <stop offset="100%" stop-color="#7c3aed" />
+                <stop offset="0%" stop-color="#67e8f9" />
+                <stop offset="100%" stop-color="#06b6d4" />
               </linearGradient>
             </defs>
             <!-- 行星圆环 -->
-            <ellipse cx="160" cy="38" rx="48" ry="9" stroke="rgba(255,255,255,0.4)" stroke-width="1.4" fill="none" />
+            <ellipse
+              cx="160"
+              cy="38"
+              rx="48"
+              ry="9"
+              stroke="rgba(255,255,255,0.4)"
+              stroke-width="1.4"
+              fill="none"
+            />
             <circle cx="160" cy="38" r="14" fill="#fbbf24" />
             <circle cx="160" cy="38" r="14" fill="url(#chartG)" opacity="0.4" />
             <!-- 主屏幕 -->
-            <rect x="58" y="34" width="92" height="68" rx="8" fill="url(#screenG)" stroke="rgba(255,255,255,0.7)" stroke-width="1.5" />
-            <rect x="65" y="42" width="32" height="6" rx="3" fill="#a78bfa" opacity="0.85" />
-            <rect x="65" y="52" width="48" height="4" rx="2" fill="#c4b5fd" opacity="0.7" />
-            <rect x="65" y="60" width="36" height="4" rx="2" fill="#c4b5fd" opacity="0.55" />
+            <rect
+              x="58"
+              y="34"
+              width="92"
+              height="68"
+              rx="8"
+              fill="url(#screenG)"
+              stroke="rgba(255,255,255,0.7)"
+              stroke-width="1.5"
+            />
+            <rect
+              x="65"
+              y="42"
+              width="32"
+              height="6"
+              rx="3"
+              fill="#67e8f9"
+              opacity="0.85"
+            />
+            <rect
+              x="65"
+              y="52"
+              width="48"
+              height="4"
+              rx="2"
+              fill="#a5f3fc"
+              opacity="0.7"
+            />
+            <rect
+              x="65"
+              y="60"
+              width="36"
+              height="4"
+              rx="2"
+              fill="#a5f3fc"
+              opacity="0.55"
+            />
             <!-- 折线图 -->
-            <polyline points="65,90 78,80 91,86 104,72 117,78 130,68 143,74"
-                      stroke="#7c3aed" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
-            <circle cx="143" cy="74" r="2.4" fill="#7c3aed" />
+            <polyline
+              points="65,90 78,80 91,86 104,72 117,78 130,68 143,74"
+              stroke="#06b6d4"
+              stroke-width="2"
+              fill="none"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <circle cx="143" cy="74" r="2.4" fill="#06b6d4" />
             <!-- 火箭 -->
             <g transform="translate(28 64) rotate(-22)">
-              <path d="M0 14 L10 0 L18 4 L18 22 L10 26 Z" fill="#ffffff" opacity="0.92" />
-              <circle cx="11" cy="10" r="2.2" fill="#7c3aed" />
+              <path
+                d="M0 14 L10 0 L18 4 L18 22 L10 26 Z"
+                fill="#ffffff"
+                opacity="0.92"
+              />
+              <circle cx="11" cy="10" r="2.2" fill="#06b6d4" />
               <path d="M2 22 L-3 30 L4 26 Z" fill="#fbbf24" opacity="0.85" />
             </g>
             <!-- 装饰小气泡 -->
@@ -581,10 +742,42 @@ function rerunLog(log: any) {
             <circle cx="200" cy="100" r="4" fill="rgba(255,255,255,0.55)" />
             <circle cx="190" cy="86" r="2" fill="rgba(255,255,255,0.85)" />
             <!-- 文档卡 -->
-            <rect x="160" y="78" width="34" height="26" rx="4" fill="#ffffff" opacity="0.92" />
-            <rect x="164" y="84" width="20" height="3" rx="1.5" fill="#a78bfa" opacity="0.7" />
-            <rect x="164" y="90" width="16" height="3" rx="1.5" fill="#c4b5fd" opacity="0.6" />
-            <rect x="164" y="96" width="12" height="3" rx="1.5" fill="#c4b5fd" opacity="0.6" />
+            <rect
+              x="160"
+              y="78"
+              width="34"
+              height="26"
+              rx="4"
+              fill="#ffffff"
+              opacity="0.92"
+            />
+            <rect
+              x="164"
+              y="84"
+              width="20"
+              height="3"
+              rx="1.5"
+              fill="#67e8f9"
+              opacity="0.7"
+            />
+            <rect
+              x="164"
+              y="90"
+              width="16"
+              height="3"
+              rx="1.5"
+              fill="#a5f3fc"
+              opacity="0.6"
+            />
+            <rect
+              x="164"
+              y="96"
+              width="12"
+              height="3"
+              rx="1.5"
+              fill="#a5f3fc"
+              opacity="0.6"
+            />
           </svg>
         </div>
       </div>
@@ -600,7 +793,10 @@ function rerunLog(log: any) {
             class="quick-tile"
             @click="action.action"
           >
-            <span class="quick-tile__icon" :style="{ background: action.bg, color: action.color }">
+            <span
+              class="quick-tile__icon"
+              :style="{ background: action.bg, color: action.color }"
+            >
               <el-icon :size="18"><component :is="action.icon" /></el-icon>
             </span>
             <span class="quick-tile__label">{{ action.label }}</span>
@@ -620,7 +816,12 @@ function rerunLog(log: any) {
         <div class="stat-card__main">
           <span class="stat-card__label">{{ card.label }}</span>
           <span class="stat-card__value" :style="{ color: card.color }">
-            <CountUp :end-val="card.value" :duration="1.2" :decimals="card.decimals || 0" :suffix="card.suffix || ''" />
+            <CountUp
+              :end-val="card.value"
+              :duration="1.2"
+              :decimals="card.decimals || 0"
+              :suffix="card.suffix || ''"
+            />
           </span>
           <span class="stat-card__delta">
             <template v-if="card.delta !== null && card.delta !== undefined">
@@ -628,7 +829,8 @@ function rerunLog(log: any) {
               <span
                 v-if="card.delta === 0"
                 class="stat-card__delta-value is-flat"
-              >持平</span>
+                >持平</span
+              >
               <span
                 v-else
                 class="stat-card__delta-value"
@@ -637,7 +839,8 @@ function rerunLog(log: any) {
                 <el-icon :size="11">
                   <component :is="card.delta > 0 ? ArrowUp : ArrowDown" />
                 </el-icon>
-                {{ card.delta > 0 ? '+' : '' }}{{ card.delta }}{{ card.deltaSuffix || '' }}
+                {{ card.delta > 0 ? "+" : "" }}{{ card.delta
+                }}{{ card.deltaSuffix || "" }}
               </span>
             </template>
             <template v-else>
@@ -645,7 +848,10 @@ function rerunLog(log: any) {
             </template>
           </span>
         </div>
-        <div class="stat-card__icon" :style="{ background: card.bgIcon, color: card.color }">
+        <div
+          class="stat-card__icon"
+          :style="{ background: card.bgIcon, color: card.color }"
+        >
           <el-icon :size="20" :class="{ 'icon-spin': card.spinning }">
             <component :is="card.icon" />
           </el-icon>
@@ -659,7 +865,12 @@ function rerunLog(log: any) {
       <div class="panel panel--trend">
         <div class="panel-header">
           <div class="panel-header__title">
-            <el-icon class="panel-header__icon" :size="14" style="color: #3b82f6"><TrendCharts /></el-icon>
+            <el-icon
+              class="panel-header__icon"
+              :size="14"
+              style="color: #3b82f6"
+              ><TrendCharts
+            /></el-icon>
             <span>执行趋势</span>
           </div>
           <div class="panel-header__actions">
@@ -668,21 +879,30 @@ function rerunLog(log: any) {
                 class="seg-btn"
                 :class="{ 'is-active': trendRange === 7 }"
                 @click="trendRange = 7"
-              >近7天</button>
+              >
+                近7天
+              </button>
               <button
                 class="seg-btn"
                 :class="{ 'is-active': trendRange === 30 }"
                 @click="trendRange = 30"
-              >近30天</button>
+              >
+                近30天
+              </button>
             </div>
           </div>
         </div>
         <div ref="trendChartHostRef" class="trend-chart-shell">
-          <ExecutionTrendChart v-if="showTrendChart" :stats="dashboardData.daily_stats || []" />
+          <ExecutionTrendChart
+            v-if="showTrendChart"
+            :stats="dashboardData.daily_stats || []"
+          />
           <div v-else class="trend-chart-placeholder">
             <div class="placeholder-bar"></div>
             <div class="placeholder-bar placeholder-bar--short"></div>
-            <div class="placeholder-legend"><span></span><span></span><span></span></div>
+            <div class="placeholder-legend">
+              <span></span><span></span><span></span>
+            </div>
           </div>
         </div>
       </div>
@@ -691,7 +911,12 @@ function rerunLog(log: any) {
       <div class="panel panel--resource">
         <div class="panel-header">
           <div class="panel-header__title">
-            <el-icon class="panel-header__icon" :size="14" style="color: #10b981"><Cpu /></el-icon>
+            <el-icon
+              class="panel-header__icon"
+              :size="14"
+              style="color: #10b981"
+              ><Cpu
+            /></el-icon>
             <span>系统资源</span>
             <span class="panel-header__hint">最近更新：{{ updatedHint }}</span>
           </div>
@@ -703,28 +928,44 @@ function rerunLog(log: any) {
         </div>
         <div class="resource-list">
           <div v-for="r in resourceItems" :key="r.key" class="resource-row">
-            <div class="resource-row__icon" :style="{ background: r.iconBg, color: r.iconColor }">
+            <div
+              class="resource-row__icon"
+              :style="{ background: r.iconBg, color: r.iconColor }"
+            >
               <el-icon :size="16"><component :is="r.icon" /></el-icon>
             </div>
             <div class="resource-row__body">
               <div class="resource-row__top">
                 <span class="resource-row__label">{{ r.label }}</span>
                 <span class="resource-row__detail">{{ r.detail }}</span>
-                <span class="resource-row__pct">{{ r.percent.toFixed(1) }}%</span>
+                <span class="resource-row__pct"
+                  >{{ r.percent.toFixed(1) }}%</span
+                >
               </div>
               <div class="resource-bar">
-                <div class="resource-bar__fill" :style="{ width: Math.min(r.percent, 100) + '%', background: r.barColor }"></div>
+                <div
+                  class="resource-bar__fill"
+                  :style="{
+                    width: Math.min(r.percent, 100) + '%',
+                    background: r.barColor,
+                  }"
+                ></div>
               </div>
             </div>
           </div>
           <div class="resource-row">
-            <div class="resource-row__icon" style="background: rgba(245, 158, 11, 0.12); color: #f59e0b">
+            <div
+              class="resource-row__icon"
+              style="background: rgba(245, 158, 11, 0.12); color: #f59e0b"
+            >
               <el-icon :size="16"><Timer /></el-icon>
             </div>
             <div class="resource-row__body">
               <div class="resource-row__top">
                 <span class="resource-row__label">面板运行</span>
-                <span class="resource-row__detail uptime-detail">{{ sysInfo.uptime || '-' }}</span>
+                <span class="resource-row__detail uptime-detail">{{
+                  sysInfo.uptime || "-"
+                }}</span>
               </div>
               <div class="uptime-track">
                 <span class="uptime-track__dot"></span>
@@ -740,7 +981,12 @@ function rerunLog(log: any) {
       <div class="panel panel--activity">
         <div class="panel-header">
           <div class="panel-header__title">
-            <el-icon class="panel-header__icon" :size="14" style="color: #f59e0b"><Refresh /></el-icon>
+            <el-icon
+              class="panel-header__icon"
+              :size="14"
+              style="color: #f59e0b"
+              ><Refresh
+            /></el-icon>
             <span>最近活动</span>
           </div>
           <div class="panel-header__actions">
@@ -750,7 +996,9 @@ function rerunLog(log: any) {
           </div>
         </div>
         <div class="activity-feed">
-          <div v-if="activityList.length === 0" class="empty-hint">暂无活动</div>
+          <div v-if="activityList.length === 0" class="empty-hint">
+            暂无活动
+          </div>
           <div
             v-for="(act, idx) in activityList"
             :key="act.id || idx"
@@ -758,14 +1006,24 @@ function rerunLog(log: any) {
           >
             <span class="activity-item__icon" :class="`is-${act.type}`">
               <el-icon :size="12">
-                <component :is="act.type === 'success' ? CircleCheck : (act.type === 'failed' ? CircleClose : Loading)" />
+                <component
+                  :is="
+                    act.type === 'success'
+                      ? CircleCheck
+                      : act.type === 'failed'
+                        ? CircleClose
+                        : Loading
+                  "
+                />
               </el-icon>
             </span>
             <div class="activity-item__body">
               <span class="activity-item__title">{{ act.title }}</span>
               <span class="activity-item__desc">{{ act.desc }}</span>
             </div>
-            <span class="activity-item__time">{{ relativeTime(act.time) }}</span>
+            <span class="activity-item__time">{{
+              relativeTime(act.time)
+            }}</span>
           </div>
         </div>
       </div>
@@ -777,16 +1035,28 @@ function rerunLog(log: any) {
       <div class="panel panel--logs">
         <div class="panel-header">
           <div class="panel-header__title">
-            <el-icon class="panel-header__icon" :size="14" style="color: #8b5cf6"><Document /></el-icon>
+            <el-icon
+              class="panel-header__icon"
+              :size="14"
+              style="color: #06b6d4"
+              ><Document
+            /></el-icon>
             <span>最近执行任务</span>
             <div class="seg-btn-group seg-btn-group--mini">
               <button
-                v-for="opt in [{label:'全部',value:'all'},{label:'成功',value:'success'},{label:'失败',value:'failed'},{label:'运行中',value:'running'}]"
+                v-for="opt in [
+                  { label: '全部', value: 'all' },
+                  { label: '成功', value: 'success' },
+                  { label: '失败', value: 'failed' },
+                  { label: '运行中', value: 'running' },
+                ]"
                 :key="opt.value"
                 class="seg-btn"
                 :class="{ 'is-active': logFilter === opt.value }"
                 @click="logFilter = opt.value as any"
-              >{{ opt.label }}</button>
+              >
+                {{ opt.label }}
+              </button>
             </div>
           </div>
           <div class="panel-header__actions">
@@ -796,17 +1066,30 @@ function rerunLog(log: any) {
           </div>
         </div>
         <div v-if="isMobile" class="log-mobile-list">
-          <div v-if="filteredLogs.length === 0" class="empty-hint">暂无记录</div>
-          <div v-for="log in filteredLogs" :key="log.id" class="log-mobile-card">
+          <div v-if="filteredLogs.length === 0" class="empty-hint">
+            暂无记录
+          </div>
+          <div
+            v-for="log in filteredLogs"
+            :key="log.id"
+            class="log-mobile-card"
+          >
             <div class="log-mobile-card__head">
-              <span class="log-mobile-card__name">{{ log.task_name || '未命名任务' }}</span>
-              <span class="log-status-chip" :class="`is-${statusBadgeType(log.status)}`">
+              <span class="log-mobile-card__name">{{
+                log.task_name || "未命名任务"
+              }}</span>
+              <span
+                class="log-status-chip"
+                :class="`is-${statusBadgeType(log.status)}`"
+              >
                 {{ statusBadgeText(log.status) }}
               </span>
             </div>
             <div class="log-mobile-card__meta">
               <span>{{ formatTime(log.created_at) }}</span>
-              <span v-if="log.duration != null">耗时 {{ log.duration.toFixed(1) }}s</span>
+              <span v-if="log.duration != null"
+                >耗时 {{ log.duration.toFixed(1) }}s</span
+              >
             </div>
           </div>
         </div>
@@ -837,28 +1120,57 @@ function rerunLog(log: any) {
             </tr>
             <tr v-for="log in filteredLogs" :key="log.id">
               <td>
-                <span class="log-cell-name">{{ log.task_name || '未命名任务' }}</span>
+                <span class="log-cell-name">{{
+                  log.task_name || "未命名任务"
+                }}</span>
               </td>
               <td class="col-center">
-                <span class="log-status-chip" :class="`is-${statusBadgeType(log.status)}`">
+                <span
+                  class="log-status-chip"
+                  :class="`is-${statusBadgeType(log.status)}`"
+                >
                   {{ statusBadgeText(log.status) }}
                 </span>
               </td>
-              <td><span class="log-cell-time">{{ formatTime(log.created_at) }}</span></td>
-              <td class="col-center"><span class="log-cell-duration">{{ log.duration != null ? log.duration.toFixed(1) + 's' : '-' }}</span></td>
-              <td class="col-center"><span class="log-cell-trigger">{{ triggerLabel(taskTypeOf(log)) }}</span></td>
+              <td>
+                <span class="log-cell-time">{{
+                  formatTime(log.created_at)
+                }}</span>
+              </td>
+              <td class="col-center">
+                <span class="log-cell-duration">{{
+                  log.duration != null ? log.duration.toFixed(1) + "s" : "-"
+                }}</span>
+              </td>
+              <td class="col-center">
+                <span class="log-cell-trigger">{{
+                  triggerLabel(taskTypeOf(log))
+                }}</span>
+              </td>
               <td class="col-center">
                 <span
                   class="env-chip"
-                  :style="{ background: envBadgeColor(envLabel(log)).bg, color: envBadgeColor(envLabel(log)).color }"
-                >{{ envLabel(log) }}</span>
+                  :style="{
+                    background: envBadgeColor(envLabel(log)).bg,
+                    color: envBadgeColor(envLabel(log)).color,
+                  }"
+                  >{{ envLabel(log) }}</span
+                >
               </td>
               <td class="col-center">
                 <div class="log-cell-actions">
-                  <button class="icon-btn" title="查看日志" @click="viewLog(log)">
+                  <button
+                    class="icon-btn"
+                    title="查看日志"
+                    @click="viewLog(log)"
+                  >
                     <el-icon :size="14"><View /></el-icon>
                   </button>
-                  <button class="icon-btn" title="重新运行" @click="rerunLog(log)">
+                  <button
+                    class="icon-btn"
+                    title="重新运行"
+                    @click="rerunLog(log)"
+                  >
                     <el-icon :size="14"><Refresh /></el-icon>
                   </button>
                 </div>
@@ -872,7 +1184,12 @@ function rerunLog(log: any) {
       <div class="panel panel--stats">
         <div class="panel-header">
           <div class="panel-header__title">
-            <el-icon class="panel-header__icon" :size="14" style="color: #ec4899"><TrendCharts /></el-icon>
+            <el-icon
+              class="panel-header__icon"
+              :size="14"
+              style="color: #10b981"
+              ><TrendCharts
+            /></el-icon>
             <span>任务统计</span>
             <span class="panel-header__hint">近{{ trendRange }}天</span>
           </div>
@@ -885,18 +1202,32 @@ function rerunLog(log: any) {
         <div class="task-stats-body">
           <div class="task-donut">
             <svg viewBox="0 0 140 140">
-              <circle cx="70" cy="70" r="50" fill="none" stroke="var(--el-fill-color)" stroke-width="14" />
+              <circle
+                cx="70"
+                cy="70"
+                r="50"
+                fill="none"
+                stroke="var(--el-fill-color)"
+                stroke-width="14"
+              />
               <circle
                 v-for="(seg, idx) in donutSegments()"
                 :key="idx"
-                cx="70" cy="70" r="50" fill="none"
+                cx="70"
+                cy="70"
+                r="50"
+                fill="none"
                 :stroke="seg.color"
                 stroke-width="14"
                 stroke-linecap="round"
                 :stroke-dasharray="seg.dasharray"
                 :stroke-dashoffset="seg.dashoffset"
                 transform="rotate(-90 70 70)"
-                style="transition: stroke-dasharray 0.6s ease, stroke-dashoffset 0.6s ease"
+                style="
+                  transition:
+                    stroke-dasharray 0.6s ease,
+                    stroke-dashoffset 0.6s ease;
+                "
               />
             </svg>
             <div class="task-donut__center">
@@ -910,25 +1241,33 @@ function rerunLog(log: any) {
             <div class="legend-row">
               <span class="legend-row__dot" style="background: #10b981"></span>
               <span class="legend-row__label">成功</span>
-              <span class="legend-row__value">{{ taskStats.success.toLocaleString() }}</span>
+              <span class="legend-row__value">{{
+                taskStats.success.toLocaleString()
+              }}</span>
               <span class="legend-row__pct">({{ taskStats.successPct }}%)</span>
             </div>
             <div class="legend-row">
               <span class="legend-row__dot" style="background: #ef4444"></span>
               <span class="legend-row__label">失败</span>
-              <span class="legend-row__value">{{ taskStats.failed.toLocaleString() }}</span>
+              <span class="legend-row__value">{{
+                taskStats.failed.toLocaleString()
+              }}</span>
               <span class="legend-row__pct">({{ taskStats.failedPct }}%)</span>
             </div>
             <div class="legend-row">
               <span class="legend-row__dot" style="background: #3b82f6"></span>
               <span class="legend-row__label">运行中</span>
-              <span class="legend-row__value">{{ taskStats.running.toLocaleString() }}</span>
+              <span class="legend-row__value">{{
+                taskStats.running.toLocaleString()
+              }}</span>
               <span class="legend-row__pct">({{ taskStats.runningPct }}%)</span>
             </div>
             <div class="legend-row">
               <span class="legend-row__dot" style="background: #94a3b8"></span>
               <span class="legend-row__label">跳过</span>
-              <span class="legend-row__value">{{ taskStats.skipped.toLocaleString() }}</span>
+              <span class="legend-row__value">{{
+                taskStats.skipped.toLocaleString()
+              }}</span>
               <span class="legend-row__pct">({{ taskStats.skippedPct }}%)</span>
             </div>
           </div>
@@ -962,8 +1301,8 @@ function rerunLog(log: any) {
   padding: 22px 26px;
   overflow: hidden;
   contain: layout paint;
-  background: linear-gradient(135deg, #ede9fe 0%, #e0e7ff 50%, #dbeafe 100%);
-  border: 1px solid rgba(139, 92, 246, 0.12);
+  background: linear-gradient(135deg, #ecfeff 0%, #e0f2fe 46%, #dbeafe 100%);
+  border: 1px solid rgba(6, 182, 212, 0.12);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -986,9 +1325,26 @@ function rerunLog(log: any) {
   background: rgba(255, 255, 255, 0.45);
   filter: blur(18px);
 
-  &.bubble-1 { width: 120px; height: 120px; top: -40px; left: 30%; }
-  &.bubble-2 { width: 80px; height: 80px; bottom: -20px; left: 60%; background: rgba(167, 139, 250, 0.35); }
-  &.bubble-3 { width: 60px; height: 60px; top: 30%; right: 4%; background: rgba(96, 165, 250, 0.35); }
+  &.bubble-1 {
+    width: 120px;
+    height: 120px;
+    top: -40px;
+    left: 30%;
+  }
+  &.bubble-2 {
+    width: 80px;
+    height: 80px;
+    bottom: -20px;
+    left: 60%;
+    background: rgba(103, 232, 249, 0.35);
+  }
+  &.bubble-3 {
+    width: 60px;
+    height: 60px;
+    top: 30%;
+    right: 4%;
+    background: rgba(96, 165, 250, 0.35);
+  }
 }
 
 .hero-banner__content {
@@ -1016,11 +1372,22 @@ function rerunLog(log: any) {
 }
 
 @keyframes wave {
-  0%, 100% { transform: rotate(0deg); }
-  20% { transform: rotate(14deg); }
-  40% { transform: rotate(-10deg); }
-  60% { transform: rotate(12deg); }
-  80% { transform: rotate(-4deg); }
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  20% {
+    transform: rotate(14deg);
+  }
+  40% {
+    transform: rotate(-10deg);
+  }
+  60% {
+    transform: rotate(12deg);
+  }
+  80% {
+    transform: rotate(-4deg);
+  }
 }
 
 .hero-banner__sub {
@@ -1122,7 +1489,10 @@ function rerunLog(log: any) {
   justify-content: space-between;
   gap: 12px;
   cursor: pointer;
-  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s;
+  transition:
+    transform 0.22s ease,
+    box-shadow 0.22s ease,
+    border-color 0.22s;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 
   &:hover {
@@ -1149,7 +1519,13 @@ function rerunLog(log: any) {
   font-size: 26px;
   font-weight: 700;
   line-height: 1.15;
-  font-family: 'Inter', var(--dd-font-ui), -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-family:
+    "Inter",
+    var(--dd-font-ui),
+    -apple-system,
+    "PingFang SC",
+    "Microsoft YaHei",
+    sans-serif;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   letter-spacing: -0.01em;
@@ -1208,7 +1584,9 @@ function rerunLog(log: any) {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 // ============ Middle Grid ============
@@ -1343,7 +1721,11 @@ function rerunLog(log: any) {
 .placeholder-bar {
   height: 8px;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(59, 130, 246, 0.15), rgba(16, 185, 129, 0.08));
+  background: linear-gradient(
+    90deg,
+    rgba(59, 130, 246, 0.15),
+    rgba(16, 185, 129, 0.08)
+  );
   animation: placeholderPulse 1.6s ease-in-out infinite;
 }
 
@@ -1365,8 +1747,13 @@ function rerunLog(log: any) {
 }
 
 @keyframes placeholderPulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 // ============ Resource ============
@@ -1428,7 +1815,7 @@ function rerunLog(log: any) {
   font-size: 13px;
   font-weight: 700;
   color: var(--el-text-color-primary);
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
@@ -1447,7 +1834,7 @@ function rerunLog(log: any) {
 }
 
 .uptime-detail {
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
   font-weight: 700;
   color: #f59e0b;
@@ -1475,7 +1862,11 @@ function rerunLog(log: any) {
   height: 6px;
   flex: 1;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(245, 158, 11, 0.35), rgba(245, 158, 11, 0.08));
+  background: linear-gradient(
+    90deg,
+    rgba(245, 158, 11, 0.35),
+    rgba(245, 158, 11, 0.08)
+  );
   overflow: hidden;
 }
 
@@ -1518,9 +1909,18 @@ function rerunLog(log: any) {
   flex-shrink: 0;
   margin-top: 1px;
 
-  &.is-success { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-  &.is-failed { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
-  &.is-running { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
+  &.is-success {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+  }
+  &.is-failed {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+  }
+  &.is-running {
+    background: rgba(59, 130, 246, 0.12);
+    color: #3b82f6;
+  }
 }
 
 .activity-item__body {
@@ -1561,13 +1961,27 @@ function rerunLog(log: any) {
   border-spacing: 0;
   font-size: 13px;
 
-  &__col--name { width: 19%; }
-  &__col--status { width: 9%; }
-  &__col--time { width: 18%; }
-  &__col--duration { width: 10%; }
-  &__col--trigger { width: 14%; }
-  &__col--env { width: 16%; }
-  &__col--actions { width: 14%; }
+  &__col--name {
+    width: 19%;
+  }
+  &__col--status {
+    width: 9%;
+  }
+  &__col--time {
+    width: 18%;
+  }
+  &__col--duration {
+    width: 10%;
+  }
+  &__col--trigger {
+    width: 14%;
+  }
+  &__col--env {
+    width: 16%;
+  }
+  &__col--actions {
+    width: 14%;
+  }
 
   thead {
     background: var(--el-fill-color-light);
@@ -1638,7 +2052,7 @@ function rerunLog(log: any) {
   min-width: 0;
   font-size: 12.5px;
   color: var(--el-text-color-secondary);
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1689,7 +2103,7 @@ function rerunLog(log: any) {
   border-radius: 6px;
   font-size: 11.5px;
   font-weight: 500;
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   letter-spacing: 0.02em;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1772,7 +2186,10 @@ function rerunLog(log: any) {
   height: 130px;
   flex-shrink: 0;
 
-  svg { width: 100%; height: 100%; }
+  svg {
+    width: 100%;
+    height: 100%;
+  }
 }
 
 .task-donut__center {
@@ -1789,7 +2206,7 @@ function rerunLog(log: any) {
   font-size: 22px;
   font-weight: 700;
   color: var(--el-text-color-primary);
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   letter-spacing: -0.01em;
@@ -1829,7 +2246,7 @@ function rerunLog(log: any) {
 .legend-row__value {
   font-weight: 700;
   color: var(--el-text-color-primary);
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1854,50 +2271,115 @@ function rerunLog(log: any) {
 .task-stats-footer__value {
   font-weight: 700;
   color: var(--el-color-primary);
-  font-family: 'Inter', var(--dd-font-ui), sans-serif;
+  font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
   font-size: 13.5px;
 }
 
 // ============ Responsive ============
 @media (max-width: 1280px) {
-  .hero-row { grid-template-columns: 1fr; }
-  .hero-banner__art { width: 180px; height: 110px; }
-  .middle-grid { grid-template-columns: 1.4fr 1fr; }
-  .panel--activity { grid-column: 1 / -1; }
-  .bottom-grid { grid-template-columns: 1fr; }
+  .hero-row {
+    grid-template-columns: 1fr;
+  }
+  .hero-banner__art {
+    width: 180px;
+    height: 110px;
+  }
+  .middle-grid {
+    grid-template-columns: 1.4fr 1fr;
+  }
+  .panel--activity {
+    grid-column: 1 / -1;
+  }
+  .bottom-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 960px) {
-  .stat-grid { grid-template-columns: repeat(2, 1fr); }
-  .middle-grid { grid-template-columns: 1fr; }
-  .hero-quick__grid { grid-template-columns: repeat(5, 1fr); }
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .middle-grid {
+    grid-template-columns: 1fr;
+  }
+  .hero-quick__grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
 }
 
 @media (max-width: 768px) {
-  .hero-banner { padding: 16px 18px; min-height: auto; }
-  .hero-banner__title { font-size: 18px; }
-  .hero-banner__sub { font-size: 13px; }
-  .hero-banner__art { display: none; }
+  .hero-banner {
+    padding: 16px 18px;
+    min-height: auto;
+  }
+  .hero-banner__title {
+    font-size: 18px;
+  }
+  .hero-banner__sub {
+    font-size: 13px;
+  }
+  .hero-banner__art {
+    display: none;
+  }
 
-  .hero-quick__grid { grid-template-columns: repeat(5, 1fr); gap: 4px; }
-  .quick-tile__icon { width: 34px; height: 34px; }
-  .quick-tile__label { font-size: 11px; }
+  .hero-quick__grid {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+  }
+  .quick-tile__icon {
+    width: 34px;
+    height: 34px;
+  }
+  .quick-tile__label {
+    font-size: 11px;
+  }
 
-  .stat-grid { gap: 10px; }
-  .stat-card { padding: 14px; }
-  .stat-card__value { font-size: 22px; }
-  .stat-card__icon { width: 38px; height: 38px; }
+  .stat-grid {
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 14px;
+  }
+  .stat-card__value {
+    font-size: 22px;
+  }
+  .stat-card__icon {
+    width: 38px;
+    height: 38px;
+  }
 
-  .panel-header { padding: 12px 14px; flex-wrap: wrap; }
-  .panel-header__title { font-size: 13px; flex-wrap: wrap; }
-  .seg-btn-group--mini { margin-left: 0; margin-top: 4px; }
+  .panel-header {
+    padding: 12px 14px;
+    flex-wrap: wrap;
+  }
+  .panel-header__title {
+    font-size: 13px;
+    flex-wrap: wrap;
+  }
+  .seg-btn-group--mini {
+    margin-left: 0;
+    margin-top: 4px;
+  }
 
-  .resource-list { padding: 14px; }
-  .resource-row__top { gap: 6px; }
+  .resource-list {
+    padding: 14px;
+  }
+  .resource-row__top {
+    gap: 6px;
+  }
 
-  .task-stats-body { flex-direction: column; gap: 16px; padding: 16px; }
-  .task-donut { width: 120px; height: 120px; }
-  .task-legend { width: 100%; }
+  .task-stats-body {
+    flex-direction: column;
+    gap: 16px;
+    padding: 16px;
+  }
+  .task-donut {
+    width: 120px;
+    height: 120px;
+  }
+  .task-legend {
+    width: 100%;
+  }
 }
 </style>
