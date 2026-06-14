@@ -29,26 +29,51 @@ const wrapperClass = computed(() => [
 
 <template>
   <div :class="wrapperClass" role="status" aria-live="polite">
-    <div
+    <svg
       v-if="variant === 'infinity'"
-      class="dd-loading-motion__infinity"
+      class="dd-loading-motion__svg dd-loading-motion__svg--infinity"
+      viewBox="0 0 120 48"
+      fill="none"
       aria-hidden="true"
     >
-      <span class="loop loop--left"></span>
-      <span class="loop loop--right"></span>
-    </div>
+      <path
+        class="track"
+        d="M24 24C24 15.1634 31.1634 8 40 8C54 8 54 40 68 40C76.8366 40 84 32.8366 84 24C84 15.1634 91.1634 8 100 8C108.837 8 116 15.1634 116 24C116 32.8366 108.837 40 100 40C86 40 86 8 72 8C63.1634 8 56 15.1634 56 24C56 32.8366 48.8366 40 40 40C31.1634 40 24 32.8366 24 24Z"
+      />
+      <path
+        class="accent accent--front"
+        d="M24 24C24 15.1634 31.1634 8 40 8C54 8 54 40 68 40C76.8366 40 84 32.8366 84 24C84 15.1634 91.1634 8 100 8"
+        pathLength="100"
+      />
+      <path
+        class="accent accent--back"
+        d="M116 24C116 32.8366 108.837 40 100 40C86 40 86 8 72 8C63.1634 8 56 15.1634 56 24C56 32.8366 48.8366 40 40 40C31.1634 40 24 32.8366 24 24"
+        pathLength="100"
+      />
+    </svg>
 
-    <div
+    <svg
       v-else-if="variant === 'spinner'"
-      class="dd-loading-motion__spinner"
+      class="dd-loading-motion__svg dd-loading-motion__svg--spinner"
+      viewBox="0 0 40 40"
+      fill="none"
       aria-hidden="true"
-    ></div>
+    >
+      <circle class="track" cx="20" cy="20" r="15" />
+      <circle class="accent" cx="20" cy="20" r="15" pathLength="100" />
+    </svg>
 
-    <div v-else class="dd-loading-motion__dots" aria-hidden="true">
-      <span></span>
-      <span></span>
-      <span></span>
-    </div>
+    <svg
+      v-else
+      class="dd-loading-motion__svg dd-loading-motion__svg--dots"
+      viewBox="0 0 64 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <circle class="dot dot--1" cx="12" cy="12" r="5" />
+      <circle class="dot dot--2" cx="32" cy="12" r="5" />
+      <circle class="dot dot--3" cx="52" cy="12" r="5" />
+    </svg>
 
     <span v-if="label" class="dd-loading-motion__label">{{ label }}</span>
   </div>
@@ -57,6 +82,16 @@ const wrapperClass = computed(() => [
 <style scoped lang="scss">
 .dd-loading-motion {
   --dd-loading-color: var(--el-color-primary);
+  --dd-loading-soft-color: color-mix(
+    in srgb,
+    var(--dd-loading-color) 18%,
+    transparent
+  );
+  --dd-loading-glow-color: color-mix(
+    in srgb,
+    var(--dd-loading-color) 32%,
+    transparent
+  );
   --dd-loading-text-color: var(--el-text-color-secondary);
   display: inline-flex;
   align-items: center;
@@ -86,33 +121,33 @@ const wrapperClass = computed(() => [
   color: var(--dd-loading-text-color);
 }
 
-.dd-loading-motion__spinner,
-.dd-loading-motion__infinity,
-.dd-loading-motion__dots {
+.dd-loading-motion__svg {
   flex-shrink: 0;
+  display: block;
+  overflow: visible;
+  filter: drop-shadow(0 4px 14px var(--dd-loading-glow-color));
+}
+
+.dd-loading-motion__svg .track,
+.dd-loading-motion__svg .accent,
+.dd-loading-motion__svg .dot {
+  vector-effect: non-scaling-stroke;
 }
 
 .dd-loading-motion--sm {
-  .dd-loading-motion__spinner {
-    width: 14px;
-    height: 14px;
-    border-width: 1.8px;
+  .dd-loading-motion__svg--spinner {
+    width: 16px;
+    height: 16px;
   }
 
-  .dd-loading-motion__dots span {
-    width: 5px;
-    height: 5px;
-  }
-
-  .dd-loading-motion__infinity {
-    width: 30px;
-    height: 14px;
-  }
-
-  .dd-loading-motion__infinity .loop {
-    width: 12px;
+  .dd-loading-motion__svg--dots {
+    width: 28px;
     height: 12px;
-    border-width: 1.8px;
+  }
+
+  .dd-loading-motion__svg--infinity {
+    width: 34px;
+    height: 14px;
   }
 
   .dd-loading-motion__label {
@@ -121,50 +156,36 @@ const wrapperClass = computed(() => [
 }
 
 .dd-loading-motion--md {
-  .dd-loading-motion__spinner {
-    width: 18px;
-    height: 18px;
-    border-width: 2px;
+  .dd-loading-motion__svg--spinner {
+    width: 20px;
+    height: 20px;
   }
 
-  .dd-loading-motion__dots span {
-    width: 6px;
-    height: 6px;
-  }
-
-  .dd-loading-motion__infinity {
-    width: 40px;
-    height: 18px;
-  }
-
-  .dd-loading-motion__infinity .loop {
-    width: 16px;
+  .dd-loading-motion__svg--dots {
+    width: 36px;
     height: 16px;
-    border-width: 2px;
+  }
+
+  .dd-loading-motion__svg--infinity {
+    width: 46px;
+    height: 18px;
   }
 }
 
 .dd-loading-motion--lg {
-  .dd-loading-motion__spinner {
-    width: 26px;
-    height: 26px;
-    border-width: 2.4px;
+  .dd-loading-motion__svg--spinner {
+    width: 28px;
+    height: 28px;
   }
 
-  .dd-loading-motion__dots span {
-    width: 8px;
-    height: 8px;
+  .dd-loading-motion__svg--dots {
+    width: 50px;
+    height: 20px;
   }
 
-  .dd-loading-motion__infinity {
-    width: 56px;
+  .dd-loading-motion__svg--infinity {
+    width: 64px;
     height: 24px;
-  }
-
-  .dd-loading-motion__infinity .loop {
-    width: 22px;
-    height: 22px;
-    border-width: 2.6px;
   }
 
   .dd-loading-motion__label {
@@ -172,78 +193,92 @@ const wrapperClass = computed(() => [
   }
 }
 
-.dd-loading-motion__spinner {
-  border-style: solid;
-  border-color: color-mix(in srgb, var(--dd-loading-color) 18%, transparent);
-  border-top-color: color-mix(
-    in srgb,
-    var(--dd-loading-color) 92%,
-    transparent
-  );
-  border-radius: 999px;
-  animation: dd-loading-spin 0.82s linear infinite;
-}
+.dd-loading-motion__svg--spinner {
+  transform-origin: center;
+  animation: dd-loading-spinner-rotate 1s linear infinite;
 
-.dd-loading-motion__dots {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-
-  span {
-    display: inline-block;
-    border-radius: 999px;
-    background: var(--dd-loading-color);
-    animation: dd-loading-dot-pulse 1.05s ease-in-out infinite;
+  .track {
+    stroke: color-mix(in srgb, var(--dd-loading-color) 14%, transparent);
+    stroke-width: 4;
   }
 
-  span:nth-child(2) {
-    animation-delay: 0.16s;
-  }
-
-  span:nth-child(3) {
-    animation-delay: 0.32s;
-  }
-}
-
-.dd-loading-motion__infinity {
-  position: relative;
-
-  .loop {
-    position: absolute;
-    top: 50%;
-    border-style: solid;
-    border-color: color-mix(in srgb, var(--dd-loading-color) 92%, transparent)
-      color-mix(in srgb, var(--dd-loading-color) 92%, transparent) transparent
-      transparent;
-    border-radius: 999px;
+  .accent {
+    stroke: var(--dd-loading-color);
+    stroke-width: 4;
+    stroke-linecap: round;
+    stroke-dasharray: 24 76;
+    animation: dd-loading-spinner-dash 1.2s ease-in-out infinite;
     transform-origin: center;
   }
+}
 
-  .loop--left {
-    left: 0;
-    transform: translateY(-50%) rotate(45deg);
-    animation: dd-loading-infinity-left 1.15s ease-in-out infinite;
+.dd-loading-motion__svg--dots {
+  .dot {
+    fill: var(--dd-loading-color);
+    transform-origin: center;
+    animation: dd-loading-dot-breathe 1.15s ease-in-out infinite;
   }
 
-  .loop--right {
-    right: 0;
-    transform: translateY(-50%) rotate(-45deg);
-    animation: dd-loading-infinity-right 1.15s ease-in-out infinite;
+  .dot--2 {
+    animation-delay: 0.12s;
+  }
+
+  .dot--3 {
+    animation-delay: 0.24s;
   }
 }
 
-@keyframes dd-loading-spin {
+.dd-loading-motion__svg--infinity {
+  .track {
+    stroke: color-mix(in srgb, var(--dd-loading-color) 14%, transparent);
+    stroke-width: 6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .accent {
+    stroke: var(--dd-loading-color);
+    stroke-width: 6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 38 62;
+  }
+
+  .accent--front {
+    animation: dd-loading-infinity-front 1.35s ease-in-out infinite;
+  }
+
+  .accent--back {
+    animation: dd-loading-infinity-back 1.35s ease-in-out infinite;
+  }
+}
+
+@keyframes dd-loading-spinner-rotate {
   to {
     transform: rotate(360deg);
   }
 }
 
-@keyframes dd-loading-dot-pulse {
+@keyframes dd-loading-spinner-dash {
+  0% {
+    stroke-dasharray: 18 82;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dasharray: 38 62;
+    stroke-dashoffset: -14;
+  }
+  100% {
+    stroke-dasharray: 18 82;
+    stroke-dashoffset: -48;
+  }
+}
+
+@keyframes dd-loading-dot-breathe {
   0%,
   80%,
   100% {
-    opacity: 0.32;
+    opacity: 0.28;
     transform: translateY(0) scale(0.78);
   }
   40% {
@@ -252,27 +287,42 @@ const wrapperClass = computed(() => [
   }
 }
 
-@keyframes dd-loading-infinity-left {
+@keyframes dd-loading-infinity-front {
   0% {
-    transform: translateY(-50%) rotate(45deg) scale(0.92);
+    stroke-dashoffset: 0;
+    opacity: 0.9;
   }
   50% {
-    transform: translateY(-50%) rotate(225deg) scale(1);
+    stroke-dashoffset: -52;
+    opacity: 1;
   }
   100% {
-    transform: translateY(-50%) rotate(405deg) scale(0.92);
+    stroke-dashoffset: -104;
+    opacity: 0.9;
   }
 }
 
-@keyframes dd-loading-infinity-right {
+@keyframes dd-loading-infinity-back {
   0% {
-    transform: translateY(-50%) rotate(-45deg) scale(1);
+    stroke-dashoffset: -28;
+    opacity: 0.45;
   }
   50% {
-    transform: translateY(-50%) rotate(-225deg) scale(0.92);
+    stroke-dashoffset: -80;
+    opacity: 0.9;
   }
   100% {
-    transform: translateY(-50%) rotate(-405deg) scale(1);
+    stroke-dashoffset: -132;
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dd-loading-motion__svg--spinner,
+  .dd-loading-motion__svg--spinner .accent,
+  .dd-loading-motion__svg--dots .dot,
+  .dd-loading-motion__svg--infinity .accent {
+    animation: none !important;
   }
 }
 </style>
