@@ -71,7 +71,15 @@ function renderChart() {
       textStyle: { fontSize: 12, color: c.labelColor },
       top: 0,
     },
-    grid: { left: '3%', right: '4%', bottom: '3%', top: 40, containLabel: true },
+    // 这里改用 outerBounds 语义，避免新版 ECharts 对 containLabel 给出兼容性警告。
+    grid: {
+      left: '3%',
+      right: '4%',
+      bottom: '3%',
+      top: 40,
+      outerBoundsMode: 'same',
+      outerBoundsContain: 'axisLabel',
+    },
     xAxis: {
       type: 'category',
       data: props.stats.map((item) => item.date),

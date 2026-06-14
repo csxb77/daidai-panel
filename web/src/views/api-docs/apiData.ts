@@ -37,11 +37,11 @@ export const apiCategories: ApiCategory[] = [
         method: 'GET',
         path: '/docs/plugin-overview',
         title: '对接概述',
-        description: '呆呆面板通过 Open API 应用机制对接第三方插件，实现环境变量的自动管理。首先在面板「Open API」页面创建应用，获取 App Key 和 App Secret。配置格式：Host丨AppKey丨AppSecret（使用中文竖线 丨 分隔），示例：http://localhost:8080丨a1b2c3d4...丨e5f6g7h8...。对接流程：1. 使用 App Key + App Secret 获取 Token → 2. 使用 Token 操作环境变量（增删改查）→ 3. Token 过期（24小时）后重新获取。',
+        description: '呆呆面板通过 Open API 应用机制对接第三方插件，实现环境变量的自动管理。首先在面板「Open API」页面创建应用，获取 App Key 和 App Secret。配置格式：Host丨AppKey丨AppSecret（使用中文竖线 丨 分隔），示例：http://127.0.0.1:5173丨a1b2c3d4...丨e5f6g7h8...。对接流程：1. 使用 App Key + App Secret 获取 Token → 2. 使用 Token 操作环境变量（增删改查）→ 3. Token 过期（24小时）后重新获取。',
         auth: 'none',
         responseExample: JSON.stringify({
           '配置格式': 'Host丨AppKey丨AppSecret',
-          '配置示例': 'http://localhost:8080丨a1b2c3d4e5f6...丨e5f6g7h8i9j0...',
+          '配置示例': 'http://127.0.0.1:5173丨a1b2c3d4e5f6...丨e5f6g7h8i9j0...',
           '认证方式': 'Open API Token (Bearer)',
           '接口前缀': '/api/',
           'Token有效期': '24 小时，过期后重新调用 token 接口获取',
@@ -55,7 +55,7 @@ export const apiCategories: ApiCategory[] = [
           ],
         }, null, 2),
         responseFields: [
-          { name: 'Host', type: 'string', description: '呆呆面板地址，如 http://localhost:8080' },
+          { name: 'Host', type: 'string', description: '呆呆面板地址，如 http://127.0.0.1:5173' },
           { name: 'AppKey', type: 'string', description: '应用的 App Key（在面板 Open API 页面创建应用后获取）' },
           { name: 'AppSecret', type: 'string', description: '应用的 App Secret（创建应用时生成）' },
           { name: 'Token', type: 'string', description: '通过 App Key + Secret 获取的 JWT Token，有效期 24 小时' },
@@ -180,7 +180,7 @@ export const apiCategories: ApiCategory[] = [
         description: '以下是完整的 Python 类封装 DaiDaiPanel，可直接在插件中使用。通过 Open API 的 App Key 和 App Secret 认证，支持查找/添加/更新/删除环境变量，以及智能的添加或更新逻辑。使用方法：panel = DaiDaiPanel(host, app_key, app_secret)，然后调用 panel.add_or_update_env(name, value, remarks, keyword) 即可自动判断添加或更新。',
         auth: 'none',
         bodyParams: [
-          { name: 'host', type: 'string', required: true, description: '面板地址', example: 'http://localhost:8080' },
+          { name: 'host', type: 'string', required: true, description: '面板地址', example: 'http://127.0.0.1:5173' },
           { name: 'app_key', type: 'string', required: true, description: '应用 App Key', example: 'a1b2c3d4e5f6...' },
           { name: 'app_secret', type: 'string', required: true, description: '应用 App Secret', example: 'e5f6g7h8i9j0...' },
         ],
@@ -251,7 +251,7 @@ class DaiDaiPanel:
 
 # 使用示例
 panel = DaiDaiPanel(
-    "http://localhost:8080",
+    "http://127.0.0.1:5173",
     "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
     "e5f6g7h8i9j0e5f6g7h8i9j0e5f6g7h8i9j0e5f6g7h8i9j0e5f6g7h8i9j0k1l2"
 )

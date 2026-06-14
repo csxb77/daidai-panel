@@ -775,9 +775,19 @@ async function handleImport(event: Event) {
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">上次结果</span>
               <div class="dd-mobile-card__value">
-                <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
-                  {{ getRunStatusText(row.last_run_status) }}
-                </el-tag>
+                <div class="last-run-result">
+                  <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
+                    {{ getRunStatusText(row.last_run_status) }}
+                  </el-tag>
+                  <button
+                    v-if="row.last_run_status !== null"
+                    type="button"
+                    class="last-run-result__link"
+                    @click="openLatestResultLog(row)"
+                  >
+                    查看结果
+                  </button>
+                </div>
               </div>
             </div>
             <div class="dd-mobile-card__field">

@@ -32,13 +32,13 @@ const { dialogFullscreen } = useResponsive()
         </template>
         <el-form label-position="top" style="max-width: 420px">
           <el-form-item label="* 当前密码">
-            <el-input v-model="oldPassword" type="password" show-password placeholder="当前密码" />
+            <el-input v-model="oldPassword" type="password" show-password placeholder="当前密码" aria-label="当前密码" />
           </el-form-item>
           <el-form-item label="* 新密码">
-            <el-input v-model="newPassword" type="password" show-password placeholder="新密码（至少 6 位）" />
+            <el-input v-model="newPassword" type="password" show-password placeholder="新密码（至少 6 位）" aria-label="新密码" />
           </el-form-item>
           <el-form-item label="* 确认密码">
-            <el-input v-model="confirmPassword" type="password" show-password placeholder="再次输入新密码" />
+            <el-input v-model="confirmPassword" type="password" show-password placeholder="再次输入新密码" aria-label="确认新密码" />
           </el-form-item>
           <el-form-item>
             <el-button type="primary" @click="onChangePassword">
@@ -86,7 +86,7 @@ const { dialogFullscreen } = useResponsive()
       </div>
       <div class="setup-2fa-step">
         <div class="step-title">步骤 2：输入验证码</div>
-        <el-input v-model="twoFACode" placeholder="请输入 6 位验证码" maxlength="6" size="large" style="width: 220px" @keyup.enter="onVerify2FA" />
+        <el-input v-model="twoFACode" placeholder="请输入 6 位验证码" maxlength="6" size="large" style="width: 220px" aria-label="双因素验证码" @keyup.enter="onVerify2FA" />
       </div>
     </div>
     <template #footer>
