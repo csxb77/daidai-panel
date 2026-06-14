@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"strings"
 
 	"daidai-panel/model"
+	"daidai-panel/service"
 	"daidai-panel/testutil"
 
 	"github.com/gin-gonic/gin"
@@ -124,5 +126,62 @@ func TestRunHealthCheckPersistsSnapshot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(getSnapshot.Items, postSnapshot.Items) {
 		t.Fatalf("expected GET to return persisted items %#v, got %#v", postSnapshot.Items, getSnapshot.Items)
+	}
+}
+
+func TestRunHealthCheckUsesUnavailableWarningWhenMemoryTotalMissing(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	previousClient := systemHealthCheckHTTPClient
+	previousURL := systemHealthCheckURL
+	previousGetResourceInfo := systemHealthGetResourceInfo
+	systemHealthCheckHTTPClient = upstream.Client()
+	systemHealthCheckURL = upstream.URL
+	systemHealthGetResourceInfo = func() service.ResourceInfo {
+		return service.ResourceInfo{
+			MemoryTotal: 0,
+			MemoryUsage: 0,
+		}
+	}
+	t.Cleanup(func() {
+		systemHealthCheckHTTPClient = previousClient
+		systemHealthCheckURL = previousURL
+		systemHealthGetResourceInfo = previousGetResourceInfo
+	})
+
+	user := testutil.MustCreateUser(t, "system-health-missing-memory", "viewer")
+	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+	engine := newSystemHealthTestRouter()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/health-check", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected POST to return 200, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	snapshot := decodeSystemHealthSnapshot(t, rec)
+	var memoryItem *systemHealthCheckItem
+	for i := range snapshot.Items {
+		if snapshot.Items[i].Name == "memory" {
+			memoryItem = &snapshot.Items[i]
+			break
+		}
+	}
+	if memoryItem == nil {
+		t.Fatalf("expected memory health item, got %#v", snapshot.Items)
+	}
+	if memoryItem.Status != "warning" {
+		t.Fatalf("expected memory status warning when memory_total is missing, got %#v", memoryItem)
+	}
+	if !strings.Contains(memoryItem.Message, "资源采集不可用") {
+		t.Fatalf("expected memory warning message to explain unavailable resource collection, got %#v", memoryItem)
 	}
 }

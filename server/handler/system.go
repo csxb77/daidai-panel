@@ -47,6 +47,9 @@ var (
 	// 单元测试可直接赋值非 nil 客户端进行 mock。
 	systemHealthCheckHTTPClient *http.Client
 	systemHealthCheckURL        = "https://www.baidu.com"
+	// systemHealthGetResourceInfo 默认走真实资源采集，
+	// 测试里可替换成固定值，避免健康检查回归用例受当前机器状态影响。
+	systemHealthGetResourceInfo = service.GetResourceInfo
 )
 
 func resolveSystemHealthCheckClient() *http.Client {
@@ -63,7 +66,7 @@ func NewSystemHandler() *SystemHandler {
 }
 
 func (h *SystemHandler) Info(c *gin.Context) {
-	info := service.GetResourceInfo()
+	info := systemHealthGetResourceInfo()
 	response.Success(c, gin.H{"data": info})
 }
 
@@ -539,12 +542,14 @@ func runSystemHealthChecks() []systemHealthCheckItem {
 		items = append(items, systemHealthCheckItem{Name: "database", Status: "ok"})
 	}
 
-	info := service.GetResourceInfo()
+	info := systemHealthGetResourceInfo()
 	memThreshold := float64(model.GetRegisteredConfigInt("memory_warn"))
 	if memThreshold <= 0 {
 		memThreshold = 80
 	}
-	if info.MemoryUsage > memThreshold {
+	if info.MemoryTotal == 0 {
+		items = append(items, systemHealthCheckItem{Name: "memory", Status: "warning", Message: "资源采集不可用"})
+	} else if info.MemoryUsage > memThreshold {
 		items = append(items, systemHealthCheckItem{Name: "memory", Status: "warning", Message: strconv.FormatFloat(info.MemoryUsage, 'f', 1, 64) + "%"})
 	} else {
 		items = append(items, systemHealthCheckItem{Name: "memory", Status: "ok", Message: strconv.FormatFloat(info.MemoryUsage, 'f', 1, 64) + "%"})

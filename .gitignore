@@ -32,4 +32,6 @@ data/
 log/
 /scripts/
 
-"daidai-panel.exe" 
+server/daidai-panel.exe
+server/ddp.exe
+.trellis/workspace/*.exe

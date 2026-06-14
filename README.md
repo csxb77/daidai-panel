@@ -250,6 +250,9 @@ docker build --build-arg VERSION=2.2.18 -f Dockerfile.debian -t daidai-panel:deb
 2. 双击 `start.bat` 启动服务。
 3. 浏览器访问 `http://localhost:5700`，首次进入创建管理员账号。
 
+> 注意：仓库源码目录中的本地 `server/*.exe` 仅用于开发阶段临时调试，不作为可信发布产物。  
+> Windows 正式发布包请始终以 GitHub Release 中 workflow 构建出的 `daidai-windows-amd64.zip` 为准。
+
 解压后目录：
 
 ```
