@@ -388,6 +388,7 @@ async function loadVersion() {
 // ==================== Sidebar ====================
 .layout-aside {
   width: 220px;
+  box-shadow: 8px 0 24px rgba(15, 23, 42, 0.03);
   display: flex;
   flex-direction: column;
   background: var(--el-bg-color);
@@ -502,6 +503,7 @@ async function loadVersion() {
 // Navigation
 .sidebar-nav {
   flex: 1;
+  position: relative;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 6px 0;
@@ -648,6 +650,8 @@ async function loadVersion() {
 
 .user-card-inner {
   display: flex;
+  position: relative;
+  overflow: hidden;
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
@@ -657,6 +661,25 @@ async function loadVersion() {
 
   &:hover {
     background: var(--el-fill-color-light);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+  }
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -50% 0 auto;
+    height: 75%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent);
+    opacity: 0;
+    transform: translateY(-8px);
+    transition: opacity 180ms ease, transform 180ms ease;
+    pointer-events: none;
+  }
+
+  &:hover::after {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   .is-collapsed & {
@@ -764,6 +787,7 @@ async function loadVersion() {
 
 .header-toggle-btn {
   width: 34px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
   height: 34px;
   border-radius: 8px;
   border: 1px solid var(--el-border-color-lighter);
@@ -780,6 +804,8 @@ async function loadVersion() {
     background: var(--el-fill-color-light);
     color: var(--el-color-primary);
     border-color: var(--el-color-primary-light-7);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
   }
 }
 
@@ -910,6 +936,8 @@ async function loadVersion() {
 
 .header-user {
   display: flex;
+  position: relative;
+  overflow: hidden;
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
@@ -920,6 +948,25 @@ async function loadVersion() {
 
   &:hover {
     background: var(--el-fill-color-light);
+    transform: translateY(-1px);
+    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
+  }
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -50% 0 auto;
+    height: 70%;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 180ms ease, transform 180ms ease;
+    pointer-events: none;
+  }
+
+  &:hover::after {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 

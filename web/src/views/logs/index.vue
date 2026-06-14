@@ -974,6 +974,7 @@ onBeforeUnmount(() => {
 
 .action-btns {
   display: flex;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.5);
   align-items: center;
   justify-content: center;
   gap: 2px;
@@ -1262,6 +1263,7 @@ onBeforeUnmount(() => {
 
 .detail-status-bar {
   display: flex;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.45);
   justify-content: space-between;
   padding: 6px 20px;
   font-family: var(--dd-font-mono);

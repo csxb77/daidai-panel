@@ -131,6 +131,7 @@ watch(searchKeyword, (val) => {
 <style scoped lang="scss">
 .scripts-sidebar {
   width: 300px;
+  box-shadow: 8px 0 24px rgba(15, 23, 42, 0.03);
   min-width: 300px;
   height: 100%;
   min-height: 0;
@@ -147,6 +148,7 @@ watch(searchKeyword, (val) => {
 
 .sidebar-top {
   display: flex;
+  position: relative;
   flex-direction: column;
   gap: 10px;
   flex-shrink: 0;
@@ -203,6 +205,7 @@ watch(searchKeyword, (val) => {
 
 .primary-new-btn {
   height: 30px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
   padding: 0 10px;
   border-radius: 8px;
   font-size: 12.5px;
@@ -215,11 +218,22 @@ watch(searchKeyword, (val) => {
     font-size: 10px;
     margin-left: 2px;
     opacity: 0.7;
+    transition: transform 0.18s ease;
+  }
+
+  &:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 10px 20px rgba(64, 158, 255, 0.12);
+  }
+
+  &:hover .chevron {
+    transform: translateY(1px);
   }
 }
 
 .icon-btn {
   width: 30px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
   height: 30px;
   padding: 0;
   border: 1px solid #e8e8e8;
@@ -236,6 +250,8 @@ watch(searchKeyword, (val) => {
     color: var(--el-color-primary);
     border-color: color-mix(in srgb, var(--el-color-primary) 40%, #e8e8e8);
     background: color-mix(in srgb, var(--el-color-primary) 6%, transparent);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
   }
 
   &:focus-visible {
@@ -264,6 +280,7 @@ watch(searchKeyword, (val) => {
 
   :deep(.el-tree-node__content) {
     height: 34px;
+    transition: background 0.15s, transform 0.16s ease, box-shadow 0.16s ease;
     min-width: 0;
     padding-left: 4px;
     border-radius: 6px;
@@ -274,6 +291,8 @@ watch(searchKeyword, (val) => {
 
   :deep(.el-tree-node__content:hover) {
     background: #f5f7fa;
+    transform: translateX(2px);
+    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--el-color-primary) 30%, transparent);
   }
 
   :deep(.el-tree-node.is-current > .el-tree-node__content) {
@@ -322,6 +341,8 @@ watch(searchKeyword, (val) => {
 
 .runner-card {
   width: 100%;
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -338,7 +359,25 @@ watch(searchKeyword, (val) => {
   &:hover {
     background: color-mix(in srgb, var(--scripts-accent, #22c55e) 8%, #f5f7fa);
     border-color: color-mix(in srgb, var(--scripts-accent, #22c55e) 40%, #e8e8e8);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
+    transform: translateY(-2px);
+  }
+
+  &::after {
+    content: "";
+    position: absolute;
+    inset: -55% 0 auto;
+    height: 70%;
+    background: linear-gradient(180deg, rgba(255,255,255,0.3), transparent);
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 180ms ease, transform 180ms ease;
+    pointer-events: none;
+  }
+
+  &:hover::after {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   &:focus-visible {
