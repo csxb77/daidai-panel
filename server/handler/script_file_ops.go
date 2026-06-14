@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"daidai-panel/pkg/response"
+	"daidai-panel/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -25,6 +26,9 @@ func (h *ScriptHandler) List(c *gin.Context) {
 			if shouldSkipScriptTreeDir(info.Name()) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if service.ShouldIgnoreScriptPath(dir, path) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(info.Name()))
@@ -58,12 +62,7 @@ func (h *ScriptHandler) Tree(c *gin.Context) {
 }
 
 func shouldSkipScriptTreeDir(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "node_modules", "__pycache__":
-		return true
-	default:
-		return false
-	}
+	return service.ShouldIgnoreScriptEntryName(name)
 }
 
 func buildTree(baseDir, prefix string) []map[string]interface{} {

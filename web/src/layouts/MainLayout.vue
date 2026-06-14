@@ -60,7 +60,7 @@ const workspaceItems = [
   { index: '/logs', title: '执行日志', icon: Tickets, minRole: 'viewer' },
   { index: '/scripts', title: '脚本管理', icon: Document, minRole: 'operator' },
   { index: '/deps', title: '依赖管理', icon: Box, minRole: 'admin' },
-  { index: '/api-docs', title: '接口文档', icon: Connection, minRole: 'viewer' },
+  { index: '/docs/api', title: '接口文档', icon: Connection, minRole: 'viewer' },
   { index: '/profile', title: '个人设置', icon: User, minRole: 'viewer' },
 ]
 

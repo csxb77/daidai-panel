@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { Loading } from '@element-plus/icons-vue'
 import { logApi } from '@/api/log'
 import { taskApi } from '@/api/task'
 import { useAuthStore } from '@/stores/auth'

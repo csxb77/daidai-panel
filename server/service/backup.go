@@ -40,7 +40,16 @@ func collectScripts(scriptsDir string) []ScriptFile {
 	allowedExts := map[string]bool{".js": true, ".mjs": true, ".py": true, ".ts": true, ".sh": true}
 
 	filepath.Walk(scriptsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			if ShouldIgnoreScriptPath(scriptsDir, path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if ShouldIgnoreScriptPath(scriptsDir, path) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(info.Name()))
@@ -68,6 +77,9 @@ func collectScripts(scriptsDir string) []ScriptFile {
 func restoreScripts(scriptsDir string, scripts []ScriptFile) {
 	for _, sf := range scripts {
 		if strings.Contains(sf.Path, "..") {
+			continue
+		}
+		if ShouldIgnoreScriptRelativePath(sf.Path) {
 			continue
 		}
 		data, err := base64.StdEncoding.DecodeString(sf.Content)

@@ -176,6 +176,8 @@ func main() {
 	if err := service.CleanupManagedHelperCopiesUnderRoot(cfg.Data.ScriptsDir); err != nil {
 		log.Printf("cleanup duplicated notify helpers failed: %v", err)
 	}
+	// 启动时先隔离脚本目录中的异常污染目录，避免继续影响脚本管理、备份和统计链路。
+	service.QuarantineUnexpectedScriptEntriesOnStartup()
 	service.CleanupManagedPythonArtifactsOnStartup()
 
 	service.InitSchedulerV2()

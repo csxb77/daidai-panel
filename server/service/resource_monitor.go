@@ -82,6 +82,9 @@ func GetResourceInfo() ResourceInfo {
 
 		info.CPUUsage, info.NetRxBytes, info.NetTxBytes, info.NetRxSpeed, info.NetTxSpeed = getLinuxCPUAndNet()
 	}
+	if runtime.GOOS == "windows" {
+		fillWindowsResourceInfo(&info)
+	}
 
 	return info
 }
@@ -89,7 +92,16 @@ func GetResourceInfo() ResourceInfo {
 func CountScriptFiles(scriptsDir string) int64 {
 	var count int64
 	filepath.Walk(scriptsDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
+		if err != nil || info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			if ShouldIgnoreScriptPath(scriptsDir, path) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if ShouldIgnoreScriptPath(scriptsDir, path) {
 			return nil
 		}
 		count++

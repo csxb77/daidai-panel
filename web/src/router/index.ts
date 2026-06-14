@@ -19,6 +19,7 @@ const legacyRouteMap: Record<string, string> = {
   '/users': '/admin/users',
   '/open-api': '/admin/open-api',
   '/admin/deps': '/deps',
+  '/api-docs': '/docs/api',
 }
 
 const router = createRouter({
@@ -100,7 +101,7 @@ const router = createRouter({
           meta: { title: '个人设置', icon: 'User', minRole: 'viewer' }
         },
         {
-          path: 'api-docs',
+          path: 'docs/api',
           name: 'ApiDocs',
           component: () => import('@/views/api-docs/index.vue'),
           meta: { title: '接口文档', icon: 'Connection', minRole: 'viewer' }

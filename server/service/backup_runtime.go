@@ -1192,6 +1192,16 @@ func copyDirectoryContents(sourceDir, targetDir string) error {
 		if err != nil {
 			return err
 		}
+		if info == nil {
+			return nil
+		}
+		if info.IsDir() {
+			if ShouldIgnoreScriptPath(sourceDir, path) {
+				return filepath.SkipDir
+			}
+		} else if ShouldIgnoreScriptPath(sourceDir, path) {
+			return nil
+		}
 		relPath, err := filepath.Rel(sourceDir, path)
 		if err != nil {
 			return err

@@ -270,7 +270,7 @@ const quickActions = computed(() =>
       color: "#06b6d4",
       bg: "rgba(6, 182, 212, 0.1)",
       minRole: "viewer",
-      action: () => router.push("/api-docs"),
+      action: () => router.push("/docs/api"),
     },
   ].filter((action) => hasRequiredRole(authStore.user?.role, action.minRole)),
 );
