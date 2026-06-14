@@ -393,6 +393,11 @@
         二进制部署不会内置三个
         Python，只需要在服务器安装实际要用的版本；面板会为可用版本创建独立依赖环境，未安装版本会明确提示不可用，不影响其他版本运行。
       </div>
+      <div class="python-runtime-hint__body">
+        当前正在展示 <b>Python {{ pythonVersion }}</b> 的依赖列表；
+        系统默认版本是 <b>Python {{ pythonDefaultVersion }}</b>。
+        如果默认版本当前不可用，页面会自动切到第一个可用版本，避免打开就是空白或报错。
+      </div>
       <div class="python-runtime-hint__status">
         <el-tag
           v-for="runtime in pythonRuntimes"
@@ -1108,6 +1113,28 @@ const depsTotal = computed(() => filteredDepsList.value.length);
 const depsPage = ref(1);
 const depsPageSize = ref(20);
 
+function resolveDisplayPythonVersion(
+  runtimes: PythonRuntimeInfo[],
+  defaultVersion: string,
+) {
+  if (runtimes.length === 0) {
+    return defaultVersion || "3.12";
+  }
+
+  const defaultRuntime = runtimes.find((item) => item.version === defaultVersion);
+  if (defaultRuntime?.available) {
+    return defaultRuntime.version;
+  }
+
+  const firstAvailableRuntime = runtimes.find((item) => item.available);
+  if (firstAvailableRuntime) {
+    return firstAvailableRuntime.version;
+  }
+
+  const firstRuntime = runtimes[0];
+  return defaultRuntime?.version || firstRuntime?.version || defaultVersion || "3.12";
+}
+
 function statusType(status: string) {
   switch (status) {
     case "queued":
@@ -1281,9 +1308,11 @@ async function loadPythonRuntimes() {
     const res = await depsApi.pythonRuntimes();
     pythonRuntimes.value = res.data || [];
     pythonDefaultVersion.value = res.default_version || "3.12";
-    pythonVersion.value = pythonVersion.value || pythonDefaultVersion.value;
-    createPythonVersion.value =
-      createPythonVersion.value || pythonVersion.value;
+    pythonVersion.value = resolveDisplayPythonVersion(
+      pythonRuntimes.value,
+      pythonDefaultVersion.value,
+    );
+    createPythonVersion.value = pythonVersion.value;
   } catch {
     pythonRuntimes.value = [
       {
@@ -1320,6 +1349,12 @@ async function loadPythonRuntimes() {
         message: "",
       },
     ];
+    pythonDefaultVersion.value = "3.12";
+    pythonVersion.value = resolveDisplayPythonVersion(
+      pythonRuntimes.value,
+      pythonDefaultVersion.value,
+    );
+    createPythonVersion.value = pythonVersion.value;
   }
 }
 
@@ -1337,6 +1372,11 @@ async function setCurrentPythonDefault() {
       ...item,
       default: item.version === pythonDefaultVersion.value,
     }));
+    pythonVersion.value = resolveDisplayPythonVersion(
+      pythonRuntimes.value,
+      pythonDefaultVersion.value,
+    );
+    createPythonVersion.value = pythonVersion.value;
     ElMessage.success("默认 Python 版本已更新");
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.error || "设置默认 Python 版本失败");

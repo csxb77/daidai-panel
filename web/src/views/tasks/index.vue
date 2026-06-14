@@ -351,6 +351,12 @@ function openLogViewer(task: any) {
   logViewerVisible.value = true
 }
 
+function openLatestResultLog(task: any) {
+  logViewerTaskId.value = task.id
+  logViewerTaskName.value = `${task.name} · 最近结果`
+  logViewerVisible.value = true
+}
+
 function openLogFiles(task: any) {
   logFilesTaskId.value = task.id
   logFilesTaskName.value = task.name
@@ -907,9 +913,19 @@ async function handleImport(event: Event) {
         </el-table-column>
         <el-table-column label="上次结果" width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="getRunStatusType(row.last_run_status)" size="small" round>
-              {{ getRunStatusText(row.last_run_status) }}
-            </el-tag>
+            <div class="last-run-result">
+              <el-tag :type="getRunStatusType(row.last_run_status)" size="small" round>
+                {{ getRunStatusText(row.last_run_status) }}
+              </el-tag>
+              <button
+                v-if="row.last_run_status !== null"
+                type="button"
+                class="last-run-result__link"
+                @click="openLatestResultLog(row)"
+              >
+                查看结果
+              </button>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="耗时" width="90" align="center">
@@ -1292,6 +1308,29 @@ async function handleImport(event: Event) {
 
 .text-muted {
   color: var(--el-text-color-placeholder);
+}
+
+.last-run-result {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.last-run-result__link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--el-color-primary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s ease;
+
+  &:hover {
+    color: var(--el-color-primary-dark-2);
+    text-decoration: underline;
+  }
 }
 
 .action-btns {

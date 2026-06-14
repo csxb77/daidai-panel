@@ -43,6 +43,7 @@ var registeredSystemConfigSpecs = []systemConfigSpec{
 	newIntConfig("log_retention_days", "7", "日志保留天数", "tasks", 1, 3650),
 	newIntConfig("max_log_content_size", "102400000", "任务日志内容最大保留字节数", "tasks", 1024, 524288000),
 	newBoolConfig("auto_update_enabled", "false", "静默更新开关（每 24 小时自动检查并在有新版本时尝试更新）", "network"),
+	newTrimmedStringConfig("auto_update_last_checked_at", "", "上次自动检查更新时间", "network"),
 	newIntConfig("random_delay", "0", "任务执行前随机延迟最大秒数", "tasks", 0, 86400),
 	newTrimmedStringConfig("random_delay_extensions", "", "随机延迟仅对指定脚本后缀生效", "tasks"),
 	newBoolConfig("auto_install_deps", "true", "脚本缺依赖时自动尝试安装", "tasks"),
