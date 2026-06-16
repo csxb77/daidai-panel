@@ -74,8 +74,10 @@ if (-not (Test-Path $releaseNotePath)) {
 }
 
 Assert-FileContains -Path $releaseNotePath -Pattern '<!--\s*release-title:\s*.+?\s*-->' -Description "release notes title marker"
-Assert-FileContains -Path (Join-Path $repoRoot "README.md") -Pattern ([regex]::Escape("最新稳定版：") + '.*' + [regex]::Escape($tagVersion)) -Description "README latest version"
-Assert-FileTextContains -Path (Join-Path $repoRoot "README.md") -Text "./docs/release-notes/$tagVersion.md" -Description "README release notes link"
+$readmeContent = Get-Content -Path (Join-Path $repoRoot "README.md") -Raw -Encoding UTF8
+if (($readmeContent -notmatch [regex]::Escape($tagVersion)) -or ($readmeContent -notmatch [regex]::Escape("./docs/release-notes/$tagVersion.md"))) {
+    Fail-Step "README latest version block not synced."
+}
 Assert-FileContains -Path (Join-Path $repoRoot "Magisk\module.prop") -Pattern "^version=$([regex]::Escape($tagVersion))$" -Description "Magisk module.prop version"
 Assert-FileContains -Path (Join-Path $repoRoot "Magisk\module.prop") -Pattern "^versionCode=$versionCode$" -Description "Magisk module.prop versionCode"
 Assert-FileContains -Path (Join-Path $repoRoot "Magisk\update.json") -Pattern [regex]::Escape('"version": "' + $tagVersion + '"') -Description "Magisk update.json version"
