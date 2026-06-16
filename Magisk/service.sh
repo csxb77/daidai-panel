@@ -162,9 +162,22 @@ mkdir -p $DAIDAI_DIR/scripts $DAIDAI_DIR/logs $DAIDAI_DIR/deps/nodejs $DAIDAI_DI
 chmod 777 $DAIDAI_DIR
 
 # Python 虚拟环境（第一次进入时创建）
-if [ ! -d "$DAIDAI_DIR/deps/python/3.12" ]; then
-  python3 -m venv $DAIDAI_DIR/deps/python/3.12 2>/dev/null || true
+# 模块版当前通常只有一个系统 python3，不保证真的同时有 3.10 / 3.11 / 3.12。
+# 这里必须用容器里真实 python3 小版本决定托管环境目录，不能再硬编码 3.12，
+# 否则当 Alpine 里的 python3 实际是 3.11 时，就会出现
+# “目录叫 3.12，但里面实际是 3.11 venv”，后端版本探测会直接判定 Python 3.12 不可用。
+PY_MINOR=""
+if command -v python3 >/dev/null 2>&1; then
+  PY_MINOR=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || true)
 fi
+case "$PY_MINOR" in
+  3.10|3.11|3.12)
+    export DAIDAI_PYTHON_VERSION="$PY_MINOR"
+    if [ ! -d "$DAIDAI_DIR/deps/python/$PY_MINOR" ]; then
+      python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR" 2>/dev/null || true
+    fi
+    ;;
+esac
 
 # 按配置写入 config.yaml（每次启动都覆盖，保证端口与 ports.conf 一致）
 # 后端用 net.Listen(":PORT") 绑定 0.0.0.0，穿透/局域网直连均可；

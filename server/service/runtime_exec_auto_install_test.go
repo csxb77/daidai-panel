@@ -322,3 +322,34 @@ func TestPythonBootstrapHasNoPreCheckAutoInstall(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultPythonVersionFallsBackToActiveSystemPythonOnMagiskRuntime(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	t.Setenv("DAIDAI_MAGISK_MODULE", "1")
+	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fakeDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	writeFakeExecutable(t, fakeDir, "python3", []string{"echo 3.11"})
+
+	if got := DefaultPythonVersion(); got != "3.11" {
+		t.Fatalf("expected Magisk runtime default python version to follow active python3=3.11, got %q", got)
+	}
+}
+
+func TestResolvePythonVersionFromEnvFallsBackToActiveSystemPythonOnMagiskRuntime(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	t.Setenv("DAIDAI_MAGISK_MODULE", "1")
+	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	fakeDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	writeFakeExecutable(t, fakeDir, "python3", []string{"echo 3.11"})
+
+	envMap := map[string]string{
+		"DAIDAI_PYTHON_VERSION": "3.12",
+	}
+	if got := ResolvePythonVersionFromEnv(envMap); got != "3.11" {
+		t.Fatalf("expected Magisk runtime python version to fall back from 3.12 to active python3=3.11, got %q", got)
+	}
+}

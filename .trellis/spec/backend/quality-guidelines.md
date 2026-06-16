@@ -450,3 +450,67 @@ newTrimmedStringConfig("auto_update_last_checked_at", "", "上次自动检查更
 ```text
 源码修完后重新构建 Windows 发布产物，验收时优先使用当前源码编译出的二进制或 GitHub Release workflow 产物
 ```
+
+---
+
+## 场景：Magisk / APatch 模块版 Python 版本对齐
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/python_runtime.go`、`server/service/runtime_exec.go`、`Magisk/service.sh`、模块运行时自检脚本时必须看本节。
+- 原因：模块版当前通常只有一个容器内 `python3`，不保证真的同时存在 3.10 / 3.11 / 3.12 三套解释器。`v2.2.19` 起如果仍把默认 Python 版本硬绑到 `3.12`，老任务会统一报“Python 3.12 不可用”。
+
+### 2. Signatures
+
+- 模块运行态判断：`service.IsMagiskModuleRuntime() bool`
+- 默认版本决策：`DefaultPythonVersion() string`
+- 任务环境决策：`ResolvePythonVersionFromEnv(envVars map[string]string) string`
+- 模块容器启动脚本：`Magisk/service.sh`
+
+### 3. Contracts
+
+- 模块版运行态下，默认 Python 版本必须优先跟随容器里真实 `python3` 小版本。
+- 若任务 / 配置里保存的是 `3.12`，但模块当前真实 `python3` 是 `3.11`，且系统里也不存在额外 `python3.12`，运行时必须自动回退到 `3.11`。
+- `Magisk/service.sh` 创建托管 venv 时，目录名必须使用真实 `python3` 小版本，不能硬编码 `deps/python/3.12`。
+- Docker / Windows / 普通 Linux 多版本环境继续沿用原有多版本逻辑，不受模块版兼容分支影响。
+
+### 4. Validation & Error Matrix
+
+- 模块版 + 系统 `python3` 为 3.11 + 配置默认值为 3.12 -> 最终任务运行版本应回退到 3.11
+- 模块版 + 系统里确实存在 `python3.12` -> 可以继续使用 3.12
+- 非模块版 -> 不允许因为当前 `python3` 是 3.11 就偷偷改掉用户显式指定的 3.12
+
+### 5. Good/Base/Bad Cases
+
+- Good：用户从 `v2.2.10` 升级到 `v2.2.19+` 后，历史 Python 任务在 APatch / Magisk 设备上继续可跑，不因默认版本固定成 3.12 全挂。
+- Base：模块版只有一个 `python3` 时，面板至少能稳定对齐到这个实际版本。
+- Bad：容器里实际 `python3` 是 3.11，但 `service.sh` 仍创建 `deps/python/3.12`，后端再按严格版本校验把它判成不可用。
+
+### 6. Tests Required
+
+- 后端测试：`cd server && go test ./...`
+- 回归点：
+  - `TestDefaultPythonVersionFallsBackToActiveSystemPythonOnMagiskRuntime`
+  - `TestResolvePythonVersionFromEnvFallsBackToActiveSystemPythonOnMagiskRuntime`
+  - `TestMagiskServiceScriptExportsAndroidRuntimeEnv`
+
+### 7. Wrong vs Correct
+#### Wrong
+```go
+const defaultPythonRuntimeVersion = "3.12"
+return defaultPythonRuntimeVersion
+```
+
+```sh
+python3 -m venv "$DAIDAI_DIR/deps/python/3.12"
+```
+
+#### Correct
+```go
+return resolveEffectivePythonVersionForCurrentRuntime(version)
+```
+
+```sh
+PY_MINOR=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
+```

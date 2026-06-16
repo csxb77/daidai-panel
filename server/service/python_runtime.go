@@ -34,6 +34,71 @@ func SupportedPythonVersions() []string {
 	return append([]string(nil), supportedPythonRuntimeVersions...)
 }
 
+// 模块版（Magisk / KernelSU / APatch）目前通常只有一个系统 python3，
+// 不一定真的同时具备 3.10 / 3.11 / 3.12 三套解释器。
+// v2.2.19 之后默认 Python 版本固定走 3.12，多版本逻辑在 Docker / Windows 没问题，
+// 但在模块版里会把所有历史任务都打成“Python 3.12 不可用”。
+//
+// 这里把“模块运行态”的判断提到 service 层，供 Python 版本决策直接复用，
+// 避免只在 handler / shell 脚本里知道自己是模块版，真正执行任务时却还按通用服务器逻辑硬判 3.12。
+func IsMagiskModuleRuntime() bool {
+	if strings.TrimSpace(os.Getenv("DAIDAI_MAGISK_MODULE")) != "" {
+		return true
+	}
+	for _, marker := range []string{
+		"/data/adb/daidai-panel/ports.conf",
+		"/data/adb/modules/daidai-panel/module.prop",
+		"/data/adb/modules_update/daidai-panel/module.prop",
+	} {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func detectActiveSystemPythonVersion() string {
+	for _, binary := range []string{"python3", "python"} {
+		resolved, err := exec.LookPath(binary)
+		if err != nil || strings.TrimSpace(resolved) == "" {
+			continue
+		}
+
+		cmd := exec.Command(resolved, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+		cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
+		out, runErr := cmd.CombinedOutput()
+		if runErr != nil {
+			continue
+		}
+
+		version, normalizeErr := NormalizePythonVersionStrict(strings.TrimSpace(string(out)))
+		if normalizeErr == nil && version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func resolveEffectivePythonVersionForCurrentRuntime(raw string) string {
+	requested := NormalizePythonVersionOrDefault(raw)
+	if !IsMagiskModuleRuntime() {
+		return requested
+	}
+
+	actual := detectActiveSystemPythonVersion()
+	if actual == "" || actual == requested {
+		return requested
+	}
+
+	// 如果模块里确实额外装了所请求版本，就继续尊重该版本；
+	// 只有“请求版本不可用，但模块当前真实 python3 是另一个受支持版本”时才自动回退。
+	if discoverSystemPythonForVersion(requested) != "" {
+		return requested
+	}
+
+	return actual
+}
+
 func LegacyPythonVersion() string {
 	return defaultPythonRuntimeVersion
 }
@@ -80,20 +145,20 @@ func DefaultPythonVersion() string {
 		raw = model.GetRegisteredConfig("python_default_version")
 	}
 	if strings.TrimSpace(raw) == "" {
-		return defaultPythonRuntimeVersion
+		return resolveEffectivePythonVersionForCurrentRuntime(defaultPythonRuntimeVersion)
 	}
 	version, err := NormalizePythonVersionStrict(raw)
 	if err != nil || version == "" {
-		return defaultPythonRuntimeVersion
+		return resolveEffectivePythonVersionForCurrentRuntime(defaultPythonRuntimeVersion)
 	}
-	return version
+	return resolveEffectivePythonVersionForCurrentRuntime(version)
 }
 
 func ResolvePythonVersionFromEnv(envVars map[string]string) string {
 	if envVars == nil {
 		return DefaultPythonVersion()
 	}
-	return NormalizePythonVersionOrDefault(envVars["DAIDAI_PYTHON_VERSION"])
+	return resolveEffectivePythonVersionForCurrentRuntime(envVars["DAIDAI_PYTHON_VERSION"])
 }
 
 func ResolvePythonVersionFromInterpreter(interpreter string) string {

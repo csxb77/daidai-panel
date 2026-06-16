@@ -26,6 +26,19 @@ func TestMagiskServiceScriptExportsAndroidRuntimeEnv(t *testing.T) {
 			t.Fatalf("expected service.sh to contain %q", snippet)
 		}
 	}
+
+	if strings.Contains(text, `deps/python/3.12`) {
+		t.Fatal("expected service.sh to avoid hard-coded deps/python/3.12 venv path")
+	}
+	for _, snippet := range []string{
+		`PY_MINOR=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"`,
+		`export DAIDAI_PYTHON_VERSION="$PY_MINOR"`,
+		`"$DAIDAI_DIR/deps/python/$PY_MINOR"`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected service.sh to contain dynamic python runtime snippet %q", snippet)
+		}
+	}
 }
 
 func TestMagiskCheckRuntimesScriptIncludesInstalledRuntimePaths(t *testing.T) {
