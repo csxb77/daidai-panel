@@ -2,6 +2,15 @@ import loader, { type Monaco } from '@monaco-editor/loader'
 
 const MONACO_CDN_VS = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.55.1/min/vs'
 const LOCAL_MONACO_VS = 'monaco/vs'
+const LOCAL_MONACO_REQUIRED_FILES = [
+  'loader.js',
+  'editor/editor.main.js',
+  'editor/editor.main.css',
+  'language/css/monaco.contribution.js',
+  'language/html/monaco.contribution.js',
+  'language/json/monaco.contribution.js',
+  'language/typescript/monaco.contribution.js',
+]
 
 type MonacoSource = 'local' | 'cdn'
 
@@ -16,11 +25,15 @@ function getLocalMonacoWorkerUrl() {
   return `${import.meta.env.BASE_URL}${LOCAL_MONACO_VS}/loader.js`
 }
 
-async function canUseLocalMonaco() {
-  const workerUrl = getLocalMonacoWorkerUrl()
+function getLocalMonacoAssetUrl(relativePath: string) {
+  return `${import.meta.env.BASE_URL}${LOCAL_MONACO_VS}/${relativePath}`
+}
+
+async function checkMonacoAssetExists(relativePath: string) {
+  const assetUrl = getLocalMonacoAssetUrl(relativePath)
 
   try {
-    const headResponse = await fetch(workerUrl, { method: 'HEAD', cache: 'no-store' })
+    const headResponse = await fetch(assetUrl, { method: 'HEAD', cache: 'no-store' })
     if (headResponse.ok) {
       return true
     }
@@ -32,12 +45,25 @@ async function canUseLocalMonaco() {
   }
 
   try {
-    const getResponse = await fetch(workerUrl, { method: 'GET', cache: 'no-store' })
+    const getResponse = await fetch(assetUrl, { method: 'GET', cache: 'no-store' })
     getResponse.body?.cancel?.()
     return getResponse.ok
   } catch {
     return false
   }
+}
+
+async function canUseLocalMonaco() {
+  // 不能只看 loader.js。
+  // v2.2.19 的故障就是 loader.js 还在，但 editor/main、worker、basic-languages 等已被裁掉，
+  // 导致前端误判“本地 Monaco 可用”，真正初始化时才崩。
+  for (const relativePath of LOCAL_MONACO_REQUIRED_FILES) {
+    const exists = await checkMonacoAssetExists(relativePath)
+    if (!exists) {
+      return false
+    }
+  }
+  return true
 }
 
 async function loadLocalMonaco(): Promise<MonacoLoadResult> {

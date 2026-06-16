@@ -140,3 +140,73 @@ if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
   pushLogLine()
 }
 ```
+
+## Scenario: Monaco 本地静态资源与加载探测
+
+### 1. Scope / Trigger
+- Trigger: 修改 `web/scripts/copy-monaco-assets.mjs`、`web/src/utils/monaco.ts`、`MonacoEditor.vue`、`MonacoDiffEditor.vue` 时必须看本节。
+- 原因: Monaco 是运行时动态加载资源，不是普通的“构建期 import 即可”。如果只保留 `loader.js`、却删掉 `editor/`、`language/`、`assets/` 等目录，构建仍然会成功，但浏览器里编辑器会直接初始化失败。
+
+### 2. Signatures
+- 资源复制脚本: `web/scripts/copy-monaco-assets.mjs`
+- 本地资源探测: `web/src/utils/monaco.ts`
+- 本地资源根路径: `${import.meta.env.BASE_URL}monaco/vs`
+
+### 3. Contracts
+- `copy-monaco-assets.mjs` 不能再按“带 hash 的具体文件名白名单”删 Monaco 资源。
+- 本地资源探测不能只检查 `loader.js` 是否存在，至少要检查稳定关键入口:
+  - `loader.js`
+  - `editor/editor.main.js`
+  - `editor/editor.main.css`
+  - `language/css/monaco.contribution.js`
+  - `language/html/monaco.contribution.js`
+  - `language/json/monaco.contribution.js`
+  - `language/typescript/monaco.contribution.js`
+- 当本地资源不完整时，允许回退 CDN；但如果本地资源完整，应优先使用本地，避免用户网络无法访问 CDN 时编辑器直接挂掉。
+
+### 4. Validation & Error Matrix
+- `loader.js` 存在，但 `editor/editor.main.js` 或 `language/*` 缺失 -> 视为本地资源不可用
+- 构建通过，但浏览器里出现“编辑器加载失败，请检查网络或稍后重试” -> 优先检查 `dist/monaco/vs` 完整性，而不是先怀疑用户网络
+- 本地资源完整 + CDN 不可达 -> 编辑器仍应能正常加载
+
+### 5. Good/Base/Bad Cases
+- Good: `dist/monaco/vs` 包含 `editor/`、`language/`、`assets/`、`basic-languages/`，用户离线或访问不了 CDN 也能打开编辑器
+- Base: 本地资源缺失时回退 CDN，至少不误判“本地可用”
+- Bad: 只探测 `loader.js`，或者继续按 hash 白名单裁剪 `vs` 目录
+
+### 6. Tests Required
+- 前端验证: `cd web && npm run build`
+- 构建后检查:
+  - `web/dist/monaco/vs/editor` 存在
+  - `web/dist/monaco/vs/language` 存在
+  - `web/dist/monaco/vs/assets` 存在
+- 手工回归点:
+  - 脚本编辑页能正常打开 Monaco 编辑器
+  - 断网或阻断 CDN 时，本地编辑器仍能加载
+
+### 7. Wrong vs Correct
+#### Wrong
+```js
+const allowedTopLevelVsFiles = new Set([
+  'editor.worker-abc123.js',
+  'ts.worker-def456.js',
+])
+```
+
+```ts
+return `${import.meta.env.BASE_URL}monaco/vs/loader.js`
+```
+
+#### Correct
+```js
+copyDirectory(sourceDir, targetDir)
+```
+
+```ts
+const LOCAL_MONACO_REQUIRED_FILES = [
+  'loader.js',
+  'editor/editor.main.js',
+  'editor/editor.main.css',
+  'language/css/monaco.contribution.js',
+]
+```
