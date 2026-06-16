@@ -120,8 +120,7 @@ if ($actionlint) {
 }
 
 Write-Step "Check remote tag conflict"
-git fetch origin --tags | Out-Null
-$remoteTagExists = git ls-remote --tags origin $tagVersion
+$remoteTagExists = git ls-remote --tags origin ("refs/tags/" + $tagVersion)
 if ($remoteTagExists) {
     Fail-Step "Remote tag already exists: $tagVersion. Confirm whether you really want to re-release."
 }
