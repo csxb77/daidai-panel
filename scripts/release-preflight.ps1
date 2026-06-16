@@ -31,6 +31,19 @@ function Assert-FileContains {
     }
 }
 
+function Assert-FileTextContains {
+    param(
+        [string]$Path,
+        [string]$Text,
+        [string]$Description
+    )
+
+    $content = Get-Content -Path $Path -Raw -Encoding UTF8
+    if (-not $content.Contains($Text)) {
+        Fail-Step "$Description not synced: $Path"
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $normalizedVersion = $Version.Trim()
 if ($normalizedVersion -notmatch '^\d+\.\d+\.\d+$') {
@@ -61,8 +74,8 @@ if (-not (Test-Path $releaseNotePath)) {
 }
 
 Assert-FileContains -Path $releaseNotePath -Pattern '<!--\s*release-title:\s*.+?\s*-->' -Description "release notes title marker"
-Assert-FileContains -Path (Join-Path $repoRoot "README.md") -Pattern [regex]::Escape("v$normalizedVersion") -Description "README latest version"
-Assert-FileContains -Path (Join-Path $repoRoot "README.md") -Pattern [regex]::Escape("./docs/release-notes/$tagVersion.md") -Description "README release notes link"
+Assert-FileTextContains -Path (Join-Path $repoRoot "README.md") -Text "最新稳定版：``$tagVersion``" -Description "README latest version"
+Assert-FileTextContains -Path (Join-Path $repoRoot "README.md") -Text "./docs/release-notes/$tagVersion.md" -Description "README release notes link"
 Assert-FileContains -Path (Join-Path $repoRoot "Magisk\module.prop") -Pattern "^version=$([regex]::Escape($tagVersion))$" -Description "Magisk module.prop version"
 Assert-FileContains -Path (Join-Path $repoRoot "Magisk\module.prop") -Pattern "^versionCode=$versionCode$" -Description "Magisk module.prop versionCode"
 Assert-FileContains -Path (Join-Path $repoRoot "Magisk\update.json") -Pattern [regex]::Escape('"version": "' + $tagVersion + '"') -Description "Magisk update.json version"
