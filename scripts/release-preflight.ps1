@@ -78,12 +78,17 @@ $readmeContent = Get-Content -Path (Join-Path $repoRoot "README.md") -Raw -Encod
 if (($readmeContent -notmatch [regex]::Escape($tagVersion)) -or ($readmeContent -notmatch [regex]::Escape("./docs/release-notes/$tagVersion.md"))) {
     Fail-Step "README latest version block not synced."
 }
-Assert-FileContains -Path (Join-Path $repoRoot "Magisk\module.prop") -Pattern "^version=$([regex]::Escape($tagVersion))$" -Description "Magisk module.prop version"
-Assert-FileContains -Path (Join-Path $repoRoot "Magisk\module.prop") -Pattern "^versionCode=$versionCode$" -Description "Magisk module.prop versionCode"
-Assert-FileContains -Path (Join-Path $repoRoot "Magisk\update.json") -Pattern [regex]::Escape('"version": "' + $tagVersion + '"') -Description "Magisk update.json version"
-Assert-FileContains -Path (Join-Path $repoRoot "Magisk\update.json") -Pattern [regex]::Escape('"versionCode": ' + $versionCode) -Description "Magisk update.json versionCode"
-Assert-FileContains -Path (Join-Path $repoRoot "Magisk\update.json") -Pattern [regex]::Escape("/releases/download/$tagVersion/daidai-panel-magisk-$tagVersion.zip") -Description "Magisk update.json zipUrl"
-Assert-FileContains -Path (Join-Path $repoRoot "Magisk\update.json") -Pattern [regex]::Escape("/docs/release-notes/$tagVersion.md") -Description "Magisk update.json changelog"
+$moduleProp = Get-Content -Path (Join-Path $repoRoot "Magisk\module.prop") -Raw -Encoding UTF8
+if (($moduleProp -notmatch [regex]::Escape("version=$tagVersion")) -or ($moduleProp -notmatch [regex]::Escape("versionCode=$versionCode"))) {
+    Fail-Step "Magisk module.prop version not synced."
+}
+$updateJson = Get-Content -Path (Join-Path $repoRoot "Magisk\update.json") -Raw -Encoding UTF8
+if (($updateJson -notmatch [regex]::Escape('"version": "' + $tagVersion + '"')) `
+    -or ($updateJson -notmatch [regex]::Escape('"versionCode": ' + $versionCode)) `
+    -or ($updateJson -notmatch [regex]::Escape("/releases/download/$tagVersion/daidai-panel-magisk-$tagVersion.zip")) `
+    -or ($updateJson -notmatch [regex]::Escape("/docs/release-notes/$tagVersion.md"))) {
+    Fail-Step "Magisk update.json version block not synced."
+}
 
 Write-Step "Run backend tests"
 Push-Location (Join-Path $repoRoot "server")
