@@ -31,6 +31,8 @@ Thumbs.db
 data/
 log/
 /scripts/
+!scripts/
+!scripts/release-preflight.ps1
 
 server/daidai-panel.exe
 server/ddp.exe

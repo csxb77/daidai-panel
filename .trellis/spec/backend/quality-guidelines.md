@@ -514,3 +514,58 @@ return resolveEffectivePythonVersionForCurrentRuntime(version)
 PY_MINOR=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
 ```
+
+---
+
+## 场景：版本发布前预检
+
+### 1. Scope / Trigger
+
+- 触发：准备推送 `main`、打 `vX.Y.Z` tag、触发 `.github/workflows/release.yml` 之前必须看本节。
+- 原因：这个仓库历史上多次出现“主 Release 已成功，但 Docker job 因缓存/平台问题报错”、“README / Magisk 版本号没同步”、“更新日志缺失或 title marker 缺失”这类可提前在本地发现的问题。
+
+### 2. Signatures
+
+- 预检脚本：`scripts/release-preflight.ps1 -Version X.Y.Z`
+- 目标 workflow：`.github/workflows/release.yml`
+
+### 3. Contracts
+
+- 打 tag 前必须先运行一次 `scripts/release-preflight.ps1 -Version X.Y.Z`
+- 预检至少覆盖：
+  - Git 工作区干净
+  - `docs/release-notes/vX.Y.Z.md` 存在且包含 `release-title`
+  - README 最新稳定版、Magisk `module.prop`、`Magisk/update.json` 版本号已同步
+  - `go test ./...` 通过
+  - `npm run build` 通过
+  - `release.yml` 基本语法检查通过（若本机有 `actionlint`）
+  - 远端不存在同名 tag
+
+### 4. Validation & Error Matrix
+
+- 工作区不干净 -> 直接阻断发版
+- 更新日志缺失 / title marker 缺失 -> 直接阻断发版
+- 远端已存在同名 tag -> 直接阻断发版
+- `actionlint` 不存在 -> 允许继续，但必须给出黄色告警而不是静默跳过
+
+### 5. Good/Base/Bad Cases
+
+- Good：先跑预检，再 push main、push tag；高频低级错误在本地就被拦住
+- Base：即使没装 `actionlint`，也至少完成版本同步、构建、测试、tag 冲突检查
+- Bad：直接打 tag 触发 CI，等远端失败后再补版本文件或更新日志
+
+### 6. Tests Required
+
+- 本地执行：`powershell -ExecutionPolicy Bypass -File .\scripts\release-preflight.ps1 -Version 2.2.20`
+- 修改预检脚本后至少手动跑一次，确认脚本本身可用
+
+### 7. Wrong vs Correct
+#### Wrong
+```text
+改完代码 -> 直接 git push origin main && git push origin v2.2.20
+```
+
+#### Correct
+```text
+先跑 release-preflight -> 通过后再推 main 和 tag
+```

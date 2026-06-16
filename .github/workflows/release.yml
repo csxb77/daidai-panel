@@ -310,8 +310,10 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7
           push: true
           build-args: VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha,scope=alpine
-          cache-to: type=gha,mode=max,scope=alpine
+          # GHA cache 导出偶发 504 时，会出现“镜像其实已经 push 成功，但 job 最终仍失败”的假红。
+          # 这里改成 registry + inline cache，牺牲一点缓存效率，换取发布链稳定性。
+          cache-from: type=registry,ref=linzixuanzz/daidai-panel:latest
+          cache-to: type=inline
           tags: |
             linzixuanzz/daidai-panel:latest
             linzixuanzz/daidai-panel:${{ steps.version.outputs.VERSION }}
@@ -367,7 +369,7 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           push: true
           build-args: VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha,scope=debian
-          cache-to: type=gha,mode=max,scope=debian
+          cache-from: type=registry,ref=linzixuanzz/daidai-panel:debian
+          cache-to: type=inline
           tags: |
             linzixuanzz/daidai-panel:debian
