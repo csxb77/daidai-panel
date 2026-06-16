@@ -115,7 +115,6 @@ async function consumeEventStream(
     }
 
     buffer += decoder.decode(value, { stream: true })
-    buffer = normalizeLineEndings(buffer)
 
     const segments = buffer.split('\n\n')
     buffer = segments.pop() || ''
@@ -126,7 +125,6 @@ async function consumeEventStream(
   }
 
   buffer += decoder.decode()
-  buffer = normalizeLineEndings(buffer)
   if (buffer.trim()) {
     dispatchEventSegment(buffer, handlers)
   }
@@ -165,10 +163,6 @@ function dispatchEventSegment(segment: string, handlers: EventStreamHandlers) {
   if (event.event === 'message') {
     handlers.onMessage?.(event.data, event)
   }
-}
-
-function normalizeLineEndings(value: string) {
-  return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
 }
 
 async function buildResponseError(response: Response) {

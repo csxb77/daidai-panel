@@ -75,6 +75,41 @@ const fileContentHtml = computed(() => ansiToHtml(normalizeAnsi(fileContentData.
 
 let mounted = false
 
+function mergeTerminalText(previous: string, chunk: string) {
+  if (!chunk) {
+    return previous
+  }
+
+  const lines = previous.split('\n')
+  if (lines.length === 0) {
+    lines.push('')
+  }
+
+  for (let i = 0; i < chunk.length; i++) {
+    const char = chunk[i] ?? ''
+
+    if (char === '\r') {
+      if ((chunk[i + 1] ?? '') === '\n') {
+        lines.push('')
+        i++
+        continue
+      }
+      // 裸 \r 表示覆盖当前行，把最后一行清空后继续接收后续字符。
+      lines[lines.length - 1] = ''
+      continue
+    }
+
+    if (char === '\n') {
+      lines.push('')
+      continue
+    }
+
+    lines[lines.length - 1] += char
+  }
+
+  return lines.join('\n')
+}
+
 async function loadLogs() {
   loading.value = true
   selectedIds.value = []
@@ -209,7 +244,9 @@ async function viewDetail(log: any) {
         sseBuffer.push(data)
         if (!sseFlushRaf) {
           sseFlushRaf = requestAnimationFrame(() => {
-            detailContent.value += sseBuffer.join('\n') + '\n'
+            for (const chunk of sseBuffer) {
+              detailContent.value = mergeTerminalText(detailContent.value, chunk)
+            }
             sseBuffer = []
             sseFlushRaf = 0
             if (logContentRef.value) {

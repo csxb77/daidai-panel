@@ -294,18 +294,18 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 
 	lsm := GetLogStreamManager()
 
-	onOutput := func(line string) {
-		lsm.Write(logFullPath, line+"\n")
+	onOutput := func(chunk string) {
+		lsm.Write(logFullPath, chunk)
 		s.logLock.Lock()
-		s.liveLogs[taskID] = append(s.liveLogs[taskID], line)
+		s.liveLogs[taskID] = append(s.liveLogs[taskID], chunk)
 		s.logLock.Unlock()
 	}
 
 	startTime := time.Now()
-	onOutput(fmt.Sprintf("=== 开始执行 [%s] ===", startTime.Format("2006-01-02 15:04:05")))
+	onOutput(fmt.Sprintf("=== 开始执行 [%s] ===\n", startTime.Format("2006-01-02 15:04:05")))
 
 	if task.TaskBefore != nil && *task.TaskBefore != "" {
-		onOutput("[执行前置脚本]")
+		onOutput("[执行前置脚本]\n")
 		RunInlineScript(*task.TaskBefore, s.scriptsDir, envVars, 60, onOutput, commandPlan.ScriptArgs...)
 	}
 
@@ -317,7 +317,7 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 
 	for retries <= task.MaxRetries {
 		if retries > 0 {
-			onOutput(fmt.Sprintf("[第 %d 次重试，等待 %d 秒]", retries, task.RetryInterval))
+			onOutput(fmt.Sprintf("[第 %d 次重试，等待 %d 秒]\n", retries, task.RetryInterval))
 			time.Sleep(time.Duration(task.RetryInterval) * time.Second)
 		}
 
@@ -330,7 +330,7 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		}
 		result, _, err := RunCommandWithPlan(commandPlan, timeout, envVars, maxLogSize, onOutput, onStart)
 		if err != nil {
-			onOutput(fmt.Sprintf("[执行错误: %s]", err.Error()))
+			onOutput(fmt.Sprintf("[执行错误: %s]\n", err.Error()))
 			retries++
 			lastExitCode = 1
 			continue
@@ -346,7 +346,7 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 	}
 
 	if task.TaskAfter != nil && *task.TaskAfter != "" {
-		onOutput("[执行后置脚本]")
+		onOutput("[执行后置脚本]\n")
 		RunInlineScript(*task.TaskAfter, s.scriptsDir, envVars, 60, onOutput, commandPlan.ScriptArgs...)
 	}
 
@@ -356,7 +356,7 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
-	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d ===",
+	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d ===\n",
 		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode))
 
 	runStatus := model.RunSuccess

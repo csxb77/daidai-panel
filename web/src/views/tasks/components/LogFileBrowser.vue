@@ -39,6 +39,7 @@ const renderedFileContent = computed(() => {
         i++
         continue
       }
+      // 裸 \r 代表覆盖当前行，保留最终显示结果，不把中间刷新历史展开成多行。
       currentLine = ''
       continue
     }

@@ -157,8 +157,9 @@ func (h *LogHandler) Stream(c *gin.Context) {
 }
 
 func writeSSEData(w io.Writer, data string) {
+	// SSE 分帧只需要保证每个 data: 行本身不跨物理换行。
+	// 这里保留裸 \r，避免终端进度条的覆盖刷新语义在传输层被抹掉。
 	data = strings.ReplaceAll(data, "\r\n", "\n")
-	data = strings.ReplaceAll(data, "\r", "\n")
 	for _, line := range strings.Split(data, "\n") {
 		fmt.Fprintf(w, "data: %s\n", line)
 	}

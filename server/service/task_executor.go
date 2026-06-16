@@ -337,28 +337,28 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	}()
 
 	var outputCollectorMu sync.Mutex
-	onOutput := func(line string) {
+	onOutput := func(chunk string) {
 		if tinyLog != nil {
-			fmt.Fprintf(tinyLog, "%s\n", line)
+			fmt.Fprint(tinyLog, chunk)
 		}
 		if fullLogPath != "" {
-			logMgr.Write(fullLogPath, line+"\n")
+			logMgr.Write(fullLogPath, chunk)
 		}
 	}
 
 	var outputCollector strings.Builder
 
-	onOutputWithCollect := func(line string) {
-		onOutput(line)
+	onOutputWithCollect := func(chunk string) {
+		onOutput(chunk)
 		outputCollectorMu.Lock()
-		outputCollector.WriteString(line + "\n")
+		outputCollector.WriteString(chunk)
 		outputCollectorMu.Unlock()
 	}
 
-	onOutput(fmt.Sprintf("=== 开始执行 [%s] ===", startTime.Format("2006-01-02 15:04:05")))
+	onOutput(fmt.Sprintf("=== 开始执行 [%s] ===\n", startTime.Format("2006-01-02 15:04:05")))
 
 	if task.TaskBefore != nil && *task.TaskBefore != "" {
-		onOutput("[执行前置脚本]")
+		onOutput("[执行前置脚本]\n")
 		RunInlineScript(*task.TaskBefore, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...)
 	}
 
@@ -372,7 +372,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	for retries <= task.MaxRetries {
 		if retries > 0 {
-			onOutput(fmt.Sprintf("[第 %d 次重试，等待 %d 秒]", retries, task.RetryInterval))
+			onOutput(fmt.Sprintf("[第 %d 次重试，等待 %d 秒]\n", retries, task.RetryInterval))
 			time.Sleep(time.Duration(task.RetryInterval) * time.Second)
 		}
 
@@ -388,9 +388,9 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 		result, _, err := RunCommandWithPlan(plan, effectiveTimeout, envVars, maxLogSize, onOutputWithCollect, onStart)
 		if err != nil {
-			onOutput(fmt.Sprintf("[执行错误: %s]", err.Error()))
+			onOutput(fmt.Sprintf("[执行错误: %s]\n", err.Error()))
 			if strings.Contains(err.Error(), "illegal instruction") || strings.Contains(err.Error(), "core dumped") {
-				onOutput("[提示] 该错误通常是因为当前 CPU 不支持程序所需的指令集（如 AVX/SSE），常见于部分 VPS 或 ARM 设备。建议更换支持相关指令集的服务器。")
+				onOutput("[提示] 该错误通常是因为当前 CPU 不支持程序所需的指令集（如 AVX/SSE），常见于部分 VPS 或 ARM 设备。建议更换支持相关指令集的服务器。\n")
 			}
 			retries++
 			lastExitCode = 1
@@ -419,7 +419,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			outputCollectorMu.Unlock()
 			if e.detectAndInstallDeps(plan, collected, envVars, installedDeps, onOutput) {
 				depInstallCount++
-				onOutput(fmt.Sprintf("[依赖已安装 (%d/%d)，自动重试执行]", depInstallCount, maxDepInstalls))
+				onOutput(fmt.Sprintf("[依赖已安装 (%d/%d)，自动重试执行]\n", depInstallCount, maxDepInstalls))
 				continue
 			}
 		}
@@ -437,7 +437,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	exitCode = lastExitCode
 
 	if task.TaskAfter != nil && *task.TaskAfter != "" {
-		onOutput("[执行后置脚本]")
+		onOutput("[执行后置脚本]\n")
 		RunInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...)
 	}
 
@@ -447,7 +447,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
-	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d ===",
+	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d ===\n",
 		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode))
 }
 

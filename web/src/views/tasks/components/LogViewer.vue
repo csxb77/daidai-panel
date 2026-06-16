@@ -234,23 +234,29 @@ function appendLogChunk(chunk: string, commitBoundary = false) {
   if (!chunk && !commitBoundary) return
 
   let endedWithLineBreak = false
+  let sawCarriageReturn = false
   for (let i = 0; i < chunk.length; i++) {
     const char = chunk[i]
     if (char === '\r') {
       if (chunk[i + 1] === '\n') {
         pushLogLine()
         endedWithLineBreak = true
+        sawCarriageReturn = false
         i++
         continue
       }
+      // 裸 \r 表示终端希望“回到当前行开头并覆盖原内容”，
+      // 这里只清空当前尾行，不要立刻 push，避免进度条每次刷新都变成新行。
       logTail.value = ''
       endedWithLineBreak = false
+      sawCarriageReturn = true
       continue
     }
 
     if (char === '\n') {
       pushLogLine()
       endedWithLineBreak = true
+      sawCarriageReturn = false
       continue
     }
 
@@ -258,7 +264,10 @@ function appendLogChunk(chunk: string, commitBoundary = false) {
     endedWithLineBreak = false
   }
 
-  if (commitBoundary && !endedWithLineBreak) {
+  // 只有真正确定这一批内容已经形成稳定的一行时才落行。
+  // 如果这批内容里出现过裸 \r，说明它更像“正在刷新的终端行”，
+  // 需要继续留在 tail，等待后续覆盖或最终的 \n 收尾。
+  if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
     pushLogLine()
   }
 }

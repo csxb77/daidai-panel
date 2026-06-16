@@ -23,7 +23,9 @@ type ScriptResult struct {
 	Truncated  bool
 }
 
-type OnOutputFunc func(line string)
+// 日志回调现在直接传原始输出片段。
+// 这样可以把裸 \r 也保留下来，让前端有机会按终端语义做单行覆盖刷新。
+type OnOutputFunc func(chunk string)
 
 type OnProcessStartFunc func(process *os.Process)
 
@@ -483,12 +485,12 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 	totalSize := 0
 	truncated := false
 
-	// 不再做单行字节数截断：加密 / base64 等场景一行可能上 MB，
-	// 截断会让脚本拿不到完整结果而判定为失败。改用 bufio.Reader 直接按行读，
-	// 没有 token 长度上限；总日志体量仍由 maxLogSize 全局保护。
+	// 不再用 Scanner 按行切，因为终端进度条常用裸 \r 覆盖当前行。
+	// 这里按字节流切片，把 \n / \r / \r\n 都当成边界保留下来，
+	// 让实时日志、历史日志和前端渲染都能还原真实终端语义。
 	reader := bufio.NewReaderSize(stdout, 256*1024)
 
-	emitLine := func(line string) {
+	emitChunk := func(chunk string) {
 		if truncated {
 			return
 		}
@@ -501,33 +503,48 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 			}
 			return
 		}
-		outputBuilder.WriteString(line)
-		outputBuilder.WriteString("\n")
-		totalSize += len(line) + 1
+		outputBuilder.WriteString(chunk)
+		totalSize += len(chunk)
 		if onOutput != nil {
-			onOutput(line)
+			onOutput(chunk)
 		}
 	}
 
 	done := make(chan error, 1)
 	go func() {
 		defer close(done)
-		var lineBuf strings.Builder
+		var chunkBuf strings.Builder
 		for {
-			chunk, err := reader.ReadString('\n')
-			if len(chunk) > 0 {
-				if strings.HasSuffix(chunk, "\n") {
-					lineBuf.WriteString(strings.TrimRight(chunk, "\r\n"))
-					emitLine(lineBuf.String())
-					lineBuf.Reset()
-				} else {
-					lineBuf.WriteString(chunk)
+			text, err := reader.ReadString('\n')
+			if len(text) > 0 {
+				lastBoundaryIndex := -1
+				for i := 0; i < len(text); i++ {
+					chunkBuf.WriteByte(text[i])
+					if text[i] == '\r' {
+						// 兼容 Windows 风格 \r\n，整对一起作为一个边界发出。
+						if i+1 < len(text) && text[i+1] == '\n' {
+							chunkBuf.WriteByte(text[i+1])
+							i++
+						}
+						emitChunk(chunkBuf.String())
+						chunkBuf.Reset()
+						lastBoundaryIndex = i
+						continue
+					}
+					if text[i] == '\n' {
+						emitChunk(chunkBuf.String())
+						chunkBuf.Reset()
+						lastBoundaryIndex = i
+					}
+				}
+				if lastBoundaryIndex == -1 {
+					// 当前片段里没有换行边界，继续累积，等待后续数据拼完整。
 				}
 			}
 			if err != nil {
-				if lineBuf.Len() > 0 {
-					emitLine(strings.TrimRight(lineBuf.String(), "\r\n"))
-					lineBuf.Reset()
+				if chunkBuf.Len() > 0 {
+					emitChunk(chunkBuf.String())
+					chunkBuf.Reset()
 				}
 				done <- err
 				return
@@ -563,7 +580,7 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		}
 		if readErr != nil && readErr != io.EOF && totalSize < maxLogSize && !truncated {
 			if !isBenignProcessPipeReadError(readErr) {
-				emitLine(fmt.Sprintf("[读取脚本输出失败] %s", readErr.Error()))
+				emitChunk(fmt.Sprintf("[读取脚本输出失败] %s\n", readErr.Error()))
 			}
 		}
 	case <-timerC:
@@ -577,7 +594,7 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 			onOutput(msg)
 		}
 		if readErr != nil && readErr != io.EOF && totalSize < maxLogSize && !truncated && !isBenignProcessPipeReadError(readErr) {
-			emitLine(fmt.Sprintf("[读取脚本输出失败] %s", readErr.Error()))
+			emitChunk(fmt.Sprintf("[读取脚本输出失败] %s\n", readErr.Error()))
 		}
 	}
 
@@ -957,12 +974,15 @@ func RunInlineScript(content, scriptsDir string, envVars map[string]string, time
 		return err
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 16*1024*1024)
+	reader := bufio.NewReaderSize(stdout, 256*1024)
 	go func() {
-		for scanner.Scan() {
-			if onOutput != nil {
-				onOutput(scanner.Text())
+		for {
+			chunk, err := reader.ReadString('\n')
+			if len(chunk) > 0 && onOutput != nil {
+				onOutput(chunk)
+			}
+			if err != nil {
+				return
 			}
 		}
 	}()
@@ -1019,12 +1039,15 @@ func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onO
 		return
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 256*1024), 16*1024*1024)
+	reader := bufio.NewReaderSize(stdout, 256*1024)
 	go func() {
-		for scanner.Scan() {
-			if onOutput != nil {
-				onOutput(scanner.Text())
+		for {
+			chunk, err := reader.ReadString('\n')
+			if len(chunk) > 0 && onOutput != nil {
+				onOutput(chunk)
+			}
+			if err != nil {
+				return
 			}
 		}
 	}()
