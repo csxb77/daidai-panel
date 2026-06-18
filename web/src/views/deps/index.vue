@@ -125,92 +125,6 @@
       </div>
     </el-card>
 
-    <div class="stat-cards">
-      <div
-        class="stat-card"
-        :class="{ 'stat-card--active': activeTab === 'nodejs' }"
-        @click="
-          activeTab = 'nodejs';
-          depsPage = 1;
-          loadData();
-        "
-      >
-        <div class="stat-card__content">
-          <span class="stat-card__label">Node.js 依赖</span>
-          <span class="stat-card__value">{{ nodejsCount }}</span>
-          <span class="stat-card__sub">已安装依赖包</span>
-        </div>
-        <div class="stat-card__icon-wrap stat-card__icon-wrap--js">
-          <span class="js-icon-block">JS</span>
-        </div>
-      </div>
-      <div
-        class="stat-card"
-        :class="{ 'stat-card--active': activeTab === 'python' }"
-        @click="
-          activeTab = 'python';
-          depsPage = 1;
-          loadData();
-        "
-      >
-        <div class="stat-card__content">
-          <span class="stat-card__label">Python 依赖</span>
-          <span class="stat-card__value stat-card__value--green">{{
-            pythonCount
-          }}</span>
-          <span class="stat-card__sub">已安装依赖包</span>
-        </div>
-        <div class="stat-card__icon-wrap stat-card__icon-wrap--python">
-          <svg viewBox="0 0 24 24" width="28" height="28">
-            <path
-              d="M9.585 11.692h4.328s2.432.039 2.432-2.35V5.391S16.714 3 12.304 3h-1.108C7.787 3 7.155 5.093 7.155 5.093v2.457h4.755v.735H7.155s-3.27-.37-3.27 4.788c0 5.16 2.854 4.975 2.854 4.975h1.705v-2.395s-.092-2.854 2.854-2.854l.287-.107zm-.472-4.868a.845.845 0 1 1 0-1.69.845.845 0 0 1 0 1.69z"
-              fill="#3776AB"
-            />
-            <path
-              d="M14.415 12.308h-4.328s-2.432-.039-2.432 2.35v3.951S7.286 21 11.696 21h1.108c3.409 0 4.041-2.093 4.041-2.093v-2.457h-4.755v-.735h4.755s3.27.37 3.27-4.788c0-5.16-2.854-4.975-2.854-4.975h-1.705v2.395s.092 2.854-2.854 2.854l-.287.107zm.472 4.868a.845.845 0 1 1 0 1.69.845.845 0 0 1 0-1.69z"
-              fill="#FFD43B"
-            />
-          </svg>
-        </div>
-      </div>
-      <div
-        class="stat-card"
-        :class="{ 'stat-card--active': activeTab === 'linux' }"
-        @click="
-          activeTab = 'linux';
-          depsPage = 1;
-          loadData();
-        "
-      >
-        <div class="stat-card__content">
-          <span class="stat-card__label">Linux 软件包</span>
-          <span class="stat-card__value stat-card__value--orange">{{
-            linuxCount
-          }}</span>
-          <span class="stat-card__sub">已安装软件包</span>
-        </div>
-        <div class="stat-card__icon-wrap stat-card__icon-wrap--linux">
-          <svg viewBox="0 0 24 24" width="28" height="28" fill="#333">
-            <path
-              d="M20.581 19.049c-.55-.446-.336-1.431-.907-1.917.553-3.365-.997-6.331-2.845-8.232-1.551-1.595-1.051-3.147-1.051-4.49 0-2.146-.881-4.41-3.55-4.41-2.853 0-3.635 2.38-3.663 3.738-.034 1.65-.1 2.873-.874 3.874-1.02 1.322-3.236 4.124-3.012 8.485-.7.36-.92 1.876-1.272 2.175-.403.343-.81.382-.972.848-.163.466.089.781.217 1.019.128.238.238.419-.038.6-.276.181-.591.157-.838.423-.248.266-.34.546-.076.953.186.288.63.413.857.424.227.011 2.016-.076 2.326-.076.508 0 1.42.454 2.455.454 1.037 0 1.316-.631 2.326-.631 1.01 0 1.316.631 2.326.631 1.037 0 1.42-.454 2.455-.454.31 0 2.1.087 2.326.076.227-.011.671-.136.857-.424.264-.407.172-.687-.076-.953-.247-.266-.562-.242-.838-.423-.276-.181-.166-.362-.038-.6.128-.238.38-.553.217-1.019-.162-.466-.569-.505-.972-.848z"
-            />
-          </svg>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">安装失败</span>
-          <span class="stat-card__value stat-card__value--red">{{
-            failedCount
-          }}</span>
-          <span class="stat-card__sub">最近 7 天</span>
-        </div>
-        <div class="stat-card__icon-wrap stat-card__icon-wrap--fail">
-          <el-icon :size="28" color="#f56c6c"><CircleClose /></el-icon>
-        </div>
-      </div>
-    </div>
-
     <div class="deps-tabs">
       <div class="status-tabs">
         <button
@@ -897,7 +811,6 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import {
   ArrowDown,
   Box,
-  CircleClose,
   Cpu,
   Delete,
   Download,
@@ -1079,9 +992,6 @@ const mirrorMeta = ref<MirrorsResponse>({
 });
 let mounted = false;
 
-const nodejsCount = ref(0);
-const pythonCount = ref(0);
-const linuxCount = ref(0);
 const searchKeyword = ref("");
 const statusFilter = ref("");
 
@@ -1267,12 +1177,6 @@ async function loadData() {
     selectedIds.value = selectedIds.value.filter((id) =>
       depsList.value.some((dep) => dep.id === id),
     );
-    const countMap: Record<string, (v: number) => void> = {
-      nodejs: (v) => (nodejsCount.value = v),
-      python: (v) => (pythonCount.value = v),
-      linux: (v) => (linuxCount.value = v),
-    };
-    countMap[activeTab.value]?.(depsList.value.length);
     syncPendingRefresh();
   } catch {
     if (!refreshTimer) {
@@ -1718,22 +1622,6 @@ onMounted(async () => {
   createPythonVersion.value = pythonVersion.value || pythonDefaultVersion.value;
   loadData();
   loadAndroidStatus();
-  const types = ["nodejs", "python", "linux"] as const;
-  const countRefs = {
-    nodejs: nodejsCount,
-    python: pythonCount,
-    linux: linuxCount,
-  };
-  for (const t of types) {
-    if (t !== activeTab.value) {
-      depsApi
-        .list(t, t === "python" ? pythonVersion.value : undefined)
-        .then((res) => {
-          countRefs[t].value = (res.data || []).length;
-        })
-        .catch(() => {});
-    }
-  }
 });
 
 onActivated(() => {
@@ -1786,122 +1674,6 @@ onBeforeUnmount(() => {
 
 .page-title-with-icon :deep(.el-icon) {
   color: var(--el-color-primary);
-}
-
-// ---------- Stat Cards ----------
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  position: relative;
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition:
-    transform 0.22s ease,
-    box-shadow 0.22s ease,
-    border-color 0.22s;
-  cursor: pointer;
-
-  &:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
-    border-color: color-mix(in srgb, var(--el-color-primary) 18%, var(--el-border-color));
-  }
-  &--active {
-    border-color: var(--el-color-primary);
-    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.14);
-  }
-
-  &__content {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1;
-  }
-  &__label {
-    font-size: 13px;
-    color: var(--el-text-color-secondary);
-    font-weight: 500;
-  }
-  &__value {
-    font-size: 26px;
-    font-weight: 700;
-    color: #3b82f6;
-    line-height: 1.15;
-    font-family: "Inter", var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-    white-space: nowrap;
-    &--green {
-      color: #10b981;
-    }
-    &--orange {
-      color: #f59e0b;
-    }
-    &--red {
-      color: #ef4444;
-    }
-  }
-  &__label,
-  &__sub {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  &__sub {
-    font-size: 12px;
-    color: var(--el-text-color-placeholder);
-  }
-  &__trend {
-    font-size: 11.5px;
-    font-weight: 600;
-    margin-top: 4px;
-    padding: 1px 7px;
-    border-radius: 6px;
-    align-self: flex-start;
-    &--green {
-      color: #10b981;
-      background: rgba(16, 185, 129, 0.1);
-    }
-    &--red {
-      color: #ef4444;
-      background: rgba(239, 68, 68, 0.1);
-    }
-  }
-  &__icon-wrap {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    &--js {
-      background: #fef3c7;
-    }
-    &--python {
-      background: rgba(59, 130, 246, 0.12);
-    }
-    &--linux {
-      background: rgba(245, 158, 11, 0.12);
-    }
-    &--fail {
-      background: rgba(239, 68, 68, 0.12);
-    }
-  }
 }
 
 // ---------- Toolbar ----------
@@ -1986,20 +1758,6 @@ onBeforeUnmount(() => {
   font-weight: 700;
   color: #fff;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
-}
-
-.js-icon-block {
-  width: 28px;
-  height: 28px;
-  border-radius: 4px;
-  background: #323330;
-  color: #f7df1e;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 800;
-  font-family: Arial, sans-serif;
 }
 
 .deps-tabs {
@@ -2197,11 +1955,6 @@ onBeforeUnmount(() => {
 }
 
 // ---------- Responsive ----------
-@media screen and (max-width: 1200px) {
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
 
 @media screen and (max-height: 720px) and (min-width: 769px) {
   .android-runtime-card {
@@ -2233,23 +1986,6 @@ onBeforeUnmount(() => {
     max-height: 140px;
   }
 
-  .stat-cards {
-    gap: 10px;
-    margin-bottom: 12px;
-  }
-
-  .stat-card {
-    padding: 10px 14px;
-
-    &__value {
-      font-size: 22px;
-    }
-
-    &__sub {
-      display: none;
-    }
-  }
-
   .deps-tabs,
   .toolbar {
     margin-bottom: 10px;
@@ -2267,21 +2003,6 @@ onBeforeUnmount(() => {
       font-size: 18px;
     }
   }
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-  .stat-card {
-    padding: 14px 16px;
-    &__value {
-      font-size: 22px;
-    }
-    &__icon {
-      width: 40px;
-      height: 40px;
-    }
-  }
-
   .toolbar {
     flex-direction: column;
     align-items: stretch;

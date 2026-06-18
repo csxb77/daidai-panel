@@ -99,21 +99,6 @@ function getCronExpressions(task: any) {
 
 const hasRunningTasks = computed(() => tasks.value.some(t => t.status === 2))
 
-const taskStats = computed(() => {
-  const list = tasks.value
-  const totalCount = list.length
-  const runningCount = list.filter(t => t.status === 2).length
-  const todayCount = list.filter(t => {
-    if (!t.last_run_at) return false
-    const d = new Date(t.last_run_at)
-    const now = new Date()
-    return d.toDateString() === now.toDateString()
-  }).length
-  const durations = list.filter(t => t.last_running_time != null).map(t => t.last_running_time)
-  const avgDuration = durations.length > 0 ? (durations.reduce((a: number, b: number) => a + b, 0) / durations.length).toFixed(2) : '0'
-  return { totalCount, runningCount, todayCount, avgDuration }
-})
-
 watch(pageSize, (value) => {
   persistTaskPageSize(value)
 })
@@ -619,49 +604,6 @@ async function handleImport(event: Event) {
 
 <template>
   <div class="tasks-page dd-fixed-page dd-page-hide-heading">
-    <div class="stat-cards">
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">当前页任务</span>
-          <span class="stat-card__value">{{ taskStats.totalCount }}</span>
-          <span class="stat-card__sub">本页展示任务</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--blue">
-          <el-icon :size="22"><Clock /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">运行中</span>
-          <span class="stat-card__value stat-card__value--orange">{{ taskStats.runningCount }}</span>
-          <span class="stat-card__sub">本页运行中</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--orange">
-          <el-icon :size="22"><Odometer /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">今日执行</span>
-          <span class="stat-card__value stat-card__value--green">{{ taskStats.todayCount }}</span>
-          <span class="stat-card__sub">本页今日执行</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--green">
-          <el-icon :size="22"><Check /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">平均耗时</span>
-          <span class="stat-card__value stat-card__value--red">{{ taskStats.avgDuration }}s</span>
-          <span class="stat-card__sub">本页平均耗时</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--red">
-          <el-icon :size="22"><Timer /></el-icon>
-        </div>
-      </div>
-    </div>
-
     <ViewManager @view-change="handleViewChange" />
 
     <div class="toolbar">
@@ -1054,97 +996,6 @@ async function handleImport(event: Event) {
   }
 }
 
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s;
-
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
-  }
-
-  &__content {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  &__label {
-    font-size: 13px;
-    color: var(--el-text-color-secondary);
-    font-weight: 500;
-  }
-
-  &__value {
-    font-size: 26px;
-    font-weight: 700;
-    color: #3b82f6;
-    line-height: 1.15;
-    font-family: 'Inter', var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-
-    &--orange { color: #f59e0b; }
-    &--green { color: #10b981; }
-    &--red { color: #ef4444; }
-    &--purple { color: #8b5cf6; }
-  }
-
-  &__sub {
-    font-size: 12px;
-    color: var(--el-text-color-placeholder);
-  }
-
-  &__icon {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-
-    &--blue {
-      background: rgba(59, 130, 246, 0.12);
-      color: #3b82f6;
-    }
-    &--orange {
-      background: rgba(245, 158, 11, 0.12);
-      color: #f59e0b;
-    }
-    &--green {
-      background: rgba(16, 185, 129, 0.12);
-      color: #10b981;
-    }
-    &--red {
-      background: rgba(239, 68, 68, 0.12);
-      color: #ef4444;
-    }
-    &--purple {
-      background: rgba(139, 92, 246, 0.12);
-      color: #8b5cf6;
-    }
-  }
-}
-
 .toolbar {
   display: flex;
   justify-content: space-between;
@@ -1457,12 +1308,6 @@ async function handleImport(event: Event) {
   }
 }
 
-@media screen and (max-width: 1200px) {
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
 @media screen and (max-width: 768px) {
   .page-header {
     flex-direction: column;
@@ -1475,24 +1320,6 @@ async function handleImport(event: Event) {
     .header-actions {
       width: 100%;
       flex-wrap: wrap;
-    }
-  }
-
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .stat-card {
-    padding: 14px 16px;
-
-    &__value {
-      font-size: 22px;
-    }
-
-    &__icon {
-      width: 40px;
-      height: 40px;
     }
   }
 

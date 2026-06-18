@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { notificationApi } from '@/api/notification'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Bell, Check, CircleClose, Message, Plus, Refresh, Search } from '@element-plus/icons-vue'
+import { Bell, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
 
 const { isMobile, dialogFullscreen } = useResponsive()
@@ -21,15 +21,6 @@ const filterType = ref('')
 const filterStatus = ref('')
 const channelPage = ref(1)
 const channelPageSize = ref(10)
-
-// --- Channel stats ---
-const channelStats = computed(() => {
-  const totalCount = channels.value.length
-  const enabledCount = channels.value.filter(c => c.enabled).length
-  const todaySendCount = channels.value.reduce((sum, c) => sum + (Number(c.today_send_count) || 0), 0)
-  const errorCount = channels.value.filter(c => c.last_test_status === 'error' || c.last_test_status === 'failed').length
-  return { totalCount, enabledCount, todaySendCount, errorCount }
-})
 
 // --- Filtered channels ---
 const filteredChannels = computed(() => {
@@ -610,50 +601,6 @@ function getChannelConfigSummary(row: any): string[] {
       </div>
     </div>
 
-        <!-- Stat Cards -->
-        <div class="stat-cards">
-          <div class="stat-card">
-            <div class="stat-card__content">
-              <span class="stat-card__label">渠道总数</span>
-              <span class="stat-card__value">{{ channelStats.totalCount }}</span>
-              <span class="stat-card__sub">已配置通知渠道</span>
-            </div>
-            <div class="stat-card__icon stat-card__icon--blue">
-              <el-icon :size="22"><Bell /></el-icon>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-card__content">
-              <span class="stat-card__label">启用中</span>
-              <span class="stat-card__value stat-card__value--green">{{ channelStats.enabledCount }}</span>
-              <span class="stat-card__sub">正常可用渠道</span>
-            </div>
-            <div class="stat-card__icon stat-card__icon--green">
-              <el-icon :size="22"><Check /></el-icon>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-card__content">
-              <span class="stat-card__label">今日发送</span>
-              <span class="stat-card__value stat-card__value--orange">{{ channelStats.todaySendCount }}</span>
-              <span class="stat-card__sub">今日成功发送通知数</span>
-            </div>
-            <div class="stat-card__icon stat-card__icon--orange">
-              <el-icon :size="22"><Message /></el-icon>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-card__content">
-              <span class="stat-card__label">异常渠道</span>
-              <span class="stat-card__value stat-card__value--red">{{ channelStats.errorCount }}</span>
-              <span class="stat-card__sub">最近一次测试失败</span>
-            </div>
-            <div class="stat-card__icon stat-card__icon--red">
-              <el-icon :size="22"><CircleClose /></el-icon>
-            </div>
-          </div>
-        </div>
-
         <!-- Toolbar -->
         <div class="toolbar">
           <div class="toolbar__left">
@@ -882,53 +829,6 @@ function getChannelConfigSummary(row: any): string[] {
   .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 6px 0 0; line-height: 1.6; max-width: 720px; }
 }
 
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition: transform 0.22s ease, box-shadow 0.22s ease;
-
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
-  }
-
-  &__content { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
-  &__label { font-size: 13px; color: var(--el-text-color-secondary); font-weight: 500; }
-  &__value {
-    font-size: 26px; font-weight: 700; color: #3b82f6; line-height: 1.15;
-    font-family: 'Inter', var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-    &--green { color: #10b981; }
-    &--orange { color: #f59e0b; }
-    &--red { color: #ef4444; }
-  }
-  &__sub { font-size: 12px; color: var(--el-text-color-placeholder); }
-  &__icon {
-    width: 44px; height: 44px; border-radius: 12px;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    &--blue { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
-    &--green { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-    &--orange { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-    &--red { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
-  }
-}
-
 .toolbar {
   display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap;
   &__left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1; min-width: 0; }
@@ -1041,14 +941,8 @@ function getChannelConfigSummary(row: any): string[] {
   .el-table__cell { padding: 12px 0; }
 }
 
-@media screen and (max-width: 1200px) {
-  .stat-cards { grid-template-columns: repeat(2, 1fr); }
-}
-
 @media (max-width: 768px) {
   .page-header { flex-direction: column; gap: 10px; margin-bottom: 14px; h2 { font-size: 18px; } }
-  .stat-cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .stat-card { padding: 14px 16px; &__value { font-size: 22px; } &__icon { width: 40px; height: 40px; } }
   .toolbar {
     flex-direction: column; align-items: stretch; gap: 10px;
     &__left { flex-direction: column; gap: 10px; }

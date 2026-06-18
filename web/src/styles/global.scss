@@ -755,6 +755,29 @@ html.dark {
 }
 
 .dd-log-surface {
+  // 日志内容通常比较长，默认细滚动条在 Edge/Chrome 里不明显；
+  // 这里单独给日志窗口增强滚动条对比度，不影响普通表格和页面滚动条。
+  --dd-log-scrollbar-track-color: color-mix(
+    in srgb,
+    var(--dd-log-bg-color) 84%,
+    var(--dd-log-text-color) 16%
+  );
+  --dd-log-scrollbar-thumb-color: color-mix(
+    in srgb,
+    var(--dd-log-text-color) 50%,
+    transparent
+  );
+  --dd-log-scrollbar-thumb-hover-color: color-mix(
+    in srgb,
+    var(--dd-log-text-color) 66%,
+    transparent
+  );
+  --dd-log-scrollbar-thumb-active-color: color-mix(
+    in srgb,
+    var(--dd-log-text-color) 78%,
+    transparent
+  );
+
   background-color: var(--dd-log-bg-color);
   background-image:
     var(--dd-log-bg-image),
@@ -781,6 +804,39 @@ html.dark {
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
     0 12px 28px rgba(15, 23, 42, 0.16);
   color: var(--dd-log-text-color);
+  scrollbar-color: var(--dd-log-scrollbar-thumb-color)
+    var(--dd-log-scrollbar-track-color);
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+
+  &::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: var(--dd-log-scrollbar-track-color);
+    border-radius: 999px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    min-height: 40px;
+    border: 3px solid var(--dd-log-scrollbar-track-color);
+    border-radius: 999px;
+    background: var(--dd-log-scrollbar-thumb-color);
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background: var(--dd-log-scrollbar-thumb-hover-color);
+  }
+
+  &::-webkit-scrollbar-thumb:active {
+    background: var(--dd-log-scrollbar-thumb-active-color);
+  }
+
+  &::-webkit-scrollbar-corner {
+    background: var(--dd-log-scrollbar-track-color);
+  }
 }
 
 .dd-log-surface pre,

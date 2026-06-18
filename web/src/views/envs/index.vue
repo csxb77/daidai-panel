@@ -59,17 +59,6 @@ const pageSizeOptions: Array<{ label: string; value: EnvPageSizeSelection }> = [
 const selectionScopeText = computed(() =>
   showAllEnvs.value ? '批量操作作用于当前已勾选的数据。' : '批量操作仅作用于当前页勾选的数据。'
 )
-const envStats = computed(() => {
-  const list = filteredEnvList.value
-  const totalCount = list.length
-  const enabledCount = list.filter(item => item.enabled).length
-  const remarkCount = list.filter(item => item.remarks && item.remarks.length > 0).length
-  const lastUpdated = list.reduce((latest: string, item: any) => {
-    if (!item.updated_at) return latest
-    return !latest || new Date(item.updated_at) > new Date(latest) ? item.updated_at : latest
-  }, '')
-  return { totalCount, enabledCount, remarkCount, lastUpdated }
-})
 const filteredEnvList = computed(() => {
   if (statusFilter.value === 'enabled') return envList.value.filter(item => item.enabled)
   if (statusFilter.value === 'disabled') return envList.value.filter(item => !item.enabled)
@@ -806,13 +795,6 @@ function formatDateTime(t: string | null) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}  ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-function formatShortDateTime(t: string | null) {
-  if (!t) return '-'
-  const d = new Date(t)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
 function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   if (statusFilter.value === value) {
     return
@@ -825,49 +807,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 <template>
   <div class="envs-page dd-fixed-page dd-page-hide-heading">
-    <div class="stat-cards">
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">当前页变量</span>
-          <span class="stat-card__value">{{ envStats.totalCount }}</span>
-          <span class="stat-card__sub">本页展示变量</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--blue">
-          <el-icon :size="22"><Clock /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">本页启用</span>
-          <span class="stat-card__value stat-card__value--green">{{ envStats.enabledCount }}</span>
-          <span class="stat-card__sub">当前页生效变量</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--green">
-          <el-icon :size="22"><Check /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">备注变量</span>
-          <span class="stat-card__value stat-card__value--orange">{{ envStats.remarkCount }}</span>
-          <span class="stat-card__sub">当前页有备注</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--orange">
-          <el-icon :size="22"><Connection /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">本页最近更新</span>
-          <span class="stat-card__value stat-card__value--green" style="font-size: 18px;">{{ formatShortDateTime(envStats.lastUpdated) }}</span>
-          <span class="stat-card__sub">当前页最后更新时间</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--green">
-          <el-icon :size="22"><Timer /></el-icon>
-        </div>
-      </div>
-    </div>
-
     <div class="toolbar">
       <div class="toolbar__left">
         <div class="status-tabs">
@@ -1293,98 +1232,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
-/* ---- Stat Cards ---- */
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition: transform 0.22s ease, box-shadow 0.22s ease;
-
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
-  }
-
-  &__content {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  &__label {
-    font-size: 13px;
-    color: var(--el-text-color-secondary);
-    font-weight: 500;
-  }
-
-  &__value {
-    font-size: 26px;
-    font-weight: 700;
-    color: #3b82f6;
-    line-height: 1.15;
-    font-family: 'Inter', var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-
-    &--orange { color: #f59e0b; }
-    &--green { color: #10b981; }
-    &--red { color: #ef4444; }
-    &--purple { color: #8b5cf6; }
-  }
-
-  &__sub {
-    font-size: 12px;
-    color: var(--el-text-color-placeholder);
-  }
-
-  &__icon {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-
-    &--blue {
-      background: rgba(59, 130, 246, 0.12);
-      color: #3b82f6;
-    }
-    &--orange {
-      background: rgba(245, 158, 11, 0.12);
-      color: #f59e0b;
-    }
-    &--green {
-      background: rgba(16, 185, 129, 0.12);
-      color: #10b981;
-    }
-    &--red {
-      background: rgba(239, 68, 68, 0.12);
-      color: #ef4444;
-    }
-    &--purple {
-      background: rgba(139, 92, 246, 0.12);
-      color: #8b5cf6;
-    }
-  }
-}
-
 /* ---- Toolbar ---- */
 .toolbar {
   display: flex;
@@ -1545,7 +1392,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 12px;
 }
 
-/* ---- Desktop States ---- */
 .env-desktop-state {
   display: flex;
   align-items: center;
@@ -1907,13 +1753,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
-/* ---- Responsive: 1200px ---- */
-@media screen and (max-width: 1200px) {
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
 /* ---- Responsive: 768px (Mobile) ---- */
 @media screen and (max-width: 768px) {
   .page-header {
@@ -1927,24 +1766,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     .header-actions {
       width: 100%;
       flex-wrap: wrap;
-    }
-  }
-
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .stat-card {
-    padding: 14px 16px;
-
-    &__value {
-      font-size: 22px;
-    }
-
-    &__icon {
-      width: 40px;
-      height: 40px;
     }
   }
 

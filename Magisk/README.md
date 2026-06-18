@@ -269,13 +269,13 @@ ddp backup create --name before-uninstall
 
 ```bash
 # 默认只打 arm64
-bash Magisk/build.sh 2.2.19
+bash Magisk/build.sh 2.3.1
 
 # 只打 amd64
-bash Magisk/build.sh 2.2.19 amd64
+bash Magisk/build.sh 2.3.1 amd64
 
 # 同时打 arm64 + amd64
-bash Magisk/build.sh 2.2.19 all
+bash Magisk/build.sh 2.3.1 all
 ```
 
 构建产物：`dist/daidai-panel-magisk-v<版本>.zip`（`module.prop` 里的 `version` / `versionCode` 会自动按参数同步）。

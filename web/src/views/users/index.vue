@@ -22,14 +22,6 @@ const resetPwdForm = ref({ id: 0, username: '', password: '' })
 
 const roleFilter = ref('')
 
-const userStats = computed(() => {
-  const all = users.value
-  const adminCount = all.filter(u => u.role === 'admin').length
-  const operatorCount = all.filter(u => u.role === 'operator').length
-  const viewerCount = all.filter(u => u.role === 'viewer').length
-  return { totalCount: all.length, adminCount, operatorCount, viewerCount }
-})
-
 const filteredUsers = computed(() => {
   let list = users.value
   if (roleFilter.value) {
@@ -208,49 +200,6 @@ function getRoleName(role: string) {
         <el-button type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon> 新建用户
         </el-button>
-      </div>
-    </div>
-
-    <div class="stat-cards">
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">总用户</span>
-          <span class="stat-card__value">{{ userStats.totalCount }}</span>
-          <span class="stat-card__sub">系统用户</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--blue">
-          <el-icon :size="22"><User /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">管理员</span>
-          <span class="stat-card__value stat-card__value--red">{{ userStats.adminCount }}</span>
-          <span class="stat-card__sub">最高权限</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--red">
-          <el-icon :size="22"><Star /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">操作员</span>
-          <span class="stat-card__value stat-card__value--orange">{{ userStats.operatorCount }}</span>
-          <span class="stat-card__sub">操作权限</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--orange">
-          <el-icon :size="22"><Operation /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">观察者</span>
-          <span class="stat-card__value stat-card__value--green">{{ userStats.viewerCount }}</span>
-          <span class="stat-card__sub">只读权限</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--green">
-          <el-icon :size="22"><View /></el-icon>
-        </div>
       </div>
     </div>
 
@@ -438,57 +387,6 @@ function getRoleName(role: string) {
   .header-actions { display: flex; gap: 10px; flex-shrink: 0; }
 }
 
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  position: relative;
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition: transform 0.22s ease, box-shadow 0.22s ease;
-
-  &:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
-    border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
-  }
-
-  &__content { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
-  &__label { font-size: 13px; color: var(--el-text-color-secondary); font-weight: 500; }
-  &__value {
-    font-size: 26px; font-weight: 700; color: #3b82f6; line-height: 1.15;
-    font-family: 'Inter', var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-    &--green { color: #10b981; }
-    &--orange { color: #f59e0b; }
-    &--red { color: #ef4444; }
-    &--purple { color: #8b5cf6; }
-  }
-  &__sub { font-size: 12px; color: var(--el-text-color-placeholder); }
-  &__icon {
-    width: 44px; height: 44px; border-radius: 12px;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    &--blue { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
-    &--green { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-    &--orange { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-    &--red { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
-    &--purple { background: rgba(139, 92, 246, 0.12); color: #8b5cf6; }
-  }
-}
-
 .toolbar {
   display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap;
   &__left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1; min-width: 0; }
@@ -538,14 +436,8 @@ function getRoleName(role: string) {
   .el-table__cell { padding: 12px 0; }
 }
 
-@media screen and (max-width: 1200px) {
-  .stat-cards { grid-template-columns: repeat(2, 1fr); }
-}
-
 @media (max-width: 768px) {
   .page-header { flex-direction: column; gap: 10px; margin-bottom: 14px; h2 { font-size: 18px; } }
-  .stat-cards { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .stat-card { padding: 14px 16px; &__value { font-size: 22px; } &__icon { width: 40px; height: 40px; } }
   .toolbar { flex-direction: column; align-items: stretch; gap: 10px;
     &__left { flex-direction: column; gap: 10px; }
     &__search { width: 100% !important; }

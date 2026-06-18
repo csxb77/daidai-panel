@@ -13,7 +13,7 @@ import (
 	"daidai-panel/testutil"
 )
 
-func TestTaskListPlacesDisabledTasksAfterActiveOnes(t *testing.T) {
+func TestTaskListKeepsPinnedDisabledTasksInPinnedArea(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
 	engine := newProtectedRouter()
@@ -71,8 +71,8 @@ func TestTaskListPlacesDisabledTasksAfterActiveOnes(t *testing.T) {
 
 	wantNames := []string{
 		"enabled pinned",
-		"enabled normal",
 		"disabled pinned",
+		"enabled normal",
 		"disabled normal",
 	}
 	for i, want := range wantNames {

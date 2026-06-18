@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Loading } from '@element-plus/icons-vue'
 import { logApi } from '@/api/log'
 import { taskApi } from '@/api/task'
 import { useAuthStore } from '@/stores/auth'
@@ -49,14 +48,6 @@ const routeTaskId = ref<number | null>(null)
 const pendingOpenTaskLog = ref(false)
 const canOperateLogs = computed(() => canOperate(authStore.user?.role))
 
-const logStats = computed(() => {
-  const list = logs.value
-  const totalCount = list.length
-  const successCount = list.filter(l => l.status === 0).length
-  const failedCount = list.filter(l => l.status !== 0 && l.status !== 2).length
-  const runningCount = list.filter(l => l.status === 2).length
-  return { totalCount, successCount, failedCount, runningCount }
-})
 const allSelectedOnPage = computed(() => logs.value.length > 0 && logs.value.every(l => selectedIdSet.value.has(l.id)))
 const someSelectedOnPage = computed(() => selectedIds.value.length > 0 && !allSelectedOnPage.value)
 
@@ -545,50 +536,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="logs-page dd-fixed-page dd-page-hide-heading">
-    <!-- ======= Stat Cards + Trend Chart ======= -->
-    <div class="stat-cards animate-fade-in-up">
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">当前页记录</span>
-          <span class="stat-card__value">{{ logStats.totalCount }}</span>
-          <span class="stat-card__sub">本页日志</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--blue">
-          <el-icon :size="22"><Tickets /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">成功</span>
-          <span class="stat-card__value stat-card__value--green">{{ logStats.successCount }}</span>
-          <span class="stat-card__sub">当前页</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--green">
-          <el-icon :size="22"><CircleCheck /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">失败</span>
-          <span class="stat-card__value stat-card__value--red">{{ logStats.failedCount }}</span>
-          <span class="stat-card__sub">当前页</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--red">
-          <el-icon :size="22"><CircleClose /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">运行中</span>
-          <span class="stat-card__value stat-card__value--orange">{{ logStats.runningCount }}</span>
-          <span class="stat-card__sub">当前页</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--orange">
-          <el-icon :size="22"><Loading /></el-icon>
-        </div>
-      </div>
-    </div>
-
     <!-- ======= Toolbar ======= -->
     <div class="toolbar animate-fade-in-up delay-50">
       <div class="toolbar__left">
@@ -880,76 +827,6 @@ onBeforeUnmount(() => {
   }
 }
 
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
-
-  &:hover {
-    transform: translateY(-3px);
-    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.1);
-    border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
-  }
-
-  &__content {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  &__label {
-    font-size: 13px;
-    color: var(--el-text-color-secondary);
-    font-weight: 500;
-  }
-
-  &__value {
-    font-size: 26px;
-    font-weight: 700;
-    color: #3b82f6;
-    line-height: 1.15;
-    font-family: 'Inter', var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-
-    &--green { color: #10b981; }
-    &--red { color: #ef4444; }
-    &--orange { color: #f59e0b; }
-    &--purple { color: #8b5cf6; }
-  }
-
-  &__sub {
-    font-size: 12px;
-    color: var(--el-text-color-placeholder);
-  }
-
-  &__icon {
-    width: 44px; height: 44px; border-radius: 12px;
-    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    &--blue { background: rgba(59, 130, 246, 0.12); color: #3b82f6; }
-    &--green { background: rgba(16, 185, 129, 0.12); color: #10b981; }
-    &--orange { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-    &--red { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
-  }
-}
-
 /* =============== Toolbar =============== */
 .toolbar {
   display: flex;
@@ -1128,7 +1005,6 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-secondary);
 }
 
-/* =============== Status Indicator (for dialog) =============== */
 .status-indicator {
   position: relative;
   width: 10px;
@@ -1422,21 +1298,6 @@ onBeforeUnmount(() => {
   .detail-status-item--live::before { animation: none; }
 }
 
-/* =============== Responsive: 1200px =============== */
-@media screen and (max-width: 1200px) {
-  .stat-section {
-    grid-template-columns: 1fr;
-  }
-
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  .trend-chart-card {
-    width: 100%;
-  }
-}
-
 /* =============== Mobile: 768px =============== */
 @media screen and (max-width: 768px) {
   .page-header {
@@ -1451,32 +1312,6 @@ onBeforeUnmount(() => {
       width: 100%;
       flex-wrap: wrap;
     }
-  }
-
-  .stat-section {
-    grid-template-columns: 1fr;
-  }
-
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-
-  .stat-card {
-    padding: 14px 16px;
-
-    &__value {
-      font-size: 22px;
-    }
-
-    &__sparkline {
-      width: 48px;
-      height: 20px;
-    }
-  }
-
-  .trend-chart-card {
-    width: 100%;
   }
 
   .toolbar {
@@ -1530,7 +1365,6 @@ onBeforeUnmount(() => {
   .detail-hero-title { font-size: 15.5px; }
 }
 
-
 .log-card--cinematic {
   animation: dd-log-card-in 320ms var(--dd-ease-emphasized) both;
 }
@@ -1581,7 +1415,6 @@ onBeforeUnmount(() => {
 }
 
 </style>
-
 
 <style lang="scss">
 html.dark {

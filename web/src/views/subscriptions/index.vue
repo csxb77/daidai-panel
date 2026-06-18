@@ -29,15 +29,6 @@ const filteredSubList = computed(() => {
   return subList.value.filter((s) => s.type === typeFilter.value);
 });
 
-const subStats = computed(() => {
-  const list = filteredSubList.value;
-  const totalCount = list.length;
-  const enabledCount = list.filter((s) => s.enabled).length;
-  const pullCount = list.filter((s) => s.last_pull_at).length;
-  const errorCount = list.filter((s) => s.status !== 0).length;
-  return { totalCount, enabledCount, pullCount, errorCount };
-});
-
 const showEditDialog = ref(false);
 const showLogDialog = ref(false);
 const showSettingsDialog = ref(false);
@@ -772,55 +763,6 @@ function viewLogDetail(log: any) {
 
 <template>
   <div class="subscriptions-page dd-fixed-page dd-page-hide-heading">
-    <div class="stat-cards">
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">当前页订阅</span>
-          <span class="stat-card__value">{{ subStats.totalCount }}</span>
-          <span class="stat-card__sub">本页展示订阅</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--blue">
-          <el-icon :size="22"><Connection /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">本页启用</span>
-          <span class="stat-card__value stat-card__value--green">{{
-            subStats.enabledCount
-          }}</span>
-          <span class="stat-card__sub">当前页启用订阅</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--green">
-          <el-icon :size="22"><Check /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">已拉取</span>
-          <span class="stat-card__value stat-card__value--orange">{{
-            subStats.pullCount
-          }}</span>
-          <span class="stat-card__sub">当前页曾拉取订阅</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--orange">
-          <el-icon :size="22"><Download /></el-icon>
-        </div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-card__content">
-          <span class="stat-card__label">异常</span>
-          <span class="stat-card__value stat-card__value--red">{{
-            subStats.errorCount
-          }}</span>
-          <span class="stat-card__sub">当前页需要关注</span>
-        </div>
-        <div class="stat-card__icon stat-card__icon--red">
-          <el-icon :size="22"><CircleClose /></el-icon>
-        </div>
-      </div>
-    </div>
-
     <div class="toolbar">
       <div class="toolbar__left">
         <div class="status-tabs">
@@ -1606,101 +1548,6 @@ function viewLogDetail(log: any) {
   }
 }
 
-.stat-cards {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
-  margin-bottom: 18px;
-}
-
-.stat-card {
-  background: var(--el-bg-color);
-  border-radius: 14px;
-  padding: 16px 18px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
-  border: 1px solid var(--el-border-color-lighter);
-  transition:
-    transform 0.22s ease,
-    box-shadow 0.22s ease;
-
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
-  }
-
-  &__content {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1;
-  }
-  &__label {
-    font-size: 13px;
-    color: var(--el-text-color-secondary);
-    font-weight: 500;
-  }
-  &__value {
-    font-size: 26px;
-    font-weight: 700;
-    color: #3b82f6;
-    line-height: 1.15;
-    font-family: "Inter", var(--dd-font-ui), sans-serif;
-    font-variant-numeric: tabular-nums;
-    -webkit-font-smoothing: antialiased;
-    letter-spacing: -0.01em;
-    &--green {
-      color: #10b981;
-    }
-    &--orange {
-      color: #f59e0b;
-    }
-    &--red {
-      color: #ef4444;
-    }
-    &--purple {
-      color: #8b5cf6;
-    }
-  }
-  &__sub {
-    font-size: 12px;
-    color: var(--el-text-color-placeholder);
-  }
-  &__icon {
-    width: 44px;
-    height: 44px;
-    border-radius: 12px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    &--blue {
-      background: rgba(59, 130, 246, 0.12);
-      color: #3b82f6;
-    }
-    &--green {
-      background: rgba(16, 185, 129, 0.12);
-      color: #10b981;
-    }
-    &--orange {
-      background: rgba(245, 158, 11, 0.12);
-      color: #f59e0b;
-    }
-    &--red {
-      background: rgba(239, 68, 68, 0.12);
-      color: #ef4444;
-    }
-    &--purple {
-      background: rgba(139, 92, 246, 0.12);
-      color: #8b5cf6;
-    }
-  }
-}
-
 .toolbar {
   display: flex;
   justify-content: space-between;
@@ -1864,12 +1711,6 @@ function viewLogDetail(log: any) {
   line-height: 1.4;
 }
 
-@media screen and (max-width: 1200px) {
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
@@ -1877,20 +1718,6 @@ function viewLogDetail(log: any) {
     margin-bottom: 14px;
     h2 {
       font-size: 18px;
-    }
-  }
-  .stat-cards {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 10px;
-  }
-  .stat-card {
-    padding: 14px 16px;
-    &__value {
-      font-size: 22px;
-    }
-    &__icon {
-      width: 40px;
-      height: 40px;
     }
   }
   .toolbar {

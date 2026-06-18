@@ -133,8 +133,9 @@ func (h *TaskHandler) List(c *gin.Context) {
 
 func applyDefaultTaskListOrdering(query *gorm.DB) *gorm.DB {
 	return query.
-		Order("CASE WHEN status IN (1, 0.5, 2) THEN 0 WHEN status = 0 THEN 1 ELSE 2 END ASC").
+		// 置顶是用户主动设置的展示优先级，禁用任务如果已经置顶，也必须继续留在置顶区。
 		Order("is_pinned DESC").
+		Order("CASE WHEN status IN (1, 0.5, 2) THEN 0 WHEN status = 0 THEN 1 ELSE 2 END ASC").
 		Order("sort_order ASC").
 		Order("created_at DESC").
 		Order("id DESC")
@@ -198,13 +199,14 @@ func taskSortGroup(status float64) int {
 }
 
 func defaultTaskListLess(left, right model.Task) bool {
+	// 置顶优先级要高于任务状态，避免置顶任务一禁用就被普通启用任务挤下去。
+	if left.IsPinned != right.IsPinned {
+		return left.IsPinned
+	}
 	leftGroup := taskSortGroup(left.Status)
 	rightGroup := taskSortGroup(right.Status)
 	if leftGroup != rightGroup {
 		return leftGroup < rightGroup
-	}
-	if left.IsPinned != right.IsPinned {
-		return left.IsPinned
 	}
 	if left.SortOrder != right.SortOrder {
 		return left.SortOrder < right.SortOrder

@@ -37,6 +37,34 @@ go test ./...
 
 ---
 
+## 场景：定时任务默认列表排序与置顶优先级
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/task_query.go` 中任务列表默认排序、`is_pinned`、`status`、`sort_order` 相关逻辑时必须看本节。
+- 原因：置顶是用户主动设置的展示优先级。如果默认排序先按启用 / 禁用状态分组，再按 `is_pinned` 排序，禁用后的置顶任务会被普通启用任务挤到后面，表现为“禁用任务不能保持置顶”。
+
+### 2. Contracts
+
+- 默认任务列表排序必须先尊重 `is_pinned DESC`，再按任务状态分组。
+- 已置顶任务即使状态变为禁用，也必须继续保留在置顶区域。
+- 置顶区内部再按状态分组、`sort_order`、创建时间和 ID 保持稳定顺序。
+- 自定义视图排序没有命中差异时，最终兜底排序也必须使用同一套默认规则，避免默认列表和视图列表表现不一致。
+
+### 3. Tests Required
+
+- 禁用但已置顶任务应排在普通启用任务前面。
+- 运行中 / 排队中 / 启用状态变化不能打乱同组内 `sort_order` 的稳定顺序。
+- 修改排序时至少运行：
+
+```bash
+cd server
+go test ./handler -run "TestTaskListKeepsPinnedDisabledTasksInPinnedArea|TestTaskListKeepsStableOrderWhenTaskStatusChangesToRunning"
+go test ./...
+```
+
+---
+
 ## 场景：反代 CORS 同源判断与外部端口
 
 ### 1. Scope / Trigger

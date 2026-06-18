@@ -86,7 +86,17 @@ watch(showVersionDiffDialog, (visible) => {
   <el-dialog v-model="showCreateFileDialog" title="新建文件" :width="isMobile ? '90%' : '480px'" :fullscreen="isMobile">
     <el-form :label-width="isMobile ? 'auto' : '80px'" :label-position="isMobile ? 'top' : 'right'">
       <el-form-item label="上级目录">
-        <el-select v-model="newFileParent" placeholder="根目录" clearable style="width: 100%">
+        <!-- 目录很多时允许直接输入关键词筛选，避免用户只能滚动查找。 -->
+        <el-select
+          v-model="newFileParent"
+          placeholder="输入关键词搜索目录，留空为根目录"
+          clearable
+          filterable
+          default-first-option
+          no-match-text="没有匹配的目录"
+          no-data-text="暂无可选目录"
+          style="width: 100%"
+        >
           <el-option label="根目录" value="" />
           <el-option v-for="folder in nestedFolders" :key="folder" :label="folder" :value="folder" />
         </el-select>
@@ -104,7 +114,17 @@ watch(showVersionDiffDialog, (visible) => {
   <el-dialog v-model="showCreateDirDialog" title="新建目录" :width="isMobile ? '90%' : '480px'" :fullscreen="isMobile">
     <el-form :label-width="isMobile ? 'auto' : '80px'" :label-position="isMobile ? 'top' : 'right'">
       <el-form-item label="上级目录">
-        <el-select v-model="newDirParent" placeholder="根目录" clearable style="width: 100%">
+        <!-- 目录很多时允许直接输入关键词筛选，避免用户只能滚动查找。 -->
+        <el-select
+          v-model="newDirParent"
+          placeholder="输入关键词搜索目录，留空为根目录"
+          clearable
+          filterable
+          default-first-option
+          no-match-text="没有匹配的目录"
+          no-data-text="暂无可选目录"
+          style="width: 100%"
+        >
           <el-option label="根目录" value="" />
           <el-option v-for="folder in nestedFolders" :key="folder" :label="folder" :value="folder" />
         </el-select>
@@ -242,7 +262,17 @@ watch(showVersionDiffDialog, (visible) => {
   <el-dialog v-model="showUploadDialog" title="上传文件" :width="isMobile ? '90%' : '480px'" :fullscreen="isMobile" destroy-on-close>
     <el-form :label-width="isMobile ? 'auto' : '80px'" :label-position="isMobile ? 'top' : 'right'">
       <el-form-item label="目标目录">
-        <el-select v-model="uploadDir" placeholder="根目录" clearable style="width: 100%">
+        <!-- 上传目标目录也支持输入关键词筛选，和新建文件/目录保持一致。 -->
+        <el-select
+          v-model="uploadDir"
+          placeholder="输入关键词搜索目录，留空为根目录"
+          clearable
+          filterable
+          default-first-option
+          no-match-text="没有匹配的目录"
+          no-data-text="暂无可选目录"
+          style="width: 100%"
+        >
           <el-option label="根目录" value="" />
           <el-option v-for="folder in nestedFolders" :key="folder" :label="folder" :value="folder" />
         </el-select>

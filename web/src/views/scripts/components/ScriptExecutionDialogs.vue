@@ -41,7 +41,14 @@ function markDebugCodeChanged() {
 </script>
 
 <template>
-  <el-dialog v-model="showCodeRunner" title="代码运行器" :width="isMobile ? '98%' : '86%'" :fullscreen="isMobile" :close-on-click-modal="false" :top="isMobile ? '2vh' : '3vh'" destroy-on-close>
+  <el-dialog
+    v-model="showCodeRunner"
+    title="代码运行器"
+    fullscreen
+    class="script-execution-fullscreen-dialog"
+    :close-on-click-modal="false"
+    destroy-on-close
+  >
     <div class="debug-container debug-dialog-container" :class="{ mobile: isMobile }">
       <div class="debug-code-panel">
         <div class="panel-header">
@@ -74,7 +81,7 @@ function markDebugCodeChanged() {
             {{ runnerExitCode === 0 ? '成功' : '失败' }}
           </el-tag>
         </div>
-        <div class="panel-content">
+        <div class="panel-content debug-log-content dd-log-surface">
           <div v-if="runnerError" class="debug-error">
             <el-alert type="error" :title="runnerError === 'failed' ? `退出码: ${runnerExitCode}` : runnerError" :closable="false" show-icon />
           </div>
@@ -97,7 +104,14 @@ function markDebugCodeChanged() {
     </template>
   </el-dialog>
 
-  <el-dialog v-model="showDebugDialog" title="调试运行" :width="isMobile ? '98%' : '86%'" :fullscreen="isMobile" :close-on-click-modal="false" :top="isMobile ? '2vh' : '3vh'" destroy-on-close>
+  <el-dialog
+    v-model="showDebugDialog"
+    title="调试运行"
+    fullscreen
+    class="script-execution-fullscreen-dialog"
+    :close-on-click-modal="false"
+    destroy-on-close
+  >
     <div class="debug-container debug-dialog-container" :class="{ mobile: isMobile }">
       <div class="debug-code-panel">
         <div class="panel-header">
@@ -123,7 +137,7 @@ function markDebugCodeChanged() {
           <el-tag v-if="debugRunning" type="warning" size="small" effect="plain">运行中</el-tag>
           <el-tag v-else-if="debugLogs.length > 0" type="success" size="small" effect="plain">已完成</el-tag>
         </div>
-        <div class="panel-content">
+        <div class="panel-content debug-log-content dd-log-surface">
           <div v-if="debugError" class="debug-error">
             <el-alert type="error" :title="`退出码: ${debugExitCode}`" :closable="false" show-icon />
           </div>
@@ -154,9 +168,10 @@ function markDebugCodeChanged() {
 .debug-container {
   display: flex;
   gap: 16px;
-  height: min(76dvh, 860px);
-  min-height: clamp(320px, 52dvh, 520px);
-  max-height: calc(100dvh - 220px);
+  // 全屏调试时让代码区和日志区尽量吃满可用高度，不再像小弹窗一样压缩内容。
+  height: 100%;
+  min-height: 0;
+  max-height: none;
   min-width: 0;
 }
 
@@ -174,9 +189,9 @@ function markDebugCodeChanged() {
 }
 
 .debug-dialog-container {
-  height: min(64dvh, 680px);
-  min-height: clamp(280px, 46dvh, 430px);
-  max-height: calc(100dvh - 190px);
+  height: 100%;
+  min-height: 0;
+  max-height: none;
 }
 
 .panel-header {
@@ -200,6 +215,14 @@ function markDebugCodeChanged() {
   flex-direction: column;
 }
 
+.debug-log-content.dd-log-surface {
+  // 脚本运行输出和调试日志也属于日志窗口，复用统一滚动条增强；
+  // 外层面板已经有边框，这里去掉重复边框和阴影，避免视觉变厚。
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
 .debug-error {
   margin-bottom: 12px;
 }
@@ -217,9 +240,9 @@ function markDebugCodeChanged() {
 
 .debug-container.mobile {
   flex-direction: column;
-  height: min(100%, calc(100dvh - 160px));
+  height: 100%;
   min-height: 0;
-  max-height: calc(100dvh - 160px);
+  max-height: none;
 
   .debug-code-panel,
   .debug-log-panel {
@@ -230,6 +253,37 @@ function markDebugCodeChanged() {
 
   .panel-content {
     padding: 8px;
+  }
+}
+</style>
+
+<style lang="scss">
+/*
+  Element Plus 的 el-dialog 会 teleport 到 body，scoped 样式很难稳定命中根节点。
+  这里用唯一 class 只作用于脚本调试/代码运行器，让桌面端和移动端都使用最大化工作区。
+*/
+.script-execution-fullscreen-dialog {
+  display: flex;
+  flex-direction: column;
+
+  .el-dialog__header {
+    flex-shrink: 0;
+    padding: 14px 18px;
+    margin: 0;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
+  .el-dialog__body {
+    flex: 1 1 0;
+    min-height: 0;
+    padding: 14px 18px;
+    overflow: hidden;
+  }
+
+  .el-dialog__footer {
+    flex-shrink: 0;
+    padding: 12px 18px;
+    border-top: 1px solid var(--el-border-color-lighter);
   }
 }
 </style>
