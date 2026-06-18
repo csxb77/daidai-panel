@@ -28,6 +28,7 @@ function getFileKey(file: any) {
 
 const renderedFileContent = computed(() => {
   let currentLine = ''
+  let pendingCarriageReturn = false
   const lines: string[] = []
 
   for (let i = 0; i < fileContent.value.length; i++) {
@@ -36,20 +37,27 @@ const renderedFileContent = computed(() => {
       if (fileContent.value[i + 1] === '\n') {
         lines.push(currentLine)
         currentLine = ''
+        pendingCarriageReturn = false
         i++
         continue
       }
-      // 裸 \r 代表覆盖当前行，保留最终显示结果，不把中间刷新历史展开成多行。
-      currentLine = ''
+      // 裸 \r 代表光标回到行首；等后续普通字符到来时再覆盖当前行。
+      // 这样日志文件预览和实时日志弹窗的进度条显示保持一致。
+      pendingCarriageReturn = true
       continue
     }
 
     if (char === '\n') {
       lines.push(currentLine)
       currentLine = ''
+      pendingCarriageReturn = false
       continue
     }
 
+    if (pendingCarriageReturn) {
+      currentLine = ''
+      pendingCarriageReturn = false
+    }
     currentLine += char
   }
 

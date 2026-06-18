@@ -74,11 +74,99 @@ func extractHost(value string) string {
 	return strings.ToLower(value)
 }
 
-func isSameOriginRequest(c *gin.Context, origin string) bool {
-	originHost := extractHost(origin)
-	if originHost == "" {
+func splitHostAndPort(value string) (string, string) {
+	host := extractHost(value)
+	if host == "" {
+		return "", ""
+	}
+
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		return strings.ToLower(strings.Trim(h, "[]")), normalizePort(p)
+	}
+
+	// 普通域名/IPv4 的 host:port 没有方括号，可以用最后一个冒号拆端口。
+	// IPv6 不带端口时会有多个冒号，不能按这个分支处理。
+	if strings.Count(host, ":") == 1 {
+		h, p, _ := strings.Cut(host, ":")
+		if h != "" && normalizePort(p) != "" {
+			return strings.ToLower(strings.Trim(h, "[]")), normalizePort(p)
+		}
+	}
+
+	return strings.ToLower(strings.Trim(host, "[]")), ""
+}
+
+func normalizePort(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, ",") {
+		value = strings.TrimSpace(strings.Split(value, ",")[0])
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return value
+}
+
+func defaultPortForScheme(scheme string) string {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+func originParts(origin string) (string, string, string) {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", "", ""
+	}
+	return strings.ToLower(parsed.Scheme), strings.ToLower(parsed.Hostname()), normalizePort(parsed.Port())
+}
+
+func hostMatchesOrigin(originScheme, originHostname, originPort, candidate, forwardedPort string) bool {
+	candidateHostname, candidatePort := splitHostAndPort(candidate)
+	if originHostname == "" || candidateHostname == "" || candidateHostname != originHostname {
 		return false
 	}
+
+	if originPort == "" {
+		defaultPort := defaultPortForScheme(originScheme)
+		return candidatePort == "" || candidatePort == defaultPort
+	}
+
+	if candidatePort == originPort {
+		return true
+	}
+	if candidatePort == "" {
+		if forwardedPort != "" {
+			return forwardedPort == originPort
+		}
+		if originPort == defaultPortForScheme(originScheme) {
+			return true
+		}
+		// NAS / Nginx Proxy Manager 等多层反代经常只把外部域名放进 Host / X-Forwarded-Host，
+		// 但把用户访问用的公网端口丢掉。此时 Origin 是 https://域名:端口，后端只看到域名。
+		// 域名一致时按“反代同源但端口丢失”放行；不同域名仍会被拒绝，避免退化成全网 CORS。
+		return true
+	}
+
+	return false
+}
+
+func isSameOriginRequest(c *gin.Context, origin string) bool {
+	originScheme, originHostname, originPort := originParts(origin)
+	if originHostname == "" {
+		return false
+	}
+	forwardedPort := normalizePort(c.GetHeader("X-Forwarded-Port"))
 
 	candidates := []string{
 		c.Request.Host,
@@ -90,7 +178,7 @@ func isSameOriginRequest(c *gin.Context, origin string) bool {
 	}
 
 	for _, candidate := range candidates {
-		if extractHost(candidate) == originHost {
+		if hostMatchesOrigin(originScheme, originHostname, originPort, candidate, forwardedPort) {
 			return true
 		}
 	}
@@ -155,10 +243,12 @@ func logCORSRejection(c *gin.Context, origin string) {
 	corsRejectLogOnce.Store(key, now)
 
 	log.Printf(
-		"[CORS] 拒绝跨域请求 origin=%q host=%q X-Forwarded-Host=%q Forwarded=%q method=%s path=%s — 如需放行请在 config.yaml 的 cors.origins 中加入该 origin",
+		"[CORS] 拒绝跨域请求 origin=%q host=%q X-Forwarded-Host=%q X-Forwarded-Port=%q X-Forwarded-Proto=%q Forwarded=%q method=%s path=%s — 如需放行请在 config.yaml 的 cors.origins 中加入该 origin",
 		origin,
 		c.Request.Host,
 		c.GetHeader("X-Forwarded-Host"),
+		c.GetHeader("X-Forwarded-Port"),
+		c.GetHeader("X-Forwarded-Proto"),
 		c.GetHeader("Forwarded"),
 		c.Request.Method,
 		c.Request.URL.Path,

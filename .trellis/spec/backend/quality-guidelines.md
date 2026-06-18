@@ -37,6 +37,32 @@ go test ./...
 
 ---
 
+## 场景：反代 CORS 同源判断与外部端口
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/middleware/cors.go`、反代头解析、登录 403 / CORS 拦截相关逻辑时必须看本节。
+- 原因：群晖、飞牛、Nginx Proxy Manager 等多层反代可能只把公网域名写入 `Host` / `X-Forwarded-Host`，却丢掉浏览器实际访问的外部端口。例如浏览器 `Origin=https://dd.example.com:5888`，后端只看到 `Host=dd.example.com`，如果直接比较完整 `host:port` 会误判跨域。
+
+### 2. Contracts
+
+- 公网域名不能默认全放开，仍必须满足以下任一条件：
+  - 命中 `config.yaml` 的 `cors.origins`
+  - `Origin` 域名与 `Host` / `X-Forwarded-Host` / `X-Original-Host` / RFC 7239 `Forwarded host=` 一致
+  - 私有/Loopback IP 来源命中已有局域网放行逻辑
+- 如果 `X-Forwarded-Port` 明确存在，必须与 `Origin` 端口一致；端口冲突时必须拒绝。
+- 如果反代没有传 `X-Forwarded-Port`，但域名一致且候选 host 没有端口，可以按“反代丢失外部端口”兼容放行。
+- 不允许为了修复 NAS 反代问题把 `Allow-Origin` 改成 `*`，因为登录接口携带认证能力，公网开放会扩大攻击面。
+
+### 3. Tests Required
+
+- `Origin=https://域名:端口` + `X-Forwarded-Host=同域名` + 无 `X-Forwarded-Port` -> 放行
+- `Origin=https://域名:端口` + `X-Forwarded-Host=同域名` + `X-Forwarded-Port=同端口` -> 放行
+- `Origin=https://域名:端口` + `X-Forwarded-Host=同域名` + `X-Forwarded-Port=不同端口` -> 拒绝
+- `Origin=https://恶意域名:端口` + `X-Forwarded-Host=面板域名` -> 拒绝
+
+---
+
 ## 评审检查清单
 
 - 分层是否清晰，职责是否仍然合理？

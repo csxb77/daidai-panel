@@ -108,6 +108,102 @@ func TestCORSAcceptsForwardedHeaderHost(t *testing.T) {
 	}
 }
 
+func TestCORSAcceptsProxyOriginWhenForwardedHostDropsExternalPort(t *testing.T) {
+	prev := config.C
+	t.Cleanup(func() { config.C = prev })
+	config.C = &config.Config{}
+
+	engine := newCORSRouter(t)
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/login", nil)
+	preflight.Host = "dd.221008.xyz"
+	preflight.Header.Set("Origin", "https://dd.221008.xyz:5888")
+	preflight.Header.Set("X-Forwarded-Host", "dd.221008.xyz")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflight.Header.Set("Access-Control-Request-Headers", "Authorization,Content-Type")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, preflight)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 when reverse proxy drops external port, got %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "https://dd.221008.xyz:5888" {
+		t.Fatalf("expected origin with external port to be echoed, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSAcceptsProxyOriginWithForwardedPort(t *testing.T) {
+	prev := config.C
+	t.Cleanup(func() { config.C = prev })
+	config.C = &config.Config{}
+
+	engine := newCORSRouter(t)
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/login", nil)
+	preflight.Host = "backend.internal:5701"
+	preflight.Header.Set("Origin", "https://panel.example.com:5888")
+	preflight.Header.Set("X-Forwarded-Host", "panel.example.com")
+	preflight.Header.Set("X-Forwarded-Port", "5888")
+	preflight.Header.Set("X-Forwarded-Proto", "https")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, preflight)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 with X-Forwarded-Port matching origin, got %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "https://panel.example.com:5888" {
+		t.Fatalf("expected forwarded-port origin to be echoed, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSRejectsProxyOriginWhenForwardedPortConflicts(t *testing.T) {
+	prev := config.C
+	t.Cleanup(func() { config.C = prev })
+	config.C = &config.Config{}
+
+	engine := newCORSRouter(t)
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/login", nil)
+	preflight.Host = "backend.internal:5701"
+	preflight.Header.Set("Origin", "https://panel.example.com:5888")
+	preflight.Header.Set("X-Forwarded-Host", "panel.example.com")
+	preflight.Header.Set("X-Forwarded-Port", "443")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, preflight)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 when X-Forwarded-Port conflicts with Origin port, got %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("expected conflicting forwarded-port origin to be rejected, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestCORSRejectsDifferentProxyHostnameEvenWhenOriginHasPort(t *testing.T) {
+	prev := config.C
+	t.Cleanup(func() { config.C = prev })
+	config.C = &config.Config{}
+
+	engine := newCORSRouter(t)
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/login", nil)
+	preflight.Host = "panel.example.com"
+	preflight.Header.Set("Origin", "https://evil.example.com:5888")
+	preflight.Header.Set("X-Forwarded-Host", "panel.example.com")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, preflight)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for different forwarded hostname, got %d", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("expected different host origin to be rejected, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
 func TestParseForwardedHostsExtractsMultipleHosts(t *testing.T) {
 	hosts := parseForwardedHosts(`for=192.0.2.60;proto=http;host=example.com, for=198.51.100.17;host="cdn.example.com"`)
 	if len(hosts) != 2 {

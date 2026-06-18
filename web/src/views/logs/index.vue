@@ -35,6 +35,7 @@ let logEventSource: EventStreamConnection | null = null
 const logContentRef = ref<HTMLElement>()
 let sseBuffer: string[] = []
 let sseFlushRaf = 0
+let detailContentCarriageReturnPending = false
 
 const showFileBrowser = ref(false)
 const currentTaskId = ref<number>(0)
@@ -59,19 +60,21 @@ const logStats = computed(() => {
 const allSelectedOnPage = computed(() => logs.value.length > 0 && logs.value.every(l => selectedIdSet.value.has(l.id)))
 const someSelectedOnPage = computed(() => selectedIds.value.length > 0 && !allSelectedOnPage.value)
 
+const renderedDetailContent = computed(() => renderTerminalText(detailContent.value || '（正在加载日志...）'))
+const renderedFileContent = computed(() => renderTerminalText(fileContentData.value || '(空文件)'))
 const detailLineCount = computed(() => {
-  if (!detailContent.value) return 0
-  return detailContent.value.split('\n').length
+  if (!renderedDetailContent.value) return 0
+  return renderedDetailContent.value.split('\n').length
 })
 const detailByteLabel = computed(() => {
-  if (!detailContent.value) return ''
-  const bytes = new Blob([detailContent.value]).size
+  if (!renderedDetailContent.value) return ''
+  const bytes = new Blob([renderedDetailContent.value]).size
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 })
-const detailContentHtml = computed(() => ansiToHtml(normalizeAnsi(detailContent.value || '（正在加载日志...）')))
-const fileContentHtml = computed(() => ansiToHtml(normalizeAnsi(fileContentData.value || '(空文件)')))
+const detailContentHtml = computed(() => ansiToHtml(normalizeAnsi(renderedDetailContent.value)))
+const fileContentHtml = computed(() => ansiToHtml(normalizeAnsi(renderedFileContent.value)))
 
 let mounted = false
 
@@ -91,20 +94,68 @@ function mergeTerminalText(previous: string, chunk: string) {
     if (char === '\r') {
       if ((chunk[i + 1] ?? '') === '\n') {
         lines.push('')
+        detailContentCarriageReturnPending = false
         i++
         continue
       }
-      // 裸 \r 表示覆盖当前行，把最后一行清空后继续接收后续字符。
-      lines[lines.length - 1] = ''
+      // 裸 \r 表示光标回到当前行开头，下一批普通字符才会覆盖旧内容。
+      // 不能把它当成换行，否则进度条每秒刷新一次就会在 Web 里刷成很多行。
+      detailContentCarriageReturnPending = true
       continue
     }
 
     if (char === '\n') {
       lines.push('')
+      detailContentCarriageReturnPending = false
       continue
     }
 
+    if (detailContentCarriageReturnPending) {
+      lines[lines.length - 1] = ''
+      detailContentCarriageReturnPending = false
+    }
     lines[lines.length - 1] += char
+  }
+
+  return lines.join('\n')
+}
+
+function renderTerminalText(text: string) {
+  let currentLine = ''
+  let pendingCarriageReturn = false
+  const lines: string[] = []
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i] ?? ''
+    if (char === '\r') {
+      if ((text[i + 1] ?? '') === '\n') {
+        lines.push(currentLine)
+        currentLine = ''
+        pendingCarriageReturn = false
+        i++
+        continue
+      }
+      // 历史日志和日志文件也要按终端语义处理裸 \r，只保留同一行的最终覆盖结果。
+      pendingCarriageReturn = true
+      continue
+    }
+
+    if (char === '\n') {
+      lines.push(currentLine)
+      currentLine = ''
+      pendingCarriageReturn = false
+      continue
+    }
+
+    if (pendingCarriageReturn) {
+      currentLine = ''
+      pendingCarriageReturn = false
+    }
+    currentLine += char
+  }
+
+  if (currentLine !== '' || lines.length === 0) {
+    lines.push(currentLine)
   }
 
   return lines.join('\n')
@@ -233,6 +284,7 @@ function formatTime(t: string | null) {
 async function viewDetail(log: any) {
   detailLog.value = log
   detailContent.value = ''
+  detailContentCarriageReturnPending = false
   detailVisible.value = true
   closeLogSSE()
 

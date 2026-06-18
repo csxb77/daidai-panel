@@ -135,7 +135,13 @@ function dispatchEventSegment(segment: string, handlers: EventStreamHandlers) {
   const dataLines: string[] = []
 
   for (const rawLine of segment.split('\n')) {
-    const line = rawLine.trimEnd()
+    // 注意：这里不能对 data 行直接 trimEnd()。
+    // 任务日志里的进度条会把裸 \r 放在 data 内容末尾，用来表示“回到当前行开头覆盖”。
+    // 如果这里把 \r 当普通空白删掉，前端日志组件就再也分不清“覆盖刷新”和“新增一行”了。
+    let line = rawLine
+    if (line.endsWith('\r') && !line.startsWith('data:')) {
+      line = line.slice(0, -1)
+    }
     if (!line || line.startsWith(':')) {
       continue
     }

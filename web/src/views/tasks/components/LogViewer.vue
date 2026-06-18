@@ -45,6 +45,7 @@ let logFlushTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let hiddenAt: number | null = null
 let pendingScrollRestore: number | null = null
+let logTailCarriageReturnPending = false
 
 const hasLogs = computed(() => logLines.value.length > 0 || logTail.value.length > 0)
 const renderedLogText = computed(() => {
@@ -223,11 +224,13 @@ async function fetchLatestLog(retryCount = 0, scrollMode: 'top' | 'bottom' | 'pr
 function resetLogOutput() {
   logLines.value = []
   logTail.value = ''
+  logTailCarriageReturnPending = false
 }
 
 function pushLogLine() {
   logLines.value.push(logTail.value)
   logTail.value = ''
+  logTailCarriageReturnPending = false
 }
 
 function appendLogChunk(chunk: string, commitBoundary = false) {
@@ -245,9 +248,9 @@ function appendLogChunk(chunk: string, commitBoundary = false) {
         i++
         continue
       }
-      // 裸 \r 表示终端希望“回到当前行开头并覆盖原内容”，
-      // 这里只清空当前尾行，不要立刻 push，避免进度条每次刷新都变成新行。
-      logTail.value = ''
+      // 裸 \r 表示终端希望“回到当前行开头”，不是换行。
+      // 这里先标记等待下一批字符覆盖，避免 SSE 分片刚好停在 \r 后面时把进度条临时清空。
+      logTailCarriageReturnPending = true
       endedWithLineBreak = false
       sawCarriageReturn = true
       continue
@@ -260,6 +263,12 @@ function appendLogChunk(chunk: string, commitBoundary = false) {
       continue
     }
 
+    if (logTailCarriageReturnPending) {
+      // 收到裸 \r 后的第一段普通字符，才真正覆盖当前行。
+      // 这样进度条在 Web 面板里会像终端一样留在同一行刷新。
+      logTail.value = ''
+      logTailCarriageReturnPending = false
+    }
     logTail.value += char
     endedWithLineBreak = false
   }
@@ -292,7 +301,9 @@ function flushBufferedLogs() {
   }
 
   for (const chunk of logBuffer) {
-    appendLogChunk(chunk, true)
+    // 不把“每个 SSE 消息结束”当成真实换行。
+    // 真实终端只有遇到 \n / \r\n 才落新行，裸 \r 则继续覆盖当前行。
+    appendLogChunk(chunk)
   }
   logBuffer = []
 
