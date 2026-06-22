@@ -404,6 +404,27 @@ onBeforeUnmount(() => {
   }
 })
 
+// 拖拽时把被拖行每个单元格宽度锁成固定 px，避免 forceFallback 克隆行脱离表格后列宽塌陷
+function lockRowCellWidths(row: HTMLElement | null) {
+  if (!row) return
+  row.querySelectorAll<HTMLElement>('td').forEach((cell) => {
+    const w = cell.offsetWidth
+    cell.style.width = `${w}px`
+    cell.style.minWidth = `${w}px`
+    cell.style.maxWidth = `${w}px`
+    cell.style.boxSizing = 'border-box'
+  })
+}
+function unlockRowCellWidths(row: HTMLElement | null) {
+  if (!row) return
+  row.querySelectorAll<HTMLElement>('td').forEach((cell) => {
+    cell.style.width = ''
+    cell.style.minWidth = ''
+    cell.style.maxWidth = ''
+    cell.style.boxSizing = ''
+  })
+}
+
 async function initSortable() {
   if (sortableInstance) {
     sortableInstance.destroy()
@@ -419,7 +440,8 @@ async function initSortable() {
   try {
     const Sortable = await loadSortable()
     sortableInstance = Sortable.create(el as HTMLElement, {
-      animation: 150,
+      animation: 220,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
       ghostClass: 'sortable-ghost',
       chosenClass: 'sortable-chosen',
       dragClass: 'sortable-drag',
@@ -432,7 +454,14 @@ async function initSortable() {
       ...(isMobile.value
         ? { handle: '.env-mobile-drag-handle', delay: 350, delayOnTouchOnly: true, touchStartThreshold: 8 }
         : { handle: '.env-drag-handle', delay: 0, touchStartThreshold: 4 }),
+      onChoose: (evt: any) => {
+        if (!isMobile.value) lockRowCellWidths(evt.item)
+      },
+      onUnchoose: (evt: any) => {
+        if (!isMobile.value) unlockRowCellWidths(evt.item)
+      },
       onStart: (evt: any) => {
+        if (!isMobile.value) lockRowCellWidths(evt.item)
         updateDragPointer(evt)
         startDragAutoScroll()
       },
@@ -440,6 +469,7 @@ async function initSortable() {
         updateDragPointer(evt)
       },
       onEnd: async (evt: any) => {
+        if (!isMobile.value) unlockRowCellWidths(evt.item)
         stopDragAutoScroll()
         updateDragPointer(evt)
 
@@ -997,11 +1027,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         style="width: 100%"
       >
         <el-table-column type="selection" width="44" />
-        <el-table-column width="32" class-name="env-drag-col">
-          <template #default>
-            <el-icon class="env-drag-handle"><Rank /></el-icon>
-          </template>
-        </el-table-column>
         <el-table-column prop="name" label="名称" min-width="188">
           <template #default="{ row }">
             <div class="env-name-wrap">
@@ -1044,6 +1069,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
               </span>
             </div>
             <span v-else class="env-empty-text">未分组</span>
+          </template>
+        </el-table-column>
+        <el-table-column width="40" align="center" class-name="env-drag-col">
+          <template #default>
+            <el-icon class="env-drag-handle"><Rank /></el-icon>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="92" align="center">
@@ -1233,11 +1263,13 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Toolbar ---- */
+// 工具条：与定时任务页/执行日志页/订阅页对齐——上下统一间距、左右两区一行排布、gap 一致；
+// 分组筛选（特有元素）沿用与搜索框相同的 12px 行内间距，宽度保持业务所需的 220px。
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
 
@@ -1253,7 +1285,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   &__right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
 
   &__search {
@@ -1265,10 +1297,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
+// 状态分段控件：与定时任务页/执行日志页/订阅页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   padding: 3px;
   gap: 2px;
 }
@@ -1282,7 +1315,10 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
 
   &:hover {
@@ -1292,7 +1328,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
@@ -1303,17 +1339,19 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Table Card ---- */
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
 
 /* ---- Pagination Bar ---- */
+// 分页条：与定时任务页/执行日志页/订阅页一致的间距收敛（margin-top 14px）
 .pagination-bar {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1348,14 +1386,15 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 /* ---- Table internals ---- */
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
 
   .el-table__header-wrapper th {
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid var(--el-border-color-light);
   }
 
   .el-table__row td {
-    border-bottom: 1px solid #f5f5f5;
+    border-bottom: 1px solid var(--el-border-color-lighter);
   }
 
   .el-table__cell {
@@ -1392,17 +1431,18 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 12px;
 }
 
+// 桌面空态/骨架容器（特有元素）：圆角/阴影对齐卡片令牌，明暗自动适配；保留自定义空态结构与渐变观感
 .env-desktop-state {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 360px;
   padding: 28px 24px;
-  border: 1px solid color-mix(in srgb, var(--el-border-color) 70%, transparent);
-  border-radius: 18px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--dd-card-radius);
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--el-fill-color-lighter) 62%, white) 0%, var(--el-bg-color) 100%);
-  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.05);
+  box-shadow: var(--dd-shadow-card);
 }
 
 .env-desktop-state--loading {
@@ -1412,11 +1452,12 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 16px;
 }
 
+// 骨架屏（特有元素）：底色走 --el-fill-color 系令牌，微光用半透明表面色，明暗皆不串色
 .env-skeleton {
   position: relative;
   overflow: hidden;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--el-fill-color) 82%, white);
+  border-radius: var(--dd-card-radius);
+  background: var(--el-fill-color);
 }
 
 .env-skeleton::after {
@@ -1427,7 +1468,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   background: linear-gradient(
     90deg,
     transparent 0%,
-    rgba(255, 255, 255, 0.6) 48%,
+    color-mix(in srgb, var(--el-bg-color) 70%, transparent) 48%,
     transparent 100%
   );
   animation: env-skeleton-shimmer 1.35s ease-in-out infinite;
@@ -1480,6 +1521,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 10px;
 }
 
+// 移动端拖拽手柄（特有元素）：色板已走令牌，过渡统一到 motion/ease 令牌
 .env-mobile-drag-handle {
   flex-shrink: 0;
   width: 30px;
@@ -1493,7 +1535,10 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   color: var(--el-text-color-secondary);
   cursor: grab;
   touch-action: none;
-  transition: background 0.18s, color 0.18s, border-color 0.18s;
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   -webkit-user-select: none;
   user-select: none;
   padding: 0;
@@ -1518,11 +1563,12 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   flex: 1 1 calc(33.33% - 6px);
 }
 
+// 置顶移动卡（特有元素）：保留置顶语义的橙色左缘标识，环境光阴影对齐卡片令牌
 .env-card--pinned {
   border-color: rgba(245, 166, 35, 0.28);
   box-shadow:
     inset 4px 0 0 #f5a623,
-    0 10px 28px rgba(15, 23, 42, 0.07);
+    var(--dd-shadow-card);
 }
 
 /* ---- Cell Styles ---- */
@@ -1677,11 +1723,12 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   color: var(--el-text-color-regular);
 }
 
+// 桌面拖拽手柄（特有元素）：色板已走令牌，过渡统一到 motion/ease 令牌
 .env-drag-handle {
   cursor: grab;
   color: var(--el-text-color-placeholder);
   font-size: 16px;
-  transition: color 0.15s;
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     color: var(--el-text-color-secondary);
@@ -1698,20 +1745,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 .top-action-active {
   box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.2);
-}
-
-.sortable-ghost {
-  opacity: 0.4;
-  background: var(--el-color-primary-light-9) !important;
-}
-
-.sortable-chosen {
-  background: color-mix(in srgb, var(--el-color-primary) 10%, var(--el-bg-color)) !important;
-}
-
-.sortable-drag {
-  opacity: 0.96 !important;
-  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.16);
 }
 
 /* ---- Pinned Row ---- */
@@ -1827,5 +1860,66 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   .env-card__actions > * {
     flex: 1 1 calc(50% - 4px);
   }
+}
+
+// ===== 入场动画 =====
+// 与定时任务页/执行日志页/订阅页统一：只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
+// 不给表格每一行或每张移动卡做 stagger；骨架屏/桌面空态（.env-desktop-state）不参与入场，避免与其自身加载/空态冲突。
+// 时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-envs-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-envs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
+}
+
+// 轻微错落：工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
+}
+</style>
+
+<style lang="scss">
+/* 这些类由 sortablejs 在运行时动态加到 el-table 行 / body 上的拖拽克隆上，
+   不在本组件 scoped 作用域内，必须用全局样式才能命中。 */
+
+/* 被拖起的克隆行：放大悬浮 + 多层立体阴影 + 主色描边，做出 3D 抬起质感。
+   注意用 scale 独立属性，绝不能用 transform（会覆盖 sortable 的 translate3d 跟手定位）。 */
+.sortable-drag {
+  background: var(--el-bg-color);
+  opacity: 1 !important;
+  scale: 1.03;
+  border-radius: 10px;
+  cursor: grabbing;
+  box-shadow:
+    0 2px 8px rgba(15, 23, 42, 0.14),
+    0 26px 54px rgba(15, 23, 42, 0.28),
+    0 0 0 1px color-mix(in srgb, var(--el-color-primary) 32%, transparent);
+}
+
+/* 落点占位：高亮"插槽"，清楚指示会落到哪 */
+.sortable-ghost {
+  background: var(--el-color-primary-light-9) !important;
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+  border-radius: 8px;
+}
+.sortable-ghost > td {
+  opacity: 0.25;
+}
+
+/* 被选中的原行 */
+.sortable-chosen {
+  cursor: grabbing;
 }
 </style>
