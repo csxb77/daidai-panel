@@ -419,20 +419,10 @@ a {
 
 .el-table .el-checkbox {
   .el-checkbox__inner {
-    width: 18px;
-    height: 18px;
-
-    &::after {
-      box-sizing: content-box;
-      left: 6px;
-      top: 2px;
-      width: 4px;
-      height: 8px;
-      border-width: 2px;
-      border-left: 0;
-      border-top: 0;
-      transform-origin: center;
-    }
+    // 用整体等比缩放放大复选框，自带对勾会随之等比放大且不变形；
+    // 不要再手动改 ::after 的尺寸/定位，否则对勾会错位（这是之前的 bug）。
+    transform: scale(1.15);
+    transform-origin: center;
   }
 
   .el-checkbox__input {

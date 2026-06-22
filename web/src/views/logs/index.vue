@@ -537,9 +537,9 @@ onBeforeUnmount(() => {
 <template>
   <div class="logs-page dd-fixed-page dd-page-hide-heading">
     <!-- ======= Toolbar ======= -->
-    <div class="toolbar animate-fade-in-up delay-50">
+    <div class="toolbar">
       <div class="toolbar__left">
-        <div class="status-tabs status-tabs--cinematic">
+        <div class="status-tabs">
           <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
           <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
           <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
@@ -571,10 +571,9 @@ onBeforeUnmount(() => {
     <!-- ======= Mobile Card Layout ======= -->
     <div v-if="isMobile" class="dd-mobile-list" v-loading="loading">
       <div
-        v-for="(row, cardIndex) in logs"
+        v-for="row in logs"
         :key="row.id"
-        class="dd-mobile-card log-card log-card--cinematic"
-        :style="{ animationDelay: `${cardIndex * 36}ms` }"
+        class="dd-mobile-card log-card"
       >
         <div class="dd-mobile-card__header">
           <div class="dd-mobile-card__title-wrap">
@@ -617,9 +616,8 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- ======= Desktop Table ======= -->
-    <div v-else class="table-card animate-fade-in-up delay-100">
+    <div v-else class="table-card">
       <el-table
-        class="logs-table-cinematic"
         v-loading="loading"
         :data="logs"
         style="width: 100%"
@@ -828,11 +826,12 @@ onBeforeUnmount(() => {
 }
 
 /* =============== Toolbar =============== */
+// 工具条：与定时任务页对齐——上下统一间距、左右两区一行排布、gap 一致
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
 
@@ -848,7 +847,7 @@ onBeforeUnmount(() => {
   &__right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
 
   &__search {
@@ -856,18 +855,17 @@ onBeforeUnmount(() => {
   }
 }
 
+// 状态分段控件：与定时任务页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
 .status-tabs {
   display: inline-flex;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  position: relative;
   border-radius: 7px;
   border: none;
   background: transparent;
@@ -875,30 +873,20 @@ onBeforeUnmount(() => {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s, transform 0.18s ease;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
 
   &:hover {
     color: var(--el-text-color-primary);
-    transform: translateY(-1px);
   }
 
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 6px 16px rgba(64, 158, 255, 0.12);
-
-    &::after {
-      content: "";
-      position: absolute;
-      left: 10px;
-      right: 10px;
-      bottom: 2px;
-      height: 2px;
-      border-radius: 999px;
-      background: var(--el-color-primary);
-      opacity: 0.75;
-    }
+    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
@@ -906,14 +894,14 @@ onBeforeUnmount(() => {
 .batch-actions {
   display: flex;
   gap: 8px;
-  animation: dd-batch-actions-in 220ms var(--dd-ease-emphasized) both;
 }
 
 /* =============== Table Card =============== */
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -952,16 +940,16 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-placeholder);
 }
 
+// 操作列：与定时任务页一致的轻量行内按钮组（去掉胶囊底/写死白色内阴影）
 .action-btns {
   display: flex;
-  border: 1px solid color-mix(in srgb, var(--el-border-color-lighter) 86%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.5);
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
+  gap: 4px;
+
+  :deep(.el-button) {
+    padding: 4px 8px;
+  }
 }
 
 :deep(.tag-with-dot) {
@@ -971,19 +959,20 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
 
   .el-table__header-wrapper th {
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid var(--el-border-color-light);
   }
 
   .el-table__row td {
-    border-bottom: 1px solid #f5f5f5;
+    border-bottom: 1px solid var(--el-border-color-lighter);
     transition: background-color 0.18s ease;
   }
 
   .el-table__body tr:hover > td {
-    background: color-mix(in srgb, var(--el-color-primary-light-9) 76%, white);
+    background: var(--el-color-primary-light-9);
   }
 
   .el-table__cell {
@@ -992,8 +981,9 @@ onBeforeUnmount(() => {
 }
 
 /* =============== Pagination =============== */
+// 分页条：与定时任务页一致的间距收敛
 .pagination-bar {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1365,67 +1355,30 @@ onBeforeUnmount(() => {
   .detail-hero-title { font-size: 15.5px; }
 }
 
-.log-card--cinematic {
-  animation: dd-log-card-in 320ms var(--dd-ease-emphasized) both;
-}
-
-.logs-table-cinematic {
-  animation: dd-log-table-in 340ms var(--dd-ease-emphasized) both;
-}
-
-@keyframes dd-log-card-in {
+// ===== 入场动画 =====
+// 与定时任务页统一：只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
+// 不给表格每一行或每张移动卡做 stagger。时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-logs-rise-in {
   from {
     opacity: 0;
-    transform: translate3d(0, 14px, 0) scale3d(0.988, 0.988, 1);
+    transform: translateY(12px);
   }
   to {
     opacity: 1;
-    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+    transform: translateY(0);
   }
 }
 
-@keyframes dd-log-table-in {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 14px, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-logs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
 }
 
-@keyframes dd-batch-actions-in {
-  from {
-    opacity: 0;
-    transform: translate3d(10px, 0, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
+// 轻微错落：工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .log-card--cinematic,
-  .logs-table-cinematic,
-  .batch-actions {
-    animation: none;
-  }
-}
-
-</style>
-
-<style lang="scss">
-html.dark {
-  .logs-page .toolbar__right,
-  .logs-page .action-btns {
-    background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black);
-    border-color: rgba(255,255,255,0.08);
-  }
-
-  .logs-page .status-tabs {
-    background: color-mix(in srgb, var(--el-fill-color-light) 72%, black);
-  }
-}
 </style>
