@@ -350,7 +350,8 @@ watch(
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  /* 卡片表面用令牌，明暗自动适配（卡片边框/圆角/阴影由 index.vue 负责） */
+  background: var(--el-bg-color);
   animation: dd-editor-shell-in 360ms var(--dd-ease-emphasized) both;
   font-family: var(--dd-font-ui);
   overflow: hidden;
@@ -459,9 +460,10 @@ watch(
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  border-bottom: 1px solid #f0f0f0;
+  /* 卡片内顶部分区线（明暗令牌自适配） */
+  border-bottom: 1px solid var(--el-border-color-lighter);
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.03);
-  background: #fff;
+  background: var(--el-bg-color);
   flex-shrink: 0;
   position: relative;
   min-width: 0;
@@ -725,11 +727,12 @@ watch(
   justify-content: space-between;
   gap: 8px;
   padding: 6px 18px;
-  border-top: 1px solid #f0f0f0;
+  /* 卡片内底部分区线 + 次级底色（明暗令牌自适配） */
+  border-top: 1px solid var(--el-border-color-lighter);
   font-family: var(--dd-font-mono);
   font-size: 11px;
   color: var(--el-text-color-placeholder);
-  background: #fafafa;
+  background: var(--el-fill-color-light);
 }
 
 .status-group {

@@ -131,7 +131,6 @@ watch(searchKeyword, (val) => {
 <style scoped lang="scss">
 .scripts-sidebar {
   width: 300px;
-  box-shadow: 8px 0 24px rgba(15, 23, 42, 0.03);
   min-width: 300px;
   height: 100%;
   min-height: 0;
@@ -139,8 +138,9 @@ watch(searchKeyword, (val) => {
   flex-direction: column;
   gap: 0;
   padding: 0;
-  background: #fff;
-  border-right: 1px solid #f0f0f0;
+  /* 卡片表面/边框/阴影由 index.vue 的 :deep(.scripts-sidebar) 统一负责，
+     这里不再画 border-right 分隔线与方向性投影（两卡独立后无需分隔） */
+  background: var(--el-bg-color);
   box-sizing: border-box;
   font-family: var(--dd-font-ui);
   overflow: hidden;
@@ -429,8 +429,6 @@ watch(searchKeyword, (val) => {
   width: 100%;
   min-width: 0;
   min-height: 0;
-  border-right: none;
-  border-bottom: 1px solid #f0f0f0;
 
   .sidebar-toolbar {
     padding: 0;
@@ -448,11 +446,8 @@ watch(searchKeyword, (val) => {
 
 <style lang="scss">
 html.dark {
-  .scripts-sidebar {
-    background: #171717;
-    border-right-color: rgba(255,255,255,0.08);
-  }
-
+  /* 暗色卡面/边框由 --el-bg-color 与 index.vue 的卡片样式自动适配，
+     此处仅保留内部分区线与控件底色的暗色覆盖 */
   .scripts-sidebar .sidebar-top,
   .scripts-sidebar .sidebar-footer {
     border-color: rgba(255,255,255,0.08);

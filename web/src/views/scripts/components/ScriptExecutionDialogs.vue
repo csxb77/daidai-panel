@@ -188,6 +188,30 @@ function markDebugCodeChanged() {
   background: var(--el-bg-color);
 }
 
+/*
+  整屏滑入后，内部两块面板错落淡入，营造层次感。
+  只用 opacity，不用 transform：.debug-code-panel 内含 Monaco，残留 transform
+  会成为其 fixed 浮层的包含块导致错位；opacity 结束为 1 不产生层叠上下文，安全。
+*/
+.debug-code-panel {
+  animation: dd-script-panel-fade var(--dd-motion-normal) var(--dd-ease-decelerate) both;
+  animation-delay: 60ms;
+}
+
+.debug-log-panel {
+  animation: dd-script-panel-fade var(--dd-motion-normal) var(--dd-ease-decelerate) both;
+  animation-delay: 140ms;
+}
+
+@keyframes dd-script-panel-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
 .debug-dialog-container {
   height: 100%;
   min-height: 0;
@@ -284,6 +308,32 @@ function markDebugCodeChanged() {
     flex-shrink: 0;
     padding: 12px 18px;
     border-top: 1px solid var(--el-border-color-lighter);
+  }
+}
+
+/*
+  打开时整屏工作区从底部滑入升起，比默认缩放更有"工作台升起"的高级感。
+  用 .el-dialog.script-execution-fullscreen-dialog 双 class 提高特异性，
+  覆盖全局 .el-dialog / .dialog-fade-enter-active 的默认进场动画。
+*/
+.el-dialog.script-execution-fullscreen-dialog {
+  animation: dd-script-sheet-up var(--dd-motion-page) var(--dd-ease-decelerate) !important;
+  transform-origin: center bottom;
+}
+
+/*
+  不加 both / forwards：动画收尾后 transform 自然清空。
+  否则全屏 dialog 残留 transform 会成为 Monaco 内部 position:fixed 浮层
+  （补全/悬浮提示）的包含块，导致弹层错位。to 为单位变换，视觉无跳变。
+*/
+@keyframes dd-script-sheet-up {
+  from {
+    opacity: 0;
+    transform: translateY(40px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
   }
 }
 </style>

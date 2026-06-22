@@ -296,7 +296,7 @@ async function handleCancelEdit() {
   }
 }
 
-/* ---- Workspace (3-panel container) ---- */
+/* ---- Workspace（两卡容器：透明 flex，卡片间留间隙）---- */
 .scripts-workspace {
   display: flex;
   flex: 1 1 auto;
@@ -304,28 +304,31 @@ async function handleCancelEdit() {
   height: 0;
   min-width: 0;
   min-height: 0;
-  gap: 0;
-  background: var(--scripts-surface);
-  border-radius: 14px;
-  overflow: hidden;
-  border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  /* 目录树卡与编辑器卡之间的间隙 */
+  gap: 14px;
+  /* 容器本身透明，圆角/边框/阴影下放到两张子卡 */
+  background: transparent;
 }
 
-/* ---- Sidebar deep overrides ---- */
+/* ---- 目录树卡（独立圆角卡片）---- */
 :deep(.scripts-sidebar) {
   flex: 0 0 300px;
   min-height: 0;
-  overflow: hidden;
-  border-right: 1px solid var(--el-border-color-lighter);
+  overflow: hidden; /* 裁切卡片圆角 */
   background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
 }
 
-/* ---- Editor deep overrides ---- */
+/* ---- 编辑器卡（独立圆角卡片）---- */
 :deep(.scripts-editor) {
   min-height: 0;
-  overflow: hidden;
+  overflow: hidden; /* 裁切卡片圆角 */
   background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
 }
 
 :deep(.editor-hero) {
@@ -352,26 +355,21 @@ async function handleCancelEdit() {
     }
   }
 
+  /* 移动端：两卡纵向堆叠，各占满宽度并保留卡片圆角 */
   .scripts-workspace {
     flex-direction: column;
     flex: 1 1 auto;
     width: 100%;
     height: 100%;
     min-height: 0;
-    border-radius: 0;
-    border: none;
-    box-shadow: none;
-    overflow: hidden;
+    gap: 12px;
 
     :deep(.scripts-sidebar) {
       width: 100%;
       min-width: unset;
       flex: 1 1 auto;
       min-height: 0;
-      overflow: hidden;
-      overflow: auto;
-      border-right: none;
-      border-bottom: 1px solid #f0f0f0;
+      overflow: hidden; /* 裁圆角；目录滚动由内部 .sidebar-tree 负责 */
     }
 
     :deep(.scripts-editor) {
@@ -381,6 +379,7 @@ async function handleCancelEdit() {
     }
   }
 
+  /* 切到「显示编辑器」时隐藏目录卡、铺满编辑器卡 */
   .scripts-workspace.mobile-show-editor {
     :deep(.scripts-sidebar) {
       display: none !important;
@@ -406,11 +405,12 @@ async function handleCancelEdit() {
     }
   }
 
+  /* compact：同样纵向堆叠两卡，保留卡片圆角与间隙 */
   .scripts-workspace {
     flex-direction: column;
     min-height: 0;
     height: 0;
-    border-radius: 14px;
+    gap: 12px;
 
     :deep(.scripts-sidebar) {
       width: 100%;
@@ -418,8 +418,6 @@ async function handleCancelEdit() {
       flex: 1 1 auto;
       min-height: 0;
       overflow: hidden;
-      border-right: none;
-      border-bottom: 1px solid #f0f0f0;
     }
 
     :deep(.scripts-editor) {
