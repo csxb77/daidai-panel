@@ -829,17 +829,22 @@ function getChannelConfigSummary(row: any): string[] {
   .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 6px 0 0; line-height: 1.6; max-width: 720px; }
 }
 
+// 工具条：与定时任务页/订阅管理页统一（margin:14px 0、左区 gap 12、右区 gap 10）
 .toolbar {
-  display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap;
-  &__left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1; min-width: 0; }
-  &__right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  display: flex; justify-content: space-between; align-items: center; margin: 14px 0; gap: 12px; flex-wrap: wrap;
+  &__left { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: 1; min-width: 0; }
+  &__right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
   &__search { width: 260px; }
   &__filter { width: 130px; }
 }
 
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
-  background: var(--el-bg-color); border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04); border: 1px solid var(--el-border-color-lighter); overflow: hidden;
+  background: var(--el-bg-color);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
+  border: 1px solid var(--el-border-color-lighter);
+  overflow: hidden;
 }
 
 .channel-name-cell {
@@ -848,6 +853,8 @@ function getChannelConfigSummary(row: any): string[] {
   gap: 10px;
 }
 
+// 渠道头像：底色/文字色保留按类型的品牌识别色（来自模板内联 style），
+// 这里只统一通用尺寸与轻边框，边框走令牌以适配明暗。
 .channel-avatar {
   width: 36px;
   height: 36px;
@@ -859,6 +866,7 @@ function getChannelConfigSummary(row: any): string[] {
   font-weight: 700;
   flex-shrink: 0;
   letter-spacing: 0;
+  border: 1px solid var(--el-border-color-lighter);
 }
 
 .channel-name-info {
@@ -922,8 +930,9 @@ function getChannelConfigSummary(row: any): string[] {
   display: flex; align-items: center; justify-content: center; gap: 2px;
 }
 
+// 分页条：与定时任务页/订阅管理页一致的间距收敛
 .pagination-bar {
-  margin-top: 20px; display: flex; justify-content: space-between; align-items: center; padding: 0 4px;
+  margin-top: 14px; display: flex; justify-content: space-between; align-items: center; padding: 0 4px;
 }
 
 .pagination-total {
@@ -935,9 +944,10 @@ function getChannelConfigSummary(row: any): string[] {
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
-  .el-table__header-wrapper th { border-bottom: 1px solid #e8e8e8; }
-  .el-table__row td { border-bottom: 1px solid #f5f5f5; }
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
+  .el-table__header-wrapper th { border-bottom: 1px solid var(--el-border-color-light); }
+  .el-table__row td { border-bottom: 1px solid var(--el-border-color-lighter); }
   .el-table__cell { padding: 12px 0; }
 }
 
@@ -950,5 +960,31 @@ function getChannelConfigSummary(row: any): string[] {
     &__filter { width: 100% !important; }
     &__right { justify-content: flex-end; }
   }
+}
+
+// ===== 入场动画 =====
+// 与定时任务页/订阅管理页统一：只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
+// 不给表格每一行或每张移动卡做 stagger。时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-notify-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-notify-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
+}
+
+// 轻微错落：工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
 }
 </style>
