@@ -88,6 +88,9 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  // 给 body 也铺页面底色：外壳 .layout-container 的 margin-top 因 #app 未形成 BFC 会向上塌陷穿透到 body，
+  // 若 body 是默认白底，外壳顶部那条间隙会露出白色。这里让 body 底色 = 页面底色，任何间隙都显示灰蓝，根治顶部白条。
+  background: var(--el-bg-color-page);
 }
 
 @media screen and (min-width: 769px) {
@@ -99,6 +102,8 @@ body {
 
 #app {
   height: 100%;
+  // 外壳留白处露出的页面底色（外壳本身用 --el-bg-color）
+  background: var(--el-bg-color-page);
 }
 
 .dd-scroll-page,
@@ -161,6 +166,19 @@ body {
   --dd-page-padding: 20px;
   --dd-card-radius: 12px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  // ===== 表面质感令牌（A+C 混搭，预览 data-scheme="d"）=====
+  // 圆角刻度：外壳 22px、卡片沿用 14px、小控件 10px。
+  --dd-radius-shell: 22px;
+  --dd-radius-sm: 10px;
+  // 外壳四周留白（桌面），矮屏 media 内会收小、移动端归零。
+  --dd-shell-margin: 18px;
+  // 阴影刻度（明色用 rgba(15,23,42,...)，暗色在 html.dark 覆盖为 rgba(0,0,0,...)）。
+  //  - card：卡片静置；card-hover：在静置基础上叠品牌色辉光；shell：外壳更大更柔。
+  --dd-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 20px rgba(15, 23, 42, 0.05);
+  --dd-shadow-card-hover: 0 2px 6px rgba(15, 23, 42, 0.06), 0 16px 36px rgba(64, 158, 255, 0.1);
+  --dd-shadow-shell: 0 1px 2px rgba(15, 23, 42, 0.05), 0 24px 60px rgba(15, 23, 42, 0.08);
+  // 页面底色（外壳留白处可见，对齐预览）：映射 Element Plus 页底变量。
+  --el-bg-color-page: #f4f6fb;
   // 全局动效 token（A+C 混搭方案）：
   //  - 切页 / 布局 / 浮层这类“位移到位”的动画走 decelerate / emphasized，求顺滑、不越界；
   //  - 按钮按下、卡片与图标 hover 这类“缩放 / 浮起”的微交互走 spring，带轻回弹，更灵动有高级感。
@@ -251,7 +269,8 @@ a {
 .el-card {
   border-radius: var(--dd-card-radius);
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  // 静置阴影统一引用令牌（明暗各一套）
+  box-shadow: var(--dd-shadow-card);
   transition:
     border-color var(--dd-motion-fast) var(--dd-ease-standard),
     box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
@@ -259,11 +278,9 @@ a {
   overflow: hidden;
 
   &:hover {
-    // 上浮用 spring 轻回弹，阴影叠一层淡淡的品牌色辉光，质感更高级
+    // 上浮用 spring 轻回弹，阴影叠一层淡淡的品牌色辉光，质感更高级（统一引用令牌）
     transform: translateY(-2px);
-    box-shadow:
-      0 2px 6px rgba(15, 23, 42, 0.06),
-      0 16px 36px rgba(64, 158, 255, 0.1);
+    box-shadow: var(--dd-shadow-card-hover);
   }
 
   .el-card__header {
@@ -555,13 +572,19 @@ html.dark {
   --dd-log-bg-color: #0f172a;
   --dd-log-text-color: #e2e8f0;
   --dd-log-theme-mode: dark;
+  // ===== 表面质感令牌暗色版（明色用 rgba(15,23,42,...)，暗色用 rgba(0,0,0,...)）=====
+  --dd-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 6px 20px rgba(0, 0, 0, 0.28);
+  --dd-shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.3), 0 16px 36px rgba(64, 158, 255, 0.1);
+  --dd-shadow-shell: 0 1px 2px rgba(0, 0, 0, 0.3), 0 24px 60px rgba(0, 0, 0, 0.45);
+  // 暗色页面底色（对齐预览）
+  --el-bg-color-page: #0b1120;
 
   .el-card {
     border-color: var(--el-border-color-darker);
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
 
+    // 静置/hover 阴影改为引用暗色令牌（与 :root 写死值统一）
     &:hover {
-      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+      box-shadow: var(--dd-shadow-card-hover);
     }
   }
 
@@ -1032,14 +1055,13 @@ html.dark {
     transform var(--dd-motion-fast) var(--dd-ease-spring),
     box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
     border-color var(--dd-motion-fast) var(--dd-ease-standard);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  // 静置阴影统一引用令牌
+  box-shadow: var(--dd-shadow-card);
 
   &:hover {
-    // 上浮 + 品牌色辉光 + 描边微亮，hover 时统计卡片更有“浮起来”的层次感
+    // 上浮 + 品牌色辉光 + 描边微亮，hover 时统计卡片更有“浮起来”的层次感（阴影引用令牌）
     transform: translateY(-3px);
-    box-shadow:
-      0 2px 6px rgba(15, 23, 42, 0.06),
-      0 16px 36px rgba(64, 158, 255, 0.1);
+    box-shadow: var(--dd-shadow-card-hover);
     border-color: color-mix(in srgb, var(--el-color-primary) 26%, var(--el-border-color-lighter));
   }
 
@@ -1260,7 +1282,8 @@ html.dark {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 14px;
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  // 静置阴影统一引用令牌
+  box-shadow: var(--dd-shadow-card);
 }
 
 .dd-data-card__toolbar {

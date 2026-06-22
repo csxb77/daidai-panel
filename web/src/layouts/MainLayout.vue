@@ -380,8 +380,18 @@ async function loadVersion() {
 </template>
 
 <style scoped lang="scss">
+// ==================== 悬浮圆角外壳 ====================
+// 桌面：在最外层包一层留白 + 圆角 + 阴影 + 描边的「悬浮外壳」，包住侧栏 + 主区。
+// 外壳自身用表面色，留白处露出 #app 的页面底色；overflow: hidden 用于圆角裁切。
+// 注意：内部滚动链（layout-main / route-shell / dd-*-page）保持不动，外壳只在最外层加壳。
 .layout-container {
-  height: 100dvh;
+  margin: var(--dd-shell-margin);
+  // 高度扣掉上下两侧留白，保证外壳整体在视口内、不溢出
+  height: calc(100dvh - var(--dd-shell-margin) * 2);
+  border-radius: var(--dd-radius-shell);
+  box-shadow: var(--dd-shadow-shell);
+  border: 1px solid var(--el-border-color-light);
+  background: var(--el-bg-color);
   overflow: hidden;
 }
 
@@ -1067,6 +1077,11 @@ async function loadVersion() {
 }
 
 @media screen and (max-height: 820px) and (min-width: 769px) {
+  // 矮屏：外壳四周留白收小，给内容腾出更多垂直空间
+  .layout-container {
+    --dd-shell-margin: 10px;
+  }
+
   .layout-header {
     height: 52px;
     padding: 0 16px;
@@ -1138,6 +1153,15 @@ async function loadVersion() {
 
 // ==================== Mobile responsive ====================
 @media screen and (max-width: 768px) {
+  // 移动端：取消悬浮外壳，回到全屏，避免小屏留白浪费；drawer 行为不变
+  .layout-container {
+    margin: 0;
+    height: 100dvh;
+    border-radius: 0;
+    box-shadow: none;
+    border: none;
+  }
+
   .layout-header {
     height: 54px;
     padding: 0 12px;
