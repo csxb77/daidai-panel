@@ -338,13 +338,6 @@ function openLogViewer(task: any) {
   logViewerVisible.value = true
 }
 
-function openLatestResultLog(task: any) {
-  logViewerTaskId.value = task.id
-  logViewerTaskName.value = `${task.name} · 最近结果`
-  logViewerMode.value = 'latest'
-  logViewerVisible.value = true
-}
-
 function openLogFiles(task: any) {
   logFilesTaskId.value = task.id
   logFilesTaskName.value = task.name
@@ -724,14 +717,6 @@ async function handleImport(event: Event) {
                   <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
                     {{ getRunStatusText(row.last_run_status) }}
                   </el-tag>
-                  <button
-                    v-if="row.last_run_status !== null"
-                    type="button"
-                    class="last-run-result__link"
-                    @click="openLatestResultLog(row)"
-                  >
-                    查看结果
-                  </button>
                 </div>
               </div>
             </div>
@@ -872,14 +857,6 @@ async function handleImport(event: Event) {
               <el-tag :type="getRunStatusType(row.last_run_status)" size="small" round>
                 {{ getRunStatusText(row.last_run_status) }}
               </el-tag>
-              <button
-                v-if="row.last_run_status !== null"
-                type="button"
-                class="last-run-result__link"
-                @click="openLatestResultLog(row)"
-              >
-                查看结果
-              </button>
             </div>
           </template>
         </el-table-column>
@@ -996,11 +973,12 @@ async function handleImport(event: Event) {
   }
 }
 
+// 工具条：与上方 ViewManager 留出协调间距，左右两区一行排布、gap 统一
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
 
@@ -1016,7 +994,7 @@ async function handleImport(event: Event) {
   &__right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
 
   &__search {
@@ -1024,10 +1002,11 @@ async function handleImport(event: Event) {
   }
 }
 
+// 状态分段控件：对齐全站统一的 .dd-seg-group / .dd-seg-btn 观感（胶囊容器 + 选中态白底品牌色 + 轻阴影）
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   padding: 3px;
   gap: 2px;
 }
@@ -1041,7 +1020,10 @@ async function handleImport(event: Event) {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
 
   &:hover {
@@ -1051,7 +1033,7 @@ async function handleImport(event: Event) {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
@@ -1067,10 +1049,11 @@ async function handleImport(event: Event) {
   gap: 5px;
 }
 
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex:1 + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1147,7 +1130,7 @@ async function handleImport(event: Event) {
 
   &--type {
     background: rgba(64, 158, 255, 0.08);
-    color: #409eff;
+    color: var(--el-color-primary);
     border-color: transparent;
   }
 }
@@ -1182,22 +1165,6 @@ async function handleImport(event: Event) {
   gap: 4px;
 }
 
-.last-run-result__link {
-  padding: 0;
-  border: none;
-  background: transparent;
-  color: var(--el-color-primary);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  transition: color 0.15s ease;
-
-  &:hover {
-    color: var(--el-color-primary-dark-2);
-    text-decoration: underline;
-  }
-}
-
 .action-btns {
   display: flex;
   align-items: center;
@@ -1209,8 +1176,9 @@ async function handleImport(event: Event) {
   }
 }
 
+// 分页条：与表格卡视觉衔接，间距/字号收敛
 .pagination-bar {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1256,14 +1224,15 @@ async function handleImport(event: Event) {
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
 
   .el-table__header-wrapper th {
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid var(--el-border-color-light);
   }
 
   .el-table__row td {
-    border-bottom: 1px solid #f5f5f5;
+    border-bottom: 1px solid var(--el-border-color-lighter);
   }
 
   .el-table__cell {
@@ -1350,5 +1319,31 @@ async function handleImport(event: Event) {
   .batch-actions {
     flex-wrap: wrap;
   }
+}
+
+// ===== 入场动画 =====
+// 只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
+// 不给表格每一行做 stagger（行数多会卡）。时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-tasks-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-tasks-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
+}
+
+// 轻微错落：工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
 }
 </style>
