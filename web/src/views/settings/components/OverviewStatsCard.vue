@@ -46,9 +46,10 @@ defineProps<{
 @use './config-card-shared.scss' as *;
 
 .stats-card {
-  border-radius: 14px;
+  // 圆角/阴影对齐设计令牌（原写死阴影在暗色下不会变深，统一为 --dd-shadow-card）
+  border-radius: var(--dd-card-radius);
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  box-shadow: var(--dd-shadow-card);
   height: 100%;
 }
 

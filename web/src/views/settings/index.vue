@@ -527,9 +527,10 @@ watch(
   font-weight: 500;
 }
 
+// 概览主网格：入场淡入上移，幅度小、走切页动效令牌（reduced-motion 由 global.scss 统一降级）
 .overview-grid {
   display: grid;
-  animation: fadeInUp 0.34s var(--dd-ease-emphasized) both;
+  animation: dd-settings-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
   margin-bottom: 16px;
@@ -538,48 +539,70 @@ watch(
 :deep(.el-tabs) {
   .el-tabs__header {
     margin-bottom: 20px;
+    // 整排标签栏右移，让首个标签「概览」左侧留出呼吸空间；
+    // nav-wrap（含标签、active-bar 下划线、::after 轨道线）整体右移、对齐不变
+    padding-left: 16px;
   }
 
+  // 所有标签下方的 1px 细线作为下划线指示条的轨道
   .el-tabs__nav-wrap::after {
     height: 1px;
     background-color: color-mix(in srgb, var(--el-border-color-lighter) 82%, transparent);
   }
 
-  .el-tabs__nav-scroll {
-    padding: 4px;
-    border-radius: 14px;
-    background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
-  }
-
   .el-tabs__item {
     font-size: 14px;
-    border-radius: 10px;
-    transition: color 0.18s ease, background-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+    // hover / 选中过渡统一走快速档动效令牌，与全站一致
+    transition:
+      color var(--dd-motion-fast) var(--dd-ease-standard);
 
     &:hover {
-      transform: translateY(-1px);
+      // 未选中项 hover 时用品牌色提示
+      color: var(--el-color-primary);
     }
 
     &.is-active {
       font-weight: 600;
-      background: color-mix(in srgb, var(--el-bg-color) 94%, transparent);
-      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+      // 选中项仅用品牌色文字，配合底部下划线指示条
+      color: var(--el-color-primary);
     }
   }
 
+  // 下划线指示条：品牌色，跟随选中项滑动，无填充背景不会被裁切
   .el-tabs__active-bar {
-    display: none;
+    height: 3px;
+    border-radius: 3px;
+    background-color: var(--el-color-primary);
   }
 }
 
+// 概览统计卡：夹在两个网格之间，给同款入场动画保持节奏一致（轻微延迟错落）
+:deep(.stats-card) {
+  animation: dd-settings-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) 30ms both;
+}
+
+// 概览信息网格：入场动画与主网格一致，轻微延迟形成克制的错落
 .overview-info-grid {
   display: grid;
-  animation: fadeInUp 0.4s var(--dd-ease-emphasized) both;
+  animation: dd-settings-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) 60ms both;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
 
   :deep(.mt-card) {
     margin-top: 0;
+  }
+}
+
+// 设置页入场动画：小幅淡入上移，避免大量子元素逐个 stagger
+@keyframes dd-settings-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }
 
@@ -612,13 +635,8 @@ watch(
 
 <style lang="scss">
 html.dark {
-  .settings-page .settings-toolbar,
-  .settings-page :deep(.el-tabs__nav-scroll) {
+  .settings-page .settings-toolbar {
     background: color-mix(in srgb, var(--el-fill-color-light) 72%, black);
-  }
-
-  .settings-page :deep(.el-tabs__item.is-active) {
-    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.26);
   }
 }
 </style>

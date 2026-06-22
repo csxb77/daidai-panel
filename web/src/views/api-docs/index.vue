@@ -395,7 +395,6 @@ function methodClass(method: string) {
 
 <style scoped lang="scss">
 .api-docs-page {
-  animation: fadeIn 0.3s ease-out;
   min-height: 0;
 }
 
@@ -431,8 +430,10 @@ function methodClass(method: string) {
   width: 280px;
   flex-shrink: 0;
   background: var(--el-bg-color);
-  border-radius: 10px;
+  // 圆角对齐卡片令牌、阴影引用全局静置卡片阴影，使侧栏与右侧文档卡观感统一
+  border-radius: var(--dd-card-radius);
   border: 1px solid var(--el-border-color-lighter);
+  box-shadow: var(--dd-shadow-card);
   overflow: hidden;
   height: 100%;
   display: flex;
@@ -471,17 +472,31 @@ function methodClass(method: string) {
   gap: 8px;
   padding: 6px 12px;
   margin: 2px 8px;
-  border-radius: 6px;
+  border-radius: var(--dd-radius-sm);
   cursor: pointer;
-  transition: all 0.2s ease;
+  // 选中/hover 过渡走令牌（快 + 标准缓动），与全站侧边菜单观感一致
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
 
-  &:hover {
-    background: var(--el-color-primary-light-9);
+  &:hover:not(.active) {
+    background: var(--el-fill-color-light);
   }
 
+  // 选中态对齐全局菜单：品牌色浅底渐变 + 左侧品牌色指示条
   &.active {
-    background: var(--el-color-primary-light-9);
+    background: linear-gradient(
+      135deg,
+      var(--el-color-primary-light-8),
+      var(--el-color-primary-light-9)
+    );
     box-shadow: inset 3px 0 0 var(--el-color-primary);
+
+    .menu-item-text {
+      color: var(--el-color-primary);
+      font-weight: 600;
+    }
   }
 
   .menu-item-text {
@@ -524,8 +539,10 @@ function methodClass(method: string) {
 .api-content {
   flex: 1;
   background: var(--el-bg-color);
-  border-radius: 10px;
+  // 圆角对齐卡片令牌、阴影引用全局静置卡片阴影
+  border-radius: var(--dd-card-radius);
   border: 1px solid var(--el-border-color-lighter);
+  box-shadow: var(--dd-shadow-card);
   padding: 28px 32px;
   overflow: auto;
   min-width: 0;
@@ -553,14 +570,17 @@ function methodClass(method: string) {
   padding: 12px 20px;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   margin-bottom: 24px;
   flex-wrap: wrap;
-  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+  // 过渡走令牌（标准缓动），hover 阴影引用全局静置卡片阴影（暗色自动适配）
+  transition:
+    border-color var(--dd-motion-normal) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-normal) var(--dd-ease-standard);
 
   &:hover {
     border-color: var(--el-border-color);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+    box-shadow: var(--dd-shadow-card);
   }
 }
 
@@ -583,37 +603,43 @@ function methodClass(method: string) {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  border-radius: 8px;
+  border-radius: var(--dd-radius-sm);
   margin-bottom: 20px;
   font-size: 13px;
 
   code {
     font-size: 12px;
-    background: rgba(0, 0, 0, 0.06);
+    // 用 color-mix 基于当前文字色生成半透明底，明暗双主题都自适应
+    background: color-mix(in srgb, currentColor 10%, transparent);
     padding: 2px 6px;
     border-radius: 4px;
   }
 
+  // JWT / 无鉴权两种状态：用 Element Plus 语义色 + color-mix 生成浅底，明暗双主题自适应
   &.auth-jwt {
-    background: linear-gradient(135deg, #fffbe6, #fff7e6);
-    border: 1px solid #ffe58f;
-    color: #ad6800;
+    background: color-mix(in srgb, var(--el-color-warning) 10%, var(--el-bg-color));
+    border: 1px solid color-mix(in srgb, var(--el-color-warning) 32%, transparent);
+    color: var(--el-color-warning);
   }
 
   &.auth-none {
-    background: linear-gradient(135deg, #f6ffed, #fcffe6);
-    border: 1px solid #b7eb8f;
-    color: #389e0d;
+    background: color-mix(in srgb, var(--el-color-success) 10%, var(--el-bg-color));
+    border: 1px solid color-mix(in srgb, var(--el-color-success) 32%, transparent);
+    color: var(--el-color-success);
   }
 }
 
 .api-card {
-  border-radius: 10px;
+  // 圆角对齐卡片令牌；这些卡用了 shadow="never"，全局静置阴影不会生效，
+  // 故给容器自身一条 lighter 边框 + 静置卡片阴影令牌，保持与全站卡片观感一致（暗色自动适配）。
+  border-radius: var(--dd-card-radius);
+  border: 1px solid var(--el-border-color-lighter);
+  box-shadow: var(--dd-shadow-card);
   margin-bottom: 20px;
   overflow: hidden;
 
   :deep(.el-card__header) {
-    background: var(--el-fill-color-lighter);
+    background: var(--el-fill-color-light);
     border-bottom: 1px solid var(--el-border-color-lighter);
     padding: 12px 20px;
   }
@@ -724,7 +750,7 @@ function methodClass(method: string) {
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
-  border-radius: 20px;
+  border-radius: 999px;
   font-size: 13px;
   font-weight: 600;
 
@@ -732,15 +758,16 @@ function methodClass(method: string) {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #52c41a;
+    background: var(--el-color-success);
     display: inline-block;
   }
 }
 
+// 200 成功胶囊：用 Element Plus success 语义色 + color-mix 浅底，明暗双主题自适应
 .status-200 {
-  background: #f6ffed;
-  color: #52c41a;
-  border: 1px solid #b7eb8f;
+  background: color-mix(in srgb, var(--el-color-success) 12%, var(--el-bg-color));
+  color: var(--el-color-success);
+  border: 1px solid color-mix(in srgb, var(--el-color-success) 32%, transparent);
 }
 
 .response-type {
@@ -803,8 +830,28 @@ function methodClass(method: string) {
   }
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(12px); }
-  to { opacity: 1; transform: translateY(0); }
+// ===== 入场动画 =====
+// 与全站列表页统一：克制的淡入上移，时长走令牌（--dd-motion-page），
+// prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-apidocs-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+// 进入时侧栏 + 右侧文档区整体淡入上移（只对两个卡级容器各做一次，不给每个 section 重 stagger）。
+.api-sider,
+.api-content {
+  animation: dd-apidocs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
+}
+
+// 轻微错落：侧栏先入，右侧文档区略晚
+.api-content {
+  animation-delay: 60ms;
 }
 </style>

@@ -895,12 +895,52 @@ onUnmounted(() => {
   font-family: var(--dd-font-ui);
 }
 
+/* ================= 入场动画 =================
+   克制的淡入上移：hero 与卡片轻微错落进入。
+   时长用 --dd-motion-page、缓动用 --dd-ease-decelerate，
+   prefers-reduced-motion 时令牌被压到 1ms 自动降级。 */
+@keyframes dd-profile-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.profile-hero,
+.profile-sidebar,
+.profile-content > .profile-card,
+.profile-content > .sponsor-panel {
+  animation: dd-profile-rise-in var(--dd-motion-page) var(--dd-ease-decelerate)
+    both;
+}
+
+/* 轻微错落：侧栏稍晚于 hero，内容卡片依次再延后；
+   切换 Tab 时卡片由 v-if 重新挂载，会再次播放进入动画 */
+.profile-sidebar {
+  animation-delay: 50ms;
+}
+
+.profile-content > .profile-card:nth-child(1),
+.profile-content > .sponsor-panel {
+  animation-delay: 90ms;
+}
+
+.profile-content > .profile-card:nth-child(2) {
+  animation-delay: 140ms;
+}
+
 /* ================= Hero ================= */
 .profile-hero {
   position: relative;
   overflow: hidden;
   padding: 30px 34px;
-  border-radius: 16px;
+  /* 圆角对齐令牌；阴影改用表面质感令牌，明暗双主题自动切换。
+     注意：暗色下 hero 背景由 global.scss 的 `.profile-hero` 覆盖接管，此处仅负责明色渐变 */
+  border-radius: var(--dd-card-radius);
   background:
     linear-gradient(
       135deg,
@@ -911,7 +951,7 @@ onUnmounted(() => {
     var(--profile-surface);
   border: 1px solid
     color-mix(in srgb, var(--profile-accent) 12%, var(--profile-border));
-  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+  box-shadow: var(--dd-shadow-card);
 }
 
 .profile-hero-aura {
@@ -1099,7 +1139,8 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.2px;
-  background: #f5f5f5;
+  /* 基础 chip 底色改用填充令牌，暗色不串色（实际 chip 均带 --green/--2fa 修饰覆盖此值） */
+  background: var(--el-fill-color-light);
   border: 1px solid var(--profile-border);
   color: var(--el-text-color-regular);
 }
@@ -1170,9 +1211,10 @@ onUnmounted(() => {
   gap: 4px;
   background: var(--profile-surface);
   border: 1px solid var(--profile-border);
-  border-radius: 12px;
+  /* 圆角/阴影对齐令牌，与卡片外壳风格统一 */
+  border-radius: var(--dd-card-radius);
   padding: 12px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--dd-shadow-card);
   align-self: flex-start;
 }
 
@@ -1218,14 +1260,15 @@ onUnmounted(() => {
   position: relative;
   background: var(--profile-surface);
   border: 1px solid var(--profile-border);
-  border-radius: 12px;
+  /* 圆角/阴影对齐表面质感令牌（明暗双主题自动切换） */
+  border-radius: var(--dd-card-radius);
   padding: 20px 24px;
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-  transition: box-shadow 0.2s;
+  box-shadow: var(--dd-shadow-card);
+  transition: box-shadow var(--dd-motion-normal) var(--dd-ease-standard);
 
   &:hover {
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+    box-shadow: var(--dd-shadow-card-hover);
   }
 }
 
@@ -1455,7 +1498,8 @@ onUnmounted(() => {
   gap: 14px;
   flex-wrap: wrap;
   padding: 18px 22px;
-  border-radius: 12px;
+  /* 圆角/阴影对齐令牌（保留赞助卡的琥珀色渐变外观） */
+  border-radius: var(--dd-card-radius);
   border: 1px solid rgba(245, 158, 11, 0.16);
   background:
     linear-gradient(
@@ -1464,7 +1508,7 @@ onUnmounted(() => {
       rgba(245, 158, 11, 0.02) 100%
     ),
     var(--profile-surface);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: var(--dd-shadow-card);
 }
 
 .sponsor-toolbar-copy {
@@ -1701,6 +1745,23 @@ onUnmounted(() => {
   .shield-icon {
     width: 48px;
     height: 58px;
+  }
+}
+
+/* ================= 暗色修补 =================
+   赞助卡的琥珀文字（深棕）在暗色底上对比过低，仅在暗色下提亮，
+   不影响明色下的品牌色观感 */
+html.dark {
+  .sponsor-toolbar-title-row h3 {
+    color: #fbbf24;
+  }
+
+  .sponsor-toolbar-hint {
+    color: #d6a85f;
+  }
+
+  .sponsor-toolbar-intro {
+    color: var(--el-text-color-regular);
   }
 }
 </style>

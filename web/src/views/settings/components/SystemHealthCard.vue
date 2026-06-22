@@ -149,9 +149,10 @@ onMounted(() => {
 @use './config-card-shared.scss' as *;
 
 .health-card {
-  border-radius: 12px;
-  border: 1px solid #f0f0f0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  // 圆角/边框/阴影对齐设计令牌（含暗色修补，原写死 #f0f0f0/阴影在暗色下不正确）
+  border-radius: var(--dd-card-radius);
+  border: 1px solid var(--el-border-color-lighter);
+  box-shadow: var(--dd-shadow-card);
   height: 100%;
 }
 

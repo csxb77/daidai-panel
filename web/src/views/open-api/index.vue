@@ -857,11 +857,12 @@ onMounted(loadApps);
   }
 }
 
+// 工具条：与定时任务页/订阅页对齐——上下统一间距、左右两区一行排布、gap 一致
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
   &__left {
@@ -875,18 +876,18 @@ onMounted(loadApps);
   &__right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
   &__search {
     width: 260px;
   }
 }
 
+// 状态分段控件：与定时任务页/订阅页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
 .status-tabs {
   display: inline-flex;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   padding: 3px;
   gap: 2px;
 }
@@ -900,7 +901,10 @@ onMounted(loadApps);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   &:hover {
     color: var(--el-text-color-primary);
@@ -908,15 +912,16 @@ onMounted(loadApps);
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
 
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌（本页为滚动页，无需 fixed 高度链）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1010,20 +1015,22 @@ onMounted(loadApps);
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
   .el-table__header-wrapper th {
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid var(--el-border-color-light);
   }
   .el-table__row td {
-    border-bottom: 1px solid #f5f5f5;
+    border-bottom: 1px solid var(--el-border-color-lighter);
   }
   .el-table__cell {
     padding: 12px 0;
   }
 }
 
+// 分页条：与定时任务页/订阅页一致的间距收敛
 .pagination-bar {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1042,17 +1049,25 @@ onMounted(loadApps);
 }
 
 .info-card {
-  background: #fff;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-  border-radius: 12px;
+  // 信息卡：色面/边框/阴影统一走令牌，明暗自动适配（原写死白底浅灰会在暗色串色）
+  background: var(--el-bg-color);
+  transition:
+    transform var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
+  border-radius: var(--dd-card-radius);
   padding: 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-  border: 1px solid #f0f0f0;
+  box-shadow: var(--dd-shadow-card);
+  border: 1px solid var(--el-border-color-lighter);
 
   &:hover {
     transform: translateY(-2px);
-    box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
-    border-color: color-mix(in srgb, var(--el-color-primary) 18%, #f0f0f0);
+    box-shadow: var(--dd-shadow-card-hover);
+    border-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 18%,
+      var(--el-border-color-lighter)
+    );
   }
 
   &__header {
@@ -1071,12 +1086,12 @@ onMounted(loadApps);
     justify-content: center;
     flex-shrink: 0;
     &--blue {
-      background: rgba(64, 158, 255, 0.1);
-      color: #409eff;
+      background: color-mix(in srgb, var(--el-color-primary) 10%, transparent);
+      color: var(--el-color-primary);
     }
     &--green {
-      background: rgba(103, 194, 58, 0.1);
-      color: #67c23a;
+      background: color-mix(in srgb, var(--el-color-success) 10%, transparent);
+      color: var(--el-color-success);
     }
   }
 
@@ -1207,5 +1222,32 @@ onMounted(loadApps);
   .info-cards {
     grid-template-columns: 1fr;
   }
+}
+
+// ===== 入场动画 =====
+// 与定时任务页/订阅页统一：只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
+// 不给表格每一行或每张移动卡做 stagger。时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-openapi-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-openapi-rise-in var(--dd-motion-page) var(--dd-ease-decelerate)
+    both;
+}
+
+// 轻微错落：工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
 }
 </style>
