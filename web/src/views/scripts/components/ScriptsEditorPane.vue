@@ -375,8 +375,8 @@ watch(
   padding: 36px 32px 32px;
   text-align: center;
   border-radius: 16px;
-  background: #f5f7fa;
-  border: 1px solid #f0f0f0;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
   isolation: isolate;
 }
@@ -486,7 +486,7 @@ watch(
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #409eff;
+  color: var(--el-color-primary);
   background: rgba(64, 158, 255, 0.1);
   flex-shrink: 0;
 }
@@ -555,11 +555,11 @@ watch(
 
 .file-pill--lang {
   background: rgba(64, 158, 255, 0.1);
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 
 .file-pill--muted {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   color: var(--el-text-color-secondary);
 }
 
@@ -696,9 +696,9 @@ watch(
 .binary-card {
   margin: 24px;
   padding: 24px 28px;
-  border: 1px dashed #e8e8e8;
+  border: 1px dashed var(--el-border-color);
   border-radius: 12px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 
   .binary-card-title {
     font-size: 14px;
@@ -750,7 +750,7 @@ watch(
 }
 
 .status-item--lang {
-  color: #409eff;
+  color: var(--el-color-primary);
   font-weight: 600;
 }
 

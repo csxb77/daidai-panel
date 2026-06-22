@@ -164,7 +164,8 @@ body {
   --dd-sidebar-width: 220px;
   --dd-header-height: 56px;
   --dd-page-padding: 20px;
-  --dd-card-radius: 12px;
+  // 卡片圆角统一为 14px：与设计基线 / dd-stat-card / dd-data-card 一致（原 12px 偏小不统一）
+  --dd-card-radius: 14px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   // ===== 表面质感令牌（A+C 混搭，预览 data-scheme="d"）=====
   // 圆角刻度：外壳 22px、卡片沿用 14px、小控件 10px。

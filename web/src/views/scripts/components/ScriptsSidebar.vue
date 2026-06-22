@@ -161,14 +161,14 @@ watch(searchKeyword, (val) => {
   :deep(.el-input__wrapper) {
     border-radius: 8px;
     padding: 4px 12px;
-    box-shadow: 0 0 0 1px #e8e8e8 inset;
+    box-shadow: 0 0 0 1px var(--el-border-color-lighter) inset;
     transition: box-shadow 0.2s, background 0.2s;
-    background: #f5f7fa;
+    background: var(--el-fill-color-light);
   }
 
   :deep(.el-input__wrapper.is-focus) {
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--el-color-primary) 45%, transparent) inset;
-    background: #fff;
+    background: var(--el-bg-color);
   }
 
   :deep(.el-input__inner) {
@@ -241,7 +241,7 @@ watch(searchKeyword, (val) => {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
   height: 30px;
   padding: 0;
-  border: 1px solid #e8e8e8;
+  border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   border-radius: 8px;
   color: var(--el-text-color-secondary);
@@ -253,7 +253,7 @@ watch(searchKeyword, (val) => {
 
   &:hover {
     color: var(--el-color-primary);
-    border-color: color-mix(in srgb, var(--el-color-primary) 40%, #e8e8e8);
+    border-color: color-mix(in srgb, var(--el-color-primary) 40%, var(--el-border-color-lighter));
     background: color-mix(in srgb, var(--el-color-primary) 6%, transparent);
     transform: translateY(-1px);
     box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
@@ -295,7 +295,7 @@ watch(searchKeyword, (val) => {
   }
 
   :deep(.el-tree-node__content:hover) {
-    background: #f5f7fa;
+    background: var(--el-fill-color-light);
     transform: translateX(2px);
     box-shadow: inset 2px 0 0 color-mix(in srgb, var(--el-color-primary) 30%, transparent);
   }
@@ -341,7 +341,7 @@ watch(searchKeyword, (val) => {
 .sidebar-footer {
   flex-shrink: 0;
   padding: 10px 14px 14px;
-  border-top: 1px solid #f0f0f0;
+  border-top: 1px solid var(--el-border-color-lighter);
 }
 
 .runner-card {
@@ -352,9 +352,9 @@ watch(searchKeyword, (val) => {
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid #e8e8e8;
+  border: 1px solid var(--el-border-color-lighter);
   border-radius: 10px;
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
   color: inherit;
   text-align: left;
   cursor: pointer;
@@ -362,8 +362,8 @@ watch(searchKeyword, (val) => {
   transition: background 0.15s, border-color 0.15s, box-shadow 0.2s;
 
   &:hover {
-    background: color-mix(in srgb, var(--scripts-accent, #22c55e) 8%, #f5f7fa);
-    border-color: color-mix(in srgb, var(--scripts-accent, #22c55e) 40%, #e8e8e8);
+    background: color-mix(in srgb, var(--scripts-accent, #22c55e) 8%, var(--el-fill-color-light));
+    border-color: color-mix(in srgb, var(--scripts-accent, #22c55e) 40%, var(--el-border-color-lighter));
     box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
     transform: translateY(-2px);
   }
