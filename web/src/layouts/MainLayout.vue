@@ -355,7 +355,7 @@ async function loadVersion() {
         <div class="route-shell">
           <router-view v-slot="{ Component, route: viewRoute }">
             <transition name="page-shell" mode="out-in">
-              <keep-alive :max="3">
+              <keep-alive :max="6">
                 <component :is="Component" :key="viewRoute.path" />
               </keep-alive>
             </transition>
@@ -1096,37 +1096,34 @@ async function loadVersion() {
 }
 
 // ==================== Page transition ====================
-// 页面切换改成“轻镜头感”方案：少量位移 + 透明度 + 轻微缩放，
-// 既比纯淡入更有质感，又不会像大幅平移动画那样影响布局与滚动体验。
+// A+C 混搭：切页只用「透明度 + 极微缩放」，无位移、无 blur，进场走 decelerate 求顺滑。
+// 关键修复：去掉原先的 filter: blur 整页模糊——它是最耗 GPU 的效果，也是切页卡顿主因；
+// leave 改成极短的纯淡出（120ms），配合 out-in 几乎没有空白档，既丝滑又不影响布局与滚动。
 .page-shell-enter-active {
-  animation: dd-page-shell-enter var(--dd-motion-page) var(--dd-ease-emphasized) both;
+  animation: dd-page-shell-enter var(--dd-motion-page) var(--dd-ease-decelerate) both;
 }
 
 .page-shell-leave-active {
-  animation: dd-page-shell-leave 180ms var(--dd-ease-standard) both;
+  animation: dd-page-shell-leave 120ms var(--dd-ease-standard) both;
 }
 
 @keyframes dd-page-shell-enter {
   from {
     opacity: 0;
-    transform: translate3d(0, 12px, 0) scale3d(0.992, 0.992, 1);
-    filter: blur(2px);
+    transform: scale3d(0.992, 0.992, 1);
   }
   to {
     opacity: 1;
-    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
-    filter: blur(0);
+    transform: scale3d(1, 1, 1);
   }
 }
 
 @keyframes dd-page-shell-leave {
   from {
     opacity: 1;
-    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
   }
   to {
     opacity: 0;
-    transform: translate3d(0, -8px, 0) scale3d(0.996, 0.996, 1);
   }
 }
 

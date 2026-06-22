@@ -161,15 +161,20 @@ body {
   --dd-page-padding: 20px;
   --dd-card-radius: 12px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  // 全局动效 token：页面、卡片、按钮、浮层统一走这一套速度与缓动
+  // 全局动效 token（A+C 混搭方案）：
+  //  - 切页 / 布局 / 浮层这类“位移到位”的动画走 decelerate / emphasized，求顺滑、不越界；
+  //  - 按钮按下、卡片与图标 hover 这类“缩放 / 浮起”的微交互走 spring，带轻回弹，更灵动有高级感。
   --dd-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --dd-ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
   --dd-ease-decelerate: cubic-bezier(0.16, 1, 0.3, 1);
+  // 温和弹簧：只用于 scale / translateY 浮起类微交互（按钮按下、卡片与图标 hover）。
+  // 注意：不要用在抽屉、侧栏这种“滑动到屏幕边缘”的动画上，spring 的回弹会越过边缘露出空隙。
+  --dd-ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
   --dd-motion-fast: 160ms;
   --dd-motion-normal: 240ms;
-  --dd-motion-page: 280ms;
+  --dd-motion-page: 240ms;
   --dd-motion-slow: 360ms;
-  --dd-press-scale: 0.985;
+  --dd-press-scale: 0.96;
   --dd-font-mono:
     "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
   --dd-font-ui:
@@ -214,7 +219,29 @@ a {
     color var(--dd-motion-fast) var(--dd-ease-standard),
     border-color var(--dd-motion-fast) var(--dd-ease-standard),
     box-shadow var(--dd-motion-fast) var(--dd-ease-standard),
-    transform 110ms var(--dd-ease-emphasized);
+    transform 140ms var(--dd-ease-spring);
+
+  &:active {
+    // 按下回弹用 spring：松手时轻微越过原尺寸再归位，手感更跟手、更有质感
+    transform: scale(var(--dd-press-scale));
+  }
+}
+
+// 主按钮：A+C 混搭——柔和品牌渐变 + 轻微浮起辉光。
+// 只作用于实心 primary，排除 plain / text / link / disabled，避免破坏这些变体的原生样式。
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link):not(.is-disabled) {
+  background-image: linear-gradient(
+    135deg,
+    var(--el-color-primary),
+    var(--el-color-primary-dark-2)
+  );
+  border-color: transparent;
+  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.26);
+
+  &:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(64, 158, 255, 0.4);
+  }
 
   &:active {
     transform: scale(var(--dd-press-scale));
@@ -228,12 +255,15 @@ a {
   transition:
     border-color var(--dd-motion-fast) var(--dd-ease-standard),
     box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
-    transform var(--dd-motion-fast) var(--dd-ease-emphasized);
+    transform var(--dd-motion-fast) var(--dd-ease-spring);
   overflow: hidden;
 
   &:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+    // 上浮用 spring 轻回弹，阴影叠一层淡淡的品牌色辉光，质感更高级
+    transform: translateY(-2px);
+    box-shadow:
+      0 2px 6px rgba(15, 23, 42, 0.06),
+      0 16px 36px rgba(64, 158, 255, 0.1);
   }
 
   .el-card__header {
@@ -999,14 +1029,23 @@ html.dark {
   justify-content: space-between;
   gap: 12px;
   transition:
-    transform 0.22s ease,
-    box-shadow 0.22s ease,
-    border-color 0.22s;
+    transform var(--dd-motion-fast) var(--dd-ease-spring),
+    box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 
   &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+    // 上浮 + 品牌色辉光 + 描边微亮，hover 时统计卡片更有“浮起来”的层次感
+    transform: translateY(-3px);
+    box-shadow:
+      0 2px 6px rgba(15, 23, 42, 0.06),
+      0 16px 36px rgba(64, 158, 255, 0.1);
+    border-color: color-mix(in srgb, var(--el-color-primary) 26%, var(--el-border-color-lighter));
+  }
+
+  // hover 时图标轻微放大并带一点点旋转，呼应灵动方案的微交互
+  &:hover .dd-stat-card__icon {
+    transform: scale(1.06) rotate(-3deg);
   }
 }
 
@@ -1084,6 +1123,7 @@ html.dark {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: transform var(--dd-motion-normal) var(--dd-ease-spring);
 
   &.is-blue {
     background: rgba(59, 130, 246, 0.12);
