@@ -295,7 +295,7 @@ a {
 }
 
 .el-dialog {
-  --el-dialog-margin-top: clamp(16px, 4vh, 40px);
+  --el-dialog-margin-top: clamp(16px, 4vh, 40px) !important;
   animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized);
   transform-origin: center top;
   border-radius: 16px;

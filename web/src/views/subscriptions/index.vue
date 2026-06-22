@@ -1548,11 +1548,12 @@ function viewLogDetail(log: any) {
   }
 }
 
+// 工具条：与定时任务页/执行日志页对齐——上下统一间距、左右两区一行排布、gap 一致
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
   &__left {
@@ -1566,17 +1567,18 @@ function viewLogDetail(log: any) {
   &__right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
   }
   &__search {
     width: 260px;
   }
 }
 
+// 状态分段控件：与定时任务页/执行日志页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   padding: 3px;
   gap: 2px;
 }
@@ -1590,7 +1592,10 @@ function viewLogDetail(log: any) {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   &:hover {
     color: var(--el-text-color-primary);
@@ -1598,15 +1603,16 @@ function viewLogDetail(log: any) {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
 
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1638,18 +1644,20 @@ function viewLogDetail(log: any) {
 .text-muted {
   color: var(--el-text-color-placeholder);
 }
+// 操作列：与定时任务页/执行日志页一致的轻量行内按钮组
 .action-btns {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0;
+  gap: 4px;
   :deep(.el-button) {
-    padding: 4px 6px;
+    padding: 4px 8px;
   }
 }
 
+// 分页条：与定时任务页/执行日志页一致的间距收敛
 .pagination-bar {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1661,12 +1669,13 @@ function viewLogDetail(log: any) {
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
   .el-table__header-wrapper th {
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid var(--el-border-color-light);
   }
   .el-table__row td {
-    border-bottom: 1px solid #f5f5f5;
+    border-bottom: 1px solid var(--el-border-color-lighter);
   }
   .el-table__cell {
     padding: 12px 0;
@@ -1699,7 +1708,7 @@ function viewLogDetail(log: any) {
   word-break: break-all;
 }
 .pull-running {
-  color: #e6a23c;
+  color: var(--el-color-warning);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1742,5 +1751,31 @@ function viewLogDetail(log: any) {
   .subscription-card__title-row {
     flex-direction: column;
   }
+}
+
+// ===== 入场动画 =====
+// 与定时任务页/执行日志页统一：只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
+// 不给表格每一行或每张移动卡做 stagger。时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-subs-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-subs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
+}
+
+// 轻微错落：工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
 }
 </style>
