@@ -603,32 +603,6 @@ html.dark {
     color: var(--el-text-color-regular) !important;
   }
 
-  // Dashboard hero 横幅：浅紫蓝渐变改为深色版本
-  .hero-banner {
-    background: linear-gradient(
-      135deg,
-      #312e81 0%,
-      #1e293b 55%,
-      #0f172a 100%
-    ) !important;
-    border-color: rgba(139, 92, 246, 0.28) !important;
-  }
-  .hero-banner__title {
-    color: #f1f5f9 !important;
-  }
-  .hero-banner__sub {
-    color: rgba(241, 245, 249, 0.72) !important;
-  }
-  .hero-banner__bubble.bubble-1 {
-    background: rgba(255, 255, 255, 0.18);
-  }
-  .hero-banner__bubble.bubble-2 {
-    background: rgba(167, 139, 250, 0.32);
-  }
-  .hero-banner__bubble.bubble-3 {
-    background: rgba(96, 165, 250, 0.32);
-  }
-
   // Profile 页面顶部紫色 hero
   .profile-hero {
     background: linear-gradient(135deg, #1e1b4b 0%, #1e293b 100%) !important;

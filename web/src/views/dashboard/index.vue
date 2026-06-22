@@ -23,7 +23,6 @@ import {
   Connection,
   TrendCharts,
   CircleCheck,
-  CircleClose,
   Loading,
   Refresh,
   ArrowRight,
@@ -34,8 +33,6 @@ import {
   ArrowDown,
   View,
   Document,
-  More,
-  UserFilled,
 } from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
 import { canAdminister, hasRequiredRole } from "@/utils/roles";
@@ -133,6 +130,16 @@ const greetingSub = computed(() => {
   if (hour < 14) return "该吃午饭啦，注意劳逸结合~";
   if (hour < 18) return "下午也要保持专注哦！";
   return "辛苦一天啦，看看任务运行情况吧~";
+});
+
+// hero 内的日期/星期小胶囊：用 new Date() 直接推导，无需新增数据源
+const heroDateLabel = computed(() => {
+  void refreshTimestamp.value; // 刷新时一并更新展示
+  const now = new Date();
+  const weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${m}月${d}日 · ${weekdays[now.getDay()]}`;
 });
 
 const todayLogs = computed(() => Number(dashboardData.value.today_logs) || 0);
@@ -363,16 +370,6 @@ function formatTime(t: string) {
   return new Date(t).toLocaleString("zh-CN", { hour12: false });
 }
 
-function relativeTime(t: string) {
-  if (!t) return "-";
-  const diff = (Date.now() - new Date(t).getTime()) / 1000;
-  if (diff < 60) return Math.max(1, Math.floor(diff)) + " 秒前";
-  if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
-  if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
-  if (diff < 86400 * 7) return Math.floor(diff / 86400) + " 天前";
-  return new Date(t).toLocaleDateString("zh-CN");
-}
-
 function lastUpdatedText() {
   const diff = (Date.now() - refreshTimestamp.value.getTime()) / 1000;
   if (diff < 60) return "刚刚";
@@ -393,24 +390,6 @@ const filteredLogs = computed(() => {
   if (logFilter.value === "failed")
     return list.filter((l: any) => isFailedLog(l.status)).slice(0, 5);
   return list.slice(0, 5);
-});
-
-const activityList = computed(() => {
-  return recentLogs.value.slice(0, 6).map((log: any) => {
-    const isRunning = isRunningLog(log.status);
-    const isSuccess = isSuccessLog(log.status);
-    return {
-      id: log.id,
-      title: isRunning
-        ? "任务正在运行"
-        : isSuccess
-          ? "任务执行成功"
-          : "任务执行失败",
-      desc: log.task_name || "未命名任务",
-      time: log.created_at,
-      type: isRunning ? "running" : isSuccess ? "success" : "failed",
-    };
-  });
 });
 
 const taskStats = computed(() => {
@@ -454,11 +433,12 @@ function donutSegments() {
   const radius = 50;
   const circ = 2 * Math.PI * radius;
   const stats = taskStats.value;
+  // gradient 指向 <defs> 中各段渐变，使环形更精致；color 保留用于兜底
   const segs = [
-    { color: "#10b981", percent: stats.successPct },
-    { color: "#3b82f6", percent: stats.runningPct },
-    { color: "#ef4444", percent: stats.failedPct },
-    { color: "#94a3b8", percent: stats.skippedPct },
+    { color: "#10b981", gradient: "url(#donutSuccess)", percent: stats.successPct },
+    { color: "#3b82f6", gradient: "url(#donutRunning)", percent: stats.runningPct },
+    { color: "#ef4444", gradient: "url(#donutFailed)", percent: stats.failedPct },
+    { color: "#94a3b8", gradient: "url(#donutSkipped)", percent: stats.skippedPct },
   ];
   let offset = 0;
   return segs.map((s) => {
@@ -637,174 +617,28 @@ function rerunLog(log: any) {
 
 <template>
   <div class="dashboard-page dd-scroll-page">
-    <!-- ============ Hero: Welcome banner + Quick actions ============ -->
-    <section class="hero-row animate-fade-in-up">
-      <div class="hero-banner">
-        <div class="hero-banner__bg">
-          <span class="hero-banner__bubble bubble-1"></span>
-          <span class="hero-banner__bubble bubble-2"></span>
-          <span class="hero-banner__bubble bubble-3"></span>
-        </div>
-        <div class="hero-banner__content">
-          <h2 class="hero-banner__title">
-            {{ greeting }}，{{ authStore.user?.username || "User" }}
-            <span class="hero-banner__user-icon">
-              <el-icon :size="16"><UserFilled /></el-icon>
-            </span>
-          </h2>
-          <p class="hero-banner__sub">{{ greetingSub }}</p>
-        </div>
-        <div class="hero-banner__art">
-          <svg
-            viewBox="0 0 220 140"
-            fill="none"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <defs>
-              <linearGradient id="screenG" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#ffffff" stop-opacity="0.95" />
-                <stop offset="100%" stop-color="#ffffff" stop-opacity="0.55" />
-              </linearGradient>
-              <linearGradient id="chartG" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#67e8f9" />
-                <stop offset="100%" stop-color="#06b6d4" />
-              </linearGradient>
-            </defs>
-            <!-- 行星圆环 -->
-            <ellipse
-              cx="160"
-              cy="38"
-              rx="48"
-              ry="9"
-              stroke="rgba(255,255,255,0.4)"
-              stroke-width="1.4"
-              fill="none"
-            />
-            <circle cx="160" cy="38" r="14" fill="#fbbf24" />
-            <circle cx="160" cy="38" r="14" fill="url(#chartG)" opacity="0.4" />
-            <!-- 主屏幕 -->
-            <rect
-              x="58"
-              y="34"
-              width="92"
-              height="68"
-              rx="8"
-              fill="url(#screenG)"
-              stroke="rgba(255,255,255,0.7)"
-              stroke-width="1.5"
-            />
-            <rect
-              x="65"
-              y="42"
-              width="32"
-              height="6"
-              rx="3"
-              fill="#67e8f9"
-              opacity="0.85"
-            />
-            <rect
-              x="65"
-              y="52"
-              width="48"
-              height="4"
-              rx="2"
-              fill="#a5f3fc"
-              opacity="0.7"
-            />
-            <rect
-              x="65"
-              y="60"
-              width="36"
-              height="4"
-              rx="2"
-              fill="#a5f3fc"
-              opacity="0.55"
-            />
-            <!-- 折线图 -->
-            <polyline
-              points="65,90 78,80 91,86 104,72 117,78 130,68 143,74"
-              stroke="#06b6d4"
-              stroke-width="2"
-              fill="none"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-            <circle cx="143" cy="74" r="2.4" fill="#06b6d4" />
-            <!-- 火箭 -->
-            <g transform="translate(28 64) rotate(-22)">
-              <path
-                d="M0 14 L10 0 L18 4 L18 22 L10 26 Z"
-                fill="#ffffff"
-                opacity="0.92"
-              />
-              <circle cx="11" cy="10" r="2.2" fill="#06b6d4" />
-              <path d="M2 22 L-3 30 L4 26 Z" fill="#fbbf24" opacity="0.85" />
-            </g>
-            <!-- 装饰小气泡 -->
-            <circle cx="28" cy="32" r="3" fill="rgba(255,255,255,0.7)" />
-            <circle cx="200" cy="100" r="4" fill="rgba(255,255,255,0.55)" />
-            <circle cx="190" cy="86" r="2" fill="rgba(255,255,255,0.85)" />
-            <!-- 文档卡 -->
-            <rect
-              x="160"
-              y="78"
-              width="34"
-              height="26"
-              rx="4"
-              fill="#ffffff"
-              opacity="0.92"
-            />
-            <rect
-              x="164"
-              y="84"
-              width="20"
-              height="3"
-              rx="1.5"
-              fill="#67e8f9"
-              opacity="0.7"
-            />
-            <rect
-              x="164"
-              y="90"
-              width="16"
-              height="3"
-              rx="1.5"
-              fill="#a5f3fc"
-              opacity="0.6"
-            />
-            <rect
-              x="164"
-              y="96"
-              width="12"
-              height="3"
-              rx="1.5"
-              fill="#a5f3fc"
-              opacity="0.6"
-            />
-          </svg>
-        </div>
+    <!-- ============ 轻量问候条：坐在页面底色上，问候语 + 快捷操作胶囊 ============ -->
+    <section class="dash-welcome animate-fade-in-up">
+      <!-- 左侧：问候语 + 日期/副标题元信息 -->
+      <div class="dash-welcome__greet">
+        <h2 class="dash-welcome__title">
+          {{ greeting }}，{{ authStore.user?.username || "User" }} 👋
+        </h2>
+        <span class="dash-welcome__meta"
+          >{{ heroDateLabel }} · {{ greetingSub }}</span
+        >
       </div>
-
-      <div class="hero-quick">
-        <div class="hero-quick__header">
-          <span class="hero-quick__title">快捷操作</span>
-        </div>
-        <div class="hero-quick__grid">
-          <button
-            v-for="action in quickActions"
-            :key="action.key"
-            class="quick-tile"
-            @click="action.action"
-          >
-            <span
-              class="quick-tile__icon"
-              :style="{ background: action.bg, color: action.color }"
-            >
-              <el-icon :size="18"><component :is="action.icon" /></el-icon>
-            </span>
-            <span class="quick-tile__label">{{ action.label }}</span>
-          </button>
-        </div>
+      <!-- 右侧：快捷操作胶囊按钮，复用 quickActions 数据与点击逻辑 -->
+      <div class="dash-welcome__actions">
+        <button
+          v-for="action in quickActions"
+          :key="action.key"
+          class="dash-pill"
+          @click="action.action"
+        >
+          <el-icon :size="15"><component :is="action.icon" /></el-icon>
+          <span>{{ action.label }}</span>
+        </button>
       </div>
     </section>
 
@@ -862,8 +696,8 @@ function rerunLog(log: any) {
       </div>
     </section>
 
-    <!-- ============ Middle row: Trend / Resources / Activity ============ -->
-    <section class="middle-grid animate-fade-in-up delay-100">
+    <!-- ============ 焦点行：执行趋势（大）+ 执行统计环形 ============ -->
+    <section class="focus-grid animate-fade-in-up delay-100">
       <!-- 执行趋势 -->
       <div class="panel panel--trend">
         <div class="panel-header">
@@ -910,129 +744,129 @@ function rerunLog(log: any) {
         </div>
       </div>
 
-      <!-- 系统资源 -->
-      <div class="panel panel--resource">
+      <!-- 执行统计环形 -->
+      <div class="panel panel--stats">
         <div class="panel-header">
           <div class="panel-header__title">
             <el-icon
               class="panel-header__icon"
               :size="14"
               style="color: #10b981"
-              ><Cpu
+              ><TrendCharts
             /></el-icon>
-            <span>系统资源</span>
-            <span class="panel-header__hint">最近更新：{{ updatedHint }}</span>
-          </div>
-          <div v-if="canViewSystemDetails" class="panel-header__actions">
-            <button class="text-link" @click="router.push('/admin/settings')">
-              查看详情 <el-icon :size="11"><ArrowRight /></el-icon>
-            </button>
-          </div>
-        </div>
-        <div class="resource-list">
-          <div v-for="r in resourceItems" :key="r.key" class="resource-row">
-            <div
-              class="resource-row__icon"
-              :style="{ background: r.iconBg, color: r.iconColor }"
-            >
-              <el-icon :size="16"><component :is="r.icon" /></el-icon>
-            </div>
-            <div class="resource-row__body">
-              <div class="resource-row__top">
-                <span class="resource-row__label">{{ r.label }}</span>
-                <span class="resource-row__detail">{{ r.detail }}</span>
-                <span class="resource-row__pct"
-                  >{{ r.percent.toFixed(1) }}%</span
-                >
-              </div>
-              <div class="resource-bar">
-                <div
-                  class="resource-bar__fill"
-                  :style="{
-                    width: Math.min(r.percent, 100) + '%',
-                    background: r.barColor,
-                  }"
-                ></div>
-              </div>
-            </div>
-          </div>
-          <div class="resource-row">
-            <div
-              class="resource-row__icon"
-              style="background: rgba(245, 158, 11, 0.12); color: #f59e0b"
-            >
-              <el-icon :size="16"><Timer /></el-icon>
-            </div>
-            <div class="resource-row__body">
-              <div class="resource-row__top">
-                <span class="resource-row__label">面板运行</span>
-                <span class="resource-row__detail uptime-detail">{{
-                  sysInfo.uptime || "-"
-                }}</span>
-              </div>
-              <div class="uptime-track">
-                <span class="uptime-track__dot"></span>
-                <span class="uptime-track__line"></span>
-                <span class="uptime-track__text">自本次面板启动后持续运行</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 最近活动 -->
-      <div class="panel panel--activity">
-        <div class="panel-header">
-          <div class="panel-header__title">
-            <el-icon
-              class="panel-header__icon"
-              :size="14"
-              style="color: #f59e0b"
-              ><Refresh
-            /></el-icon>
-            <span>最近活动</span>
+            <span>执行统计</span>
+            <span class="panel-header__hint">近{{ trendRange }}天</span>
           </div>
           <div class="panel-header__actions">
             <button class="text-link" @click="router.push('/logs')">
-              查看全部 <el-icon :size="11"><ArrowRight /></el-icon>
+              查看更多 <el-icon :size="11"><ArrowRight /></el-icon>
             </button>
           </div>
         </div>
-        <div class="activity-feed">
-          <div v-if="activityList.length === 0" class="empty-hint">
-            暂无活动
-          </div>
-          <div
-            v-for="(act, idx) in activityList"
-            :key="act.id || idx"
-            class="activity-item activity-item--cinematic"
-          >
-            <span class="activity-item__icon" :class="`is-${act.type}`">
-              <el-icon :size="12">
-                <component
-                  :is="
-                    act.type === 'success'
-                      ? CircleCheck
-                      : act.type === 'failed'
-                        ? CircleClose
-                        : Loading
+        <div class="task-stats-body">
+          <div class="task-donut">
+            <svg viewBox="0 0 140 140">
+              <defs>
+                <!-- 各段渐变：成功绿 / 运行蓝 / 失败红 / 跳过灰，各一套，更精致 -->
+                <linearGradient id="donutSuccess" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#34d399" />
+                  <stop offset="100%" stop-color="#059669" />
+                </linearGradient>
+                <linearGradient id="donutRunning" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#60a5fa" />
+                  <stop offset="100%" stop-color="#2563eb" />
+                </linearGradient>
+                <linearGradient id="donutFailed" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#f87171" />
+                  <stop offset="100%" stop-color="#dc2626" />
+                </linearGradient>
+                <linearGradient id="donutSkipped" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#cbd5e1" />
+                  <stop offset="100%" stop-color="#94a3b8" />
+                </linearGradient>
+              </defs>
+              <!-- 轨道底环 -->
+              <circle
+                cx="70"
+                cy="70"
+                r="50"
+                fill="none"
+                stroke="var(--el-fill-color)"
+                stroke-width="14"
+              />
+              <!-- 数据段：stroke 引用对应渐变，整体加柔和投影 -->
+              <g class="task-donut__segments">
+                <circle
+                  v-for="(seg, idx) in donutSegments()"
+                  :key="idx"
+                  cx="70"
+                  cy="70"
+                  r="50"
+                  fill="none"
+                  :stroke="seg.gradient"
+                  stroke-width="14"
+                  stroke-linecap="round"
+                  :stroke-dasharray="seg.dasharray"
+                  :stroke-dashoffset="seg.dashoffset"
+                  transform="rotate(-90 70 70)"
+                  style="
+                    transition:
+                      stroke-dasharray 0.6s ease,
+                      stroke-dashoffset 0.6s ease;
                   "
                 />
-              </el-icon>
-            </span>
-            <div class="activity-item__body">
-              <span class="activity-item__title">{{ act.title }}</span>
-              <span class="activity-item__desc">{{ act.desc }}</span>
+              </g>
+            </svg>
+            <div class="task-donut__center">
+              <span class="task-donut__value">
+                <CountUp :end-val="taskStats.total" :duration="1.2" />
+              </span>
+              <span class="task-donut__label">总执行数</span>
             </div>
-            <span class="activity-item__time">{{
-              relativeTime(act.time)
-            }}</span>
           </div>
+          <div class="task-legend">
+            <div class="legend-row">
+              <span class="legend-row__dot" style="background: #10b981"></span>
+              <span class="legend-row__label">成功</span>
+              <span class="legend-row__value">{{
+                taskStats.success.toLocaleString()
+              }}</span>
+              <span class="legend-row__pct">({{ taskStats.successPct }}%)</span>
+            </div>
+            <div class="legend-row">
+              <span class="legend-row__dot" style="background: #ef4444"></span>
+              <span class="legend-row__label">失败</span>
+              <span class="legend-row__value">{{
+                taskStats.failed.toLocaleString()
+              }}</span>
+              <span class="legend-row__pct">({{ taskStats.failedPct }}%)</span>
+            </div>
+            <div class="legend-row">
+              <span class="legend-row__dot" style="background: #3b82f6"></span>
+              <span class="legend-row__label">运行中</span>
+              <span class="legend-row__value">{{
+                taskStats.running.toLocaleString()
+              }}</span>
+              <span class="legend-row__pct">({{ taskStats.runningPct }}%)</span>
+            </div>
+            <div class="legend-row">
+              <span class="legend-row__dot" style="background: #94a3b8"></span>
+              <span class="legend-row__label">跳过</span>
+              <span class="legend-row__value">{{
+                taskStats.skipped.toLocaleString()
+              }}</span>
+              <span class="legend-row__pct">({{ taskStats.skippedPct }}%)</span>
+            </div>
+          </div>
+        </div>
+        <div class="task-stats-footer">
+          <span class="task-stats-footer__label">平均执行时长</span>
+          <span class="task-stats-footer__value">{{ avgDuration }}s</span>
         </div>
       </div>
     </section>
 
-    <!-- ============ Bottom row: Recent task table / Task stats ring ============ -->
+    <!-- ============ 底部行：最近执行任务表（大）+ 系统资源 ============ -->
     <section class="bottom-grid animate-fade-in-up delay-150">
       <!-- 最近执行任务 -->
       <div class="panel panel--logs">
@@ -1183,101 +1017,73 @@ function rerunLog(log: any) {
         </table>
       </div>
 
-      <!-- 任务统计 -->
-      <div class="panel panel--stats">
+      <!-- 系统资源 -->
+      <div class="panel panel--resource">
         <div class="panel-header">
           <div class="panel-header__title">
             <el-icon
               class="panel-header__icon"
               :size="14"
               style="color: #10b981"
-              ><TrendCharts
+              ><Cpu
             /></el-icon>
-            <span>执行统计</span>
-            <span class="panel-header__hint">近{{ trendRange }}天</span>
+            <span>系统资源</span>
+            <span class="panel-header__hint">最近更新：{{ updatedHint }}</span>
           </div>
-          <div class="panel-header__actions">
-            <button class="text-link" @click="router.push('/logs')">
-              查看更多 <el-icon :size="11"><ArrowRight /></el-icon>
+          <div v-if="canViewSystemDetails" class="panel-header__actions">
+            <button class="text-link" @click="router.push('/admin/settings')">
+              查看详情 <el-icon :size="11"><ArrowRight /></el-icon>
             </button>
           </div>
         </div>
-        <div class="task-stats-body">
-          <div class="task-donut">
-            <svg viewBox="0 0 140 140">
-              <circle
-                cx="70"
-                cy="70"
-                r="50"
-                fill="none"
-                stroke="var(--el-fill-color)"
-                stroke-width="14"
-              />
-              <circle
-                v-for="(seg, idx) in donutSegments()"
-                :key="idx"
-                cx="70"
-                cy="70"
-                r="50"
-                fill="none"
-                :stroke="seg.color"
-                stroke-width="14"
-                stroke-linecap="round"
-                :stroke-dasharray="seg.dasharray"
-                :stroke-dashoffset="seg.dashoffset"
-                transform="rotate(-90 70 70)"
-                style="
-                  transition:
-                    stroke-dasharray 0.6s ease,
-                    stroke-dashoffset 0.6s ease;
-                "
-              />
-            </svg>
-            <div class="task-donut__center">
-              <span class="task-donut__value">
-                <CountUp :end-val="taskStats.total" :duration="1.2" />
-              </span>
-              <span class="task-donut__label">总执行数</span>
+        <div class="resource-list">
+          <div v-for="r in resourceItems" :key="r.key" class="resource-row">
+            <div
+              class="resource-row__icon"
+              :style="{ background: r.iconBg, color: r.iconColor }"
+            >
+              <el-icon :size="16"><component :is="r.icon" /></el-icon>
+            </div>
+            <div class="resource-row__body">
+              <div class="resource-row__top">
+                <span class="resource-row__label">{{ r.label }}</span>
+                <span class="resource-row__detail">{{ r.detail }}</span>
+                <span class="resource-row__pct"
+                  >{{ r.percent.toFixed(1) }}%</span
+                >
+              </div>
+              <div class="resource-bar">
+                <div
+                  class="resource-bar__fill"
+                  :style="{
+                    width: Math.min(r.percent, 100) + '%',
+                    background: r.barColor,
+                  }"
+                ></div>
+              </div>
             </div>
           </div>
-          <div class="task-legend">
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #10b981"></span>
-              <span class="legend-row__label">成功</span>
-              <span class="legend-row__value">{{
-                taskStats.success.toLocaleString()
-              }}</span>
-              <span class="legend-row__pct">({{ taskStats.successPct }}%)</span>
+          <div class="resource-row">
+            <div
+              class="resource-row__icon"
+              style="background: rgba(245, 158, 11, 0.12); color: #f59e0b"
+            >
+              <el-icon :size="16"><Timer /></el-icon>
             </div>
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #ef4444"></span>
-              <span class="legend-row__label">失败</span>
-              <span class="legend-row__value">{{
-                taskStats.failed.toLocaleString()
-              }}</span>
-              <span class="legend-row__pct">({{ taskStats.failedPct }}%)</span>
-            </div>
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #3b82f6"></span>
-              <span class="legend-row__label">运行中</span>
-              <span class="legend-row__value">{{
-                taskStats.running.toLocaleString()
-              }}</span>
-              <span class="legend-row__pct">({{ taskStats.runningPct }}%)</span>
-            </div>
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #94a3b8"></span>
-              <span class="legend-row__label">跳过</span>
-              <span class="legend-row__value">{{
-                taskStats.skipped.toLocaleString()
-              }}</span>
-              <span class="legend-row__pct">({{ taskStats.skippedPct }}%)</span>
+            <div class="resource-row__body">
+              <div class="resource-row__top">
+                <span class="resource-row__label">面板运行</span>
+                <span class="resource-row__detail uptime-detail">{{
+                  sysInfo.uptime || "-"
+                }}</span>
+              </div>
+              <div class="uptime-track">
+                <span class="uptime-track__dot"></span>
+                <span class="uptime-track__line"></span>
+                <span class="uptime-track__text">自本次面板启动后持续运行</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="task-stats-footer">
-          <span class="task-stats-footer__label">平均执行时长</span>
-          <span class="task-stats-footer__value">{{ avgDuration }}s</span>
         </div>
       </div>
     </section>
@@ -1288,223 +1094,88 @@ function rerunLog(log: any) {
 .dashboard-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  // 行间留白加大，体现"不塞满"的呼吸感
+  gap: 20px;
 }
 
-// ============ Hero ============
-.hero-row {
-  display: grid;
-  grid-template-columns: 1fr 360px;
-  gap: 16px;
-}
-
-.hero-banner {
-  position: relative;
-  animation: dd-hero-pan-in 420ms var(--dd-ease-emphasized) both;
-  border-radius: 16px;
-  padding: 24px 28px;
-  overflow: hidden;
-  contain: layout paint;
-  background: linear-gradient(135deg, #ecfeff 0%, #e0f2fe 46%, #dbeafe 100%);
-  border: 1px solid rgba(6, 182, 212, 0.12);
+// ============ 轻量问候条（坐在页面底色上，无彩色背景）============
+.dash-welcome {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  min-height: 138px;
+  // 与下方统计卡拉开少量间距即可，整体紧凑
+  margin-bottom: 4px;
 }
 
-.hero-banner__bg {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  // 把 blur 装饰层提升为独立合成层，浏览器只在初始时计算一次 blur，
-  // 后续 hover / 滚动等交互不再触发昂贵的重绘。
-  transform: translateZ(0);
-}
-
-.hero-banner__bubble {
-  position: absolute;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.45);
-  filter: blur(18px);
-
-  &.bubble-1 {
-    width: 120px;
-    height: 120px;
-    top: -40px;
-    left: 30%;
-  }
-  &.bubble-2 {
-    width: 80px;
-    height: 80px;
-    bottom: -20px;
-    left: 60%;
-    background: rgba(103, 232, 249, 0.35);
-  }
-  &.bubble-3 {
-    width: 60px;
-    height: 60px;
-    top: 30%;
-    right: 4%;
-    background: rgba(96, 165, 250, 0.35);
-  }
-}
-
-.hero-banner__content {
-  position: relative;
-  z-index: 1;
-  flex: 1;
+.dash-welcome__greet {
+  display: flex;
+  flex-direction: column;
+  // 标题与元信息间 4px
+  gap: 4px;
   min-width: 0;
 }
 
-.hero-banner__title {
+.dash-welcome__title {
   margin: 0;
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 700;
-  color: #1e293b;
-  line-height: 1.3;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.hero-banner__user-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: #0891b2;
-  background: rgba(255, 255, 255, 0.68);
-  border: 1px solid rgba(8, 145, 178, 0.12);
-  box-shadow: 0 4px 12px rgba(8, 145, 178, 0.08);
-}
-
-.hero-banner__sub {
-  margin: 10px 0 0;
-  max-width: 680px;
-  font-size: 14px;
-  color: rgba(30, 41, 59, 0.7);
-  line-height: 1.5;
-}
-
-.hero-banner__art {
-  position: relative;
-  z-index: 1;
-  width: 220px;
-  height: 140px;
-  flex-shrink: 0;
-}
-
-.hero-banner__art svg {
-  width: 100%;
-  height: 100%;
-}
-
-.hero-quick {
-  border-radius: 16px;
-  padding: 18px 18px 14px;
-  background: var(--el-bg-color);
-  border: 1px solid var(--el-border-color-lighter);
-  // 对齐全局表面令牌：静置阴影随明暗自动切换
-  box-shadow: var(--dd-shadow-card);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.hero-quick__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.hero-quick__title {
-  font-size: 14px;
-  font-weight: 700;
+  line-height: 1.25;
   color: var(--el-text-color-primary);
 }
 
-.hero-quick__grid {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
-  perspective: 1000px;
+.dash-welcome__meta {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.4;
 }
 
-.quick-tile {
+// 快捷操作胶囊：复用页面令牌，明暗双主题自动适配
+.dash-welcome__actions {
   display: flex;
-  position: relative;
-  overflow: hidden;
-  flex-direction: column;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dash-pill {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 6px;
-  border: none;
-  background: transparent;
-  border-radius: 10px;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: var(--dd-radius-sm);
+  border: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
   transition:
-    background 0.18s ease,
-    transform 0.18s ease;
+    transform var(--dd-motion-fast) var(--dd-ease-spring),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
-    background: var(--el-fill-color-light);
-    transform: translateY(-2px);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+    // 边框/文字转品牌色，轻微上浮
+    border-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 45%,
+      var(--el-border-color)
+    );
+    color: var(--el-color-primary);
+    transform: translateY(-1px);
   }
 
   &:active {
-    transform: scale(0.985);
+    transform: scale(var(--dd-press-scale));
   }
-
-  &::after {
-    content: "";
-    position: absolute;
-    inset: -40% 0 auto;
-    height: 70%;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.34), transparent);
-    opacity: 0;
-    transform: translateY(-10px);
-    transition: opacity 180ms ease, transform 180ms ease;
-    pointer-events: none;
-  }
-
-  &:hover::after {
-    opacity: 1;
-    transform: translateY(0);
-  }
-
-  &:hover .quick-tile__icon {
-    transform: translateY(-1px) scale(1.04);
-    box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
-  }
-}
-
-.quick-tile__icon {
-  width: 38px;
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
-  height: 38px;
-  border-radius: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.quick-tile__label {
-  font-size: 12px;
-  color: var(--el-text-color-regular);
-  font-weight: 500;
-  white-space: nowrap;
 }
 
 // ============ Stat Grid ============
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 14px;
+  // 间距加大，更舒展
+  gap: 18px;
 }
 
 .stat-card {
@@ -1632,18 +1303,19 @@ function rerunLog(log: any) {
   }
 }
 
-// ============ Middle Grid ============
-.middle-grid {
+// ============ 焦点行 Grid（趋势图大 + 环形）============
+.focus-grid {
   display: grid;
-  grid-template-columns: 1.5fr 1.2fr 1fr;
-  gap: 16px;
+  grid-template-columns: 1.8fr 1fr;
+  gap: 18px;
   align-items: stretch;
 }
 
+// ============ 底部行 Grid（任务表 + 系统资源）============
 .bottom-grid {
   display: grid;
-  grid-template-columns: 2.4fr 1fr;
-  gap: 16px;
+  grid-template-columns: 2fr 1fr;
+  gap: 18px;
 }
 
 .panel {
@@ -1750,12 +1422,13 @@ function rerunLog(log: any) {
 // ============ Trend Chart ============
 .trend-chart-shell {
   flex: 1;
-  min-height: 240px;
-  padding: 8px 10px 12px;
+  // 给趋势图足够高度，焦点行更舒展
+  min-height: 320px;
+  padding: 10px 12px 14px;
 }
 
 .trend-chart-placeholder {
-  height: 240px;
+  height: 300px;
   border-radius: 10px;
   padding: 18px;
   background: linear-gradient(180deg, rgba(64, 158, 255, 0.04), transparent);
@@ -1935,88 +1608,6 @@ function rerunLog(log: any) {
 .uptime-track__text {
   flex-shrink: 0;
   white-space: nowrap;
-}
-
-// ============ Activity ============
-.activity-feed {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  padding: 8px 14px 12px;
-  gap: 4px;
-  max-height: 320px;
-  overflow-y: auto;
-}
-
-.activity-item {
-  display: flex;
-  position: relative;
-  border: 1px solid transparent;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 6px;
-  border-radius: 10px;
-  transition: background 0.15s;
-
-  &:hover {
-    background: var(--el-fill-color-light);
-    transform: translateX(2px);
-    border-color: color-mix(in srgb, var(--el-color-primary) 16%, transparent);
-  }
-}
-
-.activity-item__icon {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-top: 1px;
-
-  &.is-success {
-    background: rgba(16, 185, 129, 0.12);
-    color: #10b981;
-  }
-  &.is-failed {
-    background: rgba(239, 68, 68, 0.12);
-    color: #ef4444;
-  }
-  &.is-running {
-    background: rgba(59, 130, 246, 0.12);
-    color: #3b82f6;
-  }
-}
-
-.activity-item__body {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.activity-item__title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--el-text-color-primary);
-  line-height: 1.3;
-}
-
-.activity-item__desc {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.activity-item__time {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--el-text-color-placeholder);
-  margin-top: 3px;
 }
 
 // ============ Recent Logs Table ============
@@ -2262,14 +1853,19 @@ function rerunLog(log: any) {
 
 .task-donut {
   position: relative;
-  width: 130px;
-  height: 130px;
+  width: 140px;
+  height: 140px;
   flex-shrink: 0;
 
   svg {
     width: 100%;
     height: 100%;
   }
+}
+
+// 给环形数据段加柔和投影，更精致
+.task-donut__segments {
+  filter: drop-shadow(0 4px 8px rgba(15, 23, 42, 0.14));
 }
 
 .task-donut__center {
@@ -2358,18 +1954,9 @@ function rerunLog(log: any) {
 
 // ============ Responsive ============
 @media (max-width: 1280px) {
-  .hero-row {
-    grid-template-columns: 1fr;
-  }
-  .hero-banner__art {
-    width: 180px;
-    height: 110px;
-  }
-  .middle-grid {
-    grid-template-columns: 1.4fr 1fr;
-  }
-  .panel--activity {
-    grid-column: 1 / -1;
+  // 窄屏：焦点/底部行各自收敛为单列
+  .focus-grid {
+    grid-template-columns: 1.5fr 1fr;
   }
   .bottom-grid {
     grid-template-columns: 1fr;
@@ -2380,48 +1967,26 @@ function rerunLog(log: any) {
   .stat-grid {
     grid-template-columns: repeat(2, 1fr);
   }
-  .middle-grid {
+  .focus-grid {
     grid-template-columns: 1fr;
-  }
-  .hero-quick__grid {
-    grid-template-columns: repeat(5, 1fr);
   }
 }
 
 @media (max-width: 768px) {
-  .hero-banner {
-    padding: 14px 16px;
-    min-height: auto;
+  // 窄屏：问候条竖排，actions 占满宽度、胶囊换行不溢出
+  .dash-welcome {
+    flex-direction: column;
+    align-items: flex-start;
   }
-  .hero-banner__title {
+  .dash-welcome__title {
     font-size: 18px;
   }
-  .hero-banner__sub {
-    font-size: 13px;
-  }
-  .hero-banner__art {
-    display: none;
-  }
-
-  .hero-quick__grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 6px;
-  }
-  .quick-tile__icon {
-    width: 34px;
-    height: 34px;
-  }
-
-  .quick-tile {
-    padding: 8px 4px;
-    gap: 5px;
-  }
-  .quick-tile__label {
-    font-size: 11px;
+  .dash-welcome__actions {
+    width: 100%;
   }
 
   .stat-grid {
-    gap: 10px;
+    gap: 12px;
   }
   .stat-card {
     padding: 14px;
@@ -2469,17 +2034,6 @@ function rerunLog(log: any) {
 }
 
 
-@keyframes dd-hero-pan-in {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 14px, 0) scale3d(0.992, 0.992, 1);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
-  }
-}
-
 @keyframes dd-card-rise-in {
   from {
     opacity: 0;
@@ -2524,11 +2078,9 @@ function rerunLog(log: any) {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero-banner,
   .stat-card--cinematic,
   .panel,
   .log-table__row-cinematic,
-  .activity-item--cinematic,
   .resource-bar__fill::after {
     animation: none;
   }

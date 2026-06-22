@@ -99,14 +99,17 @@ function renderChart() {
         name: '执行总数',
         type: 'line',
         data: props.stats.map((item) => (item.success || 0) + (item.failed || 0)),
-        smooth: 0.6,
+        // 主线更顺、symbol/线宽统一；面积渐变更明显，强调"执行总数"主线
+        smooth: 0.5,
+        showSymbol: false,
         symbol: 'circle',
-        symbolSize: 7,
-        lineStyle: { width: 2.5, color: '#409EFF' },
+        symbolSize: 6,
+        lineStyle: { width: 3, color: '#409EFF' },
         itemStyle: { color: '#409EFF', borderWidth: 2, borderColor: c.pointBorder },
+        // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(64,158,255,0.2)' },
+            { offset: 0, color: 'rgba(64,158,255,0.32)' },
             { offset: 1, color: 'rgba(64,158,255,0)' },
           ])
         },
@@ -115,14 +118,16 @@ function renderChart() {
         name: '成功',
         type: 'line',
         data: props.stats.map((item) => item.success || 0),
-        smooth: 0.6,
+        smooth: 0.5,
+        showSymbol: false,
         symbol: 'circle',
-        symbolSize: 7,
+        symbolSize: 6,
         lineStyle: { width: 2.5, color: '#67C23A' },
         itemStyle: { color: '#67C23A', borderWidth: 2, borderColor: c.pointBorder },
+        // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(103,194,58,0.15)' },
+            { offset: 0, color: 'rgba(103,194,58,0.14)' },
             { offset: 1, color: 'rgba(103,194,58,0)' },
           ])
         },
@@ -131,11 +136,13 @@ function renderChart() {
         name: '失败',
         type: 'line',
         data: props.stats.map((item) => item.failed || 0),
-        smooth: 0.6,
+        smooth: 0.5,
+        showSymbol: false,
         symbol: 'circle',
-        symbolSize: 7,
+        symbolSize: 6,
         lineStyle: { width: 2.5, color: '#F56C6C' },
         itemStyle: { color: '#F56C6C', borderWidth: 2, borderColor: c.pointBorder },
+        // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
       },
     ],
   })
@@ -167,6 +174,6 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .trend-chart {
-  height: 280px;
+  height: 300px;
 }
 </style>
