@@ -70,11 +70,15 @@ const logFilesTaskId = ref<number | null>(null)
 const logFilesTaskName = ref('')
 const viewFilters = ref<TaskViewFilter[]>([])
 const viewSortRules = ref<TaskViewSortRule[]>([])
+// 工具栏快捷排序：null 表示走后端默认排序（置顶+状态分组），非空时优先于视图自带排序
+const quickSort = ref<{ field: string; direction: 'asc' | 'desc' } | null>(null)
 const canOperateTasks = computed(() => canOperate(authStore.user?.role))
 const canPollTaskStatus = computed(() => hasRunningTasks.value && isPageActive.value && selectedIds.value.length === 0)
 const desktopTableHeight = computed(() => (isMobile.value ? undefined : '100%'))
 
 function handleViewChange(filters: TaskViewFilter[], sortRules: TaskViewSortRule[]) {
+  // 应用视图时清空快捷排序，避免与视图自带排序双重作用；视图自带排序优先
+  quickSort.value = null
   viewFilters.value = filters
   viewSortRules.value = sortRules
   page.value = 1
@@ -99,6 +103,39 @@ function getCronExpressions(task: any) {
 
 const hasRunningTasks = computed(() => tasks.value.some(t => t.status === 2))
 
+// 快捷排序可选项：value 为 null 表示恢复默认排序，其余对应后端 sort_rules 的单条规则
+const quickSortOptions: { key: string; label: string; value: { field: string; direction: 'asc' | 'desc' } | null }[] = [
+  { key: 'default', label: '默认排序', value: null },
+  { key: 'name_asc', label: '名称 A→Z', value: { field: 'name', direction: 'asc' } },
+  { key: 'name_desc', label: '名称 Z→A', value: { field: 'name', direction: 'desc' } },
+  { key: 'created_desc', label: '创建时间（最新优先）', value: { field: 'created_at', direction: 'desc' } },
+  { key: 'created_asc', label: '创建时间（最早优先）', value: { field: 'created_at', direction: 'asc' } },
+]
+
+// 当前选中的快捷排序项 key，用于下拉菜单高亮；未选中（默认排序）时返回 'default'
+const activeQuickSortKey = computed(() => {
+  if (!quickSort.value) return 'default'
+  const matched = quickSortOptions.find(
+    opt => opt.value && opt.value.field === quickSort.value!.field && opt.value.direction === quickSort.value!.direction,
+  )
+  return matched ? matched.key : 'default'
+})
+
+// 排序按钮文案：默认显示「排序」，选中后体现当前排序，如「排序：创建时间 ↓」
+const quickSortButtonText = computed(() => {
+  if (!quickSort.value) return '排序'
+  const arrow = quickSort.value.direction === 'asc' ? '↑' : '↓'
+  const fieldText = quickSort.value.field === 'name' ? '名称' : '创建时间'
+  return `排序：${fieldText} ${arrow}`
+})
+
+// 选择快捷排序项：重置到第一页并以现有加载逻辑刷新（与 handleSearch 同款）
+function handleQuickSortSelect(value: { field: string; direction: 'asc' | 'desc' } | null) {
+  quickSort.value = value
+  page.value = 1
+  void loadTasks()
+}
+
 watch(pageSize, (value) => {
   persistTaskPageSize(value)
 })
@@ -117,7 +154,10 @@ function buildTaskListParams() {
   if (viewFilters.value.length > 0) {
     params.filters = JSON.stringify(viewFilters.value)
   }
-  if (viewSortRules.value.length > 0) {
+  // sort_rules 优先级：工具栏快捷排序 > 视图自带排序；默认排序（quickSort 为 null 且无视图排序）时不传，走后端默认置顶逻辑
+  if (quickSort.value) {
+    params.sort_rules = JSON.stringify([quickSort.value])
+  } else if (viewSortRules.value.length > 0) {
     params.sort_rules = JSON.stringify(viewSortRules.value)
   }
   return params
@@ -612,6 +652,31 @@ async function handleImport(event: Event) {
         </el-input>
       </div>
       <div class="toolbar__right">
+        <el-dropdown trigger="click" class="sort-dropdown">
+          <el-button :type="quickSort ? 'primary' : 'default'" :plain="!!quickSort">
+            <el-icon><Sort /></el-icon>
+            <span class="sort-dropdown__text">{{ quickSortButtonText }}</span>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="option in quickSortOptions"
+                :key="option.key"
+                @click="handleQuickSortSelect(option.value)"
+              >
+                <!-- 选中项用左侧 Check 图标 + 品牌色高亮（下拉菜单 teleport 到 body，故用内联色保证生效） -->
+                <el-icon
+                  v-if="activeQuickSortKey === option.key"
+                  style="margin-right: 6px; color: var(--el-color-primary);"
+                ><Check /></el-icon>
+                <span v-else style="display: inline-block; width: 20px;"></span>
+                <span :style="activeQuickSortKey === option.key ? 'color: var(--el-color-primary); font-weight: 600;' : ''">
+                  {{ option.label }}
+                </span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <el-dropdown trigger="click">
           <el-button><el-icon><More /></el-icon></el-button>
           <template #dropdown>
@@ -1041,6 +1106,12 @@ async function handleImport(event: Event) {
 .batch-actions {
   display: flex;
   gap: 8px;
+}
+
+// 快捷排序触发按钮：图标与文案留出间距，文案过长时不撑破工具栏
+.sort-dropdown__text {
+  margin-left: 4px;
+  white-space: nowrap;
 }
 
 :deep(.tag-with-dot) {

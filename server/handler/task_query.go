@@ -543,6 +543,15 @@ func comparePreparedTaskByRule(left, right preparedTaskListItem, rule taskListSo
 		return strings.Compare(strings.ToLower(strings.Join(left.displayLabels, ",")), strings.ToLower(strings.Join(right.displayLabels, ",")))
 	case "subscription":
 		return strings.Compare(strings.ToLower(strings.Join(left.subscriptionLabels, ",")), strings.ToLower(strings.Join(right.subscriptionLabels, ",")))
+	case "created_at":
+		// 按创建时间比较：早于为 -1、晚于为 1，相等返回 0，direction 由上层 sortPreparedTaskListItems 翻转
+		if left.task.CreatedAt.Before(right.task.CreatedAt) {
+			return -1
+		}
+		if left.task.CreatedAt.After(right.task.CreatedAt) {
+			return 1
+		}
+		return 0
 	default:
 		return 0
 	}
