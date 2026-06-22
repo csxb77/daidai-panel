@@ -1201,6 +1201,16 @@ function viewLogDetail(log: any) {
             v-model="editForm.whitelist"
             placeholder="文件名/路径白名单 (逗号分隔)"
           />
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            白名单会同时限制实际检出的文件：只有命中白名单的文件会落盘。若主脚本依赖同目录的辅助文件，请把辅助文件名也一并加入白名单。
+          </div>
         </el-form-item>
         <el-form-item label="黑名单">
           <el-input
@@ -1211,7 +1221,7 @@ function viewLogDetail(log: any) {
         <el-form-item label="依赖说明">
           <el-input
             v-model="editForm.depend_on"
-            placeholder="用于记录订阅依赖、过滤说明或迁移信息"
+            placeholder="用于记录订阅依赖、过滤说明或迁移信息（仅备注，不参与文件检出）"
           />
         </el-form-item>
         <el-form-item label="拉取后钩子">
