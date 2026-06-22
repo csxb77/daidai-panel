@@ -1677,23 +1677,25 @@ onBeforeUnmount(() => {
 }
 
 // ---------- Toolbar ----------
+// 工具条：与定时任务页/执行日志页/订阅页/环境变量页对齐——上下统一间距、左右两区一行排布、gap 一致；
+// 本页工具条元素较多（版本选择/搜索/状态过滤），保持各自业务所需宽度，行内间距统一到 12px。
 .toolbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 14px;
+  margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
   &__left {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     flex-wrap: wrap;
   }
   &__right {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     flex-wrap: wrap;
   }
   &__search {
@@ -1731,10 +1733,11 @@ onBeforeUnmount(() => {
 }
 
 // ---------- Table Card ----------
+// 表格卡：圆角/阴影/边框全部对齐卡片令牌；本页是滚动页（dd-scroll-page），不做 fixed 高度链处理。
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 14px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  border-radius: var(--dd-card-radius);
+  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1767,16 +1770,19 @@ onBeforeUnmount(() => {
   gap: 12px;
   flex-wrap: wrap;
 }
+
+// 状态分段控件：与定时任务页/执行日志页/订阅页/环境变量页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌。
+// 本页有两组：①运行时切换（Node/Python3/Linux）②状态筛选（.status-tabs--filter，含已安装/失败计数），
+// 共用同一套观感，使两组视觉统一。
 .status-tabs {
   display: inline-flex;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.6);
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: var(--dd-radius-sm);
   padding: 3px;
   gap: 2px;
 }
 .status-tab {
-  padding: 6px 18px;
+  padding: 6px 14px;
   border-radius: 7px;
   border: none;
   background: transparent;
@@ -1784,7 +1790,10 @@ onBeforeUnmount(() => {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
@@ -1795,9 +1804,10 @@ onBeforeUnmount(() => {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
+  // 成功/失败筛选选中态用语义色，与计数徽标协调
   &--success.active {
     color: var(--el-color-success);
   }
@@ -1805,6 +1815,7 @@ onBeforeUnmount(() => {
     color: var(--el-color-danger);
   }
 }
+// 计数徽标：默认次级底色；选中态跟随分段控件语义色（已安装=success / 失败=danger）反白
 .status-tab__count {
   font-size: 11px;
   font-weight: 700;
@@ -1814,12 +1825,11 @@ onBeforeUnmount(() => {
   text-align: center;
   border-radius: 9px;
   background: var(--el-fill-color);
+  color: var(--el-text-color-secondary);
   display: inline-block;
-  .status-tab.active & {
-    background: currentColor;
-    color: #fff;
-    background-clip: padding-box;
-  }
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard);
   .status-tab--success.active & {
     background: var(--el-color-success);
     color: #fff;
@@ -1877,11 +1887,13 @@ onBeforeUnmount(() => {
 }
 
 // ---------- Pagination ----------
+// 分页条：与定时任务页/执行日志页/订阅页/环境变量页一致的间距收敛（margin-top 14px）
 .pagination-bar {
-  margin-top: 20px;
+  margin-top: 14px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   padding: 0 4px;
 }
 .pagination-total {
@@ -1890,12 +1902,13 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table) {
-  --el-table-border-color: #f0f0f0;
+  // 边框统一走令牌，明暗自动适配（原写死浅灰会在暗色串色）
+  --el-table-border-color: var(--el-border-color-lighter);
   .el-table__header-wrapper th {
-    border-bottom: 1px solid #e8e8e8;
+    border-bottom: 1px solid var(--el-border-color-light);
   }
   .el-table__row td {
-    border-bottom: 1px solid #f5f5f5;
+    border-bottom: 1px solid var(--el-border-color-lighter);
   }
   .el-table__cell {
     padding: 8px 0;
@@ -2118,5 +2131,33 @@ onBeforeUnmount(() => {
   max-height: 240px;
   overflow: auto;
   margin: 0;
+}
+
+// ===== 入场动画 =====
+// 与定时任务页/执行日志页/订阅页/环境变量页统一：只对卡片级容器（状态标签区 / 工具条 / 表格卡 / 移动列表）
+// 做克制的淡入上移 + 轻微错落；不给表格每一行或每张移动卡做 stagger。
+// 时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+@keyframes dd-deps-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.deps-tabs,
+.toolbar,
+.table-card,
+.dd-mobile-list {
+  animation: dd-deps-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
+}
+
+// 轻微错落：状态标签区/工具条先入，表格卡/移动列表略晚
+.table-card,
+.dd-mobile-list {
+  animation-delay: 60ms;
 }
 </style>
