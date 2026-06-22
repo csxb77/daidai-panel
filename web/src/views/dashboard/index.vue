@@ -1408,7 +1408,8 @@ function rerunLog(log: any) {
   padding: 18px 18px 14px;
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  // 对齐全局表面令牌：静置阴影随明暗自动切换
+  box-shadow: var(--dd-shadow-card);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1517,15 +1518,16 @@ function rerunLog(log: any) {
   justify-content: space-between;
   gap: 12px;
   cursor: pointer;
+  // 对齐全局表面令牌：弹簧 hover + 标准缓动，静置/悬浮阴影随明暗自动切换
   transition:
-    transform 0.22s ease,
-    box-shadow 0.22s ease,
-    border-color 0.22s;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    transform var(--dd-motion-fast) var(--dd-ease-spring),
+    box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
+  box-shadow: var(--dd-shadow-card);
 
   &:hover {
     transform: translateY(-4px);
-    box-shadow: 0 12px 28px rgba(15, 23, 42, 0.1);
+    box-shadow: var(--dd-shadow-card-hover);
     border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
   }
 
@@ -1652,7 +1654,8 @@ function rerunLog(log: any) {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  // 对齐全局表面令牌：静置阴影随明暗自动切换
+  box-shadow: var(--dd-shadow-card);
 }
 
 .panel-header {
