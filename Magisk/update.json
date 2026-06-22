@@ -1,6 +1,6 @@
 {
-  "version": "v2.3.1",
-  "versionCode": 20301,
-  "zipUrl": "https://github.com/linzixuanzz/daidai-panel/releases/download/v2.3.1/daidai-panel-magisk-v2.3.1.zip",
-  "changelog": "https://raw.githubusercontent.com/linzixuanzz/daidai-panel/main/docs/release-notes/v2.3.1.md"
+  "version": "v2.3.2",
+  "versionCode": 20302,
+  "zipUrl": "https://github.com/linzixuanzz/daidai-panel/releases/download/v2.3.2/daidai-panel-magisk-v2.3.2.zip",
+  "changelog": "https://raw.githubusercontent.com/linzixuanzz/daidai-panel/main/docs/release-notes/v2.3.2.md"
 }
