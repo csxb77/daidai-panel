@@ -107,7 +107,11 @@ func (h *LogHandler) Stream(c *gin.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(60 * time.Second):
-				fmt.Fprintf(c.Writer, "event: done\ndata: timeout\n\n")
+				// 静默 60s 不代表任务结束（慢接口/长计算/下载/sleep 都会无输出）。
+				// 重查任务真实状态：仍运行 → reconnect 让前端无缝重连续流，否则才判完成。
+				var t model.Task
+				database.DB.Select("status").First(&t, taskID)
+				fmt.Fprintf(c.Writer, "event: done\ndata: %s\n\n", streamDoneEventForStatus(t.Status))
 				c.Writer.Flush()
 				return
 			}
@@ -126,7 +130,11 @@ func (h *LogHandler) Stream(c *gin.Context) {
 				c.Writer.Flush()
 			}
 		}
-		fmt.Fprintf(c.Writer, "event: done\ndata: finished\n\n")
+		// 启动竞态：打开日志窗时任务可能刚入队、runTask 尚未置运行中/未建 TinyLog。
+		// sleep 后重查真实状态，若已开始运行 → reconnect（前端重连后进入 tl != nil 流式分支），否则才判完成。
+		var t model.Task
+		database.DB.Select("status").First(&t, taskID)
+		fmt.Fprintf(c.Writer, "event: done\ndata: %s\n\n", streamDoneEventForStatus(t.Status))
 		c.Writer.Flush()
 	} else {
 		idleCount := 0
@@ -145,7 +153,10 @@ func (h *LogHandler) Stream(c *gin.Context) {
 
 			idleCount++
 			if idleCount >= 120 {
-				fmt.Fprintf(w, "event: done\ndata: timeout\n\n")
+				// 等待 TinyLog 超时同样不等于任务结束，重查真实状态决定 reconnect / 完成。
+				var t model.Task
+				database.DB.Select("status").First(&t, taskID)
+				fmt.Fprintf(w, "event: done\ndata: %s\n\n", streamDoneEventForStatus(t.Status))
 				c.Writer.Flush()
 				return false
 			}
@@ -164,6 +175,16 @@ func writeSSEData(w io.Writer, data string) {
 		fmt.Fprintf(w, "data: %s\n", line)
 	}
 	fmt.Fprint(w, "\n")
+}
+
+// streamDoneEventForStatus 根据任务真实状态决定 SSE done 事件的 data 值。
+// 任务仍在运行 → "reconnect"，让前端 LogViewer 无缝重连续流，避免误判"已完成"；
+// 其它状态（已结束/排队/禁用等）→ "finished"，前端正常置为"已完成"。
+func streamDoneEventForStatus(status float64) string {
+	if status == model.TaskStatusRunning {
+		return "reconnect"
+	}
+	return "finished"
 }
 
 func (h *LogHandler) Detail(c *gin.Context) {
