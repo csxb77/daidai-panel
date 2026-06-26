@@ -457,11 +457,9 @@ async function loadVersion() {
 }
 
 .is-collapsed .logo-inner {
-  // 收起态把 logo 卡片尺寸对齐顶栏切换按钮（.header-toggle-btn 为 34px 方块），
-  // 使两者图标盒边缘与视觉中心落在同一水平线，改善"看起来没对齐"的观感。
-  width: 34px;
-  min-height: 34px;
-  padding: 3px;
+  width: 40px;
+  min-height: 40px;
+  padding: 6px;
   justify-content: center;
 }
 
@@ -532,6 +530,15 @@ async function loadVersion() {
   &:hover::-webkit-scrollbar-thumb {
     background: var(--el-border-color);
   }
+}
+
+// 收起态：Element Plus 把菜单项内容包进 tooltip 触发层，其默认 padding: 0 20px 会把
+// 图标整体右推，导致与已居中的 logo 不在同一竖直轴上。清掉左右内距并居中，让收起态
+// 导航图标与 logo / 用户头像 / 收起按钮统一居中对齐。
+.sidebar-nav :deep(.el-menu--collapse .el-menu-item .el-menu-tooltip__trigger) {
+  padding-left: 0;
+  padding-right: 0;
+  justify-content: center;
 }
 
 .nav-section-label {
