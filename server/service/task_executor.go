@@ -166,6 +166,8 @@ func (e *TaskExecutor) StopTask(taskID uint) bool {
 	defer e.processLock.Unlock()
 
 	if processes, ok := e.runningProcesses[taskID]; ok {
+		// 先打"手动停止"标记再 kill，保证完成块结算时标记已可见。
+		markManualStop(taskID)
 		for _, process := range processes {
 			KillProcessGroup(process)
 		}
@@ -277,6 +279,15 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			logStatus = model.LogStatusFailed
 		}
 
+		runStatus := model.RunSuccess
+		if !success {
+			runStatus = model.RunFailed
+		}
+
+		// 手动停止：判为成功（日志与运行状态都置成功），并跳过成功/失败两类通知。
+		// applyManualStopOverride 读即清标记，自然完成时返回原状态、suppressNotify=false。
+		runStatus, logStatus, manualStopSuppress := applyManualStopOverride(req.TaskID, runStatus, logStatus)
+
 		endedAt := time.Now()
 		database.DB.Model(taskLog).Updates(map[string]interface{}{
 			"status":   logStatus,
@@ -284,11 +295,6 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			"ended_at": endedAt,
 			"duration": duration,
 		})
-
-		runStatus := model.RunSuccess
-		if !success {
-			runStatus = model.RunFailed
-		}
 
 		inactiveStatus := ResolveTaskInactiveStatus(task)
 		database.DB.Model(task).Updates(map[string]interface{}{
@@ -309,14 +315,14 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 		e.OnTaskCompleted(req, result)
 
-		if success && task.NotifyOnSuccess {
+		if !manualStopSuppress && success && task.NotifyOnSuccess {
 			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, true, exitCode, duration, endedAt, lastSuccessOutput)
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
 				Context:    context,
 			})
 		}
-		if !success && task.NotifyOnFailure {
+		if !manualStopSuppress && !success && task.NotifyOnFailure {
 			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, false, exitCode, duration, endedAt, lastFailureOutput)
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
@@ -950,11 +956,14 @@ func RecordAutoInstalledDepForPythonVersion(depType, name, installLog, pythonVer
 		pythonVersion = ""
 	}
 	var existing model.Dependency
-	query := database.DB.Where("type = ? AND name = ?", depType, name)
+	found := false
 	if depType == model.DepTypePython {
-		query = query.Where("COALESCE(NULLIF(python_version, ''), ?) = ?", LegacyPythonVersion(), pythonVersion)
+		// 按 PEP 503 归一化键查重，避免 requests / Requests 落成两条。
+		existing, found = FindExistingPythonDependency(name, pythonVersion)
+	} else {
+		found = database.DB.Where("type = ? AND name = ?", depType, name).First(&existing).Error == nil
 	}
-	if err := query.First(&existing).Error; err == nil {
+	if found {
 		database.DB.Model(&existing).Updates(map[string]interface{}{
 			"status":         model.DepStatusInstalled,
 			"log":            installLog,

@@ -67,6 +67,7 @@ var registeredSystemConfigSpecs = []systemConfigSpec{
 	newValidatedStringConfig("default_cron_rule", "", "订阅脚本未声明 cron 时使用的默认规则", "subscription", normalizeDefaultCronRule),
 	newTrimmedStringConfig("repo_file_extensions", "py js sh ts", "订阅自动识别任务时扫描的脚本后缀", "subscription"),
 	newBoolConfig("notify_on_resource_warn", "false", "资源超限发送通知", "alerts"),
+	newTrimmedStringConfig("notify_panel_label", "", "通知标题前缀的面板名称（多面板区分用，留空不附带）", "alerts"),
 	newBoolConfig("notify_on_login", "false", "登录成功发送通知", "security"),
 	newValidatedStringConfig("proxy_url", "", "出站请求代理地址", "network", normalizeProxyURL),
 	newValidatedStringConfig("update_image_mirror", "", "系统更新拉取镜像时使用的可选镜像源（留空直连 Docker Hub）", "network", normalizeUpdateImageMirror),

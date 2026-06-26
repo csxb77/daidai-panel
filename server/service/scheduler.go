@@ -153,6 +153,8 @@ func (s *Scheduler) StopRunningTask(taskID uint) bool {
 	defer s.processLock.Unlock()
 
 	if p, ok := s.runningProcesses[taskID]; ok {
+		// 先打"手动停止"标记再 kill，保证完成块结算时标记已可见。
+		markManualStop(taskID)
 		KillProcessGroup(p)
 		delete(s.runningProcesses, taskID)
 		return true
@@ -365,6 +367,10 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		runStatus = model.RunFailed
 		logStatus = model.LogStatusFailed
 	}
+
+	// 手动停止：判为成功（本完成块无通知逻辑，无需额外跳过）。
+	// applyManualStopOverride 读即清标记，自然完成时返回原状态。
+	runStatus, logStatus, _ = applyManualStopOverride(taskID, runStatus, logStatus)
 
 	database.DB.Model(&task).Updates(map[string]interface{}{
 		"status":            model.TaskStatusEnabled,

@@ -93,6 +93,10 @@ export const taskApi = {
     return request.post('/tasks/batch/run', { task_ids: taskIds }) as Promise<{ message: string; count: number }>
   },
 
+  batchAddLabels(taskIds: number[], labels: string[]) {
+    return request.put('/tasks/batch/add-labels', { task_ids: taskIds, labels }) as Promise<{ message: string; success_count: number }>
+  },
+
   cleanLogs(days?: number) {
     return request.delete('/tasks/clean-logs', { params: { days } }) as Promise<{ message: string }>
   },

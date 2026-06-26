@@ -11,6 +11,7 @@ import TaskDetail from './components/TaskDetail.vue'
 import LogFileBrowser from './components/LogFileBrowser.vue'
 import ViewManager from './components/ViewManager.vue'
 import TaskCronList from './components/TaskCronList.vue'
+import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
 import { getDisplayTaskLabels } from './taskLabels'
 import { splitTaskCommandDisplay } from './taskCommand'
 import { usePageActivity } from '@/composables/usePageActivity'
@@ -54,6 +55,7 @@ const statusFilter = ref<string>('')
 const loading = ref(false)
 const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
+const batchLabelVisible = ref(false)
 const notificationChannels = ref<{ id: number; name: string; type: string; enabled: boolean }[]>([])
 const defaultPythonVersion = ref('3.12')
 const formVisible = ref(false)
@@ -534,6 +536,20 @@ async function handleBatchAction(action: string) {
   }
 }
 
+function openBatchAddLabel() {
+  if (!ensureCanOperate()) return
+  if (selectedIds.value.length === 0) {
+    ElMessage.warning('请先选择任务')
+    return
+  }
+  batchLabelVisible.value = true
+}
+
+function handleBatchLabelSuccess() {
+  selectedIds.value = []
+  loadTasks()
+}
+
 async function handleBatchPin() {
   if (!ensureCanOperate('当前账号没有置顶任务权限')) return
   if (selectedIds.value.length === 0) {
@@ -693,6 +709,7 @@ async function handleImport(event: Event) {
           <el-button size="small" @click="handleBatchAction('disable')">批量禁用</el-button>
           <el-button size="small" @click="handleBatchAction('run')">批量运行</el-button>
           <el-button size="small" type="warning" plain @click="handleBatchAction('stop')">批量停止</el-button>
+          <el-button size="small" @click="openBatchAddLabel">添加标签</el-button>
           <el-button size="small" @click="handleBatchPin">批量置顶</el-button>
           <el-button size="small" type="danger" @click="handleBatchAction('delete')">批量删除</el-button>
         </div>
@@ -999,6 +1016,12 @@ async function handleImport(event: Event) {
       v-model:visible="logFilesVisible"
       :task-id="logFilesTaskId"
       :task-name="logFilesTaskName"
+    />
+
+    <BatchAddLabelDialog
+      v-model:visible="batchLabelVisible"
+      :task-ids="selectedIds"
+      @success="handleBatchLabelSuccess"
     />
   </div>
 </template>

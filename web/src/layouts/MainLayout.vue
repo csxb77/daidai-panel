@@ -457,9 +457,11 @@ async function loadVersion() {
 }
 
 .is-collapsed .logo-inner {
-  width: 40px;
-  min-height: 40px;
-  padding: 6px;
+  // 收起态把 logo 卡片尺寸对齐顶栏切换按钮（.header-toggle-btn 为 34px 方块），
+  // 使两者图标盒边缘与视觉中心落在同一水平线，改善"看起来没对齐"的观感。
+  width: 34px;
+  min-height: 34px;
+  padding: 3px;
   justify-content: center;
 }
 

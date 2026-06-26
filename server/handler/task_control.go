@@ -97,6 +97,8 @@ func (h *TaskHandler) Stop(c *gin.Context) {
 	}
 
 	if task.PID != nil && *task.PID > 0 {
+		// 兜底杀孤儿 PID 前也打"手动停止"标记，覆盖进程未被内存追踪的场景。
+		service.MarkManualStop(uint(taskID))
 		service.KillProcessByPid(*task.PID)
 	}
 
@@ -111,8 +113,9 @@ func (h *TaskHandler) Stop(c *gin.Context) {
 	if err := database.DB.Where("task_id = ? AND status = ?", taskID, model.LogStatusRunning).
 		Order("started_at DESC").First(&runningLog).Error; err == nil {
 		now := time.Now()
+		// 手动停止判为成功，与完成块一致（二者都写成功不冲突）。
 		database.DB.Model(&runningLog).Updates(map[string]interface{}{
-			"status":   model.LogStatusFailed,
+			"status":   model.LogStatusSuccess,
 			"ended_at": now,
 		})
 	}

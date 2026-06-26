@@ -168,6 +168,11 @@ func sendToChannel(ch model.NotifyChannel, title, content string, context map[st
 		return fmt.Errorf("invalid config: %w", err)
 	}
 
+	// 多面板共用同一通知渠道时，可在标题前缀附带面板名称以便区分；留空则不附带。
+	if label := strings.TrimSpace(model.GetRegisteredConfig("notify_panel_label")); label != "" {
+		title = "【" + label + "】" + title
+	}
+
 	var err error
 	switch ch.Type {
 	case "webhook":
@@ -427,13 +432,24 @@ func sendDingtalk(cfg map[string]string, title, content string) error {
 		}
 		webhook = webhook + sep + "timestamp=" + timestamp + "&sign=" + sign
 	}
-	mdContent := strings.ReplaceAll(content, "\n", "  \n")
-	body := map[string]interface{}{
-		"msgtype": "markdown",
-		"markdown": map[string]string{
-			"title": title,
-			"text":  fmt.Sprintf("### %s  \n%s", title, mdContent),
-		},
+
+	var body map[string]interface{}
+	if strings.ToLower(strings.TrimSpace(cfg["msg_type"])) == "text" {
+		body = map[string]interface{}{
+			"msgtype": "text",
+			"text": map[string]string{
+				"content": title + "\n" + content,
+			},
+		}
+	} else {
+		mdContent := strings.ReplaceAll(content, "\n", "  \n")
+		body = map[string]interface{}{
+			"msgtype": "markdown",
+			"markdown": map[string]string{
+				"title": title,
+				"text":  fmt.Sprintf("### %s  \n%s", title, mdContent),
+			},
+		}
 	}
 	return httpPost(webhook, body, nil)
 }

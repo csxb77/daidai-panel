@@ -55,6 +55,8 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 			if task.Status == model.TaskStatusRunning {
 				service.GetTaskExecutor().StopTask(id)
 				if task.PID != nil && *task.PID > 0 {
+					// StopTask 已打标记，这里再显式标记一次覆盖按 PID 兜底场景（幂等）。
+					service.MarkManualStop(id)
 					service.KillProcessByPid(*task.PID)
 				}
 				inactiveStatus := service.ResolveTaskInactiveStatus(&task)

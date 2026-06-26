@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/smtp"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"daidai-panel/model"
 	"daidai-panel/testutil"
 )
 
@@ -146,6 +148,150 @@ func TestBuildTelegramMessagesSplitsLongContent(t *testing.T) {
 		if len([]rune(message)) > 3600 {
 			t.Fatalf("expected telegram message %d to stay under safe limit, got %d runes", i, len([]rune(message)))
 		}
+	}
+}
+
+func TestSendDingtalkText(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	var body map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	err := sendDingtalk(map[string]string{
+		"webhook":  server.URL,
+		"msg_type": "Text",
+	}, "标题", "第一行\n第二行")
+	if err != nil {
+		t.Fatalf("send dingtalk text: %v", err)
+	}
+
+	if got := body["msgtype"]; got != "text" {
+		t.Fatalf("unexpected msgtype: %#v", got)
+	}
+	textBody, ok := body["text"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("unexpected text payload: %#v", body["text"])
+	}
+	if got := textBody["content"]; got != "标题\n第一行\n第二行" {
+		t.Fatalf("unexpected text content: %#v", got)
+	}
+	if _, exists := body["markdown"]; exists {
+		t.Fatalf("text message should not include markdown payload")
+	}
+}
+
+func TestSendDingtalkMarkdownFallback(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	cases := []struct {
+		name    string
+		msgType string
+	}{
+		{name: "explicit markdown", msgType: "markdown"},
+		{name: "empty falls back to markdown", msgType: ""},
+		{name: "unknown falls back to markdown", msgType: "html"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]interface{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+
+			cfg := map[string]string{"webhook": server.URL}
+			if tc.msgType != "" {
+				cfg["msg_type"] = tc.msgType
+			}
+
+			if err := sendDingtalk(cfg, "标题", "第一行\n第二行"); err != nil {
+				t.Fatalf("send dingtalk markdown: %v", err)
+			}
+
+			if got := body["msgtype"]; got != "markdown" {
+				t.Fatalf("unexpected msgtype: %#v", got)
+			}
+			markdown, ok := body["markdown"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("unexpected markdown payload: %#v", body["markdown"])
+			}
+			if got := markdown["title"]; got != "标题" {
+				t.Fatalf("unexpected markdown title: %#v", got)
+			}
+			if got := markdown["text"]; got != "### 标题  \n第一行  \n第二行" {
+				t.Fatalf("unexpected markdown text: %#v", got)
+			}
+			if _, exists := body["text"]; exists {
+				t.Fatalf("markdown message should not include text payload")
+			}
+		})
+	}
+}
+
+func TestSendToChannelPrefixesPanelLabel(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	if err := model.SetConfig("notify_panel_label", "家里NAS"); err != nil {
+		t.Fatalf("set notify_panel_label: %v", err)
+	}
+
+	var body map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ch := model.NotifyChannel{
+		Type:   "webhook",
+		Config: fmt.Sprintf(`{"url":%q}`, server.URL),
+	}
+	if err := sendToChannel(ch, "原始标题", "正文", nil); err != nil {
+		t.Fatalf("send to channel: %v", err)
+	}
+
+	if got := body["title"]; got != "【家里NAS】原始标题" {
+		t.Fatalf("unexpected prefixed title: %q", got)
+	}
+	if got := body["content"]; got != "正文" {
+		t.Fatalf("unexpected content: %q", got)
+	}
+}
+
+func TestSendToChannelKeepsTitleWhenPanelLabelEmpty(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	var body map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ch := model.NotifyChannel{
+		Type:   "webhook",
+		Config: fmt.Sprintf(`{"url":%q}`, server.URL),
+	}
+	if err := sendToChannel(ch, "原始标题", "正文", nil); err != nil {
+		t.Fatalf("send to channel: %v", err)
+	}
+
+	if got := body["title"]; got != "原始标题" {
+		t.Fatalf("expected title unchanged when label empty, got %q", got)
 	}
 }
 

@@ -123,6 +123,10 @@ const configFields = computed(() => {
     case 'dingtalk': return [
       { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=xxx' },
       { key: 'secret', label: '加签秘钥 (可选)', type: 'input', placeholder: '安全设置中的 SEC 开头的秘钥' },
+      { key: 'msg_type', label: '消息类型', type: 'select', placeholder: '选择钉钉机器人消息类型', options: [
+        { label: '文本', value: 'text' },
+        { label: 'Markdown', value: 'markdown' },
+      ]},
     ]
     case 'wecom': return [
       { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' },
@@ -352,10 +356,23 @@ onMounted(() => {
   loadChannelTypes()
 })
 
+function applyChannelTypeDefaults() {
+  // 钉钉新建渠道默认走 Markdown，与后端 msg_type 空值兜底保持一致
+  if (channelForm.value.type === 'dingtalk') {
+    configData.value.msg_type = 'markdown'
+  }
+}
+
+function onChannelTypeChange() {
+  configData.value = {}
+  applyChannelTypeDefaults()
+}
+
 function openCreateChannel() {
   isCreateChannel.value = true
   channelForm.value = { id: 0, name: '', type: 'webhook', config: '{}' }
   configData.value = {}
+  applyChannelTypeDefaults()
   showChannelDialog.value = true
 }
 
@@ -770,7 +787,7 @@ function getChannelConfigSummary(row: any): string[] {
           <el-input v-model="channelForm.name" placeholder="渠道名称" />
         </el-form-item>
         <el-form-item label="类型">
-          <el-select v-model="channelForm.type" style="width: 100%" @change="configData = {}">
+          <el-select v-model="channelForm.type" style="width: 100%" @change="onChannelTypeChange">
             <el-option v-for="t in channelTypes" :key="t.type" :label="t.name" :value="t.type" />
           </el-select>
         </el-form-item>

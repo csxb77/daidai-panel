@@ -192,6 +192,9 @@ func main() {
 	service.StartResourceWatcher()
 	defer service.StopResourceWatcher()
 
+	service.StartLogCleanupWorker()
+	defer service.StopLogCleanupWorker()
+
 	handler.StartPanelAutoUpdateWatcher()
 	defer handler.StopPanelAutoUpdateWatcher()
 

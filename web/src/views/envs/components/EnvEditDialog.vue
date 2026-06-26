@@ -27,6 +27,9 @@ const emit = defineEmits<{
   save: [value: EnvFormModel | EnvFormModel[]]
 }>()
 
+// 与后端 envNamePattern 对齐：字母/数字/下划线，且不能以数字开头
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
 function splitEnvGroups(value: string): string[] {
   return value
     .split(/[,，;；\n\r\t]/)
@@ -49,6 +52,12 @@ const { dialogFullscreen } = useResponsive()
 const isCreate = computed(() => props.mode === 'create')
 const dialogTitle = computed(() => isCreate.value ? '新建环境变量' : '编辑环境变量')
 const submitText = computed(() => isCreate.value ? '创建' : '保存')
+
+// 已输入但不符合规则时，提示文字变红
+const nameInvalid = computed(() => {
+  const name = form.value.name.trim()
+  return name !== '' && !ENV_NAME_PATTERN.test(name)
+})
 
 function syncForm() {
   const initial = props.initialData ?? createEmptyForm()
@@ -76,6 +85,11 @@ function handleSave() {
 
   if (!name) {
     ElMessage.warning('变量名不能为空')
+    return
+  }
+
+  if (!ENV_NAME_PATTERN.test(name)) {
+    ElMessage.warning('变量名只能包含字母、数字、下划线，且不能以数字开头')
     return
   }
 
@@ -137,6 +151,9 @@ watch(
     >
       <el-form-item label="变量名">
         <el-input v-model="form.name" placeholder="变量名 (如: API_KEY)" />
+        <div class="env-edit-dialog__name-hint" :class="{ 'is-error': nameInvalid }">
+          只能输入字母、数字、下划线，且不能以数字开头
+        </div>
       </el-form-item>
       <el-form-item v-if="isCreate" label="按行拆分">
         <div style="display: flex; align-items: center; gap: 8px; width: 100%">
@@ -210,6 +227,18 @@ watch(
 .env-edit-dialog__form :deep(.el-form-item__label) {
   white-space: nowrap;
   word-break: keep-all;
+}
+
+.env-edit-dialog__name-hint {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+}
+
+.env-edit-dialog__name-hint.is-error {
+  color: var(--el-color-danger);
 }
 
 .env-edit-dialog__value-item :deep(.el-form-item__label) {

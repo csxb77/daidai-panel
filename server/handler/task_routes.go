@@ -37,6 +37,7 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.PUT("/batch/disable", middleware.RequireRole("operator"), h.BatchDisable)
 		tasks.DELETE("/batch/delete", middleware.RequireRole("operator"), h.BatchDelete)
 		tasks.POST("/batch/run", middleware.RequireRole("operator"), h.BatchRun)
+		tasks.PUT("/batch/add-labels", middleware.RequireRole("operator"), h.BatchAddLabels)
 		tasks.DELETE("/clean-logs", middleware.RequireRole("operator"), h.CleanLogs)
 		tasks.POST("/import", middleware.RequireRole("operator"), h.Import)
 

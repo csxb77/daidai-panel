@@ -195,6 +195,7 @@ func (h *DepsHandler) Create(c *gin.Context) {
 		return
 	}
 	created := []map[string]interface{}{}
+	skipped := 0
 	for _, name := range req.Names {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -205,6 +206,16 @@ func (h *DepsHandler) Create(c *gin.Context) {
 		}
 
 		for _, pythonVersion := range dependencyPythonInstallVersions(req.Type) {
+			// Python 依赖按 PEP 503 归一化键去重：同名（忽略大小写/分隔符差异）已存在且
+			// 已安装/安装中/排队中的，跳过、不重复安装。
+			if req.Type == model.DepTypePython {
+				if _, exists := service.FindExistingPythonDependency(name, pythonVersion,
+					model.DepStatusInstalled, model.DepStatusInstalling, model.DepStatusQueued); exists {
+					skipped++
+					continue
+				}
+			}
+
 			dep := model.Dependency{
 				Type:          req.Type,
 				Name:          name,
@@ -223,6 +234,9 @@ func (h *DepsHandler) Create(c *gin.Context) {
 	message := fmt.Sprintf("已提交 %d 个依赖安装", len(created))
 	if req.Type == model.DepTypePython && len(created) > 0 {
 		message = fmt.Sprintf("已提交 %d 个 Python 版本依赖安装", len(created))
+	}
+	if skipped > 0 {
+		message = fmt.Sprintf("%s，已存在跳过 %d 个", message, skipped)
 	}
 	response.Created(c, gin.H{
 		"message": message,
