@@ -53,6 +53,15 @@ defineProps<{
     </div>
 
     <div class="config-section">
+      <h4 class="section-title">通知标识</h4>
+      <div class="form-field">
+        <label>通知面板名称</label>
+        <el-input v-model="form.notify_panel_label" placeholder="留空不附带，例如：家里NAS" maxlength="32" show-word-limit clearable />
+      </div>
+      <span class="form-hint">填写后所有通知标题统一加上「【面板名】」前缀，方便多个面板共用同一通知渠道时区分来源；留空则不附带</span>
+    </div>
+
+    <div class="config-section">
       <h4 class="section-title">登录通知</h4>
       <div class="switch-row">
         <div class="switch-item">

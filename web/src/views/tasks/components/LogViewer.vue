@@ -46,6 +46,9 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let hiddenAt: number | null = null
 let pendingScrollRestore: number | null = null
 let logTailCarriageReturnPending = false
+// reconnect 风暴熔断：连续重连且无新数据时累加，超过上限即按完成处理，避免无限重连+全量重渲染卡顿。
+let reconnectAttempts = 0
+const MAX_RECONNECT_ATTEMPTS = 5
 
 const hasLogs = computed(() => logLines.value.length > 0 || logTail.value.length > 0)
 const renderedLogText = computed(() => {
@@ -113,6 +116,8 @@ async function startStream(isReconnect = false) {
   loading.value = !isReconnect
   pendingScrollRestore = isReconnect && savedScrollTop !== null ? savedScrollTop : null
   if (!isReconnect) {
+    // 用户主动打开/切换任务重新起流：清零重连计数，确保熔断只针对一次会话内的连续空重连。
+    reconnectAttempts = 0
     autoScroll.value = false
     scheduleScrollToTop()
   }
@@ -132,6 +137,8 @@ async function startStream(isReconnect = false) {
       if (!data) {
         return
       }
+      // 收到真实日志数据 = 有实质进展，不算空重连风暴，重置熔断计数。
+      reconnectAttempts = 0
       logBuffer.push(data)
       scheduleBufferFlush()
     },
@@ -143,10 +150,18 @@ async function startStream(isReconnect = false) {
       done.value = true
       cleanup()
       if (event.data === 'reconnect') {
+        reconnectAttempts++
+        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+          // 连续多次重连都没有新数据：判定为无可续流的实时日志，按完成处理，停止重连风暴。
+          void fetchLatestLog(0, autoScroll.value ? 'bottom' : 'preserve')
+          return
+        }
+        // 退避重连：第 1 次 500ms，逐次翻倍，封顶 5s，降低无效重连对前端的冲击。
+        const delay = Math.min(500 * 2 ** (reconnectAttempts - 1), 5000)
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
-          void startStream()
-        }, 500)
+          void startStream(true)
+        }, delay)
         return
       }
       void fetchLatestLog(0, autoScroll.value ? 'bottom' : 'preserve')

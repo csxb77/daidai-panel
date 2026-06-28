@@ -326,7 +326,13 @@ a {
   }
 
   &.is-fullscreen {
+    // 全屏模式复位上面对 .el-dialog 的通用装饰，确保真正边到边铺满：
+    // - margin-top 抵消 :299 那条带 !important 的留白，否则全屏框被顶下来一截露缝
+    // - 去圆角，避免四角留白看起来像浮窗
     max-height: 100dvh;
+    --el-dialog-margin-top: 0 !important;
+    margin: 0;
+    border-radius: 0;
   }
 }
 

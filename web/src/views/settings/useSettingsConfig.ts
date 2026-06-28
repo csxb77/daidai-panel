@@ -100,6 +100,7 @@ export function useSettingsConfig() {
     memory_warn: 80,
     disk_warn: 90,
     notify_on_resource_warn: false,
+    notify_panel_label: '',
     notify_on_login: false,
     proxy_url: '',
     update_image_mirror: '',
@@ -168,6 +169,7 @@ export function useSettingsConfig() {
         memory_warn: readConfigNumber(cfgs, 'memory_warn', 80),
         disk_warn: readConfigNumber(cfgs, 'disk_warn', 90),
         notify_on_resource_warn: readConfigBool(cfgs, 'notify_on_resource_warn', false),
+        notify_panel_label: readConfigString(cfgs, 'notify_panel_label', ''),
         notify_on_login: readConfigBool(cfgs, 'notify_on_login', false),
         proxy_url: readConfigString(cfgs, 'proxy_url', ''),
         update_image_mirror: readConfigString(cfgs, 'update_image_mirror', ''),
@@ -230,7 +232,7 @@ export function useSettingsConfig() {
 
   function handleSaveAlertConfig() {
     void saveConfigKeys([
-      'cpu_warn', 'memory_warn', 'disk_warn', 'notify_on_resource_warn', 'notify_on_login'
+      'cpu_warn', 'memory_warn', 'disk_warn', 'notify_on_resource_warn', 'notify_panel_label', 'notify_on_login'
     ])
   }
 

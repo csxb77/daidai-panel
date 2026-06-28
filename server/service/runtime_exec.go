@@ -643,6 +643,22 @@ func ResolveManagedPipBinaryForPythonVersion(pythonVersion string) string {
 	return resolveManagedPipBinaryInVenv(venvDir)
 }
 
+// ResolveManagedPythonBinary 返回面板默认版本托管 venv 的 python 可执行文件路径，
+// 供 ddp 等容器内命令在与任务执行一致的环境里跑脚本/开 shell。venv 缺失时会先按需创建。
+func ResolveManagedPythonBinary() string {
+	return ResolveManagedPythonBinaryForPythonVersion("")
+}
+
+func ResolveManagedPythonBinaryForPythonVersion(pythonVersion string) string {
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	EnsureManagedPythonVenvForVersion(pythonVersion)
+	venvDir := ManagedPythonVenvDir(pythonVersion)
+	if !managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
+		return ""
+	}
+	return resolveManagedPythonBinaryInVenv(venvDir)
+}
+
 func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths, pythonVersion string) (*exec.Cmd, func(), error) {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
 	EnsureManagedPythonVenvForVersion(pythonVersion)

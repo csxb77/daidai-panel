@@ -691,7 +691,7 @@ func loadQingLongTasks(db *sql.DB) ([]model.Task, error) {
 			continue
 		}
 
-		command := strings.TrimSpace(firstNonEmptySQLiteString(row, "command"))
+		command := normalizeQingLongTaskCommand(firstNonEmptySQLiteString(row, "command"))
 		name := strings.TrimSpace(firstNonEmptySQLiteString(row, "name"))
 		task := model.Task{
 			ID:                     uint(sqliteRowInt(row, "id")),
@@ -731,6 +731,62 @@ func loadQingLongTasks(db *sql.DB) ([]model.Task, error) {
 	}
 
 	return result, nil
+}
+
+// 面板命令文法（见 ParseCommandExecutionPlan）要求首 token 必须是 task / desi / 已知解释器之一，
+// 否则无法运行。青龙 Crontabs.command 存的命令不一定满足该规范：
+//   - 有的是裸脚本（"123.py" / "/ql/scripts/123.py"），缺 task 前缀，导入后面板跑不了；
+//   - 有的带青龙绝对路径前缀（"task /ql/scripts/123.py"），路径在面板脚本目录里找不到。
+// 这里在导入时把命令归一化成面板可执行的 "task <相对脚本目录路径>"。
+var qingLongRecognizedCommandHeads = map[string]struct{}{
+	"task": {}, "desi": {},
+	"python": {}, "python3": {}, "python3.10": {}, "python3.11": {}, "python3.12": {},
+	"node": {}, "ts-node": {}, "bash": {}, "go": {},
+}
+
+// 青龙脚本根目录的常见前缀，导入面板后脚本会落到面板脚本目录，需要剥成相对路径。
+var qingLongScriptPathPrefixes = []string{
+	"/ql/data/scripts/",
+	"/ql/scripts/",
+	"ql/data/scripts/",
+	"ql/scripts/",
+	"/scripts/",
+	"scripts/",
+}
+
+func stripQingLongScriptPrefix(token string) string {
+	for _, prefix := range qingLongScriptPathPrefixes {
+		if strings.HasPrefix(token, prefix) {
+			return strings.TrimPrefix(token, prefix)
+		}
+	}
+	return token
+}
+
+func normalizeQingLongTaskCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return command
+	}
+
+	tokens := strings.Fields(command)
+	if len(tokens) == 0 {
+		return command
+	}
+
+	if _, recognized := qingLongRecognizedCommandHeads[tokens[0]]; recognized {
+		// 已是面板可识别格式：只清理后续 token 里的青龙路径前缀，首 token（task/解释器）保持不动。
+		for i := 1; i < len(tokens); i++ {
+			tokens[i] = stripQingLongScriptPrefix(tokens[i])
+		}
+		return strings.Join(tokens, " ")
+	}
+
+	// 裸命令：剥脚本路径前缀后补 task 前缀。
+	for i := range tokens {
+		tokens[i] = stripQingLongScriptPrefix(tokens[i])
+	}
+	return "task " + strings.Join(tokens, " ")
 }
 
 func deriveTaskNameFromCommand(command string) string {

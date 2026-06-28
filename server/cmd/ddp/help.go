@@ -14,6 +14,8 @@ func printHelp() {
   ddp restart
   ddp update
   ddp service <install|uninstall|start|stop|restart|status>
+  ddp python <脚本路径> [参数...]
+  ddp shell
   ddp script list
   ddp script cat <相对路径>
   ddp script fetch <url> [--path 相对路径] [--force]
@@ -48,6 +50,9 @@ func printHelp() {
 说明:
   1. 没有使用 dd 作为命令名，因为 Linux 已自带 dd 命令，容易冲突。
   2. task run 会在当前终端里同步执行并等待结果。
+  2.1 python / shell 使用面板托管 Python 环境（venv + 已装依赖 + 面板环境变量），在当前终端前台
+      交互执行，可输入手机号/验证码等；解决 docker exec 终端 python3 找不到面板依赖的问题。
+      python 的脚本路径相对脚本目录（也可给绝对路径）；shell 进入后 python3 即面板解释器。
   3. sub pull 会在当前终端里实时输出拉库日志。
   4. update 会自动识别 Docker 或二进制部署；Docker 模式依赖 /var/run/docker.sock 挂载。
   5. service install 目前会在 Linux 上安装 systemd 守护，并让二进制更新时自动停启该服务。
@@ -55,6 +60,8 @@ func printHelp() {
 
 示例:
   ddp status
+  ddp python tg/首次登录.py
+  ddp shell
   ddp script fetch https://example.com/demo.py --path tools/demo.py
   ddp env set JD_COOKIE "pt_key=xxx;pt_pin=yyy;" --group 京东
   ddp task list --status running

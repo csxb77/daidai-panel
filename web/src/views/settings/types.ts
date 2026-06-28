@@ -15,6 +15,7 @@ export interface SettingsConfigForm {
   memory_warn: number
   disk_warn: number
   notify_on_resource_warn: boolean
+  notify_panel_label: string
   notify_on_login: boolean
   proxy_url: string
   update_image_mirror: string

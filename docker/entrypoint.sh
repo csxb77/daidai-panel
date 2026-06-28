@@ -86,6 +86,12 @@ if ! sh -c "${PROBE_CMD}" 2>/dev/null; then
 fi
 rm -f "${WRITE_PROBE}" 2>/dev/null || true
 
+# --- 字符编码 --------------------------------------------------------------
+# 与 Dockerfile 的 ENV 对称，双保险：未经 ENV 注入的场景（如部分守护方式）也能拿到 UTF-8 locale，
+# 避免任务执行与终端里的中文文件名/输出乱码。C.UTF-8 在 Alpine musl 与 Debian glibc 均内置。
+export LANG="${LANG:-C.UTF-8}"
+export LC_ALL="${LC_ALL:-C.UTF-8}"
+
 # --- PATH / NODE_PATH ------------------------------------------------------
 export NODE_PATH="${DATA_DIR}/deps/nodejs/node_modules"
 export DAIDAI_PYTHON_RUNTIME_ROOT="${DAIDAI_PYTHON_RUNTIME_ROOT:-/opt/daidai-python}"

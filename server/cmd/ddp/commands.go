@@ -49,6 +49,10 @@ func run(args []string) int {
 		err = runUpdate(rt)
 	case "service":
 		err = runService(rt, args[1:])
+	case "python", "py":
+		err = runRuntimePython(rt, args[1:])
+	case "shell", "sh":
+		err = runRuntimeShell(rt, args[1:])
 	case "script":
 		err = runScript(rt, args[1:])
 	case "env":

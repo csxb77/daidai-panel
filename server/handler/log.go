@@ -106,14 +106,15 @@ func (h *LogHandler) Stream(c *gin.Context) {
 				c.Writer.Flush()
 			case <-ctx.Done():
 				return
-			case <-time.After(60 * time.Second):
-				// 静默 60s 不代表任务结束（慢接口/长计算/下载/sleep 都会无输出）。
-				// 重查任务真实状态：仍运行 → reconnect 让前端无缝重连续流，否则才判完成。
-				var t model.Task
-				database.DB.Select("status").First(&t, taskID)
-				fmt.Fprintf(c.Writer, "event: done\ndata: %s\n\n", streamDoneEventForStatus(t.Status))
+			case <-time.After(30 * time.Second):
+				// 静默 30s 不代表任务结束（慢接口/长计算/下载/sleep 都会无输出）。
+				// 这里发一条 SSE keepalive 注释心跳并继续保持连接（不 return）：
+				//   - 维持长连接，避免反代/网关空闲超时主动断开；
+				//   - 不再断开重连重发整段历史，消除安静任务的周期性全量重渲染卡顿；
+				//   - 任务真正结束时 sub 通道会关闭，自然走上面已有的 done:finished 分支。
+				// 前端 sse.ts dispatchEventSegment 对 ":" 开头的行直接 continue，注释心跳是无副作用 no-op。
+				fmt.Fprintf(c.Writer, ": keepalive\n\n")
 				c.Writer.Flush()
-				return
 			}
 		}
 	}
@@ -153,10 +154,11 @@ func (h *LogHandler) Stream(c *gin.Context) {
 
 			idleCount++
 			if idleCount >= 120 {
-				// 等待 TinyLog 超时同样不等于任务结束，重查真实状态决定 reconnect / 完成。
-				var t model.Task
-				database.DB.Select("status").First(&t, taskID)
-				fmt.Fprintf(w, "event: done\ndata: %s\n\n", streamDoneEventForStatus(t.Status))
+				// 等满约 60s（120 * 500ms）TinyLog 始终未出现：该任务没有可流式的实时日志
+				// （典型为 conc / SuppressLiveOutput 抑制输出的运行任务）。此处直接发 finished，
+				// 不再用 streamDoneEventForStatus —— 否则 status==running 会回 reconnect，
+				// 而前端重连后仍是 tl==nil，60s 后又超时，形成无可续流的无限重连风暴。
+				fmt.Fprintf(w, "event: done\ndata: finished\n\n")
 				c.Writer.Flush()
 				return false
 			}

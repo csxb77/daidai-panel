@@ -15,6 +15,33 @@ import (
 	_ "github.com/glebarez/sqlite"
 )
 
+func TestNormalizeQingLongTaskCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"裸文件名补 task", "123.py", "task 123.py"},
+		{"已合规保持不变", "task 123.py", "task 123.py"},
+		{"task+绝对路径剥前缀", "task /ql/scripts/123.py", "task 123.py"},
+		{"裸绝对路径剥前缀并补 task", "/ql/scripts/123.py", "task 123.py"},
+		{"裸 data/scripts 前缀", "/ql/data/scripts/sub/sign.js", "task sub/sign.js"},
+		{"相对 scripts 前缀", "task scripts/jd/jd.py", "task jd/jd.py"},
+		{"解释器开头保持不变", "python3 demo.py", "python3 demo.py"},
+		{"保留脚本参数", "task 123.py now", "task 123.py now"},
+		{"首尾空白清理", "  task 123.py  ", "task 123.py"},
+		{"空命令", "", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeQingLongTaskCommand(tc.in); got != tc.want {
+				t.Fatalf("normalizeQingLongTaskCommand(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMapQingLongDependencyType(t *testing.T) {
 	if got := mapQingLongDependencyType(0); got != "nodejs" {
 		t.Fatalf("expected nodejs, got %q", got)
