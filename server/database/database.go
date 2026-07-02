@@ -108,6 +108,7 @@ func EnsureColumns() {
 		{"task_before", "TEXT"},
 		{"task_after", "TEXT"},
 		{"task_type", "VARCHAR(16) DEFAULT 'cron'"},
+		{"last_startup_auto_run_date", "VARCHAR(10) DEFAULT ''"},
 		{"allow_multiple_instances", "BOOLEAN DEFAULT 0"},
 		{"timeout", "INTEGER DEFAULT 0"},
 		{"random_delay_seconds", "INTEGER"},

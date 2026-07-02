@@ -81,6 +81,87 @@ func TestSchedulerV2EnqueueStartupTasks(t *testing.T) {
 	}
 }
 
+func TestSchedulerV2EnqueueStartupTasksOnlyOncePerDay(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	today := time.Now().Format("2006-01-02")
+	startupTask := &model.Task{
+		Name:     "startup daily task",
+		Command:  "echo boot once",
+		TaskType: model.TaskTypeStartup,
+		Status:   model.TaskStatusEnabled,
+	}
+	if err := database.DB.Create(startupTask).Error; err != nil {
+		t.Fatalf("create startup task: %v", err)
+	}
+
+	scheduler := NewSchedulerV2(SchedulerConfig{
+		WorkerCount:  1,
+		QueueSize:    10,
+		RateInterval: time.Hour,
+	}, nil)
+
+	if count := scheduler.EnqueueStartupTasks(); count != 1 {
+		t.Fatalf("expected first startup enqueue count 1, got %d", count)
+	}
+
+	var updated model.Task
+	if err := database.DB.First(&updated, startupTask.ID).Error; err != nil {
+		t.Fatalf("reload startup task: %v", err)
+	}
+	if updated.LastStartupAutoRunDate != today {
+		t.Fatalf("expected startup auto run date %q, got %q", today, updated.LastStartupAutoRunDate)
+	}
+
+	// 模拟第一次开机运行已经结束：任务状态会回到启用，但当天再次重启面板不应再自动入队。
+	if err := database.DB.Model(&model.Task{}).Where("id = ?", startupTask.ID).Update("status", model.TaskStatusEnabled).Error; err != nil {
+		t.Fatalf("reset startup task status: %v", err)
+	}
+
+	if count := scheduler.EnqueueStartupTasks(); count != 0 {
+		t.Fatalf("expected same-day startup enqueue count 0, got %d", count)
+	}
+	if got := len(scheduler.taskQueue); got != 1 {
+		t.Fatalf("expected only the first automatic queue item to remain, got queue length %d", got)
+	}
+
+	if err := scheduler.RunNow(startupTask.ID); err != nil {
+		t.Fatalf("manual run should ignore startup auto date: %v", err)
+	}
+	if err := scheduler.RunNow(startupTask.ID); err != nil {
+		t.Fatalf("second manual run should ignore startup auto date: %v", err)
+	}
+	if got := len(scheduler.taskQueue); got != 3 {
+		t.Fatalf("expected one automatic item plus two manual items, got queue length %d", got)
+	}
+}
+
+func TestSchedulerV2EnqueueStartupTasksRunsAgainWhenStoredDateIsOld(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	startupTask := &model.Task{
+		Name:                   "old startup task",
+		Command:                "echo boot again",
+		TaskType:               model.TaskTypeStartup,
+		Status:                 model.TaskStatusEnabled,
+		LastStartupAutoRunDate: yesterday,
+	}
+	if err := database.DB.Create(startupTask).Error; err != nil {
+		t.Fatalf("create startup task: %v", err)
+	}
+
+	scheduler := NewSchedulerV2(SchedulerConfig{
+		WorkerCount:  1,
+		QueueSize:    10,
+		RateInterval: time.Hour,
+	}, nil)
+
+	if count := scheduler.EnqueueStartupTasks(); count != 1 {
+		t.Fatalf("expected old-date startup task to enqueue again, got %d", count)
+	}
+}
+
 func TestSchedulerV2RejectsEnqueueAfterStop(t *testing.T) {
 	testutil.SetupTestEnv(t)
 

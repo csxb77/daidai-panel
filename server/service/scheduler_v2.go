@@ -442,9 +442,12 @@ func (s *SchedulerV2) EnqueueStartupTasks() int {
 		return 0
 	}
 
+	today := time.Now().Format("2006-01-02")
 	var tasks []model.Task
 	database.DB.
 		Where("status = ? AND task_type = ?", model.TaskStatusEnabled, model.TaskTypeStartup).
+		// 开机运行任务按“自动触发日期”限流：同一天只自动入队一次，手动运行走 RunNow，不受这里影响。
+		Where("last_startup_auto_run_date IS NULL OR last_startup_auto_run_date <> ?", today).
 		Order("sort_order ASC, created_at ASC, id ASC").
 		Find(&tasks)
 
@@ -461,7 +464,16 @@ func (s *SchedulerV2) EnqueueStartupTasks() int {
 			log.Printf("startup task %d enqueue failed: %v", task.ID, err)
 			continue
 		}
-		database.DB.Model(&model.Task{}).Where("id = ? AND status != ?", task.ID, model.TaskStatusRunning).Update("status", model.TaskStatusQueued)
+
+		updates := map[string]interface{}{
+			"last_startup_auto_run_date": today,
+		}
+		if task.Status != model.TaskStatusRunning {
+			updates["status"] = model.TaskStatusQueued
+		}
+		if err := database.DB.Model(&model.Task{}).Where("id = ?", task.ID).Updates(updates).Error; err != nil {
+			log.Printf("startup task %d mark auto run date failed: %v", task.ID, err)
+		}
 		count++
 	}
 

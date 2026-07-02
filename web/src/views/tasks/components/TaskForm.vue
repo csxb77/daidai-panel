@@ -217,7 +217,7 @@ function handleSubmit() {
                 不自动调度，仅在你手动点击“运行”或批量运行时执行。
               </template>
               <template v-else>
-                面板服务启动后会自动执行一次；平时也可以手动点击“运行”触发。
+                每天首次启动面板时自动执行一次；当天再次重启不会重复自动执行，手动点击“运行”不受限制。
               </template>
             </div>
           </el-form-item>

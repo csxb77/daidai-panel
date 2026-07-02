@@ -65,6 +65,82 @@ go test ./...
 
 ---
 
+## 场景：开机运行任务每天自动触发一次
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/scheduler_v2.go` 的 `EnqueueStartupTasks()`、`RunNow()`，或修改 `model.Task` 的任务类型 / 启动触发状态字段时必须看本节。
+- 原因：「开机运行」是面板启动流程的自动触发能力，不等同于“每次服务进程启动都重复执行”。面板更新、容器重建、电脑重启都会导致服务再次启动，如果不持久化当天自动触发状态，同一天可能重复跑用户原本只想每天启动自动跑一次的任务。
+
+### 2. Signatures
+
+- 自动触发入口：`func (s *SchedulerV2) EnqueueStartupTasks() int`
+- 手动触发入口：`func (s *SchedulerV2) RunNow(taskID uint) error`
+- 任务字段：`Task.LastStartupAutoRunDate string`
+- 数据库字段：`tasks.last_startup_auto_run_date VARCHAR(10) DEFAULT ''`
+
+### 3. Contracts
+
+- 开机运行任务的自动触发按面板本地日期限流，同一个任务同一天只能由 `EnqueueStartupTasks()` 自动入队一次。
+- 自动触发成功入队后，必须立即写入 `last_startup_auto_run_date=当天日期`，避免任务执行结束回到「启用」后，当天再次重启又被自动入队。
+- 手动运行必须继续走 `RunNow()`，不得读取或修改 `last_startup_auto_run_date`，确保用户当天仍可手动运行多次。
+- 旧日期、空字符串、`NULL` 都表示当天尚未自动触发，可以在当天首次启动时自动入队。
+- 新字段必须在 `database.EnsureColumns()` 中补列，保证已有 SQLite 用户升级后无需手动迁移。
+
+### 4. Validation & Error Matrix
+
+- `last_startup_auto_run_date == today` -> `EnqueueStartupTasks()` 跳过该任务。
+- `last_startup_auto_run_date == ''` 或旧日期 -> `EnqueueStartupTasks()` 正常入队，并写入今天日期。
+- 自动入队失败（队列满 / scheduler stopped）-> 不写入今天日期，允许后续启动再尝试。
+- 手动 `RunNow()` -> 不检查今天日期，正常入队或返回原有队列错误。
+- 老库缺字段 -> 启动时通过 `EnsureColumns()` 自动补列，不能要求用户手工改库。
+
+### 5. Good/Base/Bad Cases
+
+- Good：早上第一次启动面板，开机运行任务自动执行；上午面板更新重启，任务不再自动重复执行；用户手动点「运行」仍可执行。
+- Base：昨天自动执行过，今天首次启动面板时再次自动执行。
+- Bad：直接用 `last_run_at` 判断是否今天跑过，因为手动运行也会更新 `last_run_at`，会误伤「手动可以再次执行」的需求。
+
+### 6. Tests Required
+
+- 同一天第一次 `EnqueueStartupTasks()` 返回 1，写入 `LastStartupAutoRunDate=today`。
+- 模拟任务完成后状态回到启用，同一天第二次 `EnqueueStartupTasks()` 返回 0。
+- `RunNow()` 在 `LastStartupAutoRunDate=today` 时仍可多次入队。
+- 旧日期任务在新的一天仍可自动入队。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestSchedulerV2" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：每次面板服务启动都重新入队，更新/重启会导致同一天重复自动跑。
+database.DB.Where("status = ? AND task_type = ?", model.TaskStatusEnabled, model.TaskTypeStartup).Find(&tasks)
+```
+
+```go
+// 错误：用 last_run_at 限制会把用户手动运行也算进去，破坏“手动可多次执行”。
+database.DB.Where("DATE(last_run_at) <> ?", today).Find(&tasks)
+```
+
+#### Correct
+
+```go
+// 正确：只限制开机运行的自动触发日期，手动 RunNow 不看这个字段。
+database.DB.
+  Where("status = ? AND task_type = ?", model.TaskStatusEnabled, model.TaskTypeStartup).
+  Where("last_startup_auto_run_date IS NULL OR last_startup_auto_run_date <> ?", today).
+  Find(&tasks)
+```
+
+---
+
 ## 场景：反代 CORS 同源判断与外部端口
 
 ### 1. Scope / Trigger

@@ -20,13 +20,15 @@ const (
 )
 
 type Task struct {
-	ID                     uint       `gorm:"primarykey" json:"id"`
-	Name                   string     `gorm:"size:128;not null" json:"name"`
-	Command                string     `gorm:"type:text;not null" json:"command"`
-	PythonVersion          string     `gorm:"size:16;default:''" json:"python_version"`
-	CronExpression         string     `gorm:"type:text;not null" json:"cron_expression"`
-	TaskType               string     `gorm:"size:16;not null;default:'cron'" json:"task_type"`
-	Status                 float64    `gorm:"not null" json:"status"`
+	ID             uint    `gorm:"primarykey" json:"id"`
+	Name           string  `gorm:"size:128;not null" json:"name"`
+	Command        string  `gorm:"type:text;not null" json:"command"`
+	PythonVersion  string  `gorm:"size:16;default:''" json:"python_version"`
+	CronExpression string  `gorm:"type:text;not null" json:"cron_expression"`
+	TaskType       string  `gorm:"size:16;not null;default:'cron'" json:"task_type"`
+	Status         float64 `gorm:"not null" json:"status"`
+	// LastStartupAutoRunDate 只记录“开机运行”的自动触发日期，手动运行不受它限制。
+	LastStartupAutoRunDate string     `gorm:"size:10;default:''" json:"last_startup_auto_run_date"`
 	Labels                 string     `gorm:"size:256;default:''" json:"-"`
 	LastRunAt              *time.Time `json:"last_run_at"`
 	LastRunStatus          *int       `json:"last_run_status"`
