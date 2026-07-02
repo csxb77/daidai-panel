@@ -6,14 +6,14 @@ import (
 	"daidai-panel/model"
 )
 
-// manualStopMarks 记录"手动停止"过的任务 ID。
+// manualStopMarks 记录被主动停止过的任务 ID。
 //
-// 手动停止（单个停止 / 批量停止 / 孤儿 PID 兜底）必须在杀进程之前打标记，
-// 这样任务完成结算块运行时标记已可见，可把本次运行判为成功并跳过通知。
+// 手动停止、定时停止或孤儿 PID 兜底停止，必须在杀进程之前打标记，
+// 这样任务完成结算块运行时标记已可见，再按任务配置决定终止算成功还是失败。
 // key: taskID(uint) -> struct{}{}
 var manualStopMarks sync.Map
 
-// markManualStop 标记某任务本次运行为"手动停止"。
+// markManualStop 标记某任务本次运行被主动停止。
 //
 // 必须在杀进程之前调用，保证完成块运行时标记可见；重复标记安全（幂等）。
 func markManualStop(taskID uint) {
@@ -27,24 +27,25 @@ func MarkManualStop(taskID uint) {
 
 // consumeManualStop 读取并清除某任务的手动停止标记（读即清，LoadAndDelete 语义）。
 //
-// 返回 true 表示本次运行是被手动停止的。读即清保证幂等、不残留：
+// 返回 true 表示本次运行是被主动停止的。读即清保证幂等、不残留：
 // 自然完成（未打标记）的任务消费时返回 false，行为完全不变。
 func consumeManualStop(taskID uint) bool {
 	_, ok := manualStopMarks.LoadAndDelete(taskID)
 	return ok
 }
 
-// applyManualStopOverride 在任务完成结算时应用"手动停止判成功"规则。
+// applyManualStopOverride 在任务完成结算时应用主动停止结算规则。
 //
-// 它消费一次手动停止标记（读即清）：
-//   - 命中标记：将运行状态与日志状态强制为成功，并返回 suppressNotify=true，
-//     调用方据此跳过成功/失败两类通知。
-//   - 未命中：原样返回传入的 runStatus / logStatus，suppressNotify=false。
-//
-// 这样两个完成块（执行器与旧调度器）共用同一套判定，自然失败仍判失败、仍发通知。
-func applyManualStopOverride(taskID uint, runStatus, logStatus int) (finalRun int, finalLog int, suppressNotify bool) {
-	if consumeManualStop(taskID) {
-		return model.RunSuccess, model.LogStatusSuccess, true
+// 它消费一次停止标记（读即清）：
+//   - 命中标记且任务未开启 stop_as_failure：强制成功，并跳过成功/失败两类通知；
+//   - 命中标记且任务开启 stop_as_failure：强制失败，失败通知和失败统计照旧；
+//   - 未命中标记：原样返回传入状态，自然失败仍按失败处理。
+func applyManualStopOverride(taskID uint, task *model.Task, runStatus, logStatus int) (finalRun int, finalLog int, suppressNotify bool) {
+	if !consumeManualStop(taskID) {
+		return runStatus, logStatus, false
 	}
-	return runStatus, logStatus, false
+	if task != nil && task.StopAsFailure {
+		return model.RunFailed, model.LogStatusFailed, false
+	}
+	return model.RunSuccess, model.LogStatusSuccess, true
 }

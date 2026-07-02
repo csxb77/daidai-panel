@@ -60,6 +60,7 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		TaskAfter              *string  `json:"task_after"`
 		AllowMultipleInstances *bool    `json:"allow_multiple_instances"`
 		StopSchedule           *string  `json:"stop_schedule"`
+		StopAsFailure          *bool    `json:"stop_as_failure"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
@@ -149,6 +150,9 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	if req.StopSchedule != nil {
 		task.StopSchedule = *req.StopSchedule
 	}
+	if req.StopAsFailure != nil {
+		task.StopAsFailure = *req.StopAsFailure
+	}
 
 	if err := database.DB.Select("*").Create(&task).Error; err != nil {
 		response.InternalError(c, "创建任务失败")
@@ -236,7 +240,7 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		"timeout":   true, "random_delay_seconds": true, "max_retries": true, "retry_interval": true,
 		"notify_on_failure": true, "notify_on_success": true, "notification_channel_id": true, "labels": true, "depends_on": true,
 		"sort_order": true, "task_before": true, "task_after": true,
-		"allow_multiple_instances": true, "stop_schedule": true,
+		"allow_multiple_instances": true, "stop_schedule": true, "stop_as_failure": true,
 	}
 
 	updates := make(map[string]interface{})
@@ -341,6 +345,8 @@ func (h *TaskHandler) Copy(c *gin.Context) {
 		TaskBefore:             task.TaskBefore,
 		TaskAfter:              task.TaskAfter,
 		AllowMultipleInstances: task.AllowMultipleInstances,
+		StopSchedule:           task.StopSchedule,
+		StopAsFailure:          task.StopAsFailure,
 	}
 	database.DB.Select("*").Create(&newTask)
 	response.Created(c, gin.H{"message": "复制成功", "data": newTask.ToDict()})

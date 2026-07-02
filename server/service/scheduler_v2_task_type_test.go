@@ -186,3 +186,67 @@ func TestSchedulerV2RejectsEnqueueAfterStop(t *testing.T) {
 		t.Fatal("expected stopped scheduler to reject enqueue")
 	}
 }
+
+func TestSchedulerV2StopTaskByScheduleUsesStopAsFailureForRunningLogStatus(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	// 本测试只验证定时停止的数据库兜底收口，不需要真实执行器参与。
+	oldExecutor := globalExecutor
+	globalExecutor = nil
+	t.Cleanup(func() {
+		globalExecutor = oldExecutor
+	})
+
+	scheduler := NewSchedulerV2(SchedulerConfig{
+		WorkerCount:  1,
+		QueueSize:    10,
+		RateInterval: time.Hour,
+	}, nil)
+
+	tests := []struct {
+		name          string
+		stopAsFailure bool
+		wantLogStatus int
+	}{
+		{name: "默认定时停止算成功", stopAsFailure: false, wantLogStatus: model.LogStatusSuccess},
+		{name: "开启后定时停止算失败", stopAsFailure: true, wantLogStatus: model.LogStatusFailed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &model.Task{
+				Name:          tt.name,
+				Command:       "echo running",
+				TaskType:      model.TaskTypeCron,
+				Status:        model.TaskStatusRunning,
+				StopAsFailure: tt.stopAsFailure,
+			}
+			if err := database.DB.Create(task).Error; err != nil {
+				t.Fatalf("create task: %v", err)
+			}
+
+			runningStatus := model.LogStatusRunning
+			logRecord := &model.TaskLog{
+				TaskID:    task.ID,
+				Status:    &runningStatus,
+				StartedAt: time.Now().Add(-time.Minute),
+			}
+			if err := database.DB.Create(logRecord).Error; err != nil {
+				t.Fatalf("create task log: %v", err)
+			}
+
+			scheduler.stopTaskBySchedule(task.ID)
+
+			var updatedLog model.TaskLog
+			if err := database.DB.First(&updatedLog, logRecord.ID).Error; err != nil {
+				t.Fatalf("reload task log: %v", err)
+			}
+			if updatedLog.Status == nil || *updatedLog.Status != tt.wantLogStatus {
+				t.Fatalf("expected log status %d, got %#v", tt.wantLogStatus, updatedLog.Status)
+			}
+			if updatedLog.EndedAt == nil {
+				t.Fatalf("expected ended_at after scheduled stop")
+			}
+		})
+	}
+}

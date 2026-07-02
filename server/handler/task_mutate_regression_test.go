@@ -86,3 +86,40 @@ func TestCreateTaskUsesConfiguredDefaultPythonVersionWhenOmitted(t *testing.T) {
 		t.Fatalf("expected stored python_version 3.11, got %q", task.PythonVersion)
 	}
 }
+
+func TestCreateTaskPersistsStopAsFailureSwitch(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "task-create-stop-as-failure", "operator")
+	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	rec := performJSONRequest(
+		engine,
+		http.MethodPost,
+		"/api/v1/tasks",
+		`{"name":"stop as failure task","command":"echo ok","task_type":"manual","stop_as_failure":true}`,
+		map[string]string{"Authorization": "Bearer " + token},
+		"",
+	)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	payload := decodeJSONMap(t, rec)
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected task data object, got %#v", payload["data"])
+	}
+	if got, ok := data["stop_as_failure"].(bool); !ok || !got {
+		t.Fatalf("expected response stop_as_failure=true, got %#v", data["stop_as_failure"])
+	}
+
+	var task model.Task
+	if err := database.DB.First(&task, uint(data["id"].(float64))).Error; err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if !task.StopAsFailure {
+		t.Fatalf("expected stored stop_as_failure=true")
+	}
+}

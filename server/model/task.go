@@ -49,8 +49,10 @@ type Task struct {
 	TaskAfter              *string    `gorm:"type:text" json:"task_after"`
 	AllowMultipleInstances bool       `json:"allow_multiple_instances"`
 	StopSchedule           string     `gorm:"type:text;default:''" json:"stop_schedule"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
+	// StopAsFailure 控制手动停止/定时停止这类主动终止是否按失败结算；默认 false 表示按成功结算。
+	StopAsFailure bool      `gorm:"default:0" json:"stop_as_failure"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 func (Task) TableName() string {
@@ -93,6 +95,7 @@ func (t *Task) ToDict() map[string]interface{} {
 		"task_after":               t.TaskAfter,
 		"allow_multiple_instances": t.AllowMultipleInstances,
 		"stop_schedule":            t.StopSchedule,
+		"stop_as_failure":          t.StopAsFailure,
 		"created_at":               t.CreatedAt,
 		"updated_at":               t.UpdatedAt,
 	}

@@ -284,9 +284,10 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			runStatus = model.RunFailed
 		}
 
-		// 手动停止：判为成功（日志与运行状态都置成功），并跳过成功/失败两类通知。
+		// 主动停止：默认判成功并跳过成功/失败通知；任务开启 stop_as_failure 时强制按失败结算并保留失败通知。
 		// applyManualStopOverride 读即清标记，自然完成时返回原状态、suppressNotify=false。
-		runStatus, logStatus, manualStopSuppress := applyManualStopOverride(req.TaskID, runStatus, logStatus)
+		runStatus, logStatus, manualStopSuppress := applyManualStopOverride(req.TaskID, task, runStatus, logStatus)
+		finalSuccess := runStatus == model.RunSuccess
 
 		endedAt := time.Now()
 		database.DB.Model(taskLog).Updates(map[string]interface{}{
@@ -309,20 +310,20 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		e.processLock.Unlock()
 
 		result := &ExecutionResult{
-			Success:  success,
+			Success:  finalSuccess,
 			ExitCode: exitCode,
 			Duration: duration,
 		}
 		e.OnTaskCompleted(req, result)
 
-		if !manualStopSuppress && success && task.NotifyOnSuccess {
+		if !manualStopSuppress && finalSuccess && task.NotifyOnSuccess {
 			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, true, exitCode, duration, endedAt, lastSuccessOutput)
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
 				Context:    context,
 			})
 		}
-		if !manualStopSuppress && !success && task.NotifyOnFailure {
+		if !manualStopSuppress && !finalSuccess && task.NotifyOnFailure {
 			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, false, exitCode, duration, endedAt, lastFailureOutput)
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),

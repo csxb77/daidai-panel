@@ -89,7 +89,10 @@ func (h *TaskHandler) Stop(c *gin.Context) {
 		return
 	}
 
-	stopped := service.GetTaskExecutor().StopTask(uint(taskID))
+	stopped := false
+	if executor := service.GetTaskExecutor(); executor != nil {
+		stopped = executor.StopTask(uint(taskID))
+	}
 	if !stopped {
 		if scheduler := service.GetScheduler(); scheduler != nil {
 			stopped = scheduler.StopRunningTask(uint(taskID))
@@ -113,9 +116,13 @@ func (h *TaskHandler) Stop(c *gin.Context) {
 	if err := database.DB.Where("task_id = ? AND status = ?", taskID, model.LogStatusRunning).
 		Order("started_at DESC").First(&runningLog).Error; err == nil {
 		now := time.Now()
-		// 手动停止判为成功，与完成块一致（二者都写成功不冲突）。
+		stopLogStatus := model.LogStatusSuccess
+		if task.StopAsFailure {
+			stopLogStatus = model.LogStatusFailed
+		}
+		// 主动停止默认判成功；任务开启 stop_as_failure 时立即按失败结算，和完成块保持一致。
 		database.DB.Model(&runningLog).Updates(map[string]interface{}{
-			"status":   model.LogStatusSuccess,
+			"status":   stopLogStatus,
 			"ended_at": now,
 		})
 	}

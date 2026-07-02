@@ -2,6 +2,7 @@ package handler
 
 import (
 	"fmt"
+	"time"
 
 	"daidai-panel/database"
 	"daidai-panel/model"
@@ -53,11 +54,26 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 			}
 		case "stop":
 			if task.Status == model.TaskStatusRunning {
-				service.GetTaskExecutor().StopTask(id)
+				if executor := service.GetTaskExecutor(); executor != nil {
+					executor.StopTask(id)
+				}
 				if task.PID != nil && *task.PID > 0 {
 					// StopTask 已打标记，这里再显式标记一次覆盖按 PID 兜底场景（幂等）。
 					service.MarkManualStop(id)
 					service.KillProcessByPid(*task.PID)
+				}
+				stopLogStatus := model.LogStatusSuccess
+				if task.StopAsFailure {
+					stopLogStatus = model.LogStatusFailed
+				}
+				var runningLog model.TaskLog
+				if err := database.DB.Where("task_id = ? AND status = ?", id, model.LogStatusRunning).
+					Order("started_at DESC").First(&runningLog).Error; err == nil {
+					now := time.Now()
+					database.DB.Model(&runningLog).Updates(map[string]interface{}{
+						"status":   stopLogStatus,
+						"ended_at": now,
+					})
 				}
 				inactiveStatus := service.ResolveTaskInactiveStatus(&task)
 				database.DB.Model(&task).Updates(map[string]interface{}{

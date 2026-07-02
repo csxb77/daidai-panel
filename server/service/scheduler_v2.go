@@ -346,6 +346,8 @@ func (s *SchedulerV2) stopTaskBySchedule(taskID uint) {
 		return
 	}
 	if task.PID != nil && *task.PID > 0 {
+		// 定时停止按 PID 兜底时也要先打停止标记，避免被结算成普通脚本失败。
+		markManualStop(taskID)
 		KillProcessByPid(*task.PID)
 	}
 	if task.Status == model.TaskStatusRunning {
@@ -355,6 +357,20 @@ func (s *SchedulerV2) stopTaskBySchedule(taskID uint) {
 			"pid":      nil,
 			"log_path": nil,
 		})
+		stopLogStatus := model.LogStatusSuccess
+		if task.StopAsFailure {
+			stopLogStatus = model.LogStatusFailed
+		}
+		var runningLog model.TaskLog
+		if err := database.DB.Where("task_id = ? AND status = ?", taskID, model.LogStatusRunning).
+			Order("started_at DESC").First(&runningLog).Error; err == nil {
+			now := time.Now()
+			// 定时停止也先把运行中日志收口；如果执行器随后完成，会按同一口径再次写入，不会冲突。
+			database.DB.Model(&runningLog).Updates(map[string]interface{}{
+				"status":   stopLogStatus,
+				"ended_at": now,
+			})
+		}
 		log.Printf("task %d stopped by scheduled stop rule", taskID)
 	}
 }

@@ -368,9 +368,9 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		logStatus = model.LogStatusFailed
 	}
 
-	// 手动停止：判为成功（本完成块无通知逻辑，无需额外跳过）。
+	// 主动停止：默认判成功；任务开启 stop_as_failure 时强制按失败结算。
 	// applyManualStopOverride 读即清标记，自然完成时返回原状态。
-	runStatus, logStatus, _ = applyManualStopOverride(taskID, runStatus, logStatus)
+	runStatus, logStatus, _ = applyManualStopOverride(taskID, &task, runStatus, logStatus)
 
 	database.DB.Model(&task).Updates(map[string]interface{}{
 		"status":            model.TaskStatusEnabled,

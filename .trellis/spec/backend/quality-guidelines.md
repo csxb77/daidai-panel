@@ -141,6 +141,110 @@ database.DB.
 
 ---
 
+## 场景：主动停止任务的成功/失败结算
+
+### 1. Scope / Trigger
+
+- 触发：修改任务手动停止、批量停止、定时停止、任务执行完成结算、通知发送、`stop_as_failure` 字段时必须看本节。
+- 原因：手动停止和定时停止通常是用户主动规划的终止，不应默认被当成脚本异常失败，否则会误发失败通知、增加失败统计、污染任务成功率。但也要保留少数用户“终止也算失败”的可配置能力。
+
+### 2. Signatures
+
+- 停止标记：`func markManualStop(taskID uint)`
+- 完成结算覆盖：`func applyManualStopOverride(taskID uint, task *model.Task, runStatus, logStatus int) (finalRun int, finalLog int, suppressNotify bool)`
+- 单任务停止入口：`PUT /api/v1/tasks/:id/stop`
+- 批量停止入口：`PUT /api/v1/tasks/batch` with `action="stop"`
+- 定时停止入口：`func (s *SchedulerV2) stopTaskBySchedule(taskID uint)`
+- 任务字段：`Task.StopAsFailure bool`
+- 数据库字段：`tasks.stop_as_failure BOOLEAN DEFAULT 0`
+- 前端字段：`stop_as_failure`
+
+### 3. Contracts
+
+- `stop_as_failure=false` 是默认值，表示手动停止 / 定时停止按成功结算。
+- `stop_as_failure=false` 且命中停止标记时，`last_run_status` 和 `task_logs.status` 必须写成功，并且跳过成功/失败两类任务通知。
+- `stop_as_failure=true` 且命中停止标记时，必须强制按失败结算；任务日志、最后运行状态、失败通知、失败统计继续按失败处理。
+- 停止标记必须在杀进程之前写入，避免任务完成 `defer` 先执行导致仍被结算成失败。
+- 定时停止使用 PID 兜底杀进程时，也必须打停止标记，不能只 `KillProcessByPid`。
+- 自然失败、依赖失败、脚本超时等未命中停止标记的场景，不得被 `stop_as_failure` 影响。
+- 新字段必须在 `database.EnsureColumns()` 中补列，保证老 SQLite 数据库升级后默认不把主动停止算失败。
+
+### 4. Validation & Error Matrix
+
+- 主动停止 + `stop_as_failure=false` -> 运行状态成功、日志状态成功、跳过通知。
+- 主动停止 + `stop_as_failure=true` -> 强制失败、失败通知按 `notify_on_failure` 继续发送。
+- 自然成功 + 未停止 -> 成功状态和成功通知保持原逻辑。
+- 自然失败 + 未停止 -> 失败状态和失败通知保持原逻辑。
+- 老库缺 `stop_as_failure` -> 启动时自动补列，默认 `0`。
+- 测试或异常启动阶段 `GetTaskExecutor()==nil` -> 停止接口不得 panic，应继续走状态/日志兜底更新。
+
+### 5. Good/Base/Bad Cases
+
+- Good：长驻任务配置了定时停止，晚上到点被停止后统计为成功，不发送失败通知；用户打开“终止算失败”后，同样停止会进入失败统计并可发送失败通知。
+- Base：用户手动点击停止，默认不污染失败率，也不弹失败通知。
+- Bad：定时停止只杀 PID 不打停止标记，任务执行完成时收到非 0 退出码，被误判为失败。
+
+### 6. Tests Required
+
+- `applyManualStopOverride`：
+  - 默认主动停止应强制成功并 `suppressNotify=true`。
+  - `StopAsFailure=true` 时应强制失败并 `suppressNotify=false`。
+  - 未打停止标记的自然失败不能被改成成功。
+- handler：
+  - 创建任务时 `stop_as_failure` 能保存并回传。
+  - `PUT /tasks/:id/stop` 在 `stop_as_failure=false` 时把运行中日志改成功。
+  - `PUT /tasks/:id/stop` 在 `stop_as_failure=true` 时把运行中日志改失败。
+- scheduler：
+  - 定时停止在 `stop_as_failure=false` 时把运行中日志兜底改成功。
+  - 定时停止在 `stop_as_failure=true` 时把运行中日志兜底改失败。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestApplyManualStopOverride|TestConsumeManualStop|TestManualStop|TestSchedulerV2" -count=1
+go test ./handler -run "TestStopTaskUsesStopAsFailureForRunningLogStatus|TestCreateTaskPersistsStopAsFailureSwitch" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：定时停止只杀进程，不打停止标记，完成结算会把退出码当普通失败。
+if task.PID != nil {
+    KillProcessByPid(*task.PID)
+}
+```
+
+```go
+// 错误：命中停止标记后无视用户配置，永远强制成功。
+if consumeManualStop(taskID) {
+    return model.RunSuccess, model.LogStatusSuccess, true
+}
+```
+
+#### Correct
+
+```go
+// 正确：杀进程前先打停止标记，完成结算时按任务配置决定成功/失败。
+markManualStop(taskID)
+KillProcessByPid(*task.PID)
+```
+
+```go
+// 正确：默认主动停止算成功；用户开启 stop_as_failure 后强制按失败结算并保留失败通知。
+if !consumeManualStop(taskID) {
+    return runStatus, logStatus, false
+}
+if task != nil && task.StopAsFailure {
+    return model.RunFailed, model.LogStatusFailed, false
+}
+return model.RunSuccess, model.LogStatusSuccess, true
+```
+
+---
+
 ## 场景：反代 CORS 同源判断与外部端口
 
 ### 1. Scope / Trigger

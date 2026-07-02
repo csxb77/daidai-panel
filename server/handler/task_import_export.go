@@ -49,6 +49,7 @@ func (h *TaskHandler) Export(c *gin.Context) {
 			"task_before":               task.TaskBefore,
 			"task_after":                task.TaskAfter,
 			"allow_multiple_instances":  task.AllowMultipleInstances,
+			"stop_as_failure":           task.StopAsFailure,
 		}
 	}
 	response.Success(c, gin.H{"data": data})
@@ -178,6 +179,9 @@ func (h *TaskHandler) Import(c *gin.Context) {
 		}
 		if value, ok := taskData["notify_on_success"].(bool); ok {
 			task.NotifyOnSuccess = value
+		}
+		if value, ok := taskData["stop_as_failure"].(bool); ok {
+			task.StopAsFailure = value
 		}
 		if channelID, warningMessage, err := resolveImportedTaskNotificationChannel(taskData); err != nil {
 			errors = append(errors, fmt.Sprintf("任务 %d: 解析通知渠道失败: %s", i+1, err.Error()))

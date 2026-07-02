@@ -121,6 +121,7 @@ func EnsureColumns() {
 		{"sort_order", "INTEGER DEFAULT 0"},
 		{"is_pinned", "BOOLEAN DEFAULT 0"},
 		{"python_version", "VARCHAR(16) DEFAULT ''"},
+		{"stop_as_failure", "BOOLEAN DEFAULT 0"},
 	})
 	migrateLegacyTaskPIDColumn()
 

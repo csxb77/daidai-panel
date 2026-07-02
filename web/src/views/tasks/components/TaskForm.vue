@@ -38,6 +38,7 @@ const form = ref({
   task_after: '',
   allow_multiple_instances: false,
   stop_schedule: '',
+  stop_as_failure: false,
   group_name: '',
 })
 
@@ -89,6 +90,7 @@ watch(() => props.visible, (val) => {
       task_after: props.task.task_after || '',
       allow_multiple_instances: props.task.allow_multiple_instances ?? false,
       stop_schedule: props.task.stop_schedule || '',
+      stop_as_failure: props.task.stop_as_failure ?? false,
     }
   } else if (val) {
     const p = props.prefill
@@ -101,7 +103,7 @@ watch(() => props.visible, (val) => {
       task_type: p?.task_type || 'cron',
       timeout: 0, random_delay_seconds: null, max_retries: 0, retry_interval: 60,
       notify_on_failure: false, notify_on_success: false, notification_channel_id: null, labels: [], depends_on: null,
-      task_before: '', task_after: '', allow_multiple_instances: false, group_name: '', stop_schedule: '',
+      task_before: '', task_after: '', allow_multiple_instances: false, group_name: '', stop_schedule: '', stop_as_failure: false,
     }
   }
   activeTab.value = 'basic'
@@ -304,6 +306,10 @@ function handleSubmit() {
                 可绑定单个通知渠道；留空时仍按全部已启用渠道发送。
               </div>
             </div>
+          </el-form-item>
+          <el-form-item label="终止算失败">
+            <el-switch v-model="form.stop_as_failure" />
+            <span style="font-size: 12px; color: var(--el-text-color-secondary); margin-left: 8px">关闭时，手动停止或定时停止按成功结算，不发送失败通知；开启后按失败统计和通知。</span>
           </el-form-item>
           <el-form-item label="允许多实例">
             <el-switch v-model="form.allow_multiple_instances" />
