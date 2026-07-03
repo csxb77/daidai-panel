@@ -87,6 +87,29 @@ func TestCreateTaskUsesConfiguredDefaultPythonVersionWhenOmitted(t *testing.T) {
 	}
 }
 
+func TestCreateTaskRejectsUnsupportedSingleRuntimePythonVersion(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "single")
+	t.Setenv("DAIDAI_PYTHON_VERSION", "3.12")
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "task-create-unsupported-python", "operator")
+	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	// 单版本镜像只允许创建当前镜像支持的小版本任务，避免历史 3.10/3.11 环境被清理后继续误选。
+	rec := performJSONRequest(
+		engine,
+		http.MethodPost,
+		"/api/v1/tasks",
+		`{"name":"unsupported python task","command":"task test.py","task_type":"manual","python_version":"3.10"}`,
+		map[string]string{"Authorization": "Bearer " + token},
+		"",
+	)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateTaskPersistsNotifyOnAbortSwitch(t *testing.T) {
 	testutil.SetupTestEnv(t)
 

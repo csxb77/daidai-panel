@@ -35,6 +35,8 @@ ARG PYTHON_STANDALONE_RELEASE=20260602
 ARG PYTHON_RUNTIME_310=3.10.20
 ARG PYTHON_RUNTIME_311=3.11.15
 ARG PYTHON_RUNTIME_312=3.12.13
+ARG PYTHON_RUNTIME_MODE=single
+ARG PYTHON_RUNTIME_VERSION=3.12
 
 RUN apk add --no-cache \
     ca-certificates tzdata bash curl wget \
@@ -48,7 +50,7 @@ RUN apk add --no-cache \
     su-exec shadow
 
 COPY docker/install-python-runtimes.sh /tmp/install-python-runtimes.sh
-RUN sh /tmp/install-python-runtimes.sh alpine "${TARGETARCH}" "${TARGETVARIANT}" "${PYTHON_STANDALONE_RELEASE}" "${PYTHON_RUNTIME_310}" "${PYTHON_RUNTIME_311}" "${PYTHON_RUNTIME_312}" \
+RUN sh /tmp/install-python-runtimes.sh alpine "${TARGETARCH}" "${TARGETVARIANT}" "${PYTHON_STANDALONE_RELEASE}" "${PYTHON_RUNTIME_310}" "${PYTHON_RUNTIME_311}" "${PYTHON_RUNTIME_312}" "${PYTHON_RUNTIME_MODE}" "${PYTHON_RUNTIME_VERSION}" \
     && rm -f /tmp/install-python-runtimes.sh
 
 RUN mkdir -p /app/Dumb-Panel/scripts /app/Dumb-Panel/logs /app/Dumb-Panel/backups /run/nginx /tmp && chmod 1777 /tmp
@@ -69,6 +71,9 @@ ENV TZ=Asia/Shanghai
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 ENV PANEL_PORT=5700
+ENV DAIDAI_PYTHON_RUNTIME_MODE=${PYTHON_RUNTIME_MODE}
+ENV DAIDAI_PYTHON_VERSION=${PYTHON_RUNTIME_VERSION}
+ENV DAIDAI_PYTHON_RUNTIME_ROOT=/opt/daidai-python
 
 EXPOSE ${PANEL_PORT}
 

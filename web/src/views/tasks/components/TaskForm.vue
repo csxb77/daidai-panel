@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CronInput from './CronInput.vue'
 import StopScheduleInput from './StopScheduleInput.vue'
@@ -11,6 +11,7 @@ const props = defineProps<{
   task?: any
   prefill?: any
   defaultPythonVersion?: string
+  supportedPythonVersions?: string[]
   notificationChannels?: { id: number; name: string; type: string; enabled: boolean }[]
 }>()
 
@@ -47,11 +48,19 @@ const activeTab = ref('basic')
 const internalLabels = ref<string[]>([])
 const randomDelayMode = ref<'inherit' | 'disabled' | 'custom'>('inherit')
 const { dialogFullscreen } = useResponsive()
+const allPythonVersions = ['3.10', '3.11', '3.12']
+
+const pythonVersionOptions = computed(() => {
+  const versions = (props.supportedPythonVersions || [])
+    .filter(version => allPythonVersions.includes(version))
+  return versions.length > 0 ? versions : allPythonVersions
+})
 
 function getDefaultPythonVersion() {
-  return ['3.10', '3.11', '3.12'].includes(props.defaultPythonVersion || '')
+  // 单版本 Docker 镜像只会返回当前镜像支持的小版本，避免新建任务时还能选到已被清理的 3.10 / 3.11。
+  return pythonVersionOptions.value.includes(props.defaultPythonVersion || '')
     ? props.defaultPythonVersion!
-    : '3.12'
+    : (pythonVersionOptions.value[0] || '3.12')
 }
 
 watch(() => props.visible, (val) => {
@@ -195,9 +204,12 @@ function handleSubmit() {
           </el-form-item>
           <el-form-item label="Python版本">
             <el-select v-model="form.python_version" style="width: 100%">
-              <el-option label="Python 3.10" value="3.10" />
-              <el-option label="Python 3.11" value="3.11" />
-              <el-option label="Python 3.12" value="3.12" />
+              <el-option
+                v-for="version in pythonVersionOptions"
+                :key="version"
+                :label="`Python ${version}`"
+                :value="version"
+              />
             </el-select>
           </el-form-item>
           <el-form-item label="定时类型" required>

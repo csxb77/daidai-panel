@@ -262,12 +262,49 @@ jobs:
   docker-alpine:
     runs-on: ubuntu-latest
     needs: release
+    name: Docker Alpine (${{ matrix.tag_channel }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag_channel: latest
+            python_mode: single
+            python_version: '3.12'
+            version_suffix: ''
+            platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7
+          - tag_channel: latest3.10
+            python_mode: single
+            python_version: '3.10'
+            version_suffix: '-3.10'
+            platforms: linux/amd64,linux/arm64
+          - tag_channel: latest3.11
+            python_mode: single
+            python_version: '3.11'
+            version_suffix: '-3.11'
+            platforms: linux/amd64,linux/arm64
+          - tag_channel: latestall
+            python_mode: all
+            python_version: '3.12'
+            version_suffix: '-all'
+            platforms: linux/amd64,linux/arm64
     steps:
       - uses: actions/checkout@v5
 
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Resolve Docker tags
+        id: docker_tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "linzixuanzz/daidai-panel:${{ matrix.tag_channel }}"
+            echo "linzixuanzz/daidai-panel:${{ steps.version.outputs.VERSION }}${{ matrix.version_suffix }}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
 
@@ -305,28 +342,65 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          # Alpine 运行时使用 alpine:3.22 + apk nodejs/npm，避开 Node 官方镜像 linux/386 manifest 缺失问题；
-          # alpine:3.22 的 x86 / x86_64 / aarch64 / armv7 仓库均提供 nodejs>=20.19 与 npm。
-          platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7
+          # Alpine latest keeps 32-bit platforms; 3.10 / 3.11 / all only publish amd64 / arm64 with standalone Python assets.
+          platforms: ${{ matrix.platforms }}
           push: true
-          build-args: VERSION=${{ steps.version.outputs.VERSION }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            PYTHON_RUNTIME_MODE=${{ matrix.python_mode }}
+            PYTHON_RUNTIME_VERSION=${{ matrix.python_version }}
           # GHA cache 导出偶发 504 时，会出现“镜像其实已经 push 成功，但 job 最终仍失败”的假红。
           # 这里改成 registry + inline cache，牺牲一点缓存效率，换取发布链稳定性。
-          cache-from: type=registry,ref=linzixuanzz/daidai-panel:latest
+          cache-from: type=registry,ref=linzixuanzz/daidai-panel:${{ matrix.tag_channel }}
           cache-to: type=inline
-          tags: |
-            linzixuanzz/daidai-panel:latest
-            linzixuanzz/daidai-panel:${{ steps.version.outputs.VERSION }}
+          tags: ${{ steps.docker_tags.outputs.tags }}
 
   docker-debian:
     runs-on: ubuntu-latest
     needs: docker-alpine
+    name: Docker Debian (${{ matrix.tag_channel }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tag_channel: debian
+            python_mode: single
+            python_version: '3.12'
+            version_suffix: '-debian'
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - tag_channel: debian3.10
+            python_mode: single
+            python_version: '3.10'
+            version_suffix: '-debian3.10'
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - tag_channel: debian3.11
+            python_mode: single
+            python_version: '3.11'
+            version_suffix: '-debian3.11'
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - tag_channel: debianall
+            python_mode: all
+            python_version: '3.12'
+            version_suffix: '-debianall'
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
     steps:
       - uses: actions/checkout@v5
 
       - name: Get version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+
+      - name: Resolve Docker tags
+        id: docker_tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "tags<<EOF"
+            echo "linzixuanzz/daidai-panel:${{ matrix.tag_channel }}"
+            echo "linzixuanzz/daidai-panel:${{ steps.version.outputs.VERSION }}${{ matrix.version_suffix }}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3
 
@@ -364,12 +438,13 @@ jobs:
         with:
           context: .
           file: Dockerfile.debian
-          # Debian 镜像第二阶段用的 node:20.19.0-bookworm-slim 官方不提供 linux/386 manifest，
-          # 所以这里不能加 linux/386；linux/arm/v7 是 node 官方支持的 32 位 ARM 平台，可以加上。
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          # Debian runtime uses node:20.19.0-bookworm-slim, which has no linux/386 manifest.
+          platforms: ${{ matrix.platforms }}
           push: true
-          build-args: VERSION=${{ steps.version.outputs.VERSION }}
-          cache-from: type=registry,ref=linzixuanzz/daidai-panel:debian
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            PYTHON_RUNTIME_MODE=${{ matrix.python_mode }}
+            PYTHON_RUNTIME_VERSION=${{ matrix.python_version }}
+          cache-from: type=registry,ref=linzixuanzz/daidai-panel:${{ matrix.tag_channel }}
           cache-to: type=inline
-          tags: |
-            linzixuanzz/daidai-panel:debian
+          tags: ${{ steps.docker_tags.outputs.tags }}

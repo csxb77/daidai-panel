@@ -86,6 +86,10 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
+	if !service.PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		response.BadRequest(c, fmt.Sprintf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion))
+		return
+	}
 
 	task := model.Task{
 		Name:            req.Name,
@@ -228,6 +232,10 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		pythonVersion, err := service.NormalizePythonVersionStrict(value)
 		if err != nil {
 			response.BadRequest(c, err.Error())
+			return
+		}
+		if !service.PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+			response.BadRequest(c, fmt.Sprintf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion))
 			return
 		}
 		req["python_version"] = pythonVersion

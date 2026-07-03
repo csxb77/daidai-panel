@@ -220,18 +220,25 @@ docker run -d \
 | `linux/386` | **v2.0.9 新增**：32 位 x86 老 PC、瘦客户端（仅 `:latest` 有，`:debian` 无） |
 | `linux/arm/v7` | **v2.0.9 新增**：树莓派 2 / 3 / Zero 2W、老 ARMv7 盒子 / 路由器 / NAS |
 
-> Python 多版本运行时说明：`linux/amd64`、`linux/arm64` 的官方 Docker 镜像会内置 `python3.10`、`python3.11`、`python3.12`，依赖管理可直接切换版本并创建独立依赖环境。32 位 `linux/386` / `linux/arm/v7` 镜像保留基础 `python3`，如需特定 Python 小版本建议使用 amd64 / arm64 设备或自行构建镜像。
+> Python 运行时说明：从 `v2.3.5` 起，默认 `:latest` / `:debian` 镜像只内置默认 Python `3.12`，镜像体积更小、升级后也会自动清理旧的 `3.10 / 3.11` 托管环境。需要指定小版本时请使用 `:latest3.10` / `:latest3.11` / `:debian3.10` / `:debian3.11`；确实需要三套 Python 同时存在时使用 `:latestall` / `:debianall`。
 
 ### Alpine vs Debian 运行时
 
 面板提供两套运行时镜像，差别只在容器内的包管理器：
 
-| Tag | 基础镜像 | Linux 包管理 | 支持架构 | 适合谁 |
-|-----|---------|-------------|---------|--------|
-| `linzixuanzz/daidai-panel:latest` / `:<版本>` | `alpine:3.22`（`apk` 安装 Node.js / npm） | `apk` | amd64 / arm64 / 386 / arm/v7 | 默认推荐，绝大多数场景 |
-| `linzixuanzz/daidai-panel:debian` | `node:20.19.0-bookworm-slim` | `apt` | amd64 / arm64 / arm/v7 | 需要安装只在 Debian/Ubuntu 仓库存在、`apk` 没打包的 Linux 软件 |
+| Tag | 基础镜像 | Python 运行时 | Linux 包管理 | 支持架构 | 适合谁 |
+|-----|---------|---------------|-------------|---------|--------|
+| `linzixuanzz/daidai-panel:latest` / `:<版本>` | `alpine:3.22`（`apk` 安装 Node.js / npm） | 单版本 `3.12` | `apk` | amd64 / arm64 / 386 / arm/v7 | 默认推荐，绝大多数场景 |
+| `linzixuanzz/daidai-panel:latest3.10` | `alpine:3.22` | 单版本 `3.10` | `apk` | amd64 / arm64 | 任务明确需要 Python 3.10 |
+| `linzixuanzz/daidai-panel:latest3.11` | `alpine:3.22` | 单版本 `3.11` | `apk` | amd64 / arm64 | 任务明确需要 Python 3.11 |
+| `linzixuanzz/daidai-panel:latestall` | `alpine:3.22` | `3.10 / 3.11 / 3.12` | `apk` | amd64 / arm64 | 需要同时维护多个 Python 小版本依赖环境 |
+| `linzixuanzz/daidai-panel:debian` | `node:20.19.0-bookworm-slim` | 单版本 `3.12` | `apt` | amd64 / arm64 / arm/v7 | 需要安装只在 Debian/Ubuntu 仓库存在、`apk` 没打包的 Linux 软件 |
+| `linzixuanzz/daidai-panel:debian3.10` | `node:20.19.0-bookworm-slim` | 单版本 `3.10` | `apt` | amd64 / arm64 / arm/v7 | Debian 运行时且任务明确需要 Python 3.10 |
+| `linzixuanzz/daidai-panel:debian3.11` | `node:20.19.0-bookworm-slim` | 单版本 `3.11` | `apt` | amd64 / arm64 / arm/v7 | Debian 运行时且任务明确需要 Python 3.11 |
+| `linzixuanzz/daidai-panel:debianall` | `node:20.19.0-bookworm-slim` | `3.10 / 3.11 / 3.12` | `apt` | amd64 / arm64 / arm/v7 | Debian 运行时且需要三个 Python 小版本共存 |
 
 > 说明：`:latest` 从 v2.2.16 起使用 `alpine:3.22` 作为运行时底座，并通过 `apk` 安装 Alpine 官方仓库的 `nodejs/npm`。这样可以满足 `node >= 20.19.0` 的依赖要求，同时保留 Alpine `x86` 仓库支持，继续构建 `linux/386` 镜像。
+> Python 架构说明：Alpine 的 `latest3.10` / `latest3.11` / `latestall` 依赖独立 Python 运行时资产，目前仅发布 `amd64 / arm64`；32 位 x86 和 ARMv7 继续使用默认 `latest`（Python 3.12）或切换到支持 ARMv7 的 Debian 变体。
 
 切到 Debian 运行时：
 
@@ -241,6 +248,24 @@ docker compose -f docker-compose.debian.yml up -d
 
 # 或基于源码本地构建
 docker build --build-arg VERSION=2.2.20 -f Dockerfile.debian -t daidai-panel:debian-local .
+```
+
+如果要本地构建指定 Python 版本镜像，可以额外传入：
+
+```bash
+# 单版本 Python 3.10
+docker build \
+  --build-arg VERSION=2.2.20 \
+  --build-arg PYTHON_RUNTIME_MODE=single \
+  --build-arg PYTHON_RUNTIME_VERSION=3.10 \
+  -t daidai-panel:latest3.10-local .
+
+# 三版本合集
+docker build \
+  --build-arg VERSION=2.2.20 \
+  --build-arg PYTHON_RUNTIME_MODE=all \
+  --build-arg PYTHON_RUNTIME_VERSION=3.12 \
+  -t daidai-panel:latestall-local .
 ```
 
 ### Windows 单机版（不走 Docker）
@@ -435,6 +460,8 @@ docker compose up -d
 docker pull linzixuanzz/daidai-panel:debian
 docker compose -f docker-compose.debian.yml up -d
 ```
+
+如果你使用的是指定 Python 小版本镜像，把上面的 tag 替换成正在使用的版本，例如 `latest3.10`、`latest3.11`、`latestall`、`debian3.10`、`debian3.11` 或 `debianall`，并同步更新 compose 里的 `IMAGE_NAME`，这样面板内一键更新和 Watchtower 才会继续拉取同一条镜像线。
 
 本地基于源码自己构建的镜像，重新 build 即可：
 

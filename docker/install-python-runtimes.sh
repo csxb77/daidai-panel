@@ -13,6 +13,8 @@ PYTHON_STANDALONE_RELEASE=${4:-20260602}
 PYTHON_RUNTIME_310=${5:-3.10.20}
 PYTHON_RUNTIME_311=${6:-3.11.15}
 PYTHON_RUNTIME_312=${7:-3.12.13}
+PYTHON_RUNTIME_MODE=${8:-single}
+PYTHON_RUNTIME_VERSION=${9:-3.12}
 
 INSTALL_ROOT=${PYTHON_RUNTIME_ROOT:-/opt/daidai-python}
 BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PYTHON_STANDALONE_RELEASE}"
@@ -20,6 +22,24 @@ BASE_URL="https://github.com/astral-sh/python-build-standalone/releases/download
 log() {
   printf '[python-runtime] %s\n' "$*"
 }
+
+case "$PYTHON_RUNTIME_MODE" in
+  all|single)
+    ;;
+  *)
+    log "unknown PYTHON_RUNTIME_MODE=${PYTHON_RUNTIME_MODE}, fallback to single"
+    PYTHON_RUNTIME_MODE=single
+    ;;
+esac
+
+case "$PYTHON_RUNTIME_VERSION" in
+  3.10|3.11|3.12)
+    ;;
+  *)
+    log "unknown PYTHON_RUNTIME_VERSION=${PYTHON_RUNTIME_VERSION}, fallback to 3.12"
+    PYTHON_RUNTIME_VERSION=3.12
+    ;;
+esac
 
 fetch() {
   url=$1
@@ -91,20 +111,48 @@ install_python() {
   "python${minor}" -m pip --version
 }
 
+should_install_python() {
+  minor=$1
+  if [ "$PYTHON_RUNTIME_MODE" = "all" ]; then
+    return 0
+  fi
+  [ "$minor" = "$PYTHON_RUNTIME_VERSION" ]
+}
+
 PLATFORM=$(python_platform "$RUNTIME_FLAVOR" "$TARGET_ARCH" "$TARGET_VARIANT" || true)
 
 if [ -z "$PLATFORM" ]; then
-  log "no standalone CPython asset for flavor=${RUNTIME_FLAVOR} arch=${TARGET_ARCH} variant=${TARGET_VARIANT}; keep distro python only"
-  exit 0
+  # 默认 3.12 镜像在 Alpine 32 位平台上可以继续使用发行版 python3；
+  # 但 3.10 / 3.11 / all 镜像如果没有独立运行时资产，必须直接失败，避免推送“名字是 3.10，实际却只有系统 Python”的假镜像。
+  if [ "$PYTHON_RUNTIME_MODE" = "single" ] && [ "$PYTHON_RUNTIME_VERSION" = "3.12" ]; then
+    log "no standalone CPython asset for flavor=${RUNTIME_FLAVOR} arch=${TARGET_ARCH} variant=${TARGET_VARIANT}; keep distro python only"
+    exit 0
+  fi
+  log "no standalone CPython asset for flavor=${RUNTIME_FLAVOR} arch=${TARGET_ARCH} variant=${TARGET_VARIANT}; cannot build mode=${PYTHON_RUNTIME_MODE} version=${PYTHON_RUNTIME_VERSION}"
+  exit 1
 fi
 
-install_python "3.10" "$PYTHON_RUNTIME_310" "$PLATFORM"
-install_python "3.11" "$PYTHON_RUNTIME_311" "$PLATFORM"
-install_python "3.12" "$PYTHON_RUNTIME_312" "$PLATFORM"
+if should_install_python "3.10"; then
+  install_python "3.10" "$PYTHON_RUNTIME_310" "$PLATFORM"
+fi
+if should_install_python "3.11"; then
+  install_python "3.11" "$PYTHON_RUNTIME_311" "$PLATFORM"
+fi
+if should_install_python "3.12"; then
+  install_python "3.12" "$PYTHON_RUNTIME_312" "$PLATFORM"
+fi
 
-# 让通用 python3 / pip3 默认落到 3.12，减少运行层对系统 pip 的依赖。
-ln -sf "${INSTALL_ROOT}/3.12/bin/python3.12" "/usr/local/bin/python3"
-ln -sf "${INSTALL_ROOT}/3.12/bin/pip3.12" "/usr/local/bin/pip3"
-ln -sf "${INSTALL_ROOT}/3.12/bin/pip3.12" "/usr/local/bin/pip"
+# 让通用 python3 / pip3 落到当前镜像默认版本；all 镜像仍默认 3.12。
+# 这样 latest3.10 / debian3.10 这类单版本镜像里，任务和 venv 创建都会优先使用对应小版本。
+default_root="${INSTALL_ROOT}/${PYTHON_RUNTIME_VERSION}"
+if [ ! -d "${default_root}/bin" ] && [ -d "${INSTALL_ROOT}/3.12/bin" ]; then
+  default_root="${INSTALL_ROOT}/3.12"
+  PYTHON_RUNTIME_VERSION=3.12
+fi
+if [ -d "${default_root}/bin" ]; then
+  ln -sf "${default_root}/bin/python${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/python3"
+  ln -sf "${default_root}/bin/pip${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/pip3"
+  ln -sf "${default_root}/bin/pip${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/pip"
+fi
 
-log "Python runtimes installed under ${INSTALL_ROOT}"
+log "Python runtimes installed under ${INSTALL_ROOT} (mode=${PYTHON_RUNTIME_MODE}, default=${PYTHON_RUNTIME_VERSION})"

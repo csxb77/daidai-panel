@@ -112,6 +112,23 @@ if (-not (Test-Path $workflowPath)) {
     Fail-Step "Missing release workflow: $workflowPath"
 }
 
+Write-Step "Check Docker Python runtime image tags"
+foreach ($dockerTag in @(
+    "latest3.10",
+    "latest3.11",
+    "latestall",
+    "debian3.10",
+    "debian3.11",
+    "debianall"
+)) {
+    Assert-FileTextContains -Path $workflowPath -Text $dockerTag -Description "Docker Python runtime tag $dockerTag"
+}
+Assert-FileTextContains -Path $workflowPath -Text 'platforms: ${{ matrix.platforms }}' -Description "Docker matrix-specific platform list"
+Assert-FileTextContains -Path $workflowPath -Text "platforms: linux/amd64,linux/arm64" -Description "Alpine Python 3.10/3.11/all platform limit"
+Assert-FileTextContains -Path $workflowPath -Text "platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7" -Description "Alpine default Python 3.12 keeps 32-bit platforms"
+Assert-FileTextContains -Path (Join-Path $repoRoot "Dockerfile") -Text "PYTHON_RUNTIME_MODE" -Description "Alpine Docker Python runtime build args"
+Assert-FileTextContains -Path (Join-Path $repoRoot "Dockerfile.debian") -Text "PYTHON_RUNTIME_MODE" -Description "Debian Docker Python runtime build args"
+
 $actionlint = Get-Command actionlint -ErrorAction SilentlyContinue
 if ($actionlint) {
     & $actionlint.Source $workflowPath

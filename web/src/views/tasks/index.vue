@@ -58,6 +58,7 @@ const selectedIdSet = computed(() => new Set(selectedIds.value))
 const batchLabelVisible = ref(false)
 const notificationChannels = ref<{ id: number; name: string; type: string; enabled: boolean }[]>([])
 const defaultPythonVersion = ref('3.12')
+const supportedPythonVersions = ref<string[]>(['3.10', '3.11', '3.12'])
 const formVisible = ref(false)
 const editingTask = ref<any>(null)
 const prefillData = ref<any>(null)
@@ -224,11 +225,16 @@ async function loadNotificationChannels() {
 async function loadDefaultPythonVersion() {
   try {
     const res = await depsApi.pythonRuntimes()
+    const versions = (res.data || [])
+      .map(item => item.version)
+      .filter(version => ['3.10', '3.11', '3.12'].includes(version))
+    supportedPythonVersions.value = versions.length > 0 ? versions : ['3.12']
     if (['3.10', '3.11', '3.12'].includes(res.default_version)) {
       defaultPythonVersion.value = res.default_version
     }
   } catch {
     defaultPythonVersion.value = '3.12'
+    supportedPythonVersions.value = ['3.10', '3.11', '3.12']
   }
 }
 
@@ -1000,6 +1006,7 @@ async function handleImport(event: Event) {
       :task="editingTask"
       :prefill="prefillData"
       :default-python-version="defaultPythonVersion"
+      :supported-python-versions="supportedPythonVersions"
       :notification-channels="notificationChannels"
       @submit="handleFormSubmit"
     />

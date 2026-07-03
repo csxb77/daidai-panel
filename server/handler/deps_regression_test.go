@@ -184,3 +184,37 @@ func TestPythonDependencyCreateInstallsAllPythonVersions(t *testing.T) {
 		t.Fatalf("expected 3.11 dependency in list response: %s", list311.Body.String())
 	}
 }
+
+func TestPythonDependencyCreateInstallsOnlySingleRuntimeVersion(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "single")
+	t.Setenv("DAIDAI_PYTHON_VERSION", "3.12")
+
+	originalRunner := dependencyInstallRunner
+	defer func() {
+		dependencyInstallRunner = originalRunner
+	}()
+	dependencyInstallRunner = func(id uint, depType, name string) {
+		database.DB.Model(&model.Dependency{}).Where("id = ?", id).Update("status", model.DepStatusInstalled)
+	}
+
+	engine := newDepsTestRouter()
+	token := testutil.MustCreateAccessToken(t, "admin", "admin")
+	rec := performDepsJSONRequest(engine, http.MethodPost, "/api/v1/deps", map[string]any{
+		"type":  model.DepTypePython,
+		"names": []string{"requests"},
+	}, map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var stored []model.Dependency
+	if err := database.DB.Where("type = ? AND name = ?", model.DepTypePython, "requests").Order("python_version ASC").Find(&stored).Error; err != nil {
+		t.Fatalf("reload dependencies: %v", err)
+	}
+	if len(stored) != 1 || stored[0].PythonVersion != "3.12" {
+		t.Fatalf("expected dependency only for python 3.12 in single image, got %+v", stored)
+	}
+}

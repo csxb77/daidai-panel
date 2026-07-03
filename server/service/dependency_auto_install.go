@@ -227,6 +227,9 @@ func (spec pipCommandSpec) command(args []string) *exec.Cmd {
 
 func resolvePipCommandSpecForPythonVersion(pythonVersion string, includeSystemInstallFlags bool) (pipCommandSpec, error) {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		return pipCommandSpec{}, fmt.Errorf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion)
+	}
 	if binary := ResolveManagedPipBinaryForPythonVersion(pythonVersion); strings.TrimSpace(binary) != "" {
 		return pipCommandSpec{binary: binary}, nil
 	}

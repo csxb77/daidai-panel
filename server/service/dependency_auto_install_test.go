@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"daidai-panel/testutil"
@@ -189,5 +190,21 @@ func TestPipCommandForRequestedVersionDoesNotFallbackToPip3(t *testing.T) {
 	}
 	if binary, _, _ := ResolvePipInstallCommandForPythonVersion("3.10"); binary != "" {
 		t.Fatalf("expected no pip binary for missing Python 3.10, got %q", binary)
+	}
+}
+
+func TestPipCommandRejectsUnsupportedSingleRuntimeVersion(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "single")
+	t.Setenv("DAIDAI_PYTHON_VERSION", "3.12")
+
+	// 单版本镜像里不能偷偷把 3.10 的安装请求 fallback 到 pip3，
+	// 否则用户看到的是 3.10 依赖，实际却装进了 3.12 环境。
+	_, err := NewPipCommandForPythonVersion("3.10", []string{"list"})
+	if err == nil {
+		t.Fatal("expected unsupported Python 3.10 to return an error in single 3.12 image")
+	}
+	if !strings.Contains(err.Error(), "当前镜像不支持 Python 3.10") {
+		t.Fatalf("expected unsupported runtime error, got %v", err)
 	}
 }

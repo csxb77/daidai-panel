@@ -661,6 +661,53 @@ pythonVersion.value = resolveDisplayPythonVersion(
 
 ---
 
+## 场景：Docker Python 单版本 / 全版本镜像拆分
+
+### 1. Scope / Trigger
+
+- 触发：修改 `Dockerfile`、`Dockerfile.debian`、`docker/install-python-runtimes.sh`、`.github/workflows/release.yml`、`server/service/python_runtime.go`、`server/service/runtime_exec.go`、`server/handler/deps.go` 或任务 Python 版本选择逻辑时必须看本节。
+- 原因：默认 Docker 镜像不再同时塞入 `3.10 / 3.11 / 3.12` 三套 Python。单版本镜像需要只暴露当前小版本，并在老用户从三版本镜像升级后清理多余托管 venv，避免依赖页和任务执行继续指向已移除版本。
+
+### 2. Signatures
+
+- 构建参数：`PYTHON_RUNTIME_MODE=single|all`
+- 构建参数：`PYTHON_RUNTIME_VERSION=3.10|3.11|3.12`
+- 运行时环境：`DAIDAI_PYTHON_RUNTIME_MODE`
+- 运行时环境：`DAIDAI_PYTHON_VERSION`
+- 当前镜像版本列表：`CurrentPythonRuntimeVersions() []string`
+- 单版本识别：`SinglePythonRuntimeVersion() (string, bool)`
+- 启动策略修正：`ApplySinglePythonRuntimePolicyOnStartup()`
+- 启动目录清理：`CleanupManagedPythonArtifactsOnStartup()`
+
+### 3. Contracts
+
+- `latest` / `debian` 默认使用 `PYTHON_RUNTIME_MODE=single` 和 `PYTHON_RUNTIME_VERSION=3.12`，只内置 Python `3.12`。
+- `latest3.10`、`latest3.11`、`debian3.10`、`debian3.11` 分别只内置对应 Python 小版本。
+- `latestall`、`debianall` 使用 `PYTHON_RUNTIME_MODE=all`，必须同时安装 `3.10 / 3.11 / 3.12`。
+- Alpine 的 `latest3.10`、`latest3.11`、`latestall` 只发布 `amd64 / arm64`；如果某个平台没有 python-build-standalone 资产，脚本必须失败而不是回退成错误版本。默认 `latest` 可以在 32 位平台保留发行版 Python 3.12。
+- 单版本镜像启动后，后端 `SupportedPythonVersions()` / 依赖安装版本 / 任务表单选项必须只暴露当前镜像小版本。
+- 单版本镜像启动后，必须把 `python_default_version` 和历史任务 `python_version` 切回当前镜像小版本；默认 `latest` / `debian` 即 `3.12`。
+- 单版本镜像启动清理只能删除 `data/deps/python/<不支持版本>` 这类面板托管 Python 小版本目录，不能删除脚本、日志、备份、Node.js 依赖或未知目录。
+- `all` 镜像不得清理 `3.10 / 3.11 / 3.12` 任意一个托管目录。
+
+### 4. Tests Required
+
+- `SupportedPythonVersions()` 在 `DAIDAI_PYTHON_RUNTIME_MODE=single` 时只返回当前版本。
+- `CleanupManagedPythonArtifactsOnStartup()` 在 single `3.12` 时删除 `3.10 / 3.11` 目录并保留 `3.12`。
+- `CleanupManagedPythonArtifactsOnStartup()` 在 `all` 时保留三个版本目录。
+- `ApplySinglePythonRuntimePolicyOnStartup()` 必须把旧默认版本和旧任务版本切回镜像版本。
+- Python 依赖创建在 single 镜像里只创建当前小版本依赖记录。
+- 发布 workflow 必须用 matrix 平台列表限制 Alpine 非默认 Python 变体，避免 32 位平台推送错误运行时镜像。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestSupportedPythonVersions|TestCleanupManagedPythonArtifactsOnStartup|TestApplySinglePythonRuntimePolicy" -count=1
+go test ./handler -run "TestPythonDependencyCreate" -count=1
+```
+
+---
+
 ## 场景：auto_update_last_checked_at 配置键注册
 
 ### 1. Scope / Trigger

@@ -151,6 +151,9 @@ func BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir string, defau
 	loadConfigShellVars(envMap)
 
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		pythonVersion = DefaultPythonVersion()
+	}
 	envMap["DAIDAI_PYTHON_VERSION"] = pythonVersion
 
 	runtimePaths := currentManagedRuntimePathsForPythonVersion(pythonVersion)
@@ -359,6 +362,7 @@ func CleanupManagedPythonArtifactsOnStartup() {
 	defer managedPythonVenvMu.Unlock()
 
 	migrateLegacyManagedPythonVenvLocked()
+	cleanupUnsupportedManagedPythonVenvsLocked()
 	cleanupBrokenManagedPythonVenvs()
 }
 
@@ -397,13 +401,41 @@ func managedPythonVersionDir(version string) string {
 	return filepath.Join(dataDir, "deps", "python", NormalizePythonVersionOrDefault(version))
 }
 
+func cleanupUnsupportedManagedPythonVenvsLocked() {
+	allowed := make(map[string]bool)
+	for _, version := range CurrentPythonRuntimeVersions() {
+		allowed[version] = true
+	}
+	if len(allowed) >= len(allPythonRuntimeVersions) {
+		return
+	}
+
+	// 只删除面板托管的 Python 小版本目录，不碰 nodejs、脚本、备份和未知目录。
+	// 这样旧版三 Python 镜像升级到单版本镜像后，会自动释放 3.10 / 3.11 venv 空间，
+	// 同时保留当前镜像版本（默认 latest 为 3.12）的依赖环境。
+	for _, version := range allPythonRuntimeVersions {
+		if allowed[version] {
+			continue
+		}
+		versionDir := managedPythonVersionDir(version)
+		if !directoryExists(versionDir) {
+			continue
+		}
+		if err := os.RemoveAll(versionDir); err != nil {
+			log.Printf("warn: failed to remove unsupported managed python %s venv %s: %v", version, versionDir, err)
+			continue
+		}
+		log.Printf("unsupported managed python %s venv removed for current image policy: %s", version, versionDir)
+	}
+}
+
 func directoryExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
 }
 
 func flattenLegacyVersionedManagedPythonVenvsLocked() {
-	for _, version := range supportedPythonRuntimeVersions {
+	for _, version := range allPythonRuntimeVersions {
 		versionDir := managedPythonVersionDir(version)
 		nestedVenvDir := filepath.Join(versionDir, "venv")
 		if !directoryExists(nestedVenvDir) {
@@ -500,6 +532,9 @@ func ensureManagedPythonVenv(syncCreate bool) bool {
 
 func ensureManagedPythonVenvForVersion(pythonVersion string, syncCreate bool) bool {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		return false
+	}
 	dataDir := ""
 	if config.C != nil {
 		dataDir = config.C.Data.Dir
@@ -589,7 +624,7 @@ func WarmManagedPythonVenv() {
 		warmed[defaultVersion] = true
 	}
 
-	for _, version := range supportedPythonRuntimeVersions {
+	for _, version := range CurrentPythonRuntimeVersions() {
 		if warmed[version] {
 			continue
 		}
@@ -635,6 +670,9 @@ func ResolveManagedPipBinary() string {
 
 func ResolveManagedPipBinaryForPythonVersion(pythonVersion string) string {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		return ""
+	}
 	EnsureManagedPythonVenvForVersion(pythonVersion)
 	venvDir := ManagedPythonVenvDir(pythonVersion)
 	if !managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
@@ -651,6 +689,9 @@ func ResolveManagedPythonBinary() string {
 
 func ResolveManagedPythonBinaryForPythonVersion(pythonVersion string) string {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		return ""
+	}
 	EnsureManagedPythonVenvForVersion(pythonVersion)
 	venvDir := ManagedPythonVenvDir(pythonVersion)
 	if !managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
@@ -661,6 +702,9 @@ func ResolveManagedPythonBinaryForPythonVersion(pythonVersion string) string {
 
 func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths, pythonVersion string) (*exec.Cmd, func(), error) {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		return nil, nil, fmt.Errorf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion)
+	}
 	EnsureManagedPythonVenvForVersion(pythonVersion)
 	runtimePaths = currentManagedRuntimePathsForPythonVersion(pythonVersion)
 	preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)

@@ -65,6 +65,7 @@ func InitWithConfig(cfg *config.Config) error {
 
 	model.InitDefaultConfigs()
 	service.NormalizeLegacyPythonVersionColumnsAfterVenvMigration(legacyPythonVenvMigration)
+	service.ApplySinglePythonRuntimePolicyOnStartup()
 	service.MergeDuplicatePythonDependencies()
 	if err := middleware.ConfigureTrustedProxyCIDRs(model.GetRegisteredConfig("trusted_proxy_cidrs")); err != nil {
 		return fmt.Errorf("failed to configure trusted proxies: %w", err)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"daidai-panel/database"
 	"daidai-panel/model"
 	"daidai-panel/testutil"
 )
@@ -92,6 +93,104 @@ func TestWarmManagedPythonVenvWarmsAllSupportedVersions(t *testing.T) {
 		if warmed[idx] != version {
 			t.Fatalf("expected warmed versions %v, got %v", want, warmed)
 		}
+	}
+}
+
+func TestSupportedPythonVersionsHonorsSingleRuntimeVariant(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "single")
+	t.Setenv("DAIDAI_PYTHON_VERSION", "3.11")
+
+	versions := SupportedPythonVersions()
+	if len(versions) != 1 || versions[0] != "3.11" {
+		t.Fatalf("expected only Python 3.11 in single runtime image, got %v", versions)
+	}
+	if got := DefaultPythonVersion(); got != "3.11" {
+		t.Fatalf("expected default python version to follow single image version 3.11, got %q", got)
+	}
+
+	// 单版本镜像的运行时接口也只能暴露当前小版本，前端任务表单会直接使用这个列表生成选项。
+	infos := PythonRuntimeInfos()
+	if len(infos) != 1 || infos[0].Version != "3.11" {
+		t.Fatalf("expected runtime infos only for Python 3.11 in single image, got %+v", infos)
+	}
+}
+
+func TestCleanupManagedPythonArtifactsOnStartupRemovesUnsupportedSingleRuntimeDirs(t *testing.T) {
+	root := testutil.SetupTestEnv(t)
+	dataDir := filepath.Join(root, "data")
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "single")
+	t.Setenv("DAIDAI_PYTHON_VERSION", "3.12")
+
+	for _, version := range []string{"3.10", "3.11", "3.12"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, "deps", "python", version, "bin"), 0o755); err != nil {
+			t.Fatalf("mkdir python %s dir: %v", version, err)
+		}
+	}
+
+	CleanupManagedPythonArtifactsOnStartup()
+
+	for _, version := range []string{"3.10", "3.11"} {
+		if _, err := os.Stat(filepath.Join(dataDir, "deps", "python", version)); !os.IsNotExist(err) {
+			t.Fatalf("expected unsupported python %s dir to be removed, stat err=%v", version, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "deps", "python", "3.12")); err != nil {
+		t.Fatalf("expected default python 3.12 dir to be kept: %v", err)
+	}
+}
+
+func TestCleanupManagedPythonArtifactsOnStartupKeepsAllRuntimeDirs(t *testing.T) {
+	root := testutil.SetupTestEnv(t)
+	dataDir := filepath.Join(root, "data")
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "all")
+
+	for _, version := range []string{"3.10", "3.11", "3.12"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, "deps", "python", version, "bin"), 0o755); err != nil {
+			t.Fatalf("mkdir python %s dir: %v", version, err)
+		}
+	}
+
+	CleanupManagedPythonArtifactsOnStartup()
+
+	for _, version := range []string{"3.10", "3.11", "3.12"} {
+		if _, err := os.Stat(filepath.Join(dataDir, "deps", "python", version)); err != nil {
+			t.Fatalf("expected python %s dir to be kept in all image: %v", version, err)
+		}
+	}
+}
+
+func TestApplySinglePythonRuntimePolicyOnStartupResetsDefaultAndTasks(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	t.Setenv("DAIDAI_PYTHON_RUNTIME_MODE", "single")
+	t.Setenv("DAIDAI_PYTHON_VERSION", "3.12")
+
+	if err := model.SetConfig("python_default_version", "3.10"); err != nil {
+		t.Fatalf("set old default python version: %v", err)
+	}
+	task := model.Task{
+		Name:           "old python task",
+		Command:        "task.py",
+		PythonVersion:  "3.10",
+		CronExpression: "0 0 * * *",
+		TaskType:       model.TaskTypeCron,
+		Status:         model.TaskStatusEnabled,
+	}
+	if err := database.DB.Create(&task).Error; err != nil {
+		t.Fatalf("create old python task: %v", err)
+	}
+
+	ApplySinglePythonRuntimePolicyOnStartup()
+
+	if got := model.GetRegisteredConfig("python_default_version"); got != "3.12" {
+		t.Fatalf("expected default python version reset to 3.12, got %q", got)
+	}
+	var reloaded model.Task
+	if err := database.DB.First(&reloaded, task.ID).Error; err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if reloaded.PythonVersion != "3.12" {
+		t.Fatalf("expected task python version reset to 3.12, got %q", reloaded.PythonVersion)
 	}
 }
 

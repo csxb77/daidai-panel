@@ -575,6 +575,10 @@ func (h *DepsHandler) SetDefaultPythonRuntime(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
+	if !service.PythonVersionSupportedByCurrentRuntime(version) {
+		response.BadRequest(c, fmt.Sprintf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", version))
+		return
+	}
 	if err := model.SetConfig("python_default_version", version); err != nil {
 		response.BadRequest(c, err.Error())
 		return

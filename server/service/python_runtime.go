@@ -16,7 +16,7 @@ import (
 
 const defaultPythonRuntimeVersion = "3.12"
 
-var supportedPythonRuntimeVersions = []string{"3.10", "3.11", "3.12"}
+var allPythonRuntimeVersions = []string{"3.10", "3.11", "3.12"}
 
 type PythonRuntimeInfo struct {
 	Version     string `json:"version"`
@@ -31,7 +31,51 @@ type PythonRuntimeInfo struct {
 }
 
 func SupportedPythonVersions() []string {
-	return append([]string(nil), supportedPythonRuntimeVersions...)
+	return CurrentPythonRuntimeVersions()
+}
+
+func CurrentPythonRuntimeVersions() []string {
+	version, single := SinglePythonRuntimeVersion()
+	if single {
+		return []string{version}
+	}
+	return append([]string(nil), allPythonRuntimeVersions...)
+}
+
+func SinglePythonRuntimeVersion() (string, bool) {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("DAIDAI_PYTHON_RUNTIME_MODE")))
+	if mode != "single" {
+		return "", false
+	}
+
+	rawVersion := strings.TrimSpace(os.Getenv("DAIDAI_PYTHON_VERSION"))
+	if rawVersion == "" {
+		return defaultPythonRuntimeVersion, true
+	}
+	value := strings.ToLower(rawVersion)
+	value = strings.TrimPrefix(value, "python")
+	value = strings.TrimPrefix(value, "py")
+	value = strings.TrimSpace(value)
+	switch value {
+	case "3.10", "310":
+		return "3.10", true
+	case "3.11", "311":
+		return "3.11", true
+	case "3", "3.12", "312":
+		return "3.12", true
+	default:
+		return defaultPythonRuntimeVersion, true
+	}
+}
+
+func PythonVersionSupportedByCurrentRuntime(version string) bool {
+	version = NormalizePythonVersionOrDefault(version)
+	for _, candidate := range CurrentPythonRuntimeVersions() {
+		if candidate == version {
+			return true
+		}
+	}
+	return false
 }
 
 // 模块版（Magisk / KernelSU / APatch）目前通常只有一个系统 python3，
@@ -140,6 +184,10 @@ func NormalizePythonVersionOrDefault(raw string) string {
 }
 
 func DefaultPythonVersion() string {
+	if version, single := SinglePythonRuntimeVersion(); single {
+		return resolveEffectivePythonVersionForCurrentRuntime(version)
+	}
+
 	raw := ""
 	if config.C != nil && config.C.Data.Dir != "" && database.DB != nil {
 		raw = model.GetRegisteredConfig("python_default_version")
@@ -158,7 +206,11 @@ func ResolvePythonVersionFromEnv(envVars map[string]string) string {
 	if envVars == nil {
 		return DefaultPythonVersion()
 	}
-	return resolveEffectivePythonVersionForCurrentRuntime(envVars["DAIDAI_PYTHON_VERSION"])
+	version := resolveEffectivePythonVersionForCurrentRuntime(envVars["DAIDAI_PYTHON_VERSION"])
+	if !PythonVersionSupportedByCurrentRuntime(version) {
+		return DefaultPythonVersion()
+	}
+	return version
 }
 
 func ResolvePythonVersionFromInterpreter(interpreter string) string {
@@ -237,10 +289,30 @@ func NormalizeLegacyPythonVersionColumnsAfterVenvMigration(migration LegacyPytho
 	}
 }
 
+func ApplySinglePythonRuntimePolicyOnStartup() {
+	version, single := SinglePythonRuntimeVersion()
+	if !single || database.DB == nil {
+		return
+	}
+
+	// 单版本 Docker 镜像只保留一个 Python 小版本。旧版 latest 曾经内置三套 Python，
+	// 用户升级到新的 single 镜像后，需要把系统默认值和任务显式版本统一切回镜像版本，
+	// 否则历史任务仍可能指向已被删除的 3.10 / 3.11 环境。
+	if err := model.SetConfig("python_default_version", version); err != nil {
+		log.Printf("warn: failed to reset python_default_version to image runtime %s: %v", version, err)
+	}
+	if err := database.DB.Model(&model.Task{}).
+		Where("python_version IS NULL OR python_version = '' OR python_version <> ?", version).
+		Update("python_version", version).Error; err != nil {
+		log.Printf("warn: failed to reset task python versions to image runtime %s: %v", version, err)
+	}
+}
+
 func PythonRuntimeInfos() []PythonRuntimeInfo {
 	defaultVersion := DefaultPythonVersion()
-	infos := make([]PythonRuntimeInfo, 0, len(supportedPythonRuntimeVersions))
-	for _, version := range supportedPythonRuntimeVersions {
+	versions := CurrentPythonRuntimeVersions()
+	infos := make([]PythonRuntimeInfo, 0, len(versions))
+	for _, version := range versions {
 		venvDir := ManagedPythonVenvDir(version)
 		info := PythonRuntimeInfo{
 			Version:     version,

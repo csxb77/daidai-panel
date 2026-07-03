@@ -559,7 +559,7 @@
         </el-form-item>
         <el-form-item v-if="createType === 'python'" label="版本">
           <el-alert
-            title="会尝试同步安装到 Python 3.10 / 3.11 / 3.12；未安装的版本会提示先安装对应 Python"
+            :title="`会同步安装到当前镜像支持的 ${pythonRuntimeInstallSummary}；单版本镜像只会安装到当前小版本`"
             type="info"
             :closable="false"
             show-icon
@@ -942,6 +942,10 @@ const pythonRuntimes = ref<PythonRuntimeInfo[]>([]);
 const pythonDefaultVersion = ref("3.12");
 const pythonVersion = ref("3.12");
 const createPythonVersion = ref("3.12");
+const pythonRuntimeInstallSummary = computed(() => {
+  const labels = pythonRuntimes.value.map((item) => item.label || `Python ${item.version}`);
+  return labels.length > 0 ? labels.join(" / ") : "Python 3.12";
+});
 const depsList = ref<any[]>([]);
 const loading = ref(false);
 const showCreateDialog = ref(false);
@@ -1310,7 +1314,7 @@ async function handleCreate() {
     );
     ElMessage.success(
       createType.value === "python"
-        ? `已提交 ${names.length} 个依赖到 3 个 Python 版本安装`
+        ? `已提交 ${names.length} 个依赖到 ${pythonRuntimes.value.length || 1} 个 Python 版本安装`
         : `已提交 ${names.length} 个依赖安装`,
     );
     showCreateDialog.value = false;
