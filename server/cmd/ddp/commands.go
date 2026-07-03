@@ -602,6 +602,9 @@ func waitTaskCompletion(taskID uint) error {
 				fmt.Printf("任务执行成功，耗时 %s\n", duration)
 				return nil
 			}
+			if *taskLog.Status == model.LogStatusAborted {
+				return fmt.Errorf("任务已终止，耗时 %s", duration)
+			}
 			return fmt.Errorf("任务执行失败，耗时 %s", duration)
 		}
 
@@ -626,13 +629,17 @@ func stopTaskNow(rt *cliRuntime, identifier string) error {
 		return fmt.Errorf("任务当前没有可终止的进程 PID")
 	}
 
+	// 命令行停止也是用户主动终止，统一进入 Aborted，不再混入失败统计。
+	service.MarkManualStop(task.ID)
 	service.KillProcessByPid(*task.PID)
 
 	inactiveStatus := service.ResolveTaskInactiveStatus(task)
+	abortedRunStatus := model.RunAborted
 	if err := database.DB.Model(task).Updates(map[string]interface{}{
-		"status":   inactiveStatus,
-		"pid":      gorm.Expr("NULL"),
-		"log_path": gorm.Expr("NULL"),
+		"status":          inactiveStatus,
+		"last_run_status": abortedRunStatus,
+		"pid":             gorm.Expr("NULL"),
+		"log_path":        gorm.Expr("NULL"),
 	}).Error; err != nil {
 		return err
 	}
@@ -641,11 +648,18 @@ func stopTaskNow(rt *cliRuntime, identifier string) error {
 	if err := database.DB.Where("task_id = ? AND status = ?", task.ID, model.LogStatusRunning).
 		Order("started_at DESC").First(&runningLog).Error; err == nil {
 		now := time.Now()
-		failedStatus := model.LogStatusFailed
+		abortedStatus := model.LogStatusAborted
+		duration := now.Sub(runningLog.StartedAt).Seconds()
+		if duration < 0 {
+			duration = 0
+		}
 		_ = database.DB.Model(&runningLog).Updates(map[string]interface{}{
-			"status":   &failedStatus,
+			"status":   &abortedStatus,
 			"ended_at": now,
+			"duration": duration,
 		}).Error
+		// CLI 停止也回写本次耗时，任务详情里能立刻看到终止前运行了多久。
+		_ = database.DB.Model(task).Update("last_running_time", duration).Error
 	}
 
 	fmt.Printf("已停止任务: %s (#%d)\n", task.Name, task.ID)

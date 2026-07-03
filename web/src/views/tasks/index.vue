@@ -334,12 +334,16 @@ function handlePageSizeChange() {
 
 function getRunStatusType(status: number | null) {
   if (status === null) return 'info'
-  return status === 0 ? 'success' : 'danger'
+  if (status === 0) return 'success'
+  if (status === 2) return 'warning'
+  return 'danger'
 }
 
 function getRunStatusText(status: number | null) {
   if (status === null) return '未运行'
-  return status === 0 ? '成功' : '失败'
+  if (status === 0) return '成功'
+  if (status === 2) return '已终止'
+  return '失败'
 }
 
 function displayTaskLabels(task: any) {

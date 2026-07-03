@@ -187,7 +187,7 @@ func TestSchedulerV2RejectsEnqueueAfterStop(t *testing.T) {
 	}
 }
 
-func TestSchedulerV2StopTaskByScheduleUsesStopAsFailureForRunningLogStatus(t *testing.T) {
+func TestSchedulerV2StopTaskByScheduleMarksRunningLogAborted(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
 	// 本测试只验证定时停止的数据库兜底收口，不需要真实执行器参与。
@@ -203,23 +203,15 @@ func TestSchedulerV2StopTaskByScheduleUsesStopAsFailureForRunningLogStatus(t *te
 		RateInterval: time.Hour,
 	}, nil)
 
-	tests := []struct {
-		name          string
-		stopAsFailure bool
-		wantLogStatus int
-	}{
-		{name: "默认定时停止算成功", stopAsFailure: false, wantLogStatus: model.LogStatusSuccess},
-		{name: "开启后定时停止算失败", stopAsFailure: true, wantLogStatus: model.LogStatusFailed},
-	}
+	tests := []string{"定时停止长驻任务", "定时停止普通运行任务"}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
 			task := &model.Task{
-				Name:          tt.name,
-				Command:       "echo running",
-				TaskType:      model.TaskTypeCron,
-				Status:        model.TaskStatusRunning,
-				StopAsFailure: tt.stopAsFailure,
+				Name:     name,
+				Command:  "echo running",
+				TaskType: model.TaskTypeCron,
+				Status:   model.TaskStatusRunning,
 			}
 			if err := database.DB.Create(task).Error; err != nil {
 				t.Fatalf("create task: %v", err)
@@ -241,8 +233,8 @@ func TestSchedulerV2StopTaskByScheduleUsesStopAsFailureForRunningLogStatus(t *te
 			if err := database.DB.First(&updatedLog, logRecord.ID).Error; err != nil {
 				t.Fatalf("reload task log: %v", err)
 			}
-			if updatedLog.Status == nil || *updatedLog.Status != tt.wantLogStatus {
-				t.Fatalf("expected log status %d, got %#v", tt.wantLogStatus, updatedLog.Status)
+			if updatedLog.Status == nil || *updatedLog.Status != model.LogStatusAborted {
+				t.Fatalf("expected aborted log status, got %#v", updatedLog.Status)
 			}
 			if updatedLog.EndedAt == nil {
 				t.Fatalf("expected ended_at after scheduled stop")

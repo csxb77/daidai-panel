@@ -81,10 +81,10 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 	database.DB.Model(&model.Task{}).Count(&taskCount)
 
 	var enabledTasks int64
-	database.DB.Model(&model.Task{}).Where("status = ?", 1).Count(&enabledTasks)
+	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusEnabled).Count(&enabledTasks)
 
 	var runningTasks int64
-	database.DB.Model(&model.Task{}).Where("status = ?", 2).Count(&runningTasks)
+	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusRunning).Count(&runningTasks)
 
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
@@ -93,10 +93,13 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 	database.DB.Model(&model.TaskLog{}).Where("created_at >= ?", today).Count(&todayLogs)
 
 	var successLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = 0", today).Count(&successLogs)
+	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusSuccess).Count(&successLogs)
 
 	var failedLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = 1", today).Count(&failedLogs)
+	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusFailed).Count(&failedLogs)
+
+	var abortedLogs int64
+	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusAborted).Count(&abortedLogs)
 
 	var envCount int64
 	database.DB.Model(&model.EnvVar{}).Count(&envCount)
@@ -111,7 +114,11 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 	var yesterdayLogs int64
 	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ?", yesterday, today).Count(&yesterdayLogs)
 	var yesterdaySuccess int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = 0", yesterday, today).Count(&yesterdaySuccess)
+	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusSuccess).Count(&yesterdaySuccess)
+	var yesterdayFailed int64
+	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusFailed).Count(&yesterdayFailed)
+	var yesterdayAborted int64
+	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusAborted).Count(&yesterdayAborted)
 
 	var recentLogs []model.TaskLog
 	database.DB.Preload("Task").Order("created_at DESC").Limit(10).Find(&recentLogs)
@@ -132,6 +139,7 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 		Date    string `json:"date"`
 		Success int64  `json:"success"`
 		Failed  int64  `json:"failed"`
+		Aborted int64  `json:"aborted"`
 	}
 
 	var dailyStats []DailyStat
@@ -140,10 +148,11 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 		nextDay := day.Add(24 * time.Hour)
 		date := day.Format("01-02")
 
-		var s, f int64
-		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = 0", day, nextDay).Count(&s)
-		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = 1", day, nextDay).Count(&f)
-		dailyStats = append(dailyStats, DailyStat{Date: date, Success: s, Failed: f})
+		var s, f, a int64
+		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusSuccess).Count(&s)
+		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusFailed).Count(&f)
+		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusAborted).Count(&a)
+		dailyStats = append(dailyStats, DailyStat{Date: date, Success: s, Failed: f, Aborted: a})
 	}
 
 	response.Success(c, gin.H{
@@ -154,11 +163,14 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 			"today_logs":        todayLogs,
 			"success_logs":      successLogs,
 			"failed_logs":       failedLogs,
+			"aborted_logs":      abortedLogs,
 			"env_count":         envCount,
 			"sub_count":         subCount,
 			"prev_task_count":   prevTaskCount,
 			"yesterday_logs":    yesterdayLogs,
 			"yesterday_success": yesterdaySuccess,
+			"yesterday_failed":  yesterdayFailed,
+			"yesterday_aborted": yesterdayAborted,
 			"recent_logs":       recentData,
 			"daily_stats":       dailyStats,
 			"range_days":        rangeDays,
@@ -169,18 +181,21 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 func (h *SystemHandler) Stats(c *gin.Context) {
 	var taskCount, enabledTasks, disabledTasks, runningTasks int64
 	database.DB.Model(&model.Task{}).Count(&taskCount)
-	database.DB.Model(&model.Task{}).Where("status = ?", 1).Count(&enabledTasks)
-	database.DB.Model(&model.Task{}).Where("status = ?", 0).Count(&disabledTasks)
-	database.DB.Model(&model.Task{}).Where("status = ?", 2).Count(&runningTasks)
+	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusEnabled).Count(&enabledTasks)
+	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusDisabled).Count(&disabledTasks)
+	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusRunning).Count(&runningTasks)
 
-	var totalLogs, successLogs, failedLogs int64
+	var totalLogs, successLogs, failedLogs, abortedLogs int64
 	database.DB.Model(&model.TaskLog{}).Count(&totalLogs)
-	database.DB.Model(&model.TaskLog{}).Where("status = 0").Count(&successLogs)
-	database.DB.Model(&model.TaskLog{}).Where("status = 1").Count(&failedLogs)
+	database.DB.Model(&model.TaskLog{}).Where("status = ?", model.LogStatusSuccess).Count(&successLogs)
+	database.DB.Model(&model.TaskLog{}).Where("status = ?", model.LogStatusFailed).Count(&failedLogs)
+	database.DB.Model(&model.TaskLog{}).Where("status = ?", model.LogStatusAborted).Count(&abortedLogs)
 
 	successRate := 0.0
-	if totalLogs > 0 {
-		successRate = float64(successLogs) / float64(totalLogs) * 100
+	// 成功率只统计自然完成的成功 / 失败，Aborted 单独统计，不拉低成功率。
+	finishedLogs := successLogs + failedLogs
+	if finishedLogs > 0 {
+		successRate = float64(successLogs) / float64(finishedLogs) * 100
 	}
 
 	scriptCount := service.CountScriptFiles(config.C.Data.ScriptsDir)
@@ -197,6 +212,7 @@ func (h *SystemHandler) Stats(c *gin.Context) {
 				"total":        totalLogs,
 				"success":      successLogs,
 				"failed":       failedLogs,
+				"aborted":      abortedLogs,
 				"success_rate": successRate,
 			},
 			"scripts": gin.H{

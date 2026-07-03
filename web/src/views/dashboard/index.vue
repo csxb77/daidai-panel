@@ -46,6 +46,7 @@ const { isMobile } = useResponsive();
 const LOG_STATUS_SUCCESS = 0;
 const LOG_STATUS_FAILED = 1;
 const LOG_STATUS_RUNNING = 2;
+const LOG_STATUS_ABORTED = 3;
 
 const showTrendChart = ref(false);
 const trendChartHostRef = ref<HTMLElement | null>(null);
@@ -53,7 +54,15 @@ let trendChartObserver: IntersectionObserver | null = null;
 let trendChartTimer: number | null = null;
 
 const trendRange = ref<7 | 30>(7);
-const logFilter = ref<"all" | "success" | "failed" | "running">("all");
+type LogFilter = "all" | "success" | "failed" | "aborted" | "running";
+const logFilter = ref<LogFilter>("all");
+const logFilterOptions: Array<{ label: string; value: LogFilter }> = [
+  { label: "全部", value: "all" },
+  { label: "成功", value: "success" },
+  { label: "失败", value: "failed" },
+  { label: "终止", value: "aborted" },
+  { label: "运行中", value: "running" },
+];
 const refreshTimestamp = ref(new Date());
 const hasLoadedOnce = ref(false);
 const skipInitialActivated = ref(true);
@@ -147,6 +156,7 @@ const successLogs = computed(
   () => Number(dashboardData.value.success_logs) || 0,
 );
 const failedLogs = computed(() => Number(dashboardData.value.failed_logs) || 0);
+const abortedLogs = computed(() => Number(dashboardData.value.aborted_logs) || 0);
 const taskCount = computed(() => Number(dashboardData.value.task_count) || 0);
 const prevTaskCount = computed(
   () => Number(dashboardData.value.prev_task_count) || 0,
@@ -160,15 +170,23 @@ const yesterdayLogs = computed(
 const yesterdaySuccess = computed(
   () => Number(dashboardData.value.yesterday_success) || 0,
 );
+const yesterdayFailed = computed(
+  () => Number(dashboardData.value.yesterday_failed) || 0,
+);
+const yesterdayAborted = computed(
+  () => Number(dashboardData.value.yesterday_aborted) || 0,
+);
+const todayFinishedLogs = computed(() => successLogs.value + failedLogs.value);
+const yesterdayFinishedLogs = computed(() => yesterdaySuccess.value + yesterdayFailed.value);
 
 const todaySuccessRate = computed(() => {
-  if (!todayLogs.value) return 0;
-  return Math.round((successLogs.value / todayLogs.value) * 1000) / 10;
+  if (!todayFinishedLogs.value) return 0;
+  return Math.round((successLogs.value / todayFinishedLogs.value) * 1000) / 10;
 });
 
 const yesterdaySuccessRate = computed(() => {
-  if (!yesterdayLogs.value) return 0;
-  return Math.round((yesterdaySuccess.value / yesterdayLogs.value) * 1000) / 10;
+  if (!yesterdayFinishedLogs.value) return 0;
+  return Math.round((yesterdaySuccess.value / yesterdayFinishedLogs.value) * 1000) / 10;
 });
 
 const taskCountDelta = computed(() => taskCount.value - prevTaskCount.value);
@@ -177,6 +195,13 @@ const successRateDelta = computed(() => {
   return (
     Math.round((todaySuccessRate.value - yesterdaySuccessRate.value) * 10) / 10
   );
+});
+const todayAbortSubText = computed(() => {
+  // Aborted 单独展示，不参与成功率；这里仅提示今天/昨天的主动终止数量。
+  if (abortedLogs.value > 0 || yesterdayAborted.value > 0) {
+    return `终止 ${abortedLogs.value} / 昨日 ${yesterdayAborted.value}`;
+  }
+  return "较昨日";
 });
 
 const statCards = computed(() => [
@@ -208,7 +233,7 @@ const statCards = computed(() => [
     key: "today",
     label: "今日执行",
     value: todayLogs.value,
-    sub: "较昨日",
+    sub: todayAbortSubText.value,
     delta: todayLogsDelta.value,
     deltaSuffix: "",
     icon: TrendCharts,
@@ -294,6 +319,10 @@ function isSuccessLog(status: number | null | undefined) {
 
 function isFailedLog(status: number | null | undefined) {
   return status === LOG_STATUS_FAILED;
+}
+
+function isAbortedLog(status: number | null | undefined) {
+  return status === LOG_STATUS_ABORTED;
 }
 
 function normalizeLabels(labels: unknown): string[] {
@@ -389,6 +418,8 @@ const filteredLogs = computed(() => {
     return list.filter((l: any) => isSuccessLog(l.status)).slice(0, 5);
   if (logFilter.value === "failed")
     return list.filter((l: any) => isFailedLog(l.status)).slice(0, 5);
+  if (logFilter.value === "aborted")
+    return list.filter((l: any) => isAbortedLog(l.status)).slice(0, 5);
   return list.slice(0, 5);
 });
 
@@ -396,11 +427,13 @@ const taskStats = computed(() => {
   const dailyStats = (dashboardData.value.daily_stats || []) as Array<{
     success: number;
     failed: number;
+    aborted?: number;
   }>;
   const totalSuccess = dailyStats.reduce((sum, d) => sum + (d.success || 0), 0);
   const totalFailed = dailyStats.reduce((sum, d) => sum + (d.failed || 0), 0);
+  const totalAborted = dailyStats.reduce((sum, d) => sum + (d.aborted || 0), 0);
   const running = runningTasks.value;
-  const total = totalSuccess + totalFailed + running;
+  const total = totalSuccess + totalFailed + totalAborted + running;
 
   function pct(n: number) {
     if (!total) return 0;
@@ -411,12 +444,12 @@ const taskStats = computed(() => {
     total,
     success: totalSuccess,
     failed: totalFailed,
+    aborted: totalAborted,
     running,
-    skipped: 0,
     successPct: pct(totalSuccess),
     failedPct: pct(totalFailed),
+    abortedPct: pct(totalAborted),
     runningPct: pct(running),
-    skippedPct: 0,
   };
 });
 
@@ -438,7 +471,7 @@ function donutSegments() {
     { color: "#10b981", gradient: "url(#donutSuccess)", percent: stats.successPct },
     { color: "#3b82f6", gradient: "url(#donutRunning)", percent: stats.runningPct },
     { color: "#ef4444", gradient: "url(#donutFailed)", percent: stats.failedPct },
-    { color: "#94a3b8", gradient: "url(#donutSkipped)", percent: stats.skippedPct },
+    { color: "#f59e0b", gradient: "url(#donutAborted)", percent: stats.abortedPct },
   ];
   let offset = 0;
   return segs.map((s) => {
@@ -557,12 +590,14 @@ const updatedHint = computed(() => {
 function statusBadgeType(status: number | null | undefined) {
   if (isRunningLog(status)) return "primary";
   if (isSuccessLog(status)) return "success";
+  if (isAbortedLog(status)) return "warning";
   return "danger";
 }
 
 function statusBadgeText(status: number | null | undefined) {
   if (isRunningLog(status)) return "运行中";
   if (isSuccessLog(status)) return "成功";
+  if (isAbortedLog(status)) return "已终止";
   return "失败";
 }
 
@@ -767,7 +802,7 @@ function rerunLog(log: any) {
           <div class="task-donut">
             <svg viewBox="0 0 140 140">
               <defs>
-                <!-- 各段渐变：成功绿 / 运行蓝 / 失败红 / 跳过灰，各一套，更精致 -->
+                <!-- 各段渐变：成功绿 / 运行蓝 / 失败红 / 终止黄，各一套，更精致 -->
                 <linearGradient id="donutSuccess" x1="0" y1="0" x2="1" y2="1">
                   <stop offset="0%" stop-color="#34d399" />
                   <stop offset="100%" stop-color="#059669" />
@@ -780,9 +815,9 @@ function rerunLog(log: any) {
                   <stop offset="0%" stop-color="#f87171" />
                   <stop offset="100%" stop-color="#dc2626" />
                 </linearGradient>
-                <linearGradient id="donutSkipped" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stop-color="#cbd5e1" />
-                  <stop offset="100%" stop-color="#94a3b8" />
+                <linearGradient id="donutAborted" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#fbbf24" />
+                  <stop offset="100%" stop-color="#f59e0b" />
                 </linearGradient>
               </defs>
               <!-- 轨道底环 -->
@@ -850,12 +885,12 @@ function rerunLog(log: any) {
               <span class="legend-row__pct">({{ taskStats.runningPct }}%)</span>
             </div>
             <div class="legend-row">
-              <span class="legend-row__dot" style="background: #94a3b8"></span>
-              <span class="legend-row__label">跳过</span>
+              <span class="legend-row__dot" style="background: #f59e0b"></span>
+              <span class="legend-row__label">终止</span>
               <span class="legend-row__value">{{
-                taskStats.skipped.toLocaleString()
+                taskStats.aborted.toLocaleString()
               }}</span>
-              <span class="legend-row__pct">({{ taskStats.skippedPct }}%)</span>
+              <span class="legend-row__pct">({{ taskStats.abortedPct }}%)</span>
             </div>
           </div>
         </div>
@@ -881,16 +916,11 @@ function rerunLog(log: any) {
             <span>最近执行任务</span>
             <div class="seg-btn-group seg-btn-group--mini">
               <button
-                v-for="opt in [
-                  { label: '全部', value: 'all' },
-                  { label: '成功', value: 'success' },
-                  { label: '失败', value: 'failed' },
-                  { label: '运行中', value: 'running' },
-                ]"
+                v-for="opt in logFilterOptions"
                 :key="opt.value"
                 class="seg-btn"
                 :class="{ 'is-active': logFilter === opt.value }"
-                @click="logFilter = opt.value as any"
+                @click="logFilter = opt.value"
               >
                 {{ opt.label }}
               </button>
@@ -1753,6 +1783,11 @@ function rerunLog(log: any) {
   &.is-primary {
     background: rgba(59, 130, 246, 0.12);
     color: #3b82f6;
+  }
+
+  &.is-warning {
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
   }
 }
 

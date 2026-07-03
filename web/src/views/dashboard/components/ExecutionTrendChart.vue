@@ -11,6 +11,7 @@ const props = defineProps<{
     date?: string
     success?: number
     failed?: number
+    aborted?: number
   }>
 }>()
 
@@ -65,7 +66,7 @@ function renderChart() {
       extraCssText: `border-radius: 8px; box-shadow: 0 2px 8px ${c.shadow};`,
     },
     legend: {
-      data: ['执行总数', '成功', '失败'],
+      data: ['执行总数', '成功', '失败', '终止'],
       icon: 'circle',
       itemWidth: 8,
       textStyle: { fontSize: 12, color: c.labelColor },
@@ -98,7 +99,9 @@ function renderChart() {
       {
         name: '执行总数',
         type: 'line',
-        data: props.stats.map((item) => (item.success || 0) + (item.failed || 0)),
+        data: props.stats.map(
+          (item) => (item.success || 0) + (item.failed || 0) + (item.aborted || 0),
+        ),
         // 主线更顺、symbol/线宽统一；面积渐变更明显，强调"执行总数"主线
         smooth: 0.5,
         showSymbol: false,
@@ -143,6 +146,19 @@ function renderChart() {
         lineStyle: { width: 2.5, color: '#F56C6C' },
         itemStyle: { color: '#F56C6C', borderWidth: 2, borderColor: c.pointBorder },
         // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
+      },
+      {
+        name: '终止',
+        type: 'line',
+        // Aborted 是用户主动终止的独立状态，不再混进成功或失败。
+        data: props.stats.map((item) => item.aborted || 0),
+        smooth: 0.5,
+        showSymbol: false,
+        symbol: 'circle',
+        symbolSize: 6,
+        lineStyle: { width: 2.5, color: '#E6A23C' },
+        itemStyle: { color: '#E6A23C', borderWidth: 2, borderColor: c.pointBorder },
+        // 不用 focus:'series'：保持和其它线一致，避免 hover 时整图频繁重绘。
       },
     ],
   })

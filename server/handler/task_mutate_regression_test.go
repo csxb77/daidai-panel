@@ -87,18 +87,18 @@ func TestCreateTaskUsesConfiguredDefaultPythonVersionWhenOmitted(t *testing.T) {
 	}
 }
 
-func TestCreateTaskPersistsStopAsFailureSwitch(t *testing.T) {
+func TestCreateTaskPersistsNotifyOnAbortSwitch(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
 	engine := newProtectedRouter()
-	user := testutil.MustCreateUser(t, "task-create-stop-as-failure", "operator")
+	user := testutil.MustCreateUser(t, "task-create-notify-on-abort", "operator")
 	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
 
 	rec := performJSONRequest(
 		engine,
 		http.MethodPost,
 		"/api/v1/tasks",
-		`{"name":"stop as failure task","command":"echo ok","task_type":"manual","stop_as_failure":true}`,
+		`{"name":"abort notify task","command":"echo ok","task_type":"manual","notify_on_abort":true}`,
 		map[string]string{"Authorization": "Bearer " + token},
 		"",
 	)
@@ -111,15 +111,15 @@ func TestCreateTaskPersistsStopAsFailureSwitch(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected task data object, got %#v", payload["data"])
 	}
-	if got, ok := data["stop_as_failure"].(bool); !ok || !got {
-		t.Fatalf("expected response stop_as_failure=true, got %#v", data["stop_as_failure"])
+	if got, ok := data["notify_on_abort"].(bool); !ok || !got {
+		t.Fatalf("expected response notify_on_abort=true, got %#v", data["notify_on_abort"])
 	}
 
 	var task model.Task
 	if err := database.DB.First(&task, uint(data["id"].(float64))).Error; err != nil {
 		t.Fatalf("reload task: %v", err)
 	}
-	if !task.StopAsFailure {
-		t.Fatalf("expected stored stop_as_failure=true")
+	if !task.NotifyOnAbort {
+		t.Fatalf("expected stored notify_on_abort=true")
 	}
 }

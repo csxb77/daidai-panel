@@ -108,6 +108,7 @@ function handleClose() {
       <el-descriptions-item label="上次运行状态">
         <el-tag v-if="task.last_run_status === null" type="info" size="small">未运行</el-tag>
         <el-tag v-else-if="task.last_run_status === 0" type="success" size="small">成功</el-tag>
+        <el-tag v-else-if="task.last_run_status === 2" type="warning" size="small">已终止</el-tag>
         <el-tag v-else type="danger" size="small">失败</el-tag>
       </el-descriptions-item>
       <el-descriptions-item label="上次运行耗时">

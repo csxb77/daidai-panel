@@ -368,9 +368,9 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		logStatus = model.LogStatusFailed
 	}
 
-	// 主动停止：默认判成功；任务开启 stop_as_failure 时强制按失败结算。
+	// 主动停止：统一结算为 Aborted，避免混入成功或失败统计。
 	// applyManualStopOverride 读即清标记，自然完成时返回原状态。
-	runStatus, logStatus, _ = applyManualStopOverride(taskID, &task, runStatus, logStatus)
+	runStatus, logStatus, _ = applyManualStopOverride(taskID, runStatus, logStatus)
 
 	database.DB.Model(&task).Updates(map[string]interface{}{
 		"status":            model.TaskStatusEnabled,
@@ -442,6 +442,7 @@ func GetTaskStats(taskID uint, days int) map[string]interface{} {
 	totalRuns := len(logs)
 	successRuns := 0
 	failedRuns := 0
+	abortedRuns := 0
 	var totalDuration, maxDuration, minDuration float64
 	minDuration = -1
 
@@ -451,6 +452,8 @@ func GetTaskStats(taskID uint, days int) map[string]interface{} {
 				successRuns++
 			} else if *l.Status == model.LogStatusFailed {
 				failedRuns++
+			} else if *l.Status == model.LogStatusAborted {
+				abortedRuns++
 			}
 		}
 		if l.Duration != nil {
@@ -473,8 +476,10 @@ func GetTaskStats(taskID uint, days int) map[string]interface{} {
 	}
 
 	successRate := 0.0
-	if totalRuns > 0 {
-		successRate = float64(successRuns) / float64(totalRuns) * 100
+	// 成功率只统计自然完成的成功 / 失败，Aborted 单独统计，不拉低成功率。
+	finishedRuns := successRuns + failedRuns
+	if finishedRuns > 0 {
+		successRate = float64(successRuns) / float64(finishedRuns) * 100
 	}
 
 	recentLogs := logs
@@ -501,6 +506,7 @@ func GetTaskStats(taskID uint, days int) map[string]interface{} {
 			"total_runs":   totalRuns,
 			"success_runs": successRuns,
 			"failed_runs":  failedRuns,
+			"aborted_runs": abortedRuns,
 			"success_rate": roundFloat(successRate, 2),
 			"avg_duration": roundFloat(avgDuration, 2),
 			"max_duration": roundFloat(maxDuration, 2),

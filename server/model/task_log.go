@@ -8,6 +8,7 @@ const (
 	LogStatusSuccess = 0
 	LogStatusFailed  = 1
 	LogStatusRunning = 2
+	LogStatusAborted = 3
 )
 
 type TaskLog struct {

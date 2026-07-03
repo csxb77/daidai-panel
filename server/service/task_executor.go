@@ -284,10 +284,11 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			runStatus = model.RunFailed
 		}
 
-		// 主动停止：默认判成功并跳过成功/失败通知；任务开启 stop_as_failure 时强制按失败结算并保留失败通知。
-		// applyManualStopOverride 读即清标记，自然完成时返回原状态、suppressNotify=false。
-		runStatus, logStatus, manualStopSuppress := applyManualStopOverride(req.TaskID, task, runStatus, logStatus)
+		// 主动停止：统一结算为 Aborted，跳过成功/失败通知，必要时单独发送终止通知。
+		// applyManualStopOverride 读即清标记，自然完成时返回原状态、manualAborted=false。
+		runStatus, logStatus, manualAborted := applyManualStopOverride(req.TaskID, runStatus, logStatus)
 		finalSuccess := runStatus == model.RunSuccess
+		finalAborted := runStatus == model.RunAborted
 
 		endedAt := time.Now()
 		database.DB.Model(taskLog).Updates(map[string]interface{}{
@@ -316,15 +317,22 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 		e.OnTaskCompleted(req, result)
 
-		if !manualStopSuppress && finalSuccess && task.NotifyOnSuccess {
-			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, true, exitCode, duration, endedAt, lastSuccessOutput)
+		if finalAborted && manualAborted && task.NotifyOnAbort {
+			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, model.RunAborted, exitCode, duration, endedAt, "")
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
 				Context:    context,
 			})
 		}
-		if !manualStopSuppress && !finalSuccess && task.NotifyOnFailure {
-			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, false, exitCode, duration, endedAt, lastFailureOutput)
+		if !finalAborted && finalSuccess && task.NotifyOnSuccess {
+			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, model.RunSuccess, exitCode, duration, endedAt, lastSuccessOutput)
+			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
+				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
+				Context:    context,
+			})
+		}
+		if !finalAborted && !finalSuccess && task.NotifyOnFailure {
+			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, model.RunFailed, exitCode, duration, endedAt, lastFailureOutput)
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
 				Context:    context,
@@ -490,14 +498,14 @@ func buildTaskFailureOutput(output, errMessage string) string {
 	return output + "\n[执行错误] " + errMessage
 }
 
-func buildTaskExecutionNotification(task *model.Task, taskLogID uint, success bool, exitCode int, duration float64, endedAt time.Time, logOutput string) (string, string, map[string]string) {
+func buildTaskExecutionNotification(task *model.Task, taskLogID uint, runStatus int, exitCode int, duration float64, endedAt time.Time, logOutput string) (string, string, map[string]string) {
 	endedAtText := endedAt.Format("2006-01-02 15:04:05.000")
 	durationText := fmt.Sprintf("%.1f", duration)
 
 	var failureExcerpt, successExcerpt string
-	if success {
+	if runStatus == model.RunSuccess {
 		successExcerpt = summarizeTaskSuccessOutput(logOutput)
-	} else {
+	} else if runStatus == model.RunFailed {
 		failureExcerpt = summarizeTaskFailureOutput(logOutput)
 	}
 
@@ -512,7 +520,7 @@ func buildTaskExecutionNotification(task *model.Task, taskLogID uint, success bo
 		"耗时: " + durationText + " 秒",
 	}
 
-	if success {
+	if runStatus == model.RunSuccess {
 		statusText = "成功"
 		statusValue = "success"
 		title = "任务执行成功"
@@ -523,12 +531,23 @@ func buildTaskExecutionNotification(task *model.Task, taskLogID uint, success bo
 			"耗时: " + durationText + " 秒",
 		}
 	}
+	if runStatus == model.RunAborted {
+		statusText = "已终止"
+		statusValue = "aborted"
+		title = "任务已终止"
+		summaryLine = fmt.Sprintf("定时任务「%s」已被主动终止", task.Name)
+		metaLines = []string{
+			"终止时间: " + endedAtText,
+			"日志ID: " + strconv.FormatUint(uint64(taskLogID), 10),
+			"耗时: " + durationText + " 秒",
+		}
+	}
 
 	content := summaryLine + "\n" + strings.Join(metaLines, "\n")
-	if success && successExcerpt != "" {
+	if runStatus == model.RunSuccess && successExcerpt != "" {
 		content += "\n\n执行日志:\n" + successExcerpt
 	}
-	if !success && failureExcerpt != "" {
+	if runStatus == model.RunFailed && failureExcerpt != "" {
 		content += "\n\n失败原因:\n" + failureExcerpt
 	}
 

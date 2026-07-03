@@ -106,24 +106,32 @@ func (h *TaskHandler) Stop(c *gin.Context) {
 	}
 
 	inactiveStatus := service.ResolveTaskInactiveStatus(&task)
+	abortRunStatus := model.RunAborted
 	database.DB.Model(&task).Updates(map[string]interface{}{
-		"status":   inactiveStatus,
-		"pid":      gorm.Expr("NULL"),
-		"log_path": gorm.Expr("NULL"),
+		"status":          inactiveStatus,
+		"last_run_status": abortRunStatus,
+		"pid":             gorm.Expr("NULL"),
+		"log_path":        gorm.Expr("NULL"),
 	})
 
 	var runningLog model.TaskLog
 	if err := database.DB.Where("task_id = ? AND status = ?", taskID, model.LogStatusRunning).
 		Order("started_at DESC").First(&runningLog).Error; err == nil {
 		now := time.Now()
-		stopLogStatus := model.LogStatusSuccess
-		if task.StopAsFailure {
-			stopLogStatus = model.LogStatusFailed
+		stopLogStatus := model.LogStatusAborted
+		duration := now.Sub(runningLog.StartedAt).Seconds()
+		if duration < 0 {
+			duration = 0
 		}
-		// 主动停止默认判成功；任务开启 stop_as_failure 时立即按失败结算，和完成块保持一致。
+		// 主动停止立即标记为 Aborted；如果执行器随后完成，会按同一口径再次写入，不会冲突。
 		database.DB.Model(&runningLog).Updates(map[string]interface{}{
 			"status":   stopLogStatus,
 			"ended_at": now,
+			"duration": duration,
+		})
+		database.DB.Model(&task).Updates(map[string]interface{}{
+			"last_run_status":   abortRunStatus,
+			"last_running_time": duration,
 		})
 	}
 

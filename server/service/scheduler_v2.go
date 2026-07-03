@@ -353,22 +353,30 @@ func (s *SchedulerV2) stopTaskBySchedule(taskID uint) {
 	if task.Status == model.TaskStatusRunning {
 		inactiveStatus := ResolveTaskInactiveStatus(&task)
 		database.DB.Model(&task).Updates(map[string]interface{}{
-			"status":   inactiveStatus,
-			"pid":      nil,
-			"log_path": nil,
+			"status":          inactiveStatus,
+			"last_run_status": model.RunAborted,
+			"pid":             nil,
+			"log_path":        nil,
 		})
-		stopLogStatus := model.LogStatusSuccess
-		if task.StopAsFailure {
-			stopLogStatus = model.LogStatusFailed
-		}
+		stopLogStatus := model.LogStatusAborted
 		var runningLog model.TaskLog
 		if err := database.DB.Where("task_id = ? AND status = ?", taskID, model.LogStatusRunning).
 			Order("started_at DESC").First(&runningLog).Error; err == nil {
 			now := time.Now()
-			// 定时停止也先把运行中日志收口；如果执行器随后完成，会按同一口径再次写入，不会冲突。
+			duration := now.Sub(runningLog.StartedAt).Seconds()
+			if duration < 0 {
+				duration = 0
+			}
+			// 定时停止也先把运行中日志收口；如果执行器随后完成，会按 Aborted 同一口径再次写入，不会冲突。
 			database.DB.Model(&runningLog).Updates(map[string]interface{}{
 				"status":   stopLogStatus,
 				"ended_at": now,
+				"duration": duration,
+			})
+			// 如果执行器没有机会回写，任务详情也能立刻看到“已终止”和本次耗时。
+			database.DB.Model(&task).Updates(map[string]interface{}{
+				"last_run_status":   model.RunAborted,
+				"last_running_time": duration,
 			})
 		}
 		log.Printf("task %d stopped by scheduled stop rule", taskID)

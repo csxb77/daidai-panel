@@ -9,7 +9,7 @@ import (
 // manualStopMarks 记录被主动停止过的任务 ID。
 //
 // 手动停止、定时停止或孤儿 PID 兜底停止，必须在杀进程之前打标记，
-// 这样任务完成结算块运行时标记已可见，再按任务配置决定终止算成功还是失败。
+// 这样任务完成结算块运行时标记已可见，可把本次运行结算为 Aborted。
 // key: taskID(uint) -> struct{}{}
 var manualStopMarks sync.Map
 
@@ -37,15 +37,11 @@ func consumeManualStop(taskID uint) bool {
 // applyManualStopOverride 在任务完成结算时应用主动停止结算规则。
 //
 // 它消费一次停止标记（读即清）：
-//   - 命中标记且任务未开启 stop_as_failure：强制成功，并跳过成功/失败两类通知；
-//   - 命中标记且任务开启 stop_as_failure：强制失败，失败通知和失败统计照旧；
-//   - 未命中标记：原样返回传入状态，自然失败仍按失败处理。
-func applyManualStopOverride(taskID uint, task *model.Task, runStatus, logStatus int) (finalRun int, finalLog int, suppressNotify bool) {
+//   - 命中标记：强制写入 Aborted，调用方据此发送终止通知、跳过成功/失败通知；
+//   - 未命中标记：原样返回传入状态，自然成功/失败仍按原逻辑处理。
+func applyManualStopOverride(taskID uint, runStatus, logStatus int) (finalRun int, finalLog int, aborted bool) {
 	if !consumeManualStop(taskID) {
 		return runStatus, logStatus, false
 	}
-	if task != nil && task.StopAsFailure {
-		return model.RunFailed, model.LogStatusFailed, false
-	}
-	return model.RunSuccess, model.LogStatusSuccess, true
+	return model.RunAborted, model.LogStatusAborted, true
 }

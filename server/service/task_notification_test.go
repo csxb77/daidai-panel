@@ -16,7 +16,7 @@ func TestBuildTaskExecutionNotificationIncludesFailureExcerpt(t *testing.T) {
 	title, content, context := buildTaskExecutionNotification(
 		task,
 		42,
-		false,
+		model.RunFailed,
 		7,
 		3.4,
 		endedAt,
@@ -68,7 +68,7 @@ func TestBuildTaskExecutionNotificationUsesUnifiedSuccessLayout(t *testing.T) {
 	title, content, context := buildTaskExecutionNotification(
 		task,
 		34,
-		true,
+		model.RunSuccess,
 		0,
 		20.7,
 		endedAt,
@@ -95,6 +95,37 @@ func TestBuildTaskExecutionNotificationUsesUnifiedSuccessLayout(t *testing.T) {
 	}
 }
 
+func TestBuildTaskExecutionNotificationUsesUnifiedAbortLayout(t *testing.T) {
+	task := &model.Task{ID: 12, Name: "\u957f\u9a7b\u4efb\u52a1"}
+	endedAt := time.Date(2026, 5, 1, 8, 9, 10, 123000000, time.Local)
+
+	title, content, context := buildTaskExecutionNotification(
+		task,
+		88,
+		model.RunAborted,
+		-1,
+		31.2,
+		endedAt,
+		"",
+	)
+
+	if title != "\u4efb\u52a1\u5df2\u7ec8\u6b62" {
+		t.Fatalf("unexpected title: %q", title)
+	}
+	if !strings.Contains(content, "\u5b9a\u65f6\u4efb\u52a1\u300c\u957f\u9a7b\u4efb\u52a1\u300d\u5df2\u88ab\u4e3b\u52a8\u7ec8\u6b62") {
+		t.Fatalf("expected aborted summary line, got %q", content)
+	}
+	if strings.Contains(content, "\u5931\u8d25\u539f\u56e0") || strings.Contains(content, "\u6267\u884c\u65e5\u5fd7") {
+		t.Fatalf("aborted notification should not reuse success/failure log sections, got %q", content)
+	}
+	if got := context["status"]; got != "aborted" {
+		t.Fatalf("expected aborted status, got %q", got)
+	}
+	if got := context["status_text"]; got != "\u5df2\u7ec8\u6b62" {
+		t.Fatalf("expected aborted status_text, got %q", got)
+	}
+}
+
 func TestBuildTaskExecutionNotificationIncludesSuccessLogExcerpt(t *testing.T) {
 	task := &model.Task{ID: 11, Name: "慧生活798"}
 	endedAt := time.Date(2026, 4, 18, 0, 42, 31, 535000000, time.Local)
@@ -114,7 +145,7 @@ func TestBuildTaskExecutionNotificationIncludesSuccessLogExcerpt(t *testing.T) {
 		"=== 执行结束 [2026-04-18 00:42:31] 耗时 655.20 秒 退出码 0 ===",
 	}, "\n")
 
-	_, content, context := buildTaskExecutionNotification(task, 602, true, 0, 655.2, endedAt, output)
+	_, content, context := buildTaskExecutionNotification(task, 602, model.RunSuccess, 0, 655.2, endedAt, output)
 
 	if !strings.Contains(content, "执行日志:") {
 		t.Fatalf("expected content to include 执行日志 section, got %q", content)

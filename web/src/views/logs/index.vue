@@ -248,6 +248,7 @@ function handleSearch() {
 
 function getStatusType(status: number | null) {
   if (status === 2) return 'warning'
+  if (status === 3) return 'warning'
   if (status === 0) return 'success'
   if (status === 1) return 'danger'
   return 'info'
@@ -255,6 +256,7 @@ function getStatusType(status: number | null) {
 
 function getStatusText(status: number | null) {
   if (status === 2) return '运行中'
+  if (status === 3) return '已终止'
   if (status === 0) return '成功'
   if (status === 1) return '失败'
   return '未知'
@@ -543,6 +545,7 @@ onBeforeUnmount(() => {
           <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
           <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
           <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
+          <button :class="['status-tab', { active: statusFilter === '3' }]" @click="statusFilter = '3'; handleSearch()">已终止</button>
           <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
         </div>
         <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">

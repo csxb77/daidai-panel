@@ -62,24 +62,32 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 					service.MarkManualStop(id)
 					service.KillProcessByPid(*task.PID)
 				}
-				stopLogStatus := model.LogStatusSuccess
-				if task.StopAsFailure {
-					stopLogStatus = model.LogStatusFailed
-				}
+				stopLogStatus := model.LogStatusAborted
 				var runningLog model.TaskLog
 				if err := database.DB.Where("task_id = ? AND status = ?", id, model.LogStatusRunning).
 					Order("started_at DESC").First(&runningLog).Error; err == nil {
 					now := time.Now()
+					duration := now.Sub(runningLog.StartedAt).Seconds()
+					if duration < 0 {
+						duration = 0
+					}
+					// 批量停止也统一标记为 Aborted，避免进入成功/失败统计。
 					database.DB.Model(&runningLog).Updates(map[string]interface{}{
 						"status":   stopLogStatus,
 						"ended_at": now,
+						"duration": duration,
+					})
+					database.DB.Model(&task).Updates(map[string]interface{}{
+						"last_run_status":   model.RunAborted,
+						"last_running_time": duration,
 					})
 				}
 				inactiveStatus := service.ResolveTaskInactiveStatus(&task)
 				database.DB.Model(&task).Updates(map[string]interface{}{
-					"status":   inactiveStatus,
-					"pid":      gorm.Expr("NULL"),
-					"log_path": gorm.Expr("NULL"),
+					"status":          inactiveStatus,
+					"last_run_status": model.RunAborted,
+					"pid":             gorm.Expr("NULL"),
+					"log_path":        gorm.Expr("NULL"),
 				})
 			} else {
 				continue

@@ -116,12 +116,12 @@ func EnsureColumns() {
 		{"retry_interval", "INTEGER DEFAULT 60"},
 		{"notify_on_failure", "BOOLEAN DEFAULT 0"},
 		{"notify_on_success", "BOOLEAN DEFAULT 0"},
+		{"notify_on_abort", "BOOLEAN DEFAULT 0"},
 		{"notification_channel_id", "INTEGER"},
 		{"depends_on", "INTEGER"},
 		{"sort_order", "INTEGER DEFAULT 0"},
 		{"is_pinned", "BOOLEAN DEFAULT 0"},
 		{"python_version", "VARCHAR(16) DEFAULT ''"},
-		{"stop_as_failure", "BOOLEAN DEFAULT 0"},
 	})
 	migrateLegacyTaskPIDColumn()
 

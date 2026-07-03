@@ -17,6 +17,7 @@ const (
 
 	RunSuccess = 0
 	RunFailed  = 1
+	RunAborted = 2
 )
 
 type Task struct {
@@ -38,6 +39,7 @@ type Task struct {
 	RetryInterval          int        `json:"retry_interval"`
 	NotifyOnFailure        bool       `json:"notify_on_failure"`
 	NotifyOnSuccess        bool       `json:"notify_on_success"`
+	NotifyOnAbort          bool       `gorm:"default:0" json:"notify_on_abort"`
 	NotificationChannelID  *uint      `gorm:"index" json:"notification_channel_id"`
 	DependsOn              *uint      `gorm:"index" json:"depends_on"`
 	SortOrder              int        `json:"sort_order"`
@@ -49,10 +51,8 @@ type Task struct {
 	TaskAfter              *string    `gorm:"type:text" json:"task_after"`
 	AllowMultipleInstances bool       `json:"allow_multiple_instances"`
 	StopSchedule           string     `gorm:"type:text;default:''" json:"stop_schedule"`
-	// StopAsFailure 控制手动停止/定时停止这类主动终止是否按失败结算；默认 false 表示按成功结算。
-	StopAsFailure bool      `gorm:"default:0" json:"stop_as_failure"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 func (Task) TableName() string {
@@ -84,6 +84,7 @@ func (t *Task) ToDict() map[string]interface{} {
 		"retry_interval":           t.RetryInterval,
 		"notify_on_failure":        t.NotifyOnFailure,
 		"notify_on_success":        t.NotifyOnSuccess,
+		"notify_on_abort":          t.NotifyOnAbort,
 		"notification_channel_id":  t.NotificationChannelID,
 		"depends_on":               t.DependsOn,
 		"sort_order":               t.SortOrder,
@@ -95,7 +96,6 @@ func (t *Task) ToDict() map[string]interface{} {
 		"task_after":               t.TaskAfter,
 		"allow_multiple_instances": t.AllowMultipleInstances,
 		"stop_schedule":            t.StopSchedule,
-		"stop_as_failure":          t.StopAsFailure,
 		"created_at":               t.CreatedAt,
 		"updated_at":               t.UpdatedAt,
 	}
