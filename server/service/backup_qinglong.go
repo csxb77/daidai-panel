@@ -575,7 +575,9 @@ func enrichManifestFromQingLongDB(dbPath string, manifest *BackupManifest) error
 	}
 	if len(envs) > 0 {
 		manifest.Selection.EnvVars = true
-		manifest.Data.EnvVars = append(manifest.Data.EnvVars, envs...)
+		for _, env := range envs {
+			manifest.Data.EnvVars = append(manifest.Data.EnvVars, backupEnvVarFromModel(env))
+		}
 	}
 
 	tasks, err := loadQingLongTasks(db)
@@ -737,6 +739,7 @@ func loadQingLongTasks(db *sql.DB) ([]model.Task, error) {
 // 否则无法运行。青龙 Crontabs.command 存的命令不一定满足该规范：
 //   - 有的是裸脚本（"123.py" / "/ql/scripts/123.py"），缺 task 前缀，导入后面板跑不了；
 //   - 有的带青龙绝对路径前缀（"task /ql/scripts/123.py"），路径在面板脚本目录里找不到。
+//
 // 这里在导入时把命令归一化成面板可执行的 "task <相对脚本目录路径>"。
 var qingLongRecognizedCommandHeads = map[string]struct{}{
 	"task": {}, "desi": {},

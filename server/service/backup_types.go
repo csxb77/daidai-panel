@@ -73,6 +73,20 @@ type BackupTwoFactorAuth struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// BackupEnvVar 用指针保存 enabled，区分「老备份缺少 enabled 字段」和「新备份明确 disabled」。
+type BackupEnvVar struct {
+	ID        uint      `json:"id"`
+	Name      string    `json:"name"`
+	Value     string    `json:"value"`
+	Remarks   string    `json:"remarks"`
+	Enabled   *bool     `json:"enabled,omitempty"`
+	Position  float64   `json:"position"`
+	SortOrder int       `json:"sort_order"`
+	Group     string    `json:"group"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type BackupDependency struct {
 	Type          string `json:"type"`
 	Name          string `json:"name"`
@@ -105,7 +119,7 @@ type BackupConfigBundle struct {
 type BackupPayload struct {
 	Configs       BackupConfigBundle   `json:"configs,omitempty"`
 	Tasks         []model.Task         `json:"tasks,omitempty"`
-	EnvVars       []model.EnvVar       `json:"env_vars,omitempty"`
+	EnvVars       []BackupEnvVar       `json:"env_vars,omitempty"`
 	Subscriptions []model.Subscription `json:"subscriptions,omitempty"`
 	SSHKeys       []BackupSSHKey       `json:"ssh_keys,omitempty"`
 	Dependencies  []BackupDependency   `json:"dependencies,omitempty"`

@@ -469,6 +469,9 @@ func TestRestoreBackupManifestAppliesDependencyMirrorsBeforeDependencyResume(t *
 func TestRestoreBackupManifestReplacesCoreBusinessData(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
+	enabled := true
+	disabled := false
+
 	if err := database.DB.Create(&model.Task{
 		Name:    "current-task",
 		Command: "python3 current.py",
@@ -509,11 +512,17 @@ func TestRestoreBackupManifestReplacesCoreBusinessData(t *testing.T) {
 					Status:  model.TaskStatusEnabled,
 				},
 			},
-			EnvVars: []model.EnvVar{
+			EnvVars: []BackupEnvVar{
 				{
 					Name:    "RESTORED_ENV",
 					Value:   "restored",
-					Enabled: true,
+					Enabled: &enabled,
+				},
+				{
+					Name:     "RESTORED_DISABLED_ENV",
+					Value:    "disabled-restored",
+					Enabled:  &disabled,
+					Position: 2000,
 				},
 			},
 		},
@@ -535,12 +544,55 @@ func TestRestoreBackupManifestReplacesCoreBusinessData(t *testing.T) {
 	if err := database.DB.Order("id ASC").Find(&envs).Error; err != nil {
 		t.Fatalf("list envs: %v", err)
 	}
-	if len(envs) != 1 || envs[0].Name != "RESTORED_ENV" || envs[0].Value != "restored" {
+	if len(envs) != 2 || envs[0].Name != "RESTORED_ENV" || envs[0].Value != "restored" {
 		t.Fatalf("expected current envs to be replaced by restored env, got %+v", envs)
+	}
+	enabledByName := map[string]bool{}
+	for _, env := range envs {
+		enabledByName[env.Name] = env.Enabled
+	}
+	if !enabledByName["RESTORED_ENV"] {
+		t.Fatalf("expected RESTORED_ENV to stay enabled, got %+v", envs)
+	}
+	if enabledByName["RESTORED_DISABLED_ENV"] {
+		t.Fatalf("expected RESTORED_DISABLED_ENV to stay disabled, got %+v", envs)
 	}
 
 	if got := model.GetRegisteredConfig("panel_title"); got != "备份里的标题" {
 		t.Fatalf("expected panel_title to be restored, got %q", got)
+	}
+}
+
+func TestRestoreBackupManifestDefaultsLegacyEnvEnabledWhenMissing(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	manifest := BackupManifest{
+		Format:  "daidai-panel-backup",
+		Version: "0.3.0",
+		Source:  "daidai-panel",
+		Selection: BackupSelection{
+			EnvVars: true,
+		},
+		Data: BackupPayload{
+			EnvVars: []BackupEnvVar{
+				{
+					Name:  "LEGACY_ENV_WITHOUT_ENABLED",
+					Value: "legacy",
+				},
+			},
+		},
+	}
+
+	if err := restoreBackupManifest(manifest, t.TempDir()); err != nil {
+		t.Fatalf("restore backup manifest: %v", err)
+	}
+
+	var env model.EnvVar
+	if err := database.DB.Where("name = ?", "LEGACY_ENV_WITHOUT_ENABLED").First(&env).Error; err != nil {
+		t.Fatalf("load restored legacy env: %v", err)
+	}
+	if !env.Enabled {
+		t.Fatalf("expected legacy env without enabled field to default enabled, got %+v", env)
 	}
 }
 
@@ -560,6 +612,17 @@ func TestCreateBackupIncludesSelectedContentInArchive(t *testing.T) {
 		Enabled: true,
 	}).Error; err != nil {
 		t.Fatalf("create env: %v", err)
+	}
+	disabledEnv := &model.EnvVar{
+		Name:    "BACKUP_DISABLED_ENV",
+		Value:   "backup-disabled-value",
+		Enabled: true,
+	}
+	if err := database.DB.Create(disabledEnv).Error; err != nil {
+		t.Fatalf("create disabled env: %v", err)
+	}
+	if err := database.DB.Model(disabledEnv).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable env: %v", err)
 	}
 	if err := model.SetConfig("panel_title", "备份标题"); err != nil {
 		t.Fatalf("set panel_title: %v", err)
@@ -618,8 +681,21 @@ func TestCreateBackupIncludesSelectedContentInArchive(t *testing.T) {
 	if len(manifest.Data.Tasks) != 1 || manifest.Data.Tasks[0].Name != "backup-task" {
 		t.Fatalf("expected selected task to be included, got %+v", manifest.Data.Tasks)
 	}
-	if len(manifest.Data.EnvVars) != 1 || manifest.Data.EnvVars[0].Name != "BACKUP_ENV" {
+	if len(manifest.Data.EnvVars) != 2 || manifest.Data.EnvVars[0].Name != "BACKUP_ENV" {
 		t.Fatalf("expected selected env to be included, got %+v", manifest.Data.EnvVars)
+	}
+	backupEnvEnabled := map[string]bool{}
+	for _, env := range manifest.Data.EnvVars {
+		if env.Enabled == nil {
+			t.Fatalf("expected backup env %s to include enabled field, got %+v", env.Name, manifest.Data.EnvVars)
+		}
+		backupEnvEnabled[env.Name] = *env.Enabled
+	}
+	if !backupEnvEnabled["BACKUP_ENV"] {
+		t.Fatalf("expected BACKUP_ENV to export enabled=true, got %+v", manifest.Data.EnvVars)
+	}
+	if backupEnvEnabled["BACKUP_DISABLED_ENV"] {
+		t.Fatalf("expected BACKUP_DISABLED_ENV to export enabled=false, got %+v", manifest.Data.EnvVars)
 	}
 	foundPanelTitle := false
 	for _, cfg := range manifest.Data.Configs.SystemConfigs {

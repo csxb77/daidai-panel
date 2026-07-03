@@ -529,6 +529,78 @@ _ = restoreDirectoryWithStage(config.C.Data.ScriptsDir, func(stageDir string) er
 
 ---
 
+## 场景：备份恢复环境变量启用状态
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/backup_runtime.go`、`server/service/backup_types.go`、青龙备份转换或环境变量备份恢复逻辑时必须看本节。
+- 原因：`model.EnvVar.Enabled` 是 `bool`，并带有 `gorm:"default:true"`。如果恢复时直接 `Create(&model.EnvVar{Enabled:false})`，GORM 会把 `false` 当成零值交给 SQLite 默认值，最终恢复成 `true`。
+
+### 2. Signatures
+
+- 备份字段：`BackupEnvVar.Enabled *bool json:"enabled,omitempty"`
+- 导出转换：`backupEnvVarFromModel(item model.EnvVar) BackupEnvVar`
+- 恢复转换：`modelEnvVarFromBackup(item BackupEnvVar) model.EnvVar`
+- 恢复入口：`restoreEnvVars(tx *gorm.DB, envVars []BackupEnvVar) error`
+
+### 3. Contracts
+
+- 新备份必须明确写出环境变量 `enabled=true/false`，不能因为 `false` 是零值而丢字段。
+- 恢复时如果 `enabled=false` 明确存在，最终数据库里的 `env_vars.enabled` 必须是 `false`。
+- 老备份如果缺少 `enabled` 字段，必须按历史行为默认恢复为启用，避免把旧备份环境变量批量恢复成禁用。
+- 青龙备份转换得到的环境变量也必须走同一套 `BackupEnvVar` 转换，不能直接把 `model.EnvVar` 塞进备份清单。
+
+### 4. Validation & Error Matrix
+
+- `enabled=false` 明确存在 -> 恢复后 `env_vars.enabled=false`
+- `enabled=true` 明确存在 -> 恢复后 `env_vars.enabled=true`
+- `enabled` 字段缺失 -> 恢复后 `env_vars.enabled=true`
+- 恢复写入失败 -> 回滚本次备份恢复事务
+
+### 5. Good/Base/Bad Cases
+
+- Good：备份里一启用一禁用两个环境变量，恢复后状态完全一致。
+- Base：旧备份没有 `enabled` 字段，恢复后变量保持启用，兼容老用户数据。
+- Bad：恢复时直接 `tx.Create(&model.EnvVar{Enabled:false})`，结果被 SQLite 默认值覆盖成启用。
+
+### 6. Tests Required
+
+- `TestRestoreBackupManifestReplacesCoreBusinessData`：断言启用和禁用环境变量都按备份状态恢复。
+- `TestRestoreBackupManifestDefaultsLegacyEnvEnabledWhenMissing`：断言老备份缺少 `enabled` 字段时默认启用。
+- `TestCreateBackupIncludesSelectedContentInArchive`：断言导出的备份清单包含 `enabled=false`。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestRestoreBackupManifest|TestCreateBackup|TestBuildQingLongManifest" -count=1
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：Enabled=false 会被 GORM 当成零值，配合 default:true 后容易恢复成 true。
+env := model.EnvVar{Name: item.Name, Value: item.Value, Enabled: false}
+_ = tx.Create(&env).Error
+```
+
+#### Correct
+
+```go
+// 正确：用 *bool 区分字段缺失和明确 false，创建后对禁用状态做兜底写回。
+env := modelEnvVarFromBackup(item)
+shouldRestoreDisabled := !env.Enabled
+if err := tx.Create(&env).Error; err != nil {
+    return err
+}
+if shouldRestoreDisabled {
+    return tx.Model(&model.EnvVar{}).Where("id = ?", env.ID).Update("enabled", false).Error
+}
+```
+
+---
+
 ## 场景：默认 Python 版本与不可用运行时兜底
 
 ### 1. Scope / Trigger

@@ -27,7 +27,7 @@ type LegacyBackupData struct {
 	Version   string                `json:"version"`
 	CreatedAt time.Time             `json:"created_at"`
 	Tasks     []model.Task          `json:"tasks"`
-	EnvVars   []model.EnvVar        `json:"env_vars"`
+	EnvVars   []BackupEnvVar        `json:"env_vars"`
 	Subs      []model.Subscription  `json:"subscriptions"`
 	Channels  []model.NotifyChannel `json:"notify_channels"`
 	SSHKeys   []model.SSHKey        `json:"ssh_keys"`
@@ -139,8 +139,13 @@ func buildBackupManifest(selection BackupSelection) (BackupManifest, error) {
 	}
 
 	if selection.EnvVars {
-		if err := database.DB.Order("position ASC, id ASC").Find(&manifest.Data.EnvVars).Error; err != nil {
+		var envVars []model.EnvVar
+		if err := database.DB.Order("position ASC, id ASC").Find(&envVars).Error; err != nil {
 			return BackupManifest{}, fmt.Errorf("load env vars: %w", err)
+		}
+		manifest.Data.EnvVars = make([]BackupEnvVar, 0, len(envVars))
+		for _, envVar := range envVars {
+			manifest.Data.EnvVars = append(manifest.Data.EnvVars, backupEnvVarFromModel(envVar))
 		}
 	}
 
@@ -968,11 +973,54 @@ func restoreTwoFactorAuths(tx *gorm.DB, items []BackupTwoFactorAuth, userIDMap m
 	return nil
 }
 
-func restoreEnvVars(tx *gorm.DB, envVars []model.EnvVar) error {
+func backupEnvVarFromModel(item model.EnvVar) BackupEnvVar {
+	enabled := item.Enabled
+	return BackupEnvVar{
+		ID:        item.ID,
+		Name:      item.Name,
+		Value:     item.Value,
+		Remarks:   item.Remarks,
+		Enabled:   &enabled,
+		Position:  item.Position,
+		SortOrder: item.SortOrder,
+		Group:     item.Group,
+		CreatedAt: item.CreatedAt,
+		UpdatedAt: item.UpdatedAt,
+	}
+}
+
+func modelEnvVarFromBackup(item BackupEnvVar) model.EnvVar {
+	// 老备份可能没有 enabled 字段；缺字段时沿用历史行为，默认按启用恢复。
+	enabled := true
+	if item.Enabled != nil {
+		enabled = *item.Enabled
+	}
+	return model.EnvVar{
+		Name:      item.Name,
+		Value:     item.Value,
+		Remarks:   item.Remarks,
+		Enabled:   enabled,
+		Position:  item.Position,
+		SortOrder: item.SortOrder,
+		Group:     item.Group,
+		CreatedAt: item.CreatedAt,
+		UpdatedAt: item.UpdatedAt,
+	}
+}
+
+func restoreEnvVars(tx *gorm.DB, envVars []BackupEnvVar) error {
 	for _, item := range envVars {
-		item.ID = 0
-		if err := tx.Create(&item).Error; err != nil {
+		envVar := modelEnvVarFromBackup(item)
+		shouldRestoreDisabled := !envVar.Enabled
+		if err := tx.Create(&envVar).Error; err != nil {
 			return err
+		}
+		// Enabled=false 是 Go 零值，EnvVar 又有 default:true；Create 时会被 GORM 交给 SQLite 默认成 true。
+		// 所以明确禁用的备份项创建后再兜底写回 false，避免恢复后禁用变量全部变成启用。
+		if shouldRestoreDisabled {
+			if err := tx.Model(&model.EnvVar{}).Where("id = ?", envVar.ID).Update("enabled", false).Error; err != nil {
+				return err
+			}
 		}
 	}
 	return nil
