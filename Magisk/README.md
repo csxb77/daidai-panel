@@ -72,7 +72,7 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
    - 把这两个文件一起上传到 Release
 2. 已装旧版本的手机，打开管理器时自动拉取 `update.json`，比 `versionCode` 发现有新版 → 模块卡片出现「**更新**」按钮
 3. 点按钮 → 管理器自动下载 ZIP 并走安装流程（等同手动「从本地安装 ZIP」）
-4. 重启手机完成升级。升级流程内部：`customize.sh` 先把容器里的 `/app/Dumb-Panel/` 整个备份到 `TMPDIR/backup_data`，然后清掉旧 rootfs 重装 Alpine，装完再把备份复原回去——数据库、脚本、日志、依赖全部保留
+4. 重启手机完成升级。升级流程内部：`customize.sh` 先把容器里的 `/app/Dumb-Panel/` 整个备份到 `/data/adb/daidai-panel/update-data-backup`，然后清掉旧 rootfs 重装 Alpine，装完再把备份复原回去——数据库、脚本、日志、依赖全部保留；如果下载或安装中途失败，下次重试会优先沿用这份备份恢复
 
 > 说明：需要管理器版本支持 `updateJson`（Magisk v24.0+、KernelSU、APatch 新版均支持）。如果你自己 fork 了本项目发版，请把 `module.prop` 里的 `linzixuanzz/daidai-panel` 替换成自己的仓库路径即可。
 
@@ -310,7 +310,7 @@ su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
 
 **Q: 升级后旧数据会丢吗？**
 
-不会。升级流程：`customize.sh` → 备份 `<rootfs>/app/Dumb-Panel/` 到 `TMPDIR/backup_data/` → 清旧 rootfs → 重装 Alpine + 重装依赖 → 把备份复原回去。`ports.conf` 在宿主侧的 `/data/adb/daidai-panel/` 不受影响。
+不会。升级流程：`customize.sh` → 备份 `<rootfs>/app/Dumb-Panel/` 到 `/data/adb/daidai-panel/update-data-backup/` → 清旧 rootfs → 重装 Alpine + 重装依赖 → 把备份复原回去。若安装中途失败，保留下来的 `update-data-backup` 会在下次安装时优先恢复。`ports.conf` 在宿主侧的 `/data/adb/daidai-panel/` 不受影响。
 
 **Q: 禁用模块之后面板还在跑？**
 

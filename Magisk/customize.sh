@@ -26,6 +26,9 @@ fi
 MODID=daidai-panel
 PERSIST_DIR=/data/adb/$MODID
 UPDATE_FLAG="$PERSIST_DIR/.updated_from"
+INSTALL_BACKUP_DIR="$PERSIST_DIR/update-data-backup"
+INSTALL_IN_PROGRESS_FLAG="$PERSIST_DIR/.install_in_progress"
+INSTALL_BACKUP_READY=0
 
 # ---- 环境探测 ------------------------------------------------------------
 detect_ksu() { [ -d "/data/adb/ksu" ]; }
@@ -106,23 +109,43 @@ ui_print ""
 current_ver=$(get_current_version)
 new_ver=$(grep '^versionCode=' $MODPATH/module.prop 2>/dev/null | cut -d'=' -f2)
 
-if [ -d "$rootfs/app/Dumb-Panel" ]; then
+# 如果上次更新在清理 rootfs 之后中断，完整数据只会留在持久化备份目录里。
+# 这种情况下不能重新从半成品 rootfs 备份，必须优先沿用上次留下的完整备份。
+if [ -d "$INSTALL_BACKUP_DIR" ]; then
+  backup_count=$(ls -1 "$INSTALL_BACKUP_DIR/" 2>/dev/null | wc -l)
+  if [ "$backup_count" -gt 0 ]; then
+    if [ -f "$INSTALL_IN_PROGRESS_FLAG" ] || [ ! -d "$rootfs/app/Dumb-Panel" ]; then
+      INSTALL_BACKUP_READY=1
+      ui_print "- 检测到上次安装中断留下的数据备份"
+      ui_print "- 本次安装完成后会自动恢复 $INSTALL_BACKUP_DIR ($backup_count 项)"
+    fi
+  else
+    rm -rf "$INSTALL_BACKUP_DIR" 2>/dev/null
+  fi
+fi
+
+if [ "$INSTALL_BACKUP_READY" != "1" ] && [ -d "$rootfs/app/Dumb-Panel" ]; then
   if [ "$current_ver" != "0" ] && [ "$current_ver" != "$new_ver" ] 2>/dev/null; then
     ui_print "- 检测到版本变更: $current_ver -> $new_ver"
   else
     ui_print "- 检测到已有面板数据"
   fi
   ui_print "- 正在保留用户数据..."
-  mkdir -p "$TMPDIR/backup_data" || abort "! 无法创建数据备份目录 $TMPDIR/backup_data"
-  if ! cp -rf "$rootfs/app/Dumb-Panel/." "$TMPDIR/backup_data/" 2>/dev/null; then
-    abort "! 用户数据备份失败（$TMPDIR 空间可能不足），已中止安装以保护数据"
+  mkdir -p "$PERSIST_DIR" || abort "! 无法创建持久化目录 $PERSIST_DIR"
+  if [ -e "$INSTALL_BACKUP_DIR" ]; then
+    rm -rf "$INSTALL_BACKUP_DIR" 2>/dev/null || abort "! 无法清理旧的数据备份目录 $INSTALL_BACKUP_DIR"
   fi
-  backup_count=$(ls -1 "$TMPDIR/backup_data/" 2>/dev/null | wc -l)
+  mkdir -p "$INSTALL_BACKUP_DIR" || abort "! 无法创建数据备份目录 $INSTALL_BACKUP_DIR"
+  # Magisk 安装器的 TMPDIR 经常落在 /dev/tmp，老设备空间很小；完整用户数据改放 /data/adb 持久化目录，避免更新时因 /dev/tmp 不足失败。
+  if ! cp -rf "$rootfs/app/Dumb-Panel/." "$INSTALL_BACKUP_DIR/" 2>/dev/null; then
+    abort "! 用户数据备份失败（$INSTALL_BACKUP_DIR 所在 /data 空间可能不足），已中止安装以保护数据"
+  fi
+  backup_count=$(ls -1 "$INSTALL_BACKUP_DIR/" 2>/dev/null | wc -l)
   if [ "$backup_count" -eq 0 ]; then
     abort "! 数据备份目录为空，可能复制失败，已中止安装以保护数据"
   fi
-  ui_print "- 数据已备份到 $TMPDIR/backup_data ($backup_count 项)"
-  mkdir -p "$PERSIST_DIR"
+  INSTALL_BACKUP_READY=1
+  ui_print "- 数据已备份到 $INSTALL_BACKUP_DIR ($backup_count 项)"
   echo "$current_ver" > "$UPDATE_FLAG"
 
   # ---- 持久化"上次更新前快照"：模块每次更新都会重写 $MODPATH，但 $PERSIST_DIR
@@ -141,7 +164,7 @@ if [ -d "$rootfs/app/Dumb-Panel" ]; then
   mkdir -p "$PERSIST_BACKUP_DIR"
   snapshot_items=0
   for item in daidai.db daidai.db-shm daidai.db-wal scripts backups .jwt_secret config.yaml panel.log; do
-    src="$rootfs/app/Dumb-Panel/$item"
+    src="$INSTALL_BACKUP_DIR/$item"
     if [ -e "$src" ]; then
       if cp -rf "$src" "$PERSIST_BACKUP_DIR/" 2>/dev/null; then
         snapshot_items=$((snapshot_items + 1))
@@ -203,10 +226,13 @@ fi
 
 # ---- 清掉旧 rootfs 重装 -------------------------------------------------
 # 安全检查：如果面板数据存在但备份未完成，禁止继续
-if [ -d "$rootfs/app/Dumb-Panel" ] && [ ! -d "$TMPDIR/backup_data" ]; then
+if [ -d "$rootfs/app/Dumb-Panel" ] && [ "$INSTALL_BACKUP_READY" != "1" ]; then
   abort "! 面板数据存在但未成功备份，已中止安装以保护数据。请重试或手动备份 $rootfs/app/Dumb-Panel"
 fi
-rm -rf $rootfs
+if [ "$INSTALL_BACKUP_READY" = "1" ]; then
+  echo "$new_ver" > "$INSTALL_IN_PROGRESS_FLAG" 2>/dev/null || true
+fi
+rm -rf "$rootfs"
 
 ui_print "- 请勿切换到后台，避免下载失败！"
 ui_print "- 正在联网下载 Alpine rootfs..."
@@ -295,15 +321,16 @@ export NODE_PATH=/usr/local/lib/node_modules
 EOF
 
 # ---- 回填用户数据 -------------------------------------------------------
-if [ -d "$TMPDIR/backup_data" ]; then
+if [ "$INSTALL_BACKUP_READY" = "1" ] && [ -d "$INSTALL_BACKUP_DIR" ]; then
   ui_print "- 正在恢复用户数据..."
   mkdir -p "$rootfs/app/Dumb-Panel"
-  for item in "$TMPDIR/backup_data"/* "$TMPDIR/backup_data"/.[!.]* "$TMPDIR/backup_data"/..?*; do
+  for item in "$INSTALL_BACKUP_DIR"/* "$INSTALL_BACKUP_DIR"/.[!.]* "$INSTALL_BACKUP_DIR"/..?*; do
     [ -e "$item" ] || continue
     cp -rf "$item" "$rootfs/app/Dumb-Panel/" 2>/dev/null || \
       abort "! 用户数据恢复失败：$(basename "$item") 无法复制回容器数据目录"
   done
-  rm -rf $TMPDIR/backup_data
+  rm -rf "$INSTALL_BACKUP_DIR" 2>/dev/null
+  rm -f "$INSTALL_IN_PROGRESS_FLAG" 2>/dev/null
 fi
 
 # module.prop 同步一份给容器内 (supply to updater)
