@@ -58,6 +58,11 @@ export interface SystemHealthSnapshot {
   last_checked_at?: string
 }
 
+export interface ConfigScriptPayload {
+  content: string
+  path: string
+}
+
 export const systemApi = {
   info: () => request.get('/system/info'),
   machineCode: () => request.get('/system/machine-code'),
@@ -100,8 +105,8 @@ export const systemApi = {
 }
 
 export const configScriptApi = {
-  get: () => request.get('/system/config-script'),
-  save: (content: string) => request.put('/system/config-script', { content }),
+  get: () => request.get('/system/config-script') as Promise<ConfigScriptPayload>,
+  save: (content: string) => request.put('/system/config-script', { content }) as Promise<{ message: string }>,
 }
 
 export const configApi = {

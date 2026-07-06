@@ -57,6 +57,7 @@ const workspaceItems = [
   { index: '/tasks', title: '定时任务', icon: Timer, minRole: 'viewer' },
   { index: '/subscriptions', title: '订阅管理', icon: Download, minRole: 'operator' },
   { index: '/envs', title: '环境变量', icon: Setting, minRole: 'operator' },
+  { index: '/config-file', title: '配置文件', icon: Document, minRole: 'admin' },
   { index: '/logs', title: '执行日志', icon: Tickets, minRole: 'viewer' },
   { index: '/scripts', title: '脚本管理', icon: Document, minRole: 'operator' },
   { index: '/deps', title: '依赖管理', icon: Box, minRole: 'admin' },

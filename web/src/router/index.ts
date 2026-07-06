@@ -65,6 +65,12 @@ const router = createRouter({
           meta: { title: '环境变量', icon: 'Setting', minRole: 'operator' }
         },
         {
+          path: 'config-file',
+          name: 'ConfigFile',
+          component: () => import('@/views/config-file/index.vue'),
+          meta: { title: '配置文件', icon: 'Document', minRole: 'admin' }
+        },
+        {
           path: 'subscriptions',
           name: 'Subscriptions',
           component: () => import('@/views/subscriptions/index.vue'),
