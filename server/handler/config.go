@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"log"
+
 	"daidai-panel/database"
 	"daidai-panel/middleware"
 	"daidai-panel/model"
@@ -19,6 +21,10 @@ func NewConfigHandler() *ConfigHandler {
 func reloadRuntimeConfigKeys(keys ...string) {
 	for _, key := range keys {
 		switch key {
+		case model.PanelTimezoneConfigKey:
+			if err := service.ApplyRegisteredPanelTimezone(); err != nil {
+				log.Printf("warn: apply panel timezone failed: %v", err)
+			}
 		case "trusted_proxy_cidrs":
 			_ = middleware.ConfigureTrustedProxyCIDRs(model.GetRegisteredConfig(key))
 		case "backup_schedule_enabled",

@@ -2,6 +2,16 @@
 import { Document, Setting, Upload } from '@element-plus/icons-vue'
 import type { SettingsConfigForm } from '../types'
 
+const timezoneOptions = [
+  { value: 'Asia/Shanghai', label: '中国时间 Asia/Shanghai' },
+  { value: 'UTC', label: 'UTC 标准时间' },
+  { value: 'Asia/Tokyo', label: '日本时间 Asia/Tokyo' },
+  { value: 'Asia/Hong_Kong', label: '香港时间 Asia/Hong_Kong' },
+  { value: 'Asia/Singapore', label: '新加坡时间 Asia/Singapore' },
+  { value: 'America/New_York', label: '纽约时间 America/New_York' },
+  { value: 'Europe/London', label: '伦敦时间 Europe/London' }
+]
+
 defineProps<{
   configsLoading: boolean
   configsSaving: boolean
@@ -30,6 +40,25 @@ defineProps<{
         <label>面板标题</label>
         <el-input v-model="form.panel_title" placeholder="呆呆面板" />
         <span class="form-hint">自定义面板的站点标题，留空使用默认值"呆呆面板"</span>
+      </div>
+      <div class="form-field">
+        <label>面板时区</label>
+        <el-select
+          v-model="form.timezone"
+          class="timezone-select"
+          filterable
+          allow-create
+          default-first-option
+          placeholder="Asia/Shanghai"
+        >
+          <el-option
+            v-for="item in timezoneOptions"
+            :key="item.value"
+            :label="item.label"
+            :value="item.value"
+          />
+        </el-select>
+        <span class="form-hint">影响面板日志、任务日期判断和脚本运行时 TZ；Linux 二进制包建议保持 Asia/Shanghai</span>
       </div>
       <div class="form-field">
         <label>面板图标 (SVG)</label>
@@ -126,6 +155,11 @@ defineProps<{
 .icon-preview__image {
   width: 32px;
   height: 32px;
+}
+
+.timezone-select {
+  width: 100%;
+  max-width: 360px;
 }
 
 .log-bg-upload {

@@ -27,6 +27,7 @@ export interface SettingsConfigForm {
   captcha_key: string
   captcha_fail_mode: CaptchaFailMode | string
   panel_title: string
+  timezone: string
   panel_icon: string
   editor_background_color: string
   log_background_color: string

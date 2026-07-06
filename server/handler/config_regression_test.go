@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
+	"time"
 
 	"daidai-panel/database"
 	"daidai-panel/model"
+	"daidai-panel/service"
 	"daidai-panel/testutil"
 )
 
@@ -144,5 +147,57 @@ func TestConfigBatchSetUsesRegistryValidation(t *testing.T) {
 
 	if invalidMirrorRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid update_image_mirror request to return 400, got %d", invalidMirrorRec.Code)
+	}
+}
+
+func TestConfigBatchSetTimezoneAppliesImmediately(t *testing.T) {
+	oldLocal := time.Local
+	oldTZ, hadTZ := os.LookupEnv("TZ")
+	oldName := service.CurrentPanelTimezone()
+	t.Cleanup(func() {
+		_ = service.ApplyPanelTimezone(oldName)
+		time.Local = oldLocal
+		if hadTZ {
+			_ = os.Setenv("TZ", oldTZ)
+		} else {
+			_ = os.Unsetenv("TZ")
+		}
+	})
+
+	testutil.SetupTestEnv(t)
+
+	admin := testutil.MustCreateUser(t, "timezone-admin", "admin")
+	token := testutil.MustCreateAccessToken(t, admin.Username, admin.Role)
+	engine := newProtectedRouter()
+
+	body := `{"configs":{"timezone":"UTC"}}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/configs/batch", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := service.CurrentPanelTimezone(); got != "UTC" {
+		t.Fatalf("expected runtime timezone UTC after save, got %q", got)
+	}
+	if got := os.Getenv("TZ"); got != "UTC" {
+		t.Fatalf("expected process TZ=UTC after save, got %q", got)
+	}
+	if got := time.Local.String(); got != "UTC" {
+		t.Fatalf("expected time.Local UTC after save, got %q", got)
+	}
+
+	invalidBody := `{"configs":{"timezone":"Bad/Zone"}}`
+	invalidReq := httptest.NewRequest(http.MethodPut, "/api/v1/configs/batch", bytes.NewBufferString(invalidBody))
+	invalidReq.Header.Set("Authorization", "Bearer "+token)
+	invalidReq.Header.Set("Content-Type", "application/json")
+	invalidRec := httptest.NewRecorder()
+	engine.ServeHTTP(invalidRec, invalidReq)
+
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid timezone request to return 400, got %d", invalidRec.Code)
 	}
 }

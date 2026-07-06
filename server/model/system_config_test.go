@@ -54,6 +54,13 @@ func TestSetConfigNormalizesRegisteredValues(t *testing.T) {
 		t.Fatalf("expected canonical binary_update_proxy https://gh-proxy.org/, got %q", got)
 	}
 
+	if err := model.SetConfig(model.PanelTimezoneConfigKey, " Asia/Tokyo "); err != nil {
+		t.Fatalf("set timezone: %v", err)
+	}
+	if got := model.GetRegisteredConfig(model.PanelTimezoneConfigKey); got != "Asia/Tokyo" {
+		t.Fatalf("expected timezone Asia/Tokyo, got %q", got)
+	}
+
 	if err := model.SetConfig("default_cron_rule", "invalid cron"); err == nil {
 		t.Fatal("expected invalid default_cron_rule to be rejected")
 	}
@@ -66,6 +73,12 @@ func TestSetConfigNormalizesRegisteredValues(t *testing.T) {
 	if err := model.SetConfig("binary_update_proxy", "https://gh-proxy.org/?url=x"); err == nil {
 		t.Fatal("expected binary_update_proxy with query to be rejected")
 	}
+	if err := model.SetConfig(model.PanelTimezoneConfigKey, "Bad/Zone"); err == nil {
+		t.Fatal("expected invalid timezone to be rejected")
+	}
+	if err := model.SetConfig(model.PanelTimezoneConfigKey, "Local"); err == nil {
+		t.Fatal("expected Local timezone to be rejected")
+	}
 }
 
 func TestRegisteredConfigUsesRegistryDefaults(t *testing.T) {
@@ -75,6 +88,10 @@ func TestRegisteredConfigUsesRegistryDefaults(t *testing.T) {
 
 	if got := model.GetRegisteredConfig("panel_title"); got != "呆呆面板" {
 		t.Fatalf("expected registry default panel_title, got %q", got)
+	}
+	database.DB.Where("`key` = ?", model.PanelTimezoneConfigKey).Delete(&model.SystemConfig{})
+	if got := model.GetRegisteredConfig(model.PanelTimezoneConfigKey); got != model.DefaultPanelTimezone {
+		t.Fatalf("expected registry default timezone %q, got %q", model.DefaultPanelTimezone, got)
 	}
 	if got := model.GetRegisteredConfigBool("notify_on_login"); got {
 		t.Fatalf("expected registry default notify_on_login to be false")

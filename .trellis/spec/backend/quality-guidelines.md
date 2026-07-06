@@ -875,6 +875,85 @@ python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
 
 ---
 
+## 场景：面板全局时区配置
+
+### 1. Scope / Trigger
+
+- 触发：修改面板日志时间、任务调度日期判断、任务运行环境、系统设置配置项或 Linux 二进制发行包启动行为时必须看本节。
+- 原因：裸 Linux 二进制运行环境可能没有 `TZ`，`/etc/localtime` 也可能缺失或指向 UTC。只改某一处时间格式不能解决问题，必须统一处理 Go 进程本地时区和脚本子进程 `TZ`。
+
+### 2. Signatures
+
+- 配置键：`model.PanelTimezoneConfigKey = "timezone"`
+- 默认值：`model.DefaultPanelTimezone = "Asia/Shanghai"`
+- 后端应用：`service.ApplyPanelTimezone(value string) error`
+- 启动应用：`service.ApplyRegisteredPanelTimezone() error`
+- 当前运行时读取：`service.CurrentPanelTimezone() string`
+- 任务环境构造：`service.BuildManagedRuntimeEnvMapForPythonVersion(...)`
+- 前端字段：`SettingsConfigForm.timezone`
+
+### 3. Contracts
+
+- `timezone` 必须注册到系统配置表，默认值为 `Asia/Shanghai`。
+- 后端必须使用 `time.LoadLocation` 校验时区名，并内嵌 Go `time/tzdata`，不能依赖宿主机一定安装 tzdata。
+- 面板启动时必须在 `model.InitDefaultConfigs()` 之后调用 `ApplyRegisteredPanelTimezone()`，因为要读取默认配置或用户已保存配置。
+- 应用时区必须同时设置：
+  - `time.Local`
+  - 进程环境变量 `TZ`
+  - 内部当前面板时区缓存
+- 保存 `timezone` 配置后必须立即重载运行时，不要求用户重启面板。
+- 任务运行环境必须写入 `envMap["TZ"] = CurrentPanelTimezone()`，并覆盖用户普通环境变量里同名 `TZ`，保证面板日志和脚本时间一致。
+- 前端系统设置页必须提供可见入口，并把 `timezone` 纳入同一组保存键。
+
+### 4. Validation & Error Matrix
+
+- `timezone` 缺失或空值 -> 使用 `Asia/Shanghai`
+- `timezone=Asia/Tokyo` / `UTC` -> 保存成功，并立即影响 `time.Local` 和后续任务 `TZ`
+- `timezone=Bad/Zone` -> 保存失败，返回用户可读错误
+- `timezone=Local` -> 保存失败，要求填写明确 IANA 时区，避免不同宿主环境表现不一致
+- 用户环境变量表里也配置了 `TZ=UTC` -> 任务最终仍使用面板全局时区
+
+### 5. Good/Base/Bad Cases
+
+- Good：Linux tar 包直接启动，宿主机没有设置 `TZ`，面板仍按 `Asia/Shanghai` 写日志，脚本也拿到 `TZ=Asia/Shanghai`。
+- Base：Docker 用户原本设置 `TZ=Asia/Shanghai`，升级后系统设置同样默认 `Asia/Shanghai`，行为不变。
+- Bad：只在前端显示时加 8 小时，后端日志和任务脚本仍按 UTC 运行，定时任务日期判断继续错。
+
+### 6. Tests Required
+
+- 默认配置：`GetRegisteredConfig("timezone") == "Asia/Shanghai"`
+- 校验：有效 IANA 时区可保存，无效时区和 `Local` 被拒绝。
+- 运行时应用：`ApplyPanelTimezone("UTC")` 后 `time.Local.String()=="UTC"` 且 `os.Getenv("TZ")=="UTC"`。
+- 保存立即生效：通过配置接口保存 `timezone` 后，`CurrentPanelTimezone()` 立即变为新值。
+- 任务环境：`BuildManagedRuntimeEnvMapForPythonVersion` 返回的 `TZ` 必须等于当前面板时区，并覆盖用户环境变量表里的同名 `TZ`。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```go
+// 错误：只设置子进程环境，Go 进程自己的 time.Now() 仍可能按 UTC。
+envMap["TZ"] = "Asia/Shanghai"
+```
+
+```go
+// 错误：依赖宿主机 Local，精简 Linux 上可能仍是 UTC。
+time.Now().Format("2006-01-02 15:04:05")
+```
+
+#### Correct
+```go
+if err := service.ApplyRegisteredPanelTimezone(); err != nil {
+    return fmt.Errorf("failed to apply panel timezone: %w", err)
+}
+```
+
+```go
+// 正确：任务环境强制跟随面板全局时区，避免脚本时间和面板日志不一致。
+envMap["TZ"] = service.CurrentPanelTimezone()
+```
+
+---
+
 ## 场景：版本发布前预检
 
 ### 1. Scope / Trigger
@@ -926,4 +1005,84 @@ python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
 #### Correct
 ```text
 先跑 release-preflight -> 通过后再推 main 和 tag
+```
+
+---
+
+## 场景：Node preload 兼容青龙脚本的 `process.env` 字符串检测
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/runtime_exec.go` 里 Node / TypeScript 托管运行时、`writeNodePreloadScript`、环境变量注入、`NODE_OPTIONS` / preload 相关逻辑时必须看本节。
+- 原因：少数青龙脚本会执行 `JSON.stringify(process.env).indexOf("GITHUB")`，只要任务环境变量的 key 或 value 包含大写 `GITHUB` 就 `process.exit(0)` 静默退出，表现为日志只有“开始”，退出码却是 0。
+
+### 2. Signatures
+
+- Node preload 生成入口：`writeNodePreloadScript(tempDir, envFile string, envVars map[string]string) (string, error)`
+- Node 命令入口：`createManagedNodeCommand(...)`
+- TypeScript Node 命令入口：`createManagedTSNodeCommand(...)`
+- 环境文件：`env.json`，由 preload 读入并写入 `process.env`
+
+### 3. Contracts
+
+- preload 必须继续把 `env.json` 中的任务环境变量写入真实 `process.env`，不能删除用户显式配置的 `GITHUB_*` 变量。
+- 仅对 `JSON.stringify(process.env)` 做兼容过滤：返回的 JSON 字符串中不应包含 key 或 value 带大写 `GITHUB` 的环境项。
+- `process.env.GITHUB_*` 直接读取必须仍然可用，避免破坏确实依赖 GitHub 变量的脚本。
+- 普通 `JSON.stringify({ GITHUB_ACTIONS: 1 })` 等非 `process.env` 对象必须保持 Node 原生行为。
+
+### 4. Validation & Error Matrix
+
+- `env.json` 包含 `GITHUB_ACTIONS=1` -> `JSON.stringify(process.env)` 不包含 `GITHUB`，但 `process.env.GITHUB_ACTIONS === "1"`。
+- `env.json` 不含 `GITHUB` -> 普通环境注入和脚本执行行为不变。
+- 用户脚本 stringify 普通对象 -> 不过滤、不改写。
+- 如果删除真实 `process.env.GITHUB_*` -> 错误，会破坏显式读取变量的脚本。
+
+### 5. Good/Base/Bad Cases
+
+- Good：`hex-ci/smzdm_script` 这类脚本不再因为环境里有 `GITHUB` 而静默成功退出，后续签到日志能继续输出。
+- Base：普通 Node 脚本继续通过 `process.env.SMZDM_COOKIE`、`process.env.NODE_PATH` 等读取任务环境。
+- Bad：直接清理所有 `GITHUB_*` 环境变量，导致需要 GitHub token 或仓库信息的脚本读取不到配置。
+
+### 6. Tests Required
+
+- 回归测试：`TestNodePreloadKeepsGithubEnvReadableButHiddenFromStringify`
+  - 断言 `JSON.stringify(process.env)` 不含 `GITHUB`。
+  - 断言 `process.env.GITHUB_ACTIONS` 仍可直接读取。
+  - 断言普通任务环境变量仍可直接读取。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestNodePreloadKeepsGithubEnvReadableButHiddenFromStringify|TestBuildManagedRuntimeEnvMap" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```js
+// 错误：删除真实变量会破坏用户脚本显式读取 GITHUB_TOKEN / GITHUB_ACTIONS 的场景。
+delete process.env.GITHUB_ACTIONS;
+delete process.env.GITHUB_TOKEN;
+```
+
+#### Correct
+
+```js
+// 正确：只兼容 JSON.stringify(process.env) 这种粗暴检测，不删除真实 process.env。
+const originalJSONStringify = JSON.stringify;
+JSON.stringify = function(value, replacer, space) {
+  if (value === process.env) {
+    const envCopy = {};
+    for (const [key, envValue] of Object.entries(process.env)) {
+      if (String(key).includes('GITHUB') || String(envValue).includes('GITHUB')) {
+        continue;
+      }
+      envCopy[key] = envValue;
+    }
+    return originalJSONStringify.call(JSON, envCopy, replacer, space);
+  }
+  return originalJSONStringify.call(JSON, value, replacer, space);
+};
 ```

@@ -149,6 +149,8 @@ func BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir string, defau
 	}
 
 	loadConfigShellVars(envMap)
+	// 面板时区是全局运行时配置，优先级高于普通环境变量，避免任务脚本继续继承 UTC。
+	envMap["TZ"] = CurrentPanelTimezone()
 
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
 	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
@@ -938,6 +940,9 @@ func buildBootstrapProcessEnv(envVars map[string]string) []string {
 		if key == "PATH" && strings.TrimSpace(envVars["PATH"]) != "" {
 			value = envVars["PATH"]
 		}
+		if key == "TZ" && strings.TrimSpace(envVars["TZ"]) != "" {
+			value = envVars["TZ"]
+		}
 		if value == "" {
 			continue
 		}
@@ -1129,6 +1134,22 @@ for (const [key, value] of Object.entries(envPayload)) {
   }
   process.env[key] = String(value);
 }
+const originalJSONStringify = JSON.stringify;
+JSON.stringify = function(value, replacer, space) {
+  if (value === process.env) {
+    const envCopy = {};
+    for (const [key, envValue] of Object.entries(process.env)) {
+      // 兼容少数青龙脚本：它们用 JSON.stringify(process.env).indexOf("GITHUB")
+      // 粗暴判断 CI 环境并 process.exit(0)。这里只隐藏 stringify 结果，不删除真实变量。
+      if (String(key).includes('GITHUB') || String(envValue).includes('GITHUB')) {
+        continue;
+      }
+      envCopy[key] = envValue;
+    }
+    return originalJSONStringify.call(JSON, envCopy, replacer, space);
+  }
+  return originalJSONStringify.call(JSON, value, replacer, space);
+};
 const extraNodePaths = %s;
 const mergedNodePaths = [];
 for (const value of [...extraNodePaths, ...(process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [])]) {

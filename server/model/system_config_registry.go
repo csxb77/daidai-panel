@@ -5,6 +5,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	_ "time/tzdata"
 
 	panelcron "daidai-panel/pkg/cron"
 	"daidai-panel/pkg/netutil"
@@ -37,6 +40,11 @@ type systemConfigSpec struct {
 	def       SystemConfigDefinition
 	normalize func(string) (string, error)
 }
+
+const (
+	PanelTimezoneConfigKey = "timezone"
+	DefaultPanelTimezone   = "Asia/Shanghai"
+)
 
 var registeredSystemConfigSpecs = []systemConfigSpec{
 	newIntConfig("max_concurrent_tasks", "5", "定时任务最大并发数", "tasks", 1, 128),
@@ -80,6 +88,7 @@ var registeredSystemConfigSpecs = []systemConfigSpec{
 		normalizeTrustedProxyCIDRs,
 	),
 	newTrimmedStringConfig("panel_title", "呆呆面板", "面板标题", "branding"),
+	newValidatedStringConfig(PanelTimezoneConfigKey, DefaultPanelTimezone, "面板时区（影响日志、定时任务日期判断和脚本 TZ）", "branding", normalizeTimezoneValue),
 	newTrimmedStringConfig("panel_icon", "", "面板图标（SVG data URL）", "branding"),
 	newTrimmedStringConfig("editor_background_color", "", "脚本编辑器背景颜色（留空使用默认样式）", "branding"),
 	newTrimmedStringConfig("log_background_color", "", "日志视图背景颜色（留空跟随当前主题）", "branding"),
@@ -308,6 +317,20 @@ func normalizeDefaultCronRule(value string) (string, error) {
 	}
 	if !panelcron.Parse(value).Valid {
 		return "", fmt.Errorf("默认 Cron 规则无效")
+	}
+	return value, nil
+}
+
+func normalizeTimezoneValue(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = DefaultPanelTimezone
+	}
+	if value == "Local" {
+		return "", fmt.Errorf("面板时区不能使用 Local，请填写明确的 IANA 时区名，例如 Asia/Shanghai")
+	}
+	if _, err := time.LoadLocation(value); err != nil {
+		return "", fmt.Errorf("面板时区无效，请填写有效 IANA 时区名，例如 Asia/Shanghai")
 	}
 	return value, nil
 }

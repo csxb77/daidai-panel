@@ -64,6 +64,9 @@ func InitWithConfig(cfg *config.Config) error {
 	legacyPythonVenvMigration := service.MigrateLegacyManagedPythonVenvInfo()
 
 	model.InitDefaultConfigs()
+	if err := service.ApplyRegisteredPanelTimezone(); err != nil {
+		return fmt.Errorf("failed to apply panel timezone: %w", err)
+	}
 	service.NormalizeLegacyPythonVersionColumnsAfterVenvMigration(legacyPythonVenvMigration)
 	service.ApplySinglePythonRuntimePolicyOnStartup()
 	service.MergeDuplicatePythonDependencies()

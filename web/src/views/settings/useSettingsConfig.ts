@@ -112,6 +112,7 @@ export function useSettingsConfig() {
     captcha_key: '',
     captcha_fail_mode: 'open',
     panel_title: '',
+    timezone: 'Asia/Shanghai',
     panel_icon: '',
     editor_background_color: '',
     log_background_color: '',
@@ -181,6 +182,7 @@ export function useSettingsConfig() {
         captcha_key: readConfigString(cfgs, 'captcha_key', ''),
         captcha_fail_mode: readConfigString(cfgs, 'captcha_fail_mode', 'open'),
         panel_title: readConfigString(cfgs, 'panel_title', ''),
+        timezone: readConfigString(cfgs, 'timezone', 'Asia/Shanghai'),
         panel_icon: readConfigString(cfgs, 'panel_icon', ''),
         editor_background_color: readConfigString(cfgs, 'editor_background_color', ''),
         log_background_color: readConfigString(cfgs, 'log_background_color', ''),
@@ -226,7 +228,7 @@ export function useSettingsConfig() {
 
   function handleSaveSystemConfig() {
     void saveConfigKeys([
-      'panel_title', 'panel_icon', 'editor_background_color', 'log_background_color', 'log_background_image'
+      'panel_title', 'timezone', 'panel_icon', 'editor_background_color', 'log_background_color', 'log_background_image'
     ])
   }
 

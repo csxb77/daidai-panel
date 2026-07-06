@@ -2,6 +2,7 @@ package service
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -44,6 +45,46 @@ func TestBuildManagedRuntimeEnvMapUsesRequestedPythonVersion(t *testing.T) {
 	expectedVenvBin := resolveManagedVenvBin(ManagedPythonVenvDir("3.10"))
 	if !strings.Contains(envMap["PATH"], expectedVenvBin) {
 		t.Fatalf("expected PATH to contain python 3.10 venv bin %q, got %q", expectedVenvBin, envMap["PATH"])
+	}
+}
+
+func TestNodePreloadKeepsGithubEnvReadableButHiddenFromStringify(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not found")
+	}
+
+	tempDir := t.TempDir()
+	envFile := filepath.Join(tempDir, "env.json")
+	// 回归 hex-ci/smzdm_script：它会用 JSON.stringify(process.env) 检测 GITHUB，
+	// 但脚本显式读取 process.env.GITHUB_ACTIONS 时仍应该拿到真实值。
+	envJSON := `{"GITHUB_ACTIONS":"1","SMZDM_COOKIE":"cookie"}`
+	if err := os.WriteFile(envFile, []byte(envJSON), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	preloadFile, err := writeNodePreloadScript(tempDir, envFile, map[string]string{})
+	if err != nil {
+		t.Fatalf("write node preload: %v", err)
+	}
+
+	scriptFile := filepath.Join(tempDir, "target.js")
+	script := `
+if (JSON.stringify(process.env).indexOf("GITHUB") > -1) process.exit(7);
+if (process.env.GITHUB_ACTIONS !== "1") process.exit(8);
+if (process.env.SMZDM_COOKIE !== "cookie") process.exit(9);
+console.log("ok");
+`
+	if err := os.WriteFile(scriptFile, []byte(script), 0o600); err != nil {
+		t.Fatalf("write target script: %v", err)
+	}
+
+	cmd := exec.Command(nodeBin, "--require", preloadFile, scriptFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("node script failed: %v, output=%s", err, string(out))
+	}
+	if !strings.Contains(string(out), "ok") {
+		t.Fatalf("expected ok output, got %q", string(out))
 	}
 }
 
