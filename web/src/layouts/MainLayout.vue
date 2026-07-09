@@ -6,6 +6,7 @@ import { useThemeStore } from '@/stores/theme'
 import { systemApi } from '@/api/system'
 import { loadPanelSettings as loadCachedPanelSettings } from '@/utils/panelSettings'
 import { useResponsive } from '@/composables/useResponsive'
+import { preloadPanelRoutes, preloadRouteByPath } from '@/router'
 import {
   Bell,
   Box,
@@ -37,6 +38,7 @@ const drawerVisible = ref(false)
 const panelTitle = ref('呆呆面板')
 const panelIcon = ref('')
 const panelVersion = ref('')
+const routeCacheMax = 14
 
 const roleLevel: Record<string, number> = {
   viewer: 1,
@@ -82,6 +84,12 @@ const filteredAdminItems = computed(() =>
 
 const activeMenu = computed(() => route.path)
 
+const preloadableMenuPaths = computed(() =>
+  [...filteredWorkspaceItems.value, ...filteredAdminItems.value]
+    .map(item => item.index)
+    .filter(index => index !== route.path)
+)
+
 const breadcrumb = computed(() => {
   const matched = [...route.matched].reverse().find(item => item.meta.section)
   const section = matched?.meta.section === 'admin' ? '管理后台' : '工作台'
@@ -97,6 +105,7 @@ onMounted(() => {
   if (authStore.isLoggedIn && !authStore.user) {
     authStore.fetchUser()
   }
+  scheduleMenuPreload()
 })
 
 watch(isMobile, (mobile) => {
@@ -107,9 +116,23 @@ watch(isMobile, (mobile) => {
   drawerVisible.value = false
 }, { immediate: true })
 
+watch(() => authStore.user?.role, () => {
+  scheduleMenuPreload()
+})
+
 function handleMenuSelect(index: string) {
+  preloadPage(index)
   router.push(index)
   if (isMobile.value) drawerVisible.value = false
+}
+
+function preloadPage(index: string) {
+  void preloadRouteByPath(index)
+}
+
+function scheduleMenuPreload() {
+  // 首屏先让当前页稳定渲染；空闲时再分批预加载菜单页，减少首次切页等待 chunk 下载导致的白屏。
+  preloadPanelRoutes(preloadableMenuPaths.value)
 }
 
 function toggleSidebar() {
@@ -173,6 +196,8 @@ async function loadVersion() {
             v-for="item in filteredWorkspaceItems"
             :key="item.index"
             :index="item.index"
+            @mouseenter="preloadPage(item.index)"
+            @focusin="preloadPage(item.index)"
           >
             <el-icon><component :is="item.icon" /></el-icon>
             <template #title>{{ item.title }}</template>
@@ -194,6 +219,8 @@ async function loadVersion() {
               v-for="item in filteredAdminItems"
               :key="item.index"
               :index="item.index"
+              @mouseenter="preloadPage(item.index)"
+              @focusin="preloadPage(item.index)"
             >
               <el-icon><component :is="item.icon" /></el-icon>
               <template #title>{{ item.title }}</template>
@@ -259,6 +286,8 @@ async function loadVersion() {
             v-for="item in filteredWorkspaceItems"
             :key="item.index"
             :index="item.index"
+            @mouseenter="preloadPage(item.index)"
+            @focusin="preloadPage(item.index)"
           >
             <el-icon><component :is="item.icon" /></el-icon>
             <template #title>{{ item.title }}</template>
@@ -276,6 +305,8 @@ async function loadVersion() {
               v-for="item in filteredAdminItems"
               :key="item.index"
               :index="item.index"
+              @mouseenter="preloadPage(item.index)"
+              @focusin="preloadPage(item.index)"
             >
               <el-icon><component :is="item.icon" /></el-icon>
               <template #title>{{ item.title }}</template>
@@ -355,9 +386,9 @@ async function loadVersion() {
       <main class="layout-main">
         <div class="route-shell">
           <router-view v-slot="{ Component, route: viewRoute }">
-            <transition name="page-shell" mode="out-in">
-              <keep-alive :max="6">
-                <component :is="Component" :key="viewRoute.path" />
+            <transition name="page-shell">
+              <keep-alive :max="routeCacheMax">
+                <component :is="Component" :key="viewRoute.name || viewRoute.path" />
               </keep-alive>
             </transition>
           </router-view>
@@ -1121,15 +1152,23 @@ async function loadVersion() {
 }
 
 // ==================== Page transition ====================
-// A+C 混搭：切页只用「透明度 + 极微缩放」，无位移、无 blur，进场走 decelerate 求顺滑。
-// 关键修复：去掉原先的 filter: blur 整页模糊——它是最耗 GPU 的效果，也是切页卡顿主因；
-// leave 改成极短的纯淡出（120ms），配合 out-in 几乎没有空白档，既丝滑又不影响布局与滚动。
+// 切页只保留透明度 + 极轻缩放，避免 blur、复杂位移和长动画抢主线程。
+// 这里不再使用 out-in：旧页面绝对定位短暂淡出，新页面立即进入，避免先卸载旧页后等待新页导致白屏。
 .page-shell-enter-active {
-  animation: dd-page-shell-enter var(--dd-motion-page) var(--dd-ease-decelerate) both;
+  position: relative;
+  z-index: 1;
+  animation: dd-page-shell-enter 180ms var(--dd-ease-decelerate) both;
+  will-change: opacity, transform;
 }
 
 .page-shell-leave-active {
-  animation: dd-page-shell-leave 120ms var(--dd-ease-standard) both;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  pointer-events: none;
+  animation: dd-page-shell-leave 80ms var(--dd-ease-standard) both;
+  will-change: opacity;
 }
 
 @keyframes dd-page-shell-enter {

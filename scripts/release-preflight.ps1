@@ -90,6 +90,19 @@ if (($updateJson -notmatch [regex]::Escape('"version": "' + $tagVersion + '"')) 
     Fail-Step "Magisk update.json version block not synced."
 }
 
+Write-Step "Check Windows start.bat line endings"
+$startBatPath = Join-Path $repoRoot "packaging\windows\start.bat"
+if (-not (Test-Path $startBatPath)) {
+    Fail-Step "Missing Windows start script: $startBatPath"
+}
+$startBatBytes = [System.IO.File]::ReadAllBytes($startBatPath)
+for ($i = 0; $i -lt $startBatBytes.Length; $i++) {
+    # Windows 用户会直接双击 start.bat，发布前必须阻止 LF 换行进入 zip 包。
+    if (($startBatBytes[$i] -eq 10) -and (($i -eq 0) -or ($startBatBytes[($i - 1)] -ne 13))) {
+        Fail-Step "packaging/windows/start.bat must use Windows CRLF line endings."
+    }
+}
+
 Write-Step "Run backend tests"
 Push-Location (Join-Path $repoRoot "server")
 try {

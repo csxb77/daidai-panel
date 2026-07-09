@@ -864,6 +864,10 @@ func installDependency(id uint, depType, name string) {
 		nodeUnlock := service.LockNodePackageOperation()
 		defer nodeUnlock()
 
+		if notice := service.NodeInstallCompatibilityNotice(name); notice != "" {
+			database.DB.Model(&model.Dependency{}).Where("id = ?", id).Update("log", notice+"\n")
+		}
+
 		var err error
 		cmd, err = service.NewNpmInstallCommand(name)
 		if err != nil {

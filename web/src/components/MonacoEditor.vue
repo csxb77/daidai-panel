@@ -269,14 +269,17 @@ function resolveMinHeight(value: string | number | undefined) {
 <style scoped>
 .monaco-editor-wrapper {
   width: 100%;
-  height: 100%;
   min-height: var(--monaco-editor-min-height, 400px);
+  height: var(--monaco-editor-min-height, 400px);
   position: relative;
 }
 
 .monaco-editor-container {
   width: 100%;
   height: 100%;
+  /* Monaco 初始化时只读取容器 clientHeight。
+     普通卡片没有固定父级高度时，内层容器必须继承最小高度，否则会被算成 0 高度，只剩一条横线且无法输入。 */
+  min-height: inherit;
 }
 
 .monaco-loading {

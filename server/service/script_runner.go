@@ -41,6 +41,9 @@ const (
 type CommandExecutionPlan struct {
 	Interpreter        string
 	FullPath           string
+	ManagedCommand     string
+	PythonModule       string
+	WorkDir            string
 	ScriptArgs         []string
 	TimeoutOverride    *int
 	SkipRandomDelay    bool
@@ -109,7 +112,7 @@ func ParseCommandExecutionPlan(command, scriptsDir string) (*CommandExecutionPla
 		return nil, err
 	}
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("命令不能为空")
+		return nil, fmt.Errorf("命令格式无效")
 	}
 
 	switch tokens[0] {
@@ -120,13 +123,16 @@ func ParseCommandExecutionPlan(command, scriptsDir string) (*CommandExecutionPla
 	case "python", "python3", "python3.10", "python3.11", "python3.12", "node", "ts-node", "bash", "go":
 		return parseInterpreterCommandPlan(tokens[0], tokens[1:], scriptsDir)
 	default:
+		if isManagedExecutableName(tokens[0]) {
+			return parseManagedCommandPlan(tokens, scriptsDir)
+		}
 		return nil, fmt.Errorf("不支持的解释器: %s", tokens[0])
 	}
 }
 
 func parseTaskCommandPlan(tokens []string, scriptsDir string, forcedMode commandExecutionMode) (*CommandExecutionPlan, error) {
 	if len(tokens) == 0 {
-		return nil, fmt.Errorf("命令格式无效，缺少脚本路径")
+		return nil, fmt.Errorf("命令格式无效，缺少脚本路径或依赖命令名")
 	}
 
 	plan := &CommandExecutionPlan{
@@ -157,15 +163,26 @@ optionsDone:
 	remainingTokens := tokens[idx:]
 	taskShellTokens, scriptArgs := splitTaskShellAndScriptArgs(remainingTokens)
 	if len(taskShellTokens) == 0 {
-		return nil, fmt.Errorf("命令格式无效，缺少脚本路径")
+		return nil, fmt.Errorf("命令格式无效，缺少脚本路径或依赖命令名")
 	}
 
 	fullPath, pathTokenCount, err := findTaskScriptTarget(taskShellTokens, scriptsDir, forcedMode)
 	if err != nil {
-		return nil, err
+		managedCommand, managedTokenCount, managedErr := findTaskManagedCommandTarget(taskShellTokens, forcedMode)
+		if managedErr != nil {
+			return nil, err
+		}
+		// Python / Node 依赖安装后会在托管 bin 目录暴露可执行命令，例如 dailycheckin。
+		// 这类命令不是脚本文件，所以不能继续按 scriptsDir 里的 .py/.js 路径校验。
+		plan.ManagedCommand = managedCommand
+		plan.WorkDir = scriptsDir
+		plan.ScriptArgs = scriptArgs
+		remainder := taskShellTokens[managedTokenCount:]
+		return applyTaskCommandRemainder(plan, remainder, forcedMode)
 	}
 
 	plan.FullPath = fullPath
+	plan.WorkDir = filepath.Dir(fullPath)
 	plan.ScriptArgs = scriptArgs
 	remainder := taskShellTokens[pathTokenCount:]
 
@@ -178,7 +195,10 @@ optionsDone:
 		return nil, fmt.Errorf("task 命令不支持的文件扩展名: %s", ext)
 	}
 	plan.Interpreter = mapped
+	return applyTaskCommandRemainder(plan, remainder, forcedMode)
+}
 
+func applyTaskCommandRemainder(plan *CommandExecutionPlan, remainder []string, forcedMode commandExecutionMode) (*CommandExecutionPlan, error) {
 	if forcedMode == commandModeDesi {
 		if len(remainder) == 0 {
 			return nil, fmt.Errorf("desi 命令缺少环境变量名称")
@@ -213,7 +233,7 @@ optionsDone:
 		plan.AccountSpec = strings.Join(remainder[2:], " ")
 	case "desi":
 		if len(remainder) < 2 {
-			return nil, fmt.Errorf("desi 模式缺少环境变量名称")
+			return nil, fmt.Errorf("desi 命令缺少环境变量名称")
 		}
 		plan.Mode = commandModeDesi
 		plan.SkipRandomDelay = true
@@ -232,6 +252,22 @@ func parseInterpreterCommandPlan(interpreter string, tokens []string, scriptsDir
 		return nil, fmt.Errorf("命令格式无效，格式: <解释器> <脚本路径>")
 	}
 
+	if IsPythonInterpreter(interpreter) && tokens[0] == "-m" {
+		if len(tokens) < 2 {
+			return nil, fmt.Errorf("python -m 命令缺少模块名")
+		}
+		if !isSafePythonModuleName(tokens[1]) {
+			return nil, fmt.Errorf("python 模块名无效: %s", tokens[1])
+		}
+		return &CommandExecutionPlan{
+			Interpreter:  interpreter,
+			PythonModule: tokens[1],
+			WorkDir:      scriptsDir,
+			ScriptArgs:   append([]string{}, tokens[2:]...),
+			Mode:         commandModeNormal,
+		}, nil
+	}
+
 	fullPath, pathTokenCount, err := findScriptTarget(tokens, scriptsDir)
 	if err != nil {
 		return nil, err
@@ -240,8 +276,21 @@ func parseInterpreterCommandPlan(interpreter string, tokens []string, scriptsDir
 	return &CommandExecutionPlan{
 		Interpreter: interpreter,
 		FullPath:    fullPath,
+		WorkDir:     filepath.Dir(fullPath),
 		ScriptArgs:  append([]string{}, tokens[pathTokenCount:]...),
 		Mode:        commandModeNormal,
+	}, nil
+}
+
+func parseManagedCommandPlan(tokens []string, scriptsDir string) (*CommandExecutionPlan, error) {
+	if len(tokens) == 0 || !isManagedExecutableName(tokens[0]) {
+		return nil, fmt.Errorf("命令格式无效")
+	}
+	return &CommandExecutionPlan{
+		ManagedCommand: tokens[0],
+		WorkDir:        scriptsDir,
+		ScriptArgs:     append([]string{}, tokens[1:]...),
+		Mode:           commandModeNormal,
 	}, nil
 }
 
@@ -353,6 +402,19 @@ func findTaskScriptTarget(tokens []string, scriptsDir string, forcedMode command
 	return bestPath, bestCount, nil
 }
 
+func findTaskManagedCommandTarget(tokens []string, forcedMode commandExecutionMode) (string, int, error) {
+	if len(tokens) == 0 {
+		return "", 0, fmt.Errorf("命令格式无效，缺少依赖命令名")
+	}
+	if filepath.Ext(tokens[0]) != "" || !isManagedExecutableName(tokens[0]) {
+		return "", 0, fmt.Errorf("脚本不存在或命令格式无效")
+	}
+	if !isValidTaskRemainder(tokens[1:], forcedMode) {
+		return "", 0, fmt.Errorf("脚本不存在或命令格式无效")
+	}
+	return tokens[0], 1, nil
+}
+
 func findScriptTarget(tokens []string, scriptsDir string) (string, int, error) {
 	var bestPath string
 	bestCount := 0
@@ -409,6 +471,34 @@ func isSupportedScriptExtension(path string) bool {
 	default:
 		return false
 	}
+}
+
+func isManagedExecutableName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.HasPrefix(name, "-") || name == "." || name == ".." {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isSafePythonModuleName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return false
+	}
+	for _, r := range name {
+		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func resolveCommandScriptPath(scriptPath, scriptsDir string) (string, error) {
@@ -907,6 +997,19 @@ func absInt(value int) int {
 }
 
 func buildCmd(plan *CommandExecutionPlan, workDir string, envVars map[string]string) (*exec.Cmd, func(), error) {
+	if strings.TrimSpace(plan.WorkDir) != "" {
+		workDir = plan.WorkDir
+	}
+	if strings.TrimSpace(workDir) == "" {
+		workDir = "."
+	}
+	if plan.ManagedCommand != "" {
+		return createManagedExecutableCommand(plan.ManagedCommand, plan.ScriptArgs, workDir, envVars)
+	}
+	if plan.PythonModule != "" {
+		return createManagedPythonModuleCommand(plan.Interpreter, plan.PythonModule, plan.ScriptArgs, workDir, envVars)
+	}
+
 	helperBaseDir := strings.TrimSpace(envVars["DAIDAI_SCRIPTS_DIR"])
 	if helperBaseDir != "" {
 		_ = EnsureBuiltinNotifyHelpers(helperBaseDir)
@@ -916,7 +1019,7 @@ func buildCmd(plan *CommandExecutionPlan, workDir string, envVars map[string]str
 		_ = NormalizeShellScriptFile(plan.FullPath)
 	}
 
-	return CreateManagedCommand(plan.Interpreter, plan.FullPath, plan.ScriptArgs, filepath.Dir(plan.FullPath), envVars)
+	return CreateManagedCommand(plan.Interpreter, plan.FullPath, plan.ScriptArgs, workDir, envVars)
 }
 
 func buildEnv(envVars map[string]string) []string {

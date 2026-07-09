@@ -65,3 +65,71 @@ func TestEnsureNodePackageManifestRepairsBrokenPackageJSON(t *testing.T) {
 		t.Fatalf("broken backup should preserve original content, got:\n%s", string(backupData))
 	}
 }
+
+func TestResolveNodeInstallPackageSpecPinsRequireCompatibleDefaults(t *testing.T) {
+	tests := map[string]string{
+		"uuid":              "uuid@8.3.2",
+		"node-fetch":        "node-fetch@2.7.0",
+		"chalk":             "chalk@4.1.2",
+		"got":               "got@11.8.6",
+		"nanoid":            "nanoid@3.3.7",
+		"axios":             "axios@0.27.2",
+		"cheerio":           "cheerio@1.0.0-rc.12",
+		"https-proxy-agent": "https-proxy-agent@5.0.1",
+		"query-string":      "query-string@7.1.3",
+		"left-pad":          "left-pad",
+	}
+
+	for input, expected := range tests {
+		if got := ResolveNodeInstallPackageSpec(input); got != expected {
+			t.Fatalf("ResolveNodeInstallPackageSpec(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}
+
+func TestResolveNodeInstallPackageSpecKeepsExplicitVersionOrSource(t *testing.T) {
+	tests := map[string]string{
+		"uuid@9.0.0":                  "uuid@9.0.0",
+		"uuid@latest":                 "uuid@latest",
+		"@scope/pkg":                  "@scope/pkg",
+		"@scope/pkg@1.2.3":            "@scope/pkg@1.2.3",
+		"file:../local-pkg":           "file:../local-pkg",
+		"https://example.com/pkg.tgz": "https://example.com/pkg.tgz",
+		"github:user/repo":            "github:user/repo",
+	}
+
+	for input, expected := range tests {
+		if got := ResolveNodeInstallPackageSpec(input); got != expected {
+			t.Fatalf("ResolveNodeInstallPackageSpec(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}
+
+func TestNodeInstallCompatibilityNotice(t *testing.T) {
+	mapped := NodeInstallCompatibilityNotice("uuid")
+	if !strings.Contains(mapped, "uuid@8.3.2") || !strings.Contains(mapped, "CommonJS 兼容映射") {
+		t.Fatalf("expected mapped package notice to mention pinned version, got %q", mapped)
+	}
+
+	unmapped := NodeInstallCompatibilityNotice("left-pad")
+	if !strings.Contains(unmapped, "该包未在兼容映射中，将按 npm 默认版本安装。") {
+		t.Fatalf("expected unmapped package notice, got %q", unmapped)
+	}
+
+	explicit := NodeInstallCompatibilityNotice("uuid@9.0.0")
+	if !strings.Contains(explicit, "已按你指定的版本或来源安装") {
+		t.Fatalf("expected explicit version notice, got %q", explicit)
+	}
+}
+
+func TestNewNpmInstallCommandPinsRequireCompatibleDefault(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	cmd, err := NewNpmInstallCommand("uuid")
+	if err != nil {
+		t.Fatalf("build npm install command: %v", err)
+	}
+	if len(cmd.Args) == 0 || cmd.Args[len(cmd.Args)-1] != "uuid@8.3.2" {
+		t.Fatalf("expected npm install to pin uuid@8.3.2, args=%v", cmd.Args)
+	}
+}

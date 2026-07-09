@@ -79,6 +79,22 @@ sys.argv = [script_path] + script_args
 runpy.run_path(script_path, run_name="__main__")
 `
 
+const pythonModuleEnvBootstrap = `import json, os, runpy, sys
+env_file, module_name, extra_path_raw = sys.argv[1:4]
+module_args = sys.argv[4:]
+with open(env_file, "r", encoding="utf-8") as fh:
+    payload = json.load(fh)
+for key, value in payload.items():
+    if value is None:
+        continue
+    os.environ[str(key)] = str(value)
+for entry in reversed([item for item in extra_path_raw.split(os.pathsep) if item]):
+    if entry not in sys.path:
+        sys.path.insert(0, entry)
+sys.argv = [module_name] + module_args
+runpy.run_module(module_name, run_name="__main__", alter_sys=True)
+`
+
 const shellEnvBootstrap = `__dd_env_file=$1
 __dd_script=$2
 shift 2
@@ -736,6 +752,69 @@ func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir 
 	cmd.Env = appendPythonBootstrapEnv(buildBootstrapProcessEnv(envVars))
 	setPgid(cmd)
 	return cmd, cleanup, nil
+}
+
+func createManagedPythonModuleCommand(interpreter string, moduleName string, moduleArgs []string, workDir string, envVars map[string]string) (*exec.Cmd, func(), error) {
+	pythonVersion := ResolvePythonVersionFromEnv(envVars)
+	if versionFromInterpreter := ResolvePythonVersionFromInterpreter(interpreter); versionFromInterpreter != "" {
+		pythonVersion = versionFromInterpreter
+		if envVars != nil {
+			envVars["DAIDAI_PYTHON_VERSION"] = pythonVersion
+		}
+	}
+	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
+	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		return nil, nil, fmt.Errorf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion)
+	}
+
+	EnsureManagedPythonVenvForVersion(pythonVersion)
+	runtimePaths := currentManagedRuntimePathsForPythonVersion(pythonVersion)
+	preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)
+	pythonBin := ""
+	for _, name := range []string{"python", "python3", "python" + pythonVersion} {
+		candidate, err := resolveManagedBinary(name, preferredDirs, runtimePaths.searchDirs)
+		if err == nil && managedPythonBinaryMatchesVersion(candidate, pythonVersion) {
+			pythonBin = candidate
+			break
+		}
+	}
+	if pythonBin == "" {
+		return nil, nil, fmt.Errorf("Python %s 不可用，请先安装对应版本，或切换任务 Python 版本", pythonVersion)
+	}
+
+	tempDir, envFile, cleanup, err := writeManagedRuntimeEnvFile(envVars)
+	if err != nil {
+		return nil, nil, err
+	}
+	_ = tempDir
+
+	args := []string{"-u", "-c", pythonModuleEnvBootstrap, envFile, moduleName, strings.TrimSpace(envVars["PYTHONPATH"])}
+	args = append(args, cleanManagedProcessArgs(moduleArgs)...)
+
+	cmd := exec.Command(pythonBin, args...)
+	cmd.Dir = workDir
+	cmd.Env = appendPythonBootstrapEnv(buildBootstrapProcessEnv(envVars))
+	setPgid(cmd)
+	return cmd, cleanup, nil
+}
+
+func createManagedExecutableCommand(commandName string, commandArgs []string, workDir string, envVars map[string]string) (*exec.Cmd, func(), error) {
+	pythonVersion := ResolvePythonVersionFromEnv(envVars)
+	runtimePaths := currentManagedRuntimePathsForPythonVersion(pythonVersion)
+	preferredDirs := []string{runtimePaths.VenvBin, runtimePaths.NodeBin}
+
+	binary, err := resolveManagedBinary(commandName, preferredDirs, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("找不到托管依赖命令 %s，请先在依赖页面安装对应 Python/Node 依赖，或改用脚本文件命令", commandName)
+	}
+
+	cmd := exec.Command(binary, cleanManagedProcessArgs(commandArgs)...)
+	cmd.Dir = workDir
+	// 依赖命令不是面板脚本，无法走 Python/Node bootstrap，只能通过真实进程环境传入任务变量。
+	// 这里仍然过滤危险变量和 NUL，避免 LD_PRELOAD 等变量污染托管运行时。
+	cmd.Env = appendPythonBootstrapEnv(buildEnv(envVars))
+	setPgid(cmd)
+	return cmd, func() {}, nil
 }
 
 func createManagedNodeCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths) (*exec.Cmd, func(), error) {

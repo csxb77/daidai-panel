@@ -135,6 +135,14 @@ jobs:
           cp -r web/dist/. "$win_staging/web/"
           cp packaging/windows/config.yaml "$win_staging/config.yaml"
           cp packaging/windows/start.bat "$win_staging/start.bat"
+          # GitHub Actions 在 Linux 上打 Windows zip，这里双保险把批处理脚本转成 CRLF。
+          python3 - "$win_staging/start.bat" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+          path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+          PY
           cp packaging/windows/README.txt "$win_staging/README.txt"
           (cd release-windows && zip -rq ../daidai-windows-amd64.zip daidai-panel-windows-amd64)
 

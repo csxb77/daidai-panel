@@ -144,6 +144,11 @@ func (h *ScriptHandler) DebugRun(c *gin.Context) {
 					break
 				}
 				run.appendLog(fmt.Sprintf("[检测到缺失依赖: %s，正在自动安装...]", candidate.DisplayName))
+				if candidate.Manager == "nodejs" {
+					if notice := service.NodeInstallCompatibilityNotice(candidate.PackageName); notice != "" {
+						run.appendLog(notice)
+					}
+				}
 				installResult := installDepForDebug(candidate, envMap)
 				installed[candidate.PackageName] = true
 				if run.isStopped() {

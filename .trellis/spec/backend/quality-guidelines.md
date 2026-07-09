@@ -415,6 +415,97 @@ if err != nil {
 out, err := cmd.CombinedOutput()
 ```
 
+### 8. CommonJS 兼容版本映射
+
+- `NewNpmInstallCommand(packageName)` 内部必须先走 `ResolveNodeInstallPackageSpec(packageName)`，不要直接把裸包名交给 `npm install`。
+- 只有裸包名允许命中 CommonJS 兼容映射；用户显式写 `uuid@9.0.0`、`uuid@latest`、Git URL、本地路径、`file:` 等来源时必须保持原样。
+- 安装前日志必须调用 `NodeInstallCompatibilityNotice(packageName)`：
+  - 命中映射 -> 说明将安装的兼容版本，例如 `uuid@8.3.2`
+  - 未命中映射 -> 明确提示“该包未在兼容映射中，将按 npm 默认版本安装。”
+- 脚本运行日志命中 `ERR_REQUIRE_ESM` 时，`BuildModuleCompatibilityHint(output)` 应尝试从 `node_modules/<pkg>/...` 或 `require('<pkg>')` 解析包名；命中映射时给出重装旧版建议，未命中映射时提示手动指定兼容 `require()` 的旧版本。
+
+---
+
+## 场景：任务命令支持依赖可执行命令
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/script_runner.go`、`server/service/runtime_exec.go`、任务命令解析、`RunCommand()`、`ParseCommandExecutionPlan()` 或依赖命令执行相关逻辑时必须看本节。
+- 原因：部分青龙生态工具（例如 `dailycheckin`）安装后暴露的是 Python/Node 依赖目录里的可执行命令，不一定是 `scripts/` 目录中的 `.py/.js/.sh` 文件。如果只按脚本路径校验，会误报“脚本不存在或命令格式无效”。
+
+### 2. Signatures
+
+- 命令解析入口：`ParseCommandExecutionPlan(command, scriptsDir string) (*CommandExecutionPlan, error)`
+- 命令执行入口：`RunCommand(command, scriptsDir string, timeout int, envVars map[string]string, maxOutputBytes int, onOutput OnOutputFunc) (...)`
+- 计划字段：
+  - `CommandExecutionPlan.ManagedCommand string`
+  - `CommandExecutionPlan.PythonModule string`
+  - `CommandExecutionPlan.WorkDir string`
+- 执行构造：
+  - `createManagedExecutableCommand(commandName string, commandArgs []string, workDir string, envVars map[string]string)`
+  - `createManagedPythonModuleCommand(interpreter string, moduleName string, moduleArgs []string, workDir string, envVars map[string]string)`
+
+### 3. Contracts
+
+- `dailycheckin --help` 这类裸命令允许作为托管依赖命令执行，但命令名只能包含字母、数字、`_`、`-`、`.`，不能包含路径分隔符、shell 元字符或以 `-` 开头。
+- `task dailycheckin now`、`task dailycheckin -- --config config.json` 必须保留 `task` 模式语义和透传参数。
+- `python3 -m dailycheckin --help` 必须作为 Python 模块命令执行，模块名只允许字母、数字、`_`、`.`，不能以 `.` 开头/结尾，也不能包含 `..`。
+- 托管依赖命令的工作目录默认使用 `scriptsDir`；脚本文件任务继续使用脚本所在目录。
+- 托管依赖命令仍要注入任务环境变量，并优先从面板托管 Python/Node bin 目录解析可执行文件，不应直接依赖系统 PATH。
+
+### 4. Validation & Error Matrix
+
+- 命令为空 -> `命令格式无效`
+- `task` 后缺少脚本路径或依赖命令名 -> `命令格式无效，缺少脚本路径或依赖命令名`
+- 依赖命令名包含非法字符或像文件路径 -> `脚本不存在或命令格式无效`
+- `python -m` 缺少模块名 -> `python -m 命令缺少模块名`
+- Python 模块名非法 -> `python 模块名无效: <name>`
+- 托管 bin 目录找不到命令 -> 提示先安装对应 Python/Node 依赖，或改用脚本文件命令
+
+### 5. Good/Base/Bad Cases
+
+- Good：用户在依赖页安装 `dailycheckin` 后，任务命令填写 `dailycheckin --help` 可以直接运行。
+- Base：传统脚本路径命令 `task demo.py now`、`node demo.js`、`bash demo.sh` 行为不变。
+- Bad：把任意包含 `/`、`;`、`&`、`|` 的字符串当依赖命令执行，会绕过脚本路径安全校验并扩大命令注入风险。
+
+### 6. Tests Required
+
+- `TestParseCommandExecutionPlanSupportsManagedDependencyCommands`
+  - 断言裸依赖命令、`task` 模式、透传参数、`python -m` 都能解析到正确字段。
+- `TestRunCommandSupportsManagedDependencyCommand`
+  - 断言依赖命令可以从托管 bin 目录运行，并能读取任务环境变量和参数。
+- 回归验证：
+  - `cd server && go test ./service -run "TestParseCommandExecutionPlanSupportsManagedDependencyCommands|TestRunCommandSupportsManagedDependencyCommand" -count=1`
+  - `cd server && go test ./...`
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：找不到 scriptsDir 下的文件就直接失败，导致 dailycheckin 这类依赖命令无法运行。
+fullPath, _, err := findTaskScriptTarget(tokens, scriptsDir, forcedMode)
+if err != nil {
+    return nil, err
+}
+```
+
+#### Correct
+
+```go
+// 正确：脚本路径查找失败后，再判断是否是安全的托管依赖命令。
+fullPath, _, err := findTaskScriptTarget(tokens, scriptsDir, forcedMode)
+if err != nil {
+    managedCommand, _, managedErr := findTaskManagedCommandTarget(tokens, forcedMode)
+    if managedErr != nil {
+        return nil, err
+    }
+    plan.ManagedCommand = managedCommand
+    plan.WorkDir = scriptsDir
+    return plan, nil
+}
+```
+
 ---
 
 ## 场景：脚本目录污染隔离与 Windows 资源监控

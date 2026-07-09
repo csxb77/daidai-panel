@@ -658,21 +658,79 @@ func BuildModuleCompatibilityHint(output string) string {
 	}
 
 	if strings.Contains(lower, "err_require_esm") &&
-		strings.Contains(lower, "require() of es module") &&
-		strings.Contains(lower, "dynamic import()") {
-		return "[提示] 当前依赖是 ESM 模块，但脚本使用了 CommonJS require() 方式加载。请改用 import() / ESM 写法，或安装兼容 require() 的旧版本依赖。"
+		strings.Contains(lower, "require() of es module") {
+		packageName := extractRequireESMPackageName(output)
+		if packageName == "" {
+			return "[提示] 当前依赖是 ESM 模块，但脚本使用了 CommonJS require() 方式加载。请改用 import() / ESM 写法，或安装兼容 require() 的旧版本依赖。"
+		}
+
+		installSpec := ResolveNodeInstallPackageSpec(packageName)
+		if installSpec != packageName {
+			return fmt.Sprintf("[提示] 当前依赖 %s 是 ESM 模块，但脚本使用了 CommonJS require() 方式加载。建议在依赖页重装兼容版本：%s；或改用 import() / ESM 写法。", packageName, installSpec)
+		}
+		return fmt.Sprintf("[提示] 当前依赖 %s 是 ESM 模块，但脚本使用了 CommonJS require() 方式加载。该包未在兼容映射中，请手动指定兼容 require() 的旧版本，或改用 import() / ESM 写法。", packageName)
 	}
 
 	return ""
 }
 
 var (
-	pythonTraceFrameRe    = regexp.MustCompile(`^File "([^"]+)", line (\d+), in (.+)$`)
-	pythonExceptionLineRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt|Failure)(?::.*)?$`)
-	nodeStackFrameRe      = regexp.MustCompile(`^(?:at\s+.+?\s+\()?(.+?):(\d+)(?::(\d+))?\)?$`)
-	caretIndicatorLineRe  = regexp.MustCompile(`^[\^~\s]+$`)
-	genericErrorLineRe    = regexp.MustCompile(`(?i)(error|exception|panic|failed|failure|timeout|denied|refused|invalid|fatal|失败|错误|异常|超时|拒绝)`)
+	nodeRequireCallModuleRe  = regexp.MustCompile(`require\(['"]([^'"]+)['"]\)`)
+	nodeModulesPathPackageRe = regexp.MustCompile(`node_modules[/\\]((?:@[^/\\\s:]+[/\\][^/\\\s:]+)|[^/\\\s:]+)`)
+	pythonTraceFrameRe       = regexp.MustCompile(`^File "([^"]+)", line (\d+), in (.+)$`)
+	pythonExceptionLineRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception|Warning|Exit|Interrupt|Failure)(?::.*)?$`)
+	nodeStackFrameRe         = regexp.MustCompile(`^(?:at\s+.+?\s+\()?(.+?):(\d+)(?::(\d+))?\)?$`)
+	caretIndicatorLineRe     = regexp.MustCompile(`^[\^~\s]+$`)
+	genericErrorLineRe       = regexp.MustCompile(`(?i)(error|exception|panic|failed|failure|timeout|denied|refused|invalid|fatal|失败|错误|异常|超时|拒绝)`)
 )
+
+func extractRequireESMPackageName(output string) string {
+	for _, matches := range nodeModulesPathPackageRe.FindAllStringSubmatch(output, -1) {
+		if len(matches) < 2 {
+			continue
+		}
+		packageName := normalizeNodeRequireSpecifier(filepath.ToSlash(matches[1]))
+		if packageName != "" {
+			return packageName
+		}
+	}
+
+	for _, matches := range nodeRequireCallModuleRe.FindAllStringSubmatch(output, -1) {
+		if len(matches) < 2 {
+			continue
+		}
+		packageName := normalizeNodeRequireSpecifier(matches[1])
+		if packageName != "" {
+			return packageName
+		}
+	}
+	return ""
+}
+
+func normalizeNodeRequireSpecifier(spec string) string {
+	spec = strings.TrimSpace(filepath.ToSlash(spec))
+	if spec == "" ||
+		strings.HasPrefix(spec, ".") ||
+		strings.HasPrefix(spec, "/") ||
+		strings.HasPrefix(spec, "node:") ||
+		strings.HasPrefix(spec, "data:") ||
+		strings.HasPrefix(spec, "file:") ||
+		strings.Contains(spec, ":/") {
+		return ""
+	}
+
+	parts := strings.Split(spec, "/")
+	if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" || strings.HasPrefix(parts[0], ".") {
+		return ""
+	}
+	if strings.HasPrefix(parts[0], "@") {
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			return ""
+		}
+		return parts[0] + "/" + parts[1]
+	}
+	return NormalizeNodeDependencyPackageName(parts[0])
+}
 
 type taskFailureFrame struct {
 	Path     string
@@ -948,6 +1006,11 @@ func (e *TaskExecutor) detectAndInstallDeps(plan *CommandExecutionPlan, output s
 	}
 
 	onOutput(fmt.Sprintf("[检测到缺失依赖: %s，正在自动安装...]", candidate.DisplayName))
+	if candidate.Manager == "nodejs" {
+		if notice := NodeInstallCompatibilityNotice(candidate.PackageName); notice != "" {
+			onOutput(notice)
+		}
+	}
 	result := InstallAutoDependency(candidate, envVars)
 	if installedDeps != nil {
 		installedDeps[candidate.PackageName] = true

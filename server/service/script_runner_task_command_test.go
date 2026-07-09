@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -159,12 +160,127 @@ func TestParseCommandExecutionPlanSupportsTaskModesAndArgs(t *testing.T) {
 
 }
 
+func TestParseCommandExecutionPlanSupportsManagedDependencyCommands(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	tests := []struct {
+		name          string
+		command       string
+		wantCommand   string
+		wantArgs      []string
+		wantMode      commandExecutionMode
+		wantNoDelay   bool
+		wantPythonMod string
+	}{
+		{
+			name:        "direct dependency command",
+			command:     `dailycheckin --help`,
+			wantCommand: "dailycheckin",
+			wantArgs:    []string{"--help"},
+			wantMode:    commandModeNormal,
+		},
+		{
+			name:        "task dependency command keeps now mode",
+			command:     `task dailycheckin now`,
+			wantCommand: "dailycheckin",
+			wantMode:    commandModeNow,
+			wantNoDelay: true,
+		},
+		{
+			name:        "task dependency command keeps passthrough args",
+			command:     `task dailycheckin -- --config config.json`,
+			wantCommand: "dailycheckin",
+			wantArgs:    []string{"--config", "config.json"},
+			wantMode:    commandModeNormal,
+		},
+		{
+			name:          "python module command",
+			command:       `python3 -m dailycheckin --help`,
+			wantPythonMod: "dailycheckin",
+			wantArgs:      []string{"--help"},
+			wantMode:      commandModeNormal,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan, err := ParseCommandExecutionPlan(tt.command, config.C.Data.ScriptsDir)
+			if err != nil {
+				t.Fatalf("parse command plan: %v", err)
+			}
+			if plan.ManagedCommand != tt.wantCommand {
+				t.Fatalf("expected managed command %q, got %q", tt.wantCommand, plan.ManagedCommand)
+			}
+			if plan.PythonModule != tt.wantPythonMod {
+				t.Fatalf("expected python module %q, got %q", tt.wantPythonMod, plan.PythonModule)
+			}
+			if !reflect.DeepEqual(plan.ScriptArgs, tt.wantArgs) {
+				t.Fatalf("unexpected command args: got=%#v want=%#v", plan.ScriptArgs, tt.wantArgs)
+			}
+			if plan.Mode != tt.wantMode {
+				t.Fatalf("expected mode %q, got %q", tt.wantMode, plan.Mode)
+			}
+			if plan.SkipRandomDelay != tt.wantNoDelay {
+				t.Fatalf("expected skip random delay %v, got %v", tt.wantNoDelay, plan.SkipRandomDelay)
+			}
+		})
+	}
+}
+
+func TestRunCommandSupportsManagedDependencyCommand(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	pythonVersion := DefaultPythonVersion()
+	venvBin := resolveManagedVenvBin(ManagedPythonVenvDir(pythonVersion))
+	envEcho := "echo daily:$DD_TEST_VALUE"
+	argEcho := "echo arg:$1"
+	if runtime.GOOS == "windows" {
+		envEcho = "echo daily:%DD_TEST_VALUE%"
+		argEcho = "echo arg:%1"
+	}
+	writeFakeExecutable(t, venvBin, "dailycheckin", []string{envEcho, argEcho})
+
+	result, _, err := RunCommand(
+		`dailycheckin --flag`,
+		config.C.Data.ScriptsDir,
+		5,
+		map[string]string{
+			"DAIDAI_PYTHON_VERSION": pythonVersion,
+			"DD_TEST_VALUE":         "ok",
+		},
+		1024,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("run managed dependency command: %v", err)
+	}
+	if result.ReturnCode != 0 {
+		t.Fatalf("expected return code 0, got %d output=%s", result.ReturnCode, result.Output)
+	}
+	if !strings.Contains(result.Output, "daily:ok") {
+		t.Fatalf("expected dependency command to receive task env, output=%q", result.Output)
+	}
+	if !strings.Contains(result.Output, "arg:--flag") {
+		t.Fatalf("expected dependency command to receive args, output=%q", result.Output)
+	}
+}
+
+func requireUsableBash(t *testing.T) {
+	t.Helper()
+
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+	if err := exec.Command(bashPath, "--version").Run(); err != nil {
+		t.Skipf("bash is present but not usable: %v", err)
+	}
+}
+
 func TestHookScriptsReceiveTaskScriptArgs(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash unavailable: %v", err)
-	}
+	requireUsableBash(t)
 
 	outputFile := filepath.Join(config.C.Data.ScriptsDir, "hook-args.out")
 	hookPath := filepath.Join(config.C.Data.ScriptsDir, "task_before.sh")
@@ -187,9 +303,7 @@ func TestHookScriptsReceiveTaskScriptArgs(t *testing.T) {
 func TestRunHookScriptHandlesLargeEnvWithoutExecArgLimit(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash unavailable: %v", err)
-	}
+	requireUsableBash(t)
 
 	outputFile := filepath.Join(config.C.Data.ScriptsDir, "hook-large-env.out")
 	hookPath := filepath.Join(config.C.Data.ScriptsDir, "task_before.sh")

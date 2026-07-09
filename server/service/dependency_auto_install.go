@@ -179,12 +179,17 @@ func InstallAutoDependency(candidate *AutoInstallCandidate, envVars map[string]s
 		unlock := LockNodePackageOperation()
 		defer unlock()
 
+		notice := NodeInstallCompatibilityNotice(candidate.PackageName)
 		cmd, err := NewNpmInstallCommand(candidate.PackageName)
 		if err != nil {
 			return AutoInstallResult{Error: err.Error()}
 		}
 		cmd.Env = NpmInstallEnv(baseEnv, CurrentNpmMirror())
 		out, err := cmd.CombinedOutput()
+		if notice != "" {
+			// 自动安装成功后也会把安装日志写入依赖记录，先把兼容映射决策一起存进去。
+			out = append([]byte(notice+"\n"), out...)
+		}
 		return completeAutoInstall(candidate, out, err)
 	case "go":
 		cmd := exec.Command("go", "get", candidate.PackageName)

@@ -81,12 +81,22 @@ func TestDebugRunFinishDoesNotOverrideStoppedStatus(t *testing.T) {
 	}
 }
 
+func requireUsableBash(t *testing.T) {
+	t.Helper()
+
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skipf("bash unavailable: %v", err)
+	}
+	if err := exec.Command(bashPath, "--version").Run(); err != nil {
+		t.Skipf("bash is present but not usable: %v", err)
+	}
+}
+
 func TestNewScriptCommandLoadsLargeShellEnvFromFile(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash unavailable: %v", err)
-	}
+	requireUsableBash(t)
 
 	scriptPath := filepath.Join(config.C.Data.ScriptsDir, "large-env.sh")
 	outputPath := filepath.Join(config.C.Data.ScriptsDir, "large-env.out")
@@ -127,9 +137,7 @@ func TestNewScriptCommandLoadsLargeShellEnvFromFile(t *testing.T) {
 func TestNewScriptCommandDoesNotExportLargeShellEnvToChildren(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("bash unavailable: %v", err)
-	}
+	requireUsableBash(t)
 	if _, err := exec.LookPath("mktemp"); err != nil {
 		t.Skipf("mktemp unavailable: %v", err)
 	}

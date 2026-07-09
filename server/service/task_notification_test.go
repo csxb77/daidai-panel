@@ -273,6 +273,43 @@ func TestBuildModuleCompatibilityHintRecognizesRequireEsmFailure(t *testing.T) {
 	if !strings.Contains(hint, "ESM 模块") {
 		t.Fatalf("expected hint to mention ESM module, got %q", hint)
 	}
+	if !strings.Contains(hint, "uuid") || !strings.Contains(hint, "uuid@8.3.2") {
+		t.Fatalf("expected hint to mention package and compatible version, got %q", hint)
+	}
+	if !strings.Contains(hint, "require()") {
+		t.Fatalf("expected hint to mention require(), got %q", hint)
+	}
+}
+
+func TestBuildModuleCompatibilityHintParsesScopedRequireEsmPackage(t *testing.T) {
+	output := strings.Join([]string{
+		"Error [ERR_REQUIRE_ESM]: require() of ES Module C:\\app\\deps\\nodejs\\node_modules\\@scope\\pkg\\dist\\index.js from C:\\app\\scripts\\demo.js not supported.",
+		"Instead change the require of index.js in C:\\app\\scripts\\demo.js to a dynamic import() which is available in all CommonJS modules.",
+	}, "\n")
+
+	hint := BuildModuleCompatibilityHint(output)
+	if !strings.Contains(hint, "@scope/pkg") {
+		t.Fatalf("expected scoped package name to be parsed, got %q", hint)
+	}
+	if !strings.Contains(hint, "未在兼容映射中") {
+		t.Fatalf("expected unmapped scoped package notice, got %q", hint)
+	}
+}
+
+func TestBuildModuleCompatibilityHintReportsUnmappedRequireEsmPackage(t *testing.T) {
+	output := strings.Join([]string{
+		`const pkg = require('some-esm-only-package');`,
+		"Error [ERR_REQUIRE_ESM]: require() of ES Module /app/Dumb-Panel/deps/nodejs/node_modules/some-esm-only-package/index.js from /app/Dumb-Panel/scripts/demo.js not supported.",
+		"Instead change the require of index.js in /app/Dumb-Panel/scripts/demo.js to a dynamic import() which is available in all CommonJS modules.",
+	}, "\n")
+
+	hint := BuildModuleCompatibilityHint(output)
+	if !strings.Contains(hint, "some-esm-only-package") {
+		t.Fatalf("expected package name to be parsed, got %q", hint)
+	}
+	if !strings.Contains(hint, "未在兼容映射中") {
+		t.Fatalf("expected unmapped package notice, got %q", hint)
+	}
 }
 
 func TestSummarizeTaskFailureOutputPrefersModuleCompatibilityHint(t *testing.T) {
@@ -290,5 +327,8 @@ func TestSummarizeTaskFailureOutputPrefersModuleCompatibilityHint(t *testing.T) 
 	}
 	if !strings.Contains(summary, "require()") {
 		t.Fatalf("expected summary to mention require(), got %q", summary)
+	}
+	if !strings.Contains(summary, "uuid@8.3.2") {
+		t.Fatalf("expected summary to mention compatible reinstall version, got %q", summary)
 	}
 }

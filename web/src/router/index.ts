@@ -22,18 +22,115 @@ const legacyRouteMap: Record<string, string> = {
   '/api-docs': '/docs/api',
 }
 
+const routeComponents = {
+  login: () => import('@/views/login/index.vue'),
+  layout: () => import('@/layouts/MainLayout.vue'),
+  dashboard: () => import('@/views/dashboard/index.vue'),
+  tasks: () => import('@/views/tasks/index.vue'),
+  scripts: () => import('@/views/scripts/index.vue'),
+  envs: () => import('@/views/envs/index.vue'),
+  configFile: () => import('@/views/config-file/index.vue'),
+  subscriptions: () => import('@/views/subscriptions/index.vue'),
+  logs: () => import('@/views/logs/index.vue'),
+  deps: () => import('@/views/deps/index.vue'),
+  notifications: () => import('@/views/notifications/index.vue'),
+  users: () => import('@/views/users/index.vue'),
+  profile: () => import('@/views/profile/index.vue'),
+  apiDocs: () => import('@/views/api-docs/index.vue'),
+  settings: () => import('@/views/settings/index.vue'),
+  openApi: () => import('@/views/open-api/index.vue'),
+}
+
+const routePreloaders: Record<string, () => Promise<unknown>> = {
+  '/dashboard': routeComponents.dashboard,
+  '/tasks': routeComponents.tasks,
+  '/scripts': routeComponents.scripts,
+  '/envs': routeComponents.envs,
+  '/config-file': routeComponents.configFile,
+  '/subscriptions': routeComponents.subscriptions,
+  '/logs': routeComponents.logs,
+  '/deps': routeComponents.deps,
+  '/notifications': routeComponents.notifications,
+  '/users': routeComponents.users,
+  '/profile': routeComponents.profile,
+  '/docs/api': routeComponents.apiDocs,
+  '/admin/settings': routeComponents.settings,
+  '/admin/notifications': routeComponents.notifications,
+  '/admin/users': routeComponents.users,
+  '/admin/open-api': routeComponents.openApi,
+}
+
+const preloadedRoutes = new Set<string>()
+
+function normalizePreloadPath(path: string) {
+  const clean = path.split(/[?#]/)[0] || '/'
+  return clean.length > 1 ? clean.replace(/\/$/, '') : clean
+}
+
+export function preloadRouteByPath(path: string) {
+  const normalizedPath = normalizePreloadPath(path)
+  const loader = routePreloaders[normalizedPath]
+  if (!loader || preloadedRoutes.has(normalizedPath)) return Promise.resolve()
+
+  preloadedRoutes.add(normalizedPath)
+  return loader().catch((error) => {
+    // 预加载失败不能影响用户正常切页；下次点击时允许重新走 Vue Router 的懒加载。
+    preloadedRoutes.delete(normalizedPath)
+    console.warn('页面预加载失败', normalizedPath, error)
+  })
+}
+
+export function preloadPanelRoutes(paths: string[]) {
+  if (typeof window === 'undefined') return
+
+  const queue = [...new Set(paths.map(normalizePreloadPath))]
+    .filter((path) => routePreloaders[path] && !preloadedRoutes.has(path))
+
+  const scheduleNext = () => {
+    if (queue.length === 0) return
+
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (
+        callback: (deadline: { timeRemaining: () => number; didTimeout?: boolean }) => void,
+        options?: { timeout: number },
+      ) => number
+    }
+
+    const run = (deadline?: { timeRemaining: () => number; didTimeout?: boolean }) => {
+      // 每个空闲片段只预加载少量页面，避免后台下载/解析 chunk 反过来抢占切页主线程。
+      let count = 0
+      // requestIdleCallback 超时触发时 timeRemaining 可能为 0；此时至少推进一小批，避免队列一直空转。
+      const shouldForceRun = !deadline || deadline.didTimeout
+      while (queue.length > 0 && count < 2 && (shouldForceRun || deadline.timeRemaining() > 8)) {
+        void preloadRouteByPath(queue.shift()!)
+        count += 1
+      }
+      if (queue.length > 0) scheduleNext()
+    }
+
+    if (idleWindow.requestIdleCallback) {
+      idleWindow.requestIdleCallback(run, { timeout: 1800 })
+      return
+    }
+
+    window.setTimeout(() => run(), 500)
+  }
+
+  scheduleNext()
+}
+
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
       path: '/login',
       name: 'Login',
-      component: () => import('@/views/login/index.vue'),
+      component: routeComponents.login,
       meta: { requiresAuth: false }
     },
     {
       path: '/',
-      component: () => import('@/layouts/MainLayout.vue'),
+      component: routeComponents.layout,
       meta: { requiresAuth: true, section: 'workspace' },
       children: [
         {
@@ -43,80 +140,80 @@ const router = createRouter({
         {
           path: 'dashboard',
           name: 'Dashboard',
-          component: () => import('@/views/dashboard/index.vue'),
+          component: routeComponents.dashboard,
           meta: { title: '仪表板', icon: 'Odometer', minRole: 'viewer' }
         },
         {
           path: 'tasks',
           name: 'Tasks',
-          component: () => import('@/views/tasks/index.vue'),
+          component: routeComponents.tasks,
           meta: { title: '定时任务', icon: 'Timer', minRole: 'viewer' }
         },
         {
           path: 'scripts',
           name: 'Scripts',
-          component: () => import('@/views/scripts/index.vue'),
+          component: routeComponents.scripts,
           meta: { title: '脚本管理', icon: 'Document', minRole: 'operator' }
         },
         {
           path: 'envs',
           name: 'Envs',
-          component: () => import('@/views/envs/index.vue'),
+          component: routeComponents.envs,
           meta: { title: '环境变量', icon: 'Setting', minRole: 'operator' }
         },
         {
           path: 'config-file',
           name: 'ConfigFile',
-          component: () => import('@/views/config-file/index.vue'),
+          component: routeComponents.configFile,
           meta: { title: '配置文件', icon: 'Document', minRole: 'admin' }
         },
         {
           path: 'subscriptions',
           name: 'Subscriptions',
-          component: () => import('@/views/subscriptions/index.vue'),
+          component: routeComponents.subscriptions,
           meta: { title: '订阅管理', icon: 'Download', minRole: 'operator' }
         },
         {
           path: 'logs',
           name: 'Logs',
-          component: () => import('@/views/logs/index.vue'),
+          component: routeComponents.logs,
           meta: { title: '执行日志', icon: 'Tickets', minRole: 'viewer' }
         },
         {
           path: 'deps',
           name: 'Deps',
-          component: () => import('@/views/deps/index.vue'),
+          component: routeComponents.deps,
           meta: { title: '依赖管理', icon: 'Box', minRole: 'admin' }
         },
         {
           path: 'notifications',
           name: 'Notifications',
-          component: () => import('@/views/notifications/index.vue'),
+          component: routeComponents.notifications,
           meta: { title: '通知渠道', icon: 'Bell', minRole: 'admin' }
         },
         {
           path: 'users',
           name: 'Users',
-          component: () => import('@/views/users/index.vue'),
+          component: routeComponents.users,
           meta: { title: '用户管理', icon: 'UserFilled', minRole: 'admin' }
         },
         {
           path: 'profile',
           name: 'Profile',
-          component: () => import('@/views/profile/index.vue'),
+          component: routeComponents.profile,
           meta: { title: '个人设置', icon: 'User', minRole: 'viewer' }
         },
         {
           path: 'docs/api',
           name: 'ApiDocs',
-          component: () => import('@/views/api-docs/index.vue'),
+          component: routeComponents.apiDocs,
           meta: { title: '接口文档', icon: 'Connection', minRole: 'viewer' }
         }
       ]
     },
     {
       path: '/admin',
-      component: () => import('@/layouts/MainLayout.vue'),
+      component: routeComponents.layout,
       meta: { requiresAuth: true, section: 'admin' },
       children: [
         {
@@ -126,25 +223,25 @@ const router = createRouter({
         {
           path: 'settings',
           name: 'AdminSettings',
-          component: () => import('@/views/settings/index.vue'),
+          component: routeComponents.settings,
           meta: { title: '系统设置', icon: 'SetUp', minRole: 'admin' }
         },
         {
           path: 'notifications',
           name: 'AdminNotifications',
-          component: () => import('@/views/notifications/index.vue'),
+          component: routeComponents.notifications,
           meta: { title: '通知渠道', icon: 'Bell', minRole: 'admin' }
         },
         {
           path: 'users',
           name: 'AdminUsers',
-          component: () => import('@/views/users/index.vue'),
+          component: routeComponents.users,
           meta: { title: '用户管理', icon: 'UserFilled', minRole: 'admin' }
         },
         {
           path: 'open-api',
           name: 'AdminOpenAPI',
-          component: () => import('@/views/open-api/index.vue'),
+          component: routeComponents.openApi,
           meta: { title: 'Open API', icon: 'Key', minRole: 'admin' }
         }
       ]
