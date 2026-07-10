@@ -1177,3 +1177,80 @@ JSON.stringify = function(value, replacer, space) {
   return originalJSONStringify.call(JSON, value, replacer, space);
 };
 ```
+
+---
+
+## 场景：`config.sh` 多行环境变量安全解析
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/runtime_exec.go` 里的 `loadConfigShellVars()`、任务环境合并优先级或配置文件语法时必须看本节。
+- 原因：`config.sh` 允许用引号包住多行账号。如果按行独立解析，`process.env`、`os.environ` 和 Shell 任务只能拿到首行；如果直接 `source config.sh`，又会执行用户文件里的任意 Shell 命令。
+
+### 2. Signatures
+
+- 配置读取：`func loadConfigShellVars(envMap map[string]string)`
+- 任务环境入口：`BuildManagedRuntimeEnvMapForPythonVersion(...)`
+- 配置文件：`filepath.Join(config.C.Data.Dir, "config.sh")`
+- Node.js 注入：`env.json -> writeNodePreloadScript() -> process.env`
+
+### 3. Contracts
+
+- 只解析 `KEY=VALUE` 和可选 `export KEY=VALUE`，禁止通过 `source`、`bash -c` 或等价方式执行 `config.sh`。
+- 单引号和双引号内的真实跨行内容必须保留 `\n`，不能只记录首行，也不能自动改成 `&` 或字面量 `\\n`。
+- 单行值、空值、引号内的 `=` / `#` 继续按原内容读取。
+- 同一 `config.sh` 里同名键重复赋值时，后面的合法赋值覆盖前面的赋值。
+- 环境变量页面（数据库 `env_vars`）的同名键优先级高于 `config.sh`；面板全局 `TZ` 仍在两者之后强制覆盖。
+- 历史上能读取的非空键名不应在这条链路新增强制过滤；不同运行时后续可按自己的环境变量能力过滤。
+
+### 4. Validation & Error Matrix
+
+- `export CK='a\nb\nc'` -> `envMap["CK"] == "a\nb\nc"`。
+- `export CK="a=1\nb#2"` -> 保留换行、`=` 和 `#`。
+- 引号未闭合且遇到后续合法 `export NEXT=...` -> 忽略损坏项，继续读取 `NEXT`。
+- 文件不存在或无法读取 -> 保持原有环境映射，不阻断任务构建。
+- 数据库和 `config.sh` 同时存在同名键 -> 使用数据库值。
+
+### 5. Good/Base/Bad Cases
+
+- Good：用户在一个 `export csCk='...'` 里换行填写四个账号，Node.js `process.env.csCk` 读到完整四行。
+- Base：`KEY=value`、`export KEY="value"`、注释和空行行为不变。
+- Bad：用 `bufio.Scanner` 逐行立即赋值，导致引号跨行值只剩第一行。
+- Bad：为复用 Shell 解析直接 `. config.sh`，导致任务构建阶段执行用户命令。
+
+### 6. Tests Required
+
+- `TestLoadConfigShellVarsSupportsMultilineQuotedValues`：断言单引号多行、双引号多行、单行、空值和历史键名。
+- `TestLoadConfigShellVarsIgnoresBrokenMultilineAndKeepsFollowingExport`：断言损坏项不入环境，后续合法 `export` 仍可读取。
+- `TestBuildManagedRuntimeEnvMapKeepsDatabaseEnvPriorityOverConfigFile`：断言环境变量页面的同名值优先。
+- `TestConfigShellMultilineValueReachesNodeProcessEnv`：真实启动 Node.js，断言 `process.env` 收到完整换行值。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestLoadConfigShellVars|TestBuildManagedRuntimeEnvMapKeepsDatabaseEnvPriorityOverConfigFile|TestConfigShellMultilineValueReachesNodeProcessEnv" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：第一行立即写入环境，后续没有 '=' 的账号行会被丢弃。
+for scanner.Scan() {
+    line := strings.TrimSpace(scanner.Text())
+    envMap[key] = strings.Trim(value, "\"'")
+}
+```
+
+#### Correct
+
+```go
+// 正确：先收集到同类型闭合引号，完成后再写入配置值。
+if closeAt := findClosingQuote(value[1:], quote); closeAt < 0 {
+    pendingKey = key
+    pendingQuote = quote
+    pendingValue.WriteString(value[1:])
+}
+```

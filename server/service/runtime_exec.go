@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -1515,28 +1514,112 @@ func loadConfigShellVars(envMap map[string]string) {
 	}
 
 	configPath := filepath.Join(dataDir, "config.sh")
-	f, err := os.Open(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+	// config.sh 是用户可编辑文件，这里只解析变量赋值，不能通过 source 执行其中的 Shell 命令。
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	configValues := make(map[string]string)
+	pendingKey := ""
+	pendingQuote := byte(0)
+	var pendingValue strings.Builder
+
+	findClosingQuote := func(value string, quote byte) int {
+		for i := 0; i < len(value); i++ {
+			if value[i] != quote {
+				continue
+			}
+			if quote == '"' {
+				backslashes := 0
+				for j := i - 1; j >= 0 && value[j] == '\\'; j-- {
+					backslashes++
+				}
+				if backslashes%2 == 1 {
+					continue
+				}
+			}
+			return i
+		}
+		return -1
+	}
+
+	for _, rawLine := range strings.Split(content, "\n") {
+		trimmedLine := strings.TrimSpace(rawLine)
+		if pendingKey != "" {
+			// 未闭合值后如果遇到新的 export 赋值，放弃损坏项并从新变量继续解析。
+			newExport := strings.HasPrefix(trimmedLine, "export ")
+			if newExport {
+				candidate := strings.TrimSpace(strings.TrimPrefix(trimmedLine, "export "))
+				idx := strings.IndexByte(candidate, '=')
+				newExport = idx > 0 && isValidShellEnvName(strings.TrimSpace(candidate[:idx]))
+			}
+			if newExport {
+				pendingKey = ""
+				pendingQuote = 0
+				pendingValue.Reset()
+			} else if idx := findClosingQuote(rawLine, pendingQuote); idx >= 0 {
+				pendingValue.WriteByte('\n')
+				pendingValue.WriteString(rawLine[:idx])
+				configValues[pendingKey] = pendingValue.String()
+				pendingKey = ""
+				pendingQuote = 0
+				pendingValue.Reset()
+				continue
+			} else {
+				pendingValue.WriteByte('\n')
+				pendingValue.WriteString(rawLine)
+				continue
+			}
+		}
+
+		if trimmedLine == "" || strings.HasPrefix(trimmedLine, "#") {
 			continue
 		}
-		line = strings.TrimPrefix(line, "export ")
+
+		line := strings.TrimLeft(rawLine, " \t")
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimLeft(strings.TrimPrefix(line, "export "), " \t")
+		}
 		idx := strings.IndexByte(line, '=')
 		if idx <= 0 {
 			continue
 		}
 		key := strings.TrimSpace(line[:idx])
-		val := strings.TrimSpace(line[idx+1:])
-		val = strings.Trim(val, "\"'")
-		if key != "" {
-			envMap[key] = val
+		if key == "" {
+			continue
 		}
+
+		value := strings.TrimLeft(line[idx+1:], " \t")
+		if value == "" {
+			configValues[key] = ""
+			continue
+		}
+		if value[0] != '\'' && value[0] != '"' {
+			configValues[key] = strings.Trim(strings.TrimSpace(value), "\"'")
+			continue
+		}
+
+		quote := value[0]
+		if closeAt := findClosingQuote(value[1:], quote); closeAt >= 0 {
+			configValues[key] = value[1 : closeAt+1]
+			continue
+		}
+
+		// 引号在本行未闭合时保留真实换行，直到后续行出现同类型闭合引号。
+		pendingKey = key
+		pendingQuote = quote
+		pendingValue.Reset()
+		pendingValue.WriteString(value[1:])
+	}
+
+	// 数据库环境变量来自面板页面，同名时优先级高于 config.sh。
+	for key, value := range configValues {
+		if _, exists := envMap[key]; exists {
+			continue
+		}
+		envMap[key] = value
 	}
 }
