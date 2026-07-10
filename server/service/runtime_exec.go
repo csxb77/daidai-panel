@@ -51,10 +51,11 @@ var windowsPythonPreferredDirs = []string{
 	filepath.Join(os.Getenv("LocalAppData"), "Programs", "Python", "Python310"),
 }
 
-// pythonEnvBootstrap 只负责三件事：
-//  1. 从 env.json 注入任务环境变量到 os.environ
-//  2. 把 PYTHONPATH 里声明的目录前置到 sys.path（工作目录、脚本目录、venv site-packages）
-//  3. 以 runpy.run_path 的方式执行用户脚本
+// pythonEnvBootstrap 只负责四件事：
+//  1. Windows 下先按启动环境初始化 Python 本地时区缓存
+//  2. 从 env.json 注入任务环境变量到 os.environ
+//  3. 把 PYTHONPATH 里声明的目录前置到 sys.path（工作目录、脚本目录、venv site-packages）
+//  4. 以 runpy.run_path 的方式执行用户脚本
 //
 // 历史上这里还有"AST 扫 import + importlib.find_spec 判缺失 + 自动 pip install"
 // 的预检链路（v2.0.7 引入），但 find_spec 在 Alpine venv 下对 pysmx 等包会漏判，
@@ -62,9 +63,11 @@ var windowsPythonPreferredDirs = []string{
 // Go 侧 task_executor.detectAndInstallDeps 兜底——它在脚本真实抛出
 // ModuleNotFoundError 时介入，基于正则抓模块名后 pip install，并自动重跑脚本，
 // 比预检更精准，且最多重试 5 次覆盖多依赖场景。
-const pythonEnvBootstrap = `import json, os, runpy, sys
+const pythonEnvBootstrap = `import json, os, runpy, sys, time
 env_file, script_path, extra_path_raw = sys.argv[1:4]
 script_args = sys.argv[4:]
+if os.name == "nt":
+    time.localtime()
 with open(env_file, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 for key, value in payload.items():
@@ -78,9 +81,11 @@ sys.argv = [script_path] + script_args
 runpy.run_path(script_path, run_name="__main__")
 `
 
-const pythonModuleEnvBootstrap = `import json, os, runpy, sys
+const pythonModuleEnvBootstrap = `import json, os, runpy, sys, time
 env_file, module_name, extra_path_raw = sys.argv[1:4]
 module_args = sys.argv[4:]
+if os.name == "nt":
+    time.localtime()
 with open(env_file, "r", encoding="utf-8") as fh:
     payload = json.load(fh)
 for key, value in payload.items():
@@ -748,7 +753,7 @@ func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir 
 
 	cmd := exec.Command(pythonBin, args...)
 	cmd.Dir = workDir
-	cmd.Env = appendPythonBootstrapEnv(buildBootstrapProcessEnv(envVars))
+	cmd.Env = buildPythonBootstrapProcessEnv(envVars)
 	setPgid(cmd)
 	return cmd, cleanup, nil
 }
@@ -792,7 +797,7 @@ func createManagedPythonModuleCommand(interpreter string, moduleName string, mod
 
 	cmd := exec.Command(pythonBin, args...)
 	cmd.Dir = workDir
-	cmd.Env = appendPythonBootstrapEnv(buildBootstrapProcessEnv(envVars))
+	cmd.Env = buildPythonBootstrapProcessEnv(envVars)
 	setPgid(cmd)
 	return cmd, cleanup, nil
 }
@@ -1028,6 +1033,73 @@ func buildBootstrapProcessEnv(envVars map[string]string) []string {
 	}
 
 	return AppendProxyEnv(env)
+}
+
+func buildPythonBootstrapProcessEnv(envVars map[string]string) []string {
+	env := buildBootstrapProcessEnv(envVars)
+	if runtime.GOOS != "windows" {
+		return appendPythonBootstrapEnv(env)
+	}
+
+	ianaTimezone := strings.TrimSpace(envVars["TZ"])
+	if ianaTimezone == "" {
+		ianaTimezone = strings.TrimSpace(os.Getenv("TZ"))
+	}
+	pythonTimezone, err := windowsPythonPOSIXTimezone(ianaTimezone, time.Now())
+	if err != nil {
+		return appendPythonBootstrapEnv(env)
+	}
+
+	// Windows Python 启动时由 CRT 解析 TZ，只接受三字母 POSIX 格式；
+	// env.json 会在 bootstrap 内把脚本最终可见的 TZ 恢复为原始 IANA 名称。
+	for index, entry := range env {
+		if strings.HasPrefix(entry, "TZ=") {
+			env[index] = "TZ=" + pythonTimezone
+			break
+		}
+	}
+	return appendPythonBootstrapEnv(env)
+}
+
+func windowsPythonPOSIXTimezone(ianaTimezone string, now time.Time) (string, error) {
+	location, err := time.LoadLocation(strings.TrimSpace(ianaTimezone))
+	if err != nil {
+		return "", fmt.Errorf("invalid IANA timezone %q: %w", ianaTimezone, err)
+	}
+
+	zoneName, utcOffsetSeconds := now.In(location).Zone()
+	abbreviation := make([]byte, 0, 3)
+	for index := 0; index < len(zoneName) && len(abbreviation) < 3; index++ {
+		letter := zoneName[index]
+		if letter >= 'a' && letter <= 'z' {
+			letter -= 'a' - 'A'
+		}
+		if letter >= 'A' && letter <= 'Z' {
+			abbreviation = append(abbreviation, letter)
+		}
+	}
+	if len(abbreviation) < 3 {
+		abbreviation = []byte("DDT")
+	}
+
+	// POSIX 的偏移符号与 UTC 偏移相反：UTC+8 要写成 -8，UTC-4 要写成 4。
+	posixOffsetSeconds := -utcOffsetSeconds
+	sign := ""
+	if posixOffsetSeconds < 0 {
+		sign = "-"
+		posixOffsetSeconds = -posixOffsetSeconds
+	}
+	hours := posixOffsetSeconds / 3600
+	minutes := posixOffsetSeconds % 3600 / 60
+	seconds := posixOffsetSeconds % 60
+	offset := fmt.Sprintf("%s%d", sign, hours)
+	if minutes != 0 || seconds != 0 {
+		offset += fmt.Sprintf(":%02d", minutes)
+	}
+	if seconds != 0 {
+		offset += fmt.Sprintf(":%02d", seconds)
+	}
+	return string(abbreviation) + offset, nil
 }
 
 func appendPythonBootstrapEnv(env []string) []string {
