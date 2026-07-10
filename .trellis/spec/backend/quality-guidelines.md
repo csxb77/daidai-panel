@@ -250,6 +250,98 @@ return model.RunAborted, model.LogStatusAborted, true
 
 ---
 
+## 场景：任务自定义成功退出码
+
+### 1. Scope / Trigger
+
+- 触发：修改 `model.Task` 的退出码字段、`task_executor.go` / `scheduler.go` 的成功判断、任务日志结算、重试、通知，或任务创建/编辑/复制/导入导出时必须看本节。
+- 原因：少量历史脚本会在业务完成后返回 `1`。面板需要允许任务显式兼容，但不能通过“结束”“完成”等日志文本猜测成功，更不能把所有退出码 `1` 全局放行。
+
+### 2. Signatures
+
+- 任务字段：`Task.SuccessExitCodes string`
+- API / 导入导出字段：`success_exit_codes`，字符串，例如 `"0,1"`
+- 数据库字段：`tasks.success_exit_codes VARCHAR(128) NOT NULL DEFAULT '0'`
+- 规范化：`func NormalizeSuccessExitCodes(raw string) (string, error)`
+- 运行判断：`func (t *Task) IsSuccessExitCode(exitCode int) bool`
+- 前端入口：任务表单 -> 高级设置 -> 成功退出码
+
+### 3. Contracts
+
+- 默认值、空字符串、`null` 和旧数据都按 `0` 处理，现有任务升级后行为不能改变。
+- 只接受 `0-255` 的整数；允许英文逗号、中文逗号或空白分隔，保存前统一为英文逗号并去重。
+- 只有 `RunCommandWithPlan` 正常返回进程结果后，才允许调用 `IsSuccessExitCode`。
+- 启动错误、执行器 panic、超时/信号负退出码不能被配置覆盖；主动停止继续由 `applyManualStopOverride` 结算为 Aborted。
+- `TaskExecutor` 和旧 `Scheduler` 必须使用同一规则；重试、任务状态、日志状态、依赖任务、统计和通知不能分叉。
+- `TaskExecutor` 的任务状态和日志状态都必须使用同一个 `success` 结果，禁止日志状态再次直接判断 `exitCode != 0`。
+- 非零成功码仍保留真实退出码，日志尾部追加“已按任务配置判定成功”，便于用户区分标准成功和兼容成功。
+- 新字段必须同步：model、`EnsureColumns()`、创建/更新 handler、`ToDict()`、复制、导入导出和任务表单。
+
+### 4. Validation & Error Matrix
+
+- 默认/空配置 + 退出码 `0` -> Success。
+- 默认/空配置 + 退出码 `1` -> Failed，按原规则重试和通知。
+- 配置 `0,1` + 退出码 `1` -> Success，不发送失败通知，日志保留退出码 `1` 和兼容说明。
+- 配置 `0,1` + 退出码 `2` -> Failed。
+- 任意配置 + 退出码 `-1`（超时或信号）-> Failed。
+- 任意配置 + 进程启动错误 / 执行器 panic -> Failed，不能因为错误路径使用了内部值 `1` 而成功。
+- 任意配置 + 手动停止 / 定时停止 -> Aborted，不进入成功或失败通知。
+- 配置含文本、负数或大于 `255` -> API 返回参数错误，导入时跳过该任务并记录错误。
+
+### 5. Good/Base/Bad Cases
+
+- Good：确认某历史脚本业务完成后固定 `process.exit(1)`，仅给该任务配置 `0,1`；任务、日志和通知都显示成功，日志仍能看到真实退出码。
+- Base：普通脚本不改设置，退出 `0` 成功、退出非零失败。
+- Bad：看到日志最后有“结束”就全局把退出码 `1` 改成成功，真实异常也会被隐藏。
+- Bad：任务状态按 `success` 写成功，但日志状态继续按 `exitCode != 0` 写失败，造成列表、统计和通知互相矛盾。
+
+### 6. Tests Required
+
+- model：空值默认 `0`；`0,1` 接受 `1`、拒绝 `2`；负数永不成功；非法文本和范围返回错误。
+- database：模拟旧库缺列，`EnsureColumns()` 必须补出 `success_exit_codes`，已有任务默认回填 `0`。
+- handler：创建、更新、复制、导出和导入能保存规范化字段；非法配置返回 `400` 或导入错误。
+- executor：同一个真实退出码 `1` 在默认配置下任务/日志均失败，在 `0,1` 下任务/日志均成功，并保留退出码和兼容说明。
+- notification：非零成功码必须生成 Success 标题/context，保留真实 `exit_code`，且失败原因字段为空。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./model ./handler ./service -run "TestNormalizeSuccessExitCodes|TestTaskIsSuccessExitCode|TestTaskSuccessExitCodes|TestTaskExecutorAppliesConfiguredSuccessExitCodes" -count=1
+go test ./... -count=1
+go vet ./...
+cd ../web && npm run build
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：全局放行 1 会隐藏真正的脚本失败。
+if result.ReturnCode == 0 || result.ReturnCode == 1 {
+    success = true
+}
+
+// 错误：任务成功但日志仍按非零退出码写失败。
+if exitCode != 0 {
+    logStatus = model.LogStatusFailed
+}
+```
+
+#### Correct
+
+```go
+// 正确：只有正常拿到进程结果后，才按当前任务显式配置判断。
+if task.IsSuccessExitCode(result.ReturnCode) {
+    success = true
+}
+
+// 正确：任务、日志、通知统一使用同一份 success 结果。
+if !success {
+    logStatus = model.LogStatusFailed
+}
+```
+
 ## 场景：反代 CORS 同源判断与外部端口
 
 ### 1. Scope / Trigger
@@ -994,6 +1086,10 @@ python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
   - 内部当前面板时区缓存
 - 保存 `timezone` 配置后必须立即重载运行时，不要求用户重启面板。
 - 任务运行环境必须写入 `envMap["TZ"] = CurrentPanelTimezone()`，并覆盖用户普通环境变量里同名 `TZ`，保证面板日志和脚本时间一致。
+- Windows Python 的 CRT 不能正确解析 `Asia/Shanghai` 等 IANA 名称。只有 Python 脚本和 Python 模块的**启动环境**需要按任务启动时的当前偏移转换为 POSIX 固定偏移；Node.js 和其他运行时继续使用 IANA 名称。
+- Windows CRT 的 POSIX 时区缩写必须是三个 ASCII 字母，且偏移符号与 UTC 偏移相反，例如 UTC+8 写成 `CST-8`、UTC-4 写成 `EDT4`、UTC+5:30 写成 `IST-5:30`。无法生成三字母缩写时使用稳定的 `DDT`。
+- Windows Python 会延迟解析 `TZ`。bootstrap 必须在 env.json 恢复 IANA 名称前调用一次 `time.localtime()` 初始化本地时区；脚本最终读取 `os.environ["TZ"]` 时仍应得到用户设置的 IANA 名称。
+- 有夏令时的地区在每次 Python 任务启动时重新计算当前偏移。长驻 Python 任务跨越夏令时切换点后需要重启任务，才能使用新偏移。
 - 前端系统设置页必须提供可见入口，并把 `timezone` 纳入同一组保存键。
 
 ### 4. Validation & Error Matrix
@@ -1003,12 +1099,18 @@ python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
 - `timezone=Bad/Zone` -> 保存失败，返回用户可读错误
 - `timezone=Local` -> 保存失败，要求填写明确 IANA 时区，避免不同宿主环境表现不一致
 - 用户环境变量表里也配置了 `TZ=UTC` -> 任务最终仍使用面板全局时区
+- Windows Python + `Asia/Shanghai` -> 启动环境使用 `CST-8`，脚本本地时间为 `+08:00`，脚本读取 `TZ` 仍为 `Asia/Shanghai`
+- Windows Node.js + `Asia/Shanghai` -> 启动环境保持 IANA 名称，本地时间仍为 `GMT+0800`
+- Linux / Docker / 面具版 Python -> 启动环境保持 IANA 名称，不转换为固定偏移
 
 ### 5. Good/Base/Bad Cases
 
 - Good：Linux tar 包直接启动，宿主机没有设置 `TZ`，面板仍按 `Asia/Shanghai` 写日志，脚本也拿到 `TZ=Asia/Shanghai`。
+- Good：Windows Python 以 `CST-8` 初始化本地时间后，bootstrap 把脚本可见的 `TZ` 恢复为 `Asia/Shanghai`，时间和配置语义同时正确。
 - Base：Docker 用户原本设置 `TZ=Asia/Shanghai`，升级后系统设置同样默认 `Asia/Shanghai`，行为不变。
 - Bad：只在前端显示时加 8 小时，后端日志和任务脚本仍按 UTC 运行，定时任务日期判断继续错。
+- Bad：把所有运行时的 `TZ` 都改成 `CST-8`；Windows Node.js 会把它解释成 UTC，Linux 也会失去 IANA 夏令时规则。
+- Bad：Windows Python 启动后立刻恢复 `Asia/Shanghai`，却没有先调用 `time.localtime()`；Python 第一次取本地时间时仍会错误解析成 `+01:00`。
 
 ### 6. Tests Required
 
@@ -1017,6 +1119,8 @@ python3 -m venv "$DAIDAI_DIR/deps/python/$PY_MINOR"
 - 运行时应用：`ApplyPanelTimezone("UTC")` 后 `time.Local.String()=="UTC"` 且 `os.Getenv("TZ")=="UTC"`。
 - 保存立即生效：通过配置接口保存 `timezone` 后，`CurrentPanelTimezone()` 立即变为新值。
 - 任务环境：`BuildManagedRuntimeEnvMapForPythonVersion` 返回的 `TZ` 必须等于当前面板时区，并覆盖用户环境变量表里的同名 `TZ`。
+- 偏移转换：覆盖 UTC、正负偏移、分钟偏移、夏令时和四字母缩写，确认生成 Windows CRT 可识别的三字母 POSIX 值。
+- Windows 真实进程：Python 脚本和 Python 模块均输出 `+08:00` 且读取到 `TZ=Asia/Shanghai`；Node.js 仍输出 `GMT+0800`。
 
 ### 7. Wrong vs Correct
 
@@ -1041,6 +1145,11 @@ if err := service.ApplyRegisteredPanelTimezone(); err != nil {
 ```go
 // 正确：任务环境强制跟随面板全局时区，避免脚本时间和面板日志不一致。
 envMap["TZ"] = service.CurrentPanelTimezone()
+```
+
+```go
+// 正确：只给 Windows Python 的启动环境转换格式，不能修改原任务变量或 Node 环境。
+cmd.Env = buildPythonBootstrapProcessEnv(envVars)
 ```
 
 ---
