@@ -264,6 +264,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 				fmt.Fprintf(tinyLog, "\n[任务异常崩溃: %v]\n", r)
 			}
 			exitCode = 1
+			success = false
 		}
 
 		duration := time.Since(startTime).Seconds()
@@ -275,7 +276,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 
 		logStatus := model.LogStatusSuccess
-		if exitCode != 0 {
+		if !success {
 			logStatus = model.LogStatusFailed
 		}
 
@@ -416,7 +417,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 
 		lastExitCode = result.ReturnCode
-		if result.ReturnCode == 0 {
+		if task.IsSuccessExitCode(result.ReturnCode) {
 			success = true
 			lastFailureOutput = ""
 			outputCollectorMu.Lock()
@@ -462,8 +463,12 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
-	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d ===\n",
-		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode))
+	completionNote := ""
+	if success && lastExitCode != 0 {
+		completionNote = "（已按任务配置判定成功）"
+	}
+	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d%s ===\n",
+		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode, completionNote))
 }
 
 func (e *TaskExecutor) registerRunningProcess(taskID uint, process *os.Process) {

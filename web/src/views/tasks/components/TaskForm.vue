@@ -27,6 +27,7 @@ const form = ref({
   cron_expression: '0 0 * * *',
   task_type: 'cron',
   timeout: 0,
+  success_exit_codes: '0',
   random_delay_seconds: null as number | null,
   max_retries: 0,
   retry_interval: 60,
@@ -86,6 +87,7 @@ watch(() => props.visible, (val) => {
       cron_expression: props.task.cron_expression || '* * * * *',
       task_type: props.task.task_type || 'cron',
       timeout: props.task.timeout ?? 0,
+      success_exit_codes: props.task.success_exit_codes || '0',
       random_delay_seconds: taskRandomDelay,
       max_retries: props.task.max_retries ?? 0,
       retry_interval: props.task.retry_interval ?? 60,
@@ -110,7 +112,7 @@ watch(() => props.visible, (val) => {
       python_version: p?.python_version || getDefaultPythonVersion(),
       cron_expression: p?.cron_expression || '* * * * *',
       task_type: p?.task_type || 'cron',
-      timeout: 0, random_delay_seconds: null, max_retries: 0, retry_interval: 60,
+      timeout: 0, success_exit_codes: '0', random_delay_seconds: null, max_retries: 0, retry_interval: 60,
       notify_on_failure: false, notify_on_success: false, notification_channel_id: null, labels: [], depends_on: null,
       task_before: '', task_after: '', allow_multiple_instances: false, group_name: '', stop_schedule: '', notify_on_abort: false,
     }
@@ -167,7 +169,17 @@ function handleSubmit() {
       return
     }
   }
+  const successExitCodes = form.value.success_exit_codes
+    .trim()
+    .split(/[,，\s]+/)
+    .filter(Boolean)
+  if (successExitCodes.length === 0 || successExitCodes.some(code => !/^\d+$/.test(code) || Number(code) > 255)) {
+    ElMessage.warning('成功退出码只能填写 0-255 的整数，多个值请用逗号分隔')
+    return
+  }
   const data = { ...form.value }
+  // 提交前统一为英文逗号并去重，后端仍会再次校验，避免异常数据写入数据库。
+  data.success_exit_codes = [...new Set(successExitCodes.map(code => String(Number(code))))].join(',')
   if (data.task_type === 'cron') {
     if (!data.cron_expression) return
   } else {
@@ -264,6 +276,14 @@ function handleSubmit() {
             <el-input-number v-model="form.timeout" :min="0" :max="604800" />
             <div v-if="form.timeout === 0" style="font-size: 11px; color: var(--el-color-warning); margin-top: 4px">
               设置为 0 表示永不超时，任务将持续运行直到手动停止或定时停止。
+            </div>
+          </el-form-item>
+          <el-form-item label="成功退出码">
+            <div class="advanced-field-block">
+              <el-input v-model="form.success_exit_codes" maxlength="128" placeholder="0" />
+              <div class="advanced-field-hint">
+                普通任务保持 0。只有脚本业务成功但固定返回 1 时才填写 0,1；超时、启动错误和主动停止不会因此变成成功。
+              </div>
             </div>
           </el-form-item>
           <el-form-item label="随机延迟">

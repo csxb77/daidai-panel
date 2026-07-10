@@ -37,6 +37,7 @@ func (h *TaskHandler) Export(c *gin.Context) {
 			"status":                    task.Status,
 			"labels":                    task.GetLabels(),
 			"timeout":                   task.Timeout,
+			"success_exit_codes":        task.GetSuccessExitCodes(),
 			"random_delay_seconds":      task.RandomDelaySeconds,
 			"max_retries":               task.MaxRetries,
 			"retry_interval":            task.RetryInterval,
@@ -138,15 +139,16 @@ func (h *TaskHandler) Import(c *gin.Context) {
 		}
 
 		task := model.Task{
-			Name:            name,
-			Command:         command,
-			PythonVersion:   pythonVersion,
-			CronExpression:  cronExpr,
-			TaskType:        taskType,
-			Status:          model.TaskStatusDisabled,
-			Timeout:         0,
-			RetryInterval:   60,
-			NotifyOnFailure: true,
+			Name:             name,
+			Command:          command,
+			PythonVersion:    pythonVersion,
+			CronExpression:   cronExpr,
+			TaskType:         taskType,
+			Status:           model.TaskStatusDisabled,
+			Timeout:          0,
+			SuccessExitCodes: model.DefaultSuccessExitCodes,
+			RetryInterval:    60,
+			NotifyOnFailure:  true,
 		}
 
 		if statusValue, exists := taskData["status"]; exists {
@@ -159,6 +161,23 @@ func (h *TaskHandler) Import(c *gin.Context) {
 		}
 		if value, ok := taskData["timeout"].(float64); ok {
 			task.Timeout = int(value)
+		}
+		if value, exists := taskData["success_exit_codes"]; exists {
+			raw := ""
+			if value != nil {
+				var ok bool
+				raw, ok = value.(string)
+				if !ok {
+					errors = append(errors, fmt.Sprintf("任务 %d: 成功退出码格式无效", i+1))
+					continue
+				}
+			}
+			normalized, err := model.NormalizeSuccessExitCodes(raw)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("任务 %d: %s", i+1, err.Error()))
+				continue
+			}
+			task.SuccessExitCodes = normalized
 		}
 		if value, exists := taskData["random_delay_seconds"]; exists {
 			randomDelayValue, err := normalizeTaskRandomDelaySecondsValue(value)

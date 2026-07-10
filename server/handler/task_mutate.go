@@ -48,6 +48,7 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		CronExpression         string   `json:"cron_expression"`
 		TaskType               string   `json:"task_type"`
 		Timeout                *int     `json:"timeout"`
+		SuccessExitCodes       *string  `json:"success_exit_codes"`
 		RandomDelaySeconds     *int     `json:"random_delay_seconds"`
 		MaxRetries             *int     `json:"max_retries"`
 		RetryInterval          *int     `json:"retry_interval"`
@@ -92,19 +93,28 @@ func (h *TaskHandler) Create(c *gin.Context) {
 	}
 
 	task := model.Task{
-		Name:            req.Name,
-		Command:         req.Command,
-		PythonVersion:   pythonVersion,
-		CronExpression:  req.CronExpression,
-		TaskType:        taskType,
-		Status:          model.TaskStatusEnabled,
-		Timeout:         0,
-		RetryInterval:   60,
-		NotifyOnFailure: false,
+		Name:             req.Name,
+		Command:          req.Command,
+		PythonVersion:    pythonVersion,
+		CronExpression:   req.CronExpression,
+		TaskType:         taskType,
+		Status:           model.TaskStatusEnabled,
+		Timeout:          0,
+		SuccessExitCodes: model.DefaultSuccessExitCodes,
+		RetryInterval:    60,
+		NotifyOnFailure:  false,
 	}
 
 	if req.Timeout != nil {
 		task.Timeout = *req.Timeout
+	}
+	if req.SuccessExitCodes != nil {
+		normalized, err := model.NormalizeSuccessExitCodes(*req.SuccessExitCodes)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		task.SuccessExitCodes = normalized
 	}
 	if req.RandomDelaySeconds != nil {
 		randomDelayValue, err := normalizeTaskRandomDelaySecondsValue(*req.RandomDelaySeconds)
@@ -240,11 +250,28 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		}
 		req["python_version"] = pythonVersion
 	}
+	if rawSuccessExitCodes, exists := req["success_exit_codes"]; exists {
+		value := ""
+		if rawSuccessExitCodes != nil {
+			var ok bool
+			value, ok = rawSuccessExitCodes.(string)
+			if !ok {
+				response.BadRequest(c, "成功退出码格式无效")
+				return
+			}
+		}
+		normalized, err := model.NormalizeSuccessExitCodes(value)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		req["success_exit_codes"] = normalized
+	}
 
 	allowedFields := map[string]bool{
 		"name": true, "command": true, "python_version": true, "cron_expression": true,
 		"task_type": true,
-		"timeout":   true, "random_delay_seconds": true, "max_retries": true, "retry_interval": true,
+		"timeout":   true, "success_exit_codes": true, "random_delay_seconds": true, "max_retries": true, "retry_interval": true,
 		"notify_on_failure": true, "notify_on_success": true, "notify_on_abort": true, "notification_channel_id": true, "labels": true, "depends_on": true,
 		"sort_order": true, "task_before": true, "task_after": true,
 		"allow_multiple_instances": true, "stop_schedule": true,
@@ -342,6 +369,7 @@ func (h *TaskHandler) Copy(c *gin.Context) {
 		Status:                 model.TaskStatusDisabled,
 		Labels:                 task.Labels,
 		Timeout:                task.Timeout,
+		SuccessExitCodes:       task.GetSuccessExitCodes(),
 		RandomDelaySeconds:     task.RandomDelaySeconds,
 		MaxRetries:             task.MaxRetries,
 		RetryInterval:          task.RetryInterval,

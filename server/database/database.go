@@ -111,6 +111,7 @@ func EnsureColumns() {
 		{"last_startup_auto_run_date", "VARCHAR(10) DEFAULT ''"},
 		{"allow_multiple_instances", "BOOLEAN DEFAULT 0"},
 		{"timeout", "INTEGER DEFAULT 0"},
+		{"success_exit_codes", "VARCHAR(128) NOT NULL DEFAULT '0'"},
 		{"random_delay_seconds", "INTEGER"},
 		{"max_retries", "INTEGER DEFAULT 0"},
 		{"retry_interval", "INTEGER DEFAULT 60"},

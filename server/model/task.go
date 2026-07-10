@@ -1,8 +1,11 @@
 package model
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -18,6 +21,8 @@ const (
 	RunSuccess = 0
 	RunFailed  = 1
 	RunAborted = 2
+
+	DefaultSuccessExitCodes = "0"
 )
 
 type Task struct {
@@ -34,6 +39,7 @@ type Task struct {
 	LastRunAt              *time.Time `json:"last_run_at"`
 	LastRunStatus          *int       `json:"last_run_status"`
 	Timeout                int        `gorm:"default:0" json:"timeout"`
+	SuccessExitCodes       string     `gorm:"size:128;not null;default:'0'" json:"success_exit_codes"`
 	RandomDelaySeconds     *int       `json:"random_delay_seconds"`
 	MaxRetries             int        `json:"max_retries"`
 	RetryInterval          int        `json:"retry_interval"`
@@ -79,6 +85,7 @@ func (t *Task) ToDict() map[string]interface{} {
 		"last_run_at":              t.LastRunAt,
 		"last_run_status":          t.LastRunStatus,
 		"timeout":                  t.Timeout,
+		"success_exit_codes":       t.GetSuccessExitCodes(),
 		"random_delay_seconds":     t.RandomDelaySeconds,
 		"max_retries":              t.MaxRetries,
 		"retry_interval":           t.RetryInterval,
@@ -99,6 +106,57 @@ func (t *Task) ToDict() map[string]interface{} {
 		"created_at":               t.CreatedAt,
 		"updated_at":               t.UpdatedAt,
 	}
+}
+
+// NormalizeSuccessExitCodes 统一任务表单、导入文件和旧数据中的成功退出码格式。
+// Shell 退出码只接受 0-255；负数保留给超时、信号退出等面板失败状态，不能配置为成功。
+func NormalizeSuccessExitCodes(raw string) (string, error) {
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '，' || unicode.IsSpace(r)
+	})
+	if len(parts) == 0 {
+		return DefaultSuccessExitCodes, nil
+	}
+
+	seen := make(map[int]struct{}, len(parts))
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		code, err := strconv.Atoi(part)
+		if err != nil || code < 0 || code > 255 {
+			return "", fmt.Errorf("成功退出码只能填写 0-255 的整数，多个值请用逗号分隔")
+		}
+		if _, exists := seen[code]; exists {
+			continue
+		}
+		seen[code] = struct{}{}
+		normalized = append(normalized, strconv.Itoa(code))
+	}
+	return strings.Join(normalized, ","), nil
+}
+
+func (t *Task) GetSuccessExitCodes() string {
+	if t == nil {
+		return DefaultSuccessExitCodes
+	}
+	normalized, err := NormalizeSuccessExitCodes(t.SuccessExitCodes)
+	if err != nil {
+		// 旧库或手工改库出现异常值时回退到标准退出码 0，不能扩大成功范围。
+		return DefaultSuccessExitCodes
+	}
+	return normalized
+}
+
+func (t *Task) IsSuccessExitCode(exitCode int) bool {
+	if t == nil || exitCode < 0 {
+		return false
+	}
+	target := strconv.Itoa(exitCode)
+	for _, code := range strings.Split(t.GetSuccessExitCodes(), ",") {
+		if code == target {
+			return true
+		}
+	}
+	return false
 }
 
 func splitTaskCronExpressions(raw string) []string {

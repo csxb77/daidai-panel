@@ -95,6 +95,34 @@ func TestBuildTaskExecutionNotificationUsesUnifiedSuccessLayout(t *testing.T) {
 	}
 }
 
+func TestBuildTaskExecutionNotificationKeepsConfiguredNonZeroResultSuccessful(t *testing.T) {
+	task := &model.Task{ID: 13, Name: "历史兼容任务", SuccessExitCodes: "0,1"}
+	endedAt := time.Date(2026, 7, 10, 14, 54, 33, 90000000, time.Local)
+
+	title, content, context := buildTaskExecutionNotification(
+		task,
+		11,
+		model.RunSuccess,
+		1,
+		110.4,
+		endedAt,
+		"业务流程已完成",
+	)
+
+	if title != "任务执行成功" || !strings.Contains(content, "定时任务「历史兼容任务」执行成功") {
+		t.Fatalf("expected success notification for configured exit code, title=%q content=%q", title, content)
+	}
+	if got := context["status"]; got != "success" {
+		t.Fatalf("expected success context, got %q", got)
+	}
+	if got := context["exit_code"]; got != "1" {
+		t.Fatalf("expected raw exit_code=1 in context, got %q", got)
+	}
+	if strings.Contains(content, "失败原因") || context["failure_reason"] != "" {
+		t.Fatalf("configured non-zero success must not contain failure reason, content=%q context=%#v", content, context)
+	}
+}
+
 func TestBuildTaskExecutionNotificationUsesUnifiedAbortLayout(t *testing.T) {
 	task := &model.Task{ID: 12, Name: "\u957f\u9a7b\u4efb\u52a1"}
 	endedAt := time.Date(2026, 5, 1, 8, 9, 10, 123000000, time.Local)

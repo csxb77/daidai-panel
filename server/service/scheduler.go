@@ -339,7 +339,7 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 		}
 
 		lastExitCode = result.ReturnCode
-		if result.ReturnCode == 0 {
+		if task.IsSuccessExitCode(result.ReturnCode) {
 			success = true
 			break
 		}
@@ -358,8 +358,12 @@ func (s *Scheduler) executeTaskInner(taskID uint) {
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
 
-	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d ===\n",
-		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode))
+	completionNote := ""
+	if success && lastExitCode != 0 {
+		completionNote = "（已按任务配置判定成功）"
+	}
+	onOutput(fmt.Sprintf("=== 执行结束 [%s] 耗时 %.2f 秒 退出码 %d%s ===\n",
+		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode, completionNote))
 
 	runStatus := model.RunSuccess
 	logStatus := model.LogStatusSuccess
