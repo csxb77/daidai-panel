@@ -2,7 +2,7 @@
 import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { taskApi } from '@/api/task'
-import { depsApi } from '@/api/deps'
+import { depsApi, type PythonRuntimeInfo } from '@/api/deps'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import TaskForm from './components/TaskForm.vue'
@@ -58,7 +58,8 @@ const selectedIdSet = computed(() => new Set(selectedIds.value))
 const batchLabelVisible = ref(false)
 const notificationChannels = ref<{ id: number; name: string; type: string; enabled: boolean }[]>([])
 const defaultPythonVersion = ref('3.12')
-const supportedPythonVersions = ref<string[]>(['3.10', '3.11', '3.12'])
+// 任务表单的 Python 版本候选：保留后端算好的 available/message，用于标注/禁用未安装版本
+const pythonRuntimeOptions = ref<PythonRuntimeInfo[]>([])
 const formVisible = ref(false)
 const editingTask = ref<any>(null)
 const prefillData = ref<any>(null)
@@ -225,16 +226,15 @@ async function loadNotificationChannels() {
 async function loadDefaultPythonVersion() {
   try {
     const res = await depsApi.pythonRuntimes()
-    const versions = (res.data || [])
-      .map(item => item.version)
-      .filter(version => ['3.10', '3.11', '3.12'].includes(version))
-    supportedPythonVersions.value = versions.length > 0 ? versions : ['3.12']
+    // 保留后端已算好的 available/message，任务表单据此标注/禁用未安装版本并提示安装方式
+    pythonRuntimeOptions.value = (res.data || [])
+      .filter(item => ['3.10', '3.11', '3.12'].includes(item.version))
     if (['3.10', '3.11', '3.12'].includes(res.default_version)) {
       defaultPythonVersion.value = res.default_version
     }
   } catch {
     defaultPythonVersion.value = '3.12'
-    supportedPythonVersions.value = ['3.10', '3.11', '3.12']
+    pythonRuntimeOptions.value = []
   }
 }
 
@@ -1006,7 +1006,7 @@ async function handleImport(event: Event) {
       :task="editingTask"
       :prefill="prefillData"
       :default-python-version="defaultPythonVersion"
-      :supported-python-versions="supportedPythonVersions"
+      :python-runtimes="pythonRuntimeOptions"
       :notification-channels="notificationChannels"
       @submit="handleFormSubmit"
     />

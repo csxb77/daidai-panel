@@ -5,13 +5,14 @@ import CronInput from './CronInput.vue'
 import StopScheduleInput from './StopScheduleInput.vue'
 import { mergeTaskLabels, splitTaskLabels } from '../taskLabels'
 import { useResponsive } from '@/composables/useResponsive'
+import type { PythonRuntimeInfo } from '@/api/deps'
 
 const props = defineProps<{
   visible: boolean
   task?: any
   prefill?: any
   defaultPythonVersion?: string
-  supportedPythonVersions?: string[]
+  pythonRuntimes?: PythonRuntimeInfo[]
   notificationChannels?: { id: number; name: string; type: string; enabled: boolean }[]
 }>()
 
@@ -51,17 +52,35 @@ const randomDelayMode = ref<'inherit' | 'disabled' | 'custom'>('inherit')
 const { dialogFullscreen } = useResponsive()
 const allPythonVersions = ['3.10', '3.11', '3.12']
 
+// Python 版本下拉选项：带上后端算好的 available/message，
+// 未安装版本仍展示但会被标注/禁用，避免任务默认或误选到本机不存在的解释器。
 const pythonVersionOptions = computed(() => {
-  const versions = (props.supportedPythonVersions || [])
-    .filter(version => allPythonVersions.includes(version))
-  return versions.length > 0 ? versions : allPythonVersions
+  const runtimes = (props.pythonRuntimes || [])
+    .filter(item => allPythonVersions.includes(item.version))
+    .map(item => ({ version: item.version, available: item.available, message: item.message }))
+  // 后端未返回运行时信息时退回全量候选，且默认视为可用（无从判断可用性）
+  return runtimes.length > 0
+    ? runtimes
+    : allPythonVersions.map(version => ({ version, available: true, message: '' }))
+})
+
+// 当前选中版本若未安装，展示后端给的提示，让用户知道该版本不可用及如何处理
+const selectedPythonRuntimeMessage = computed(() => {
+  const current = pythonVersionOptions.value.find(item => item.version === form.value.python_version)
+  return current && !current.available ? current.message : ''
 })
 
 function getDefaultPythonVersion() {
-  // 单版本 Docker 镜像只会返回当前镜像支持的小版本，避免新建任务时还能选到已被清理的 3.10 / 3.11。
-  return pythonVersionOptions.value.includes(props.defaultPythonVersion || '')
-    ? props.defaultPythonVersion!
-    : (pythonVersionOptions.value[0] || '3.12')
+  // 默认值优先落在已安装（available）的版本上，不要默认到未安装版本；
+  // 单版本 Docker 镜像也只会返回当前镜像支持的小版本。
+  const options = pythonVersionOptions.value
+  const preferred = props.defaultPythonVersion || ''
+  const defaultOption = options.find(item => item.version === preferred)
+  if (defaultOption?.available) return defaultOption.version
+  const firstAvailable = options.find(item => item.available)
+  if (firstAvailable) return firstAvailable.version
+  // 全部未安装时退回后端默认/首个候选
+  return defaultOption?.version || options[0]?.version || preferred || '3.12'
 }
 
 watch(() => props.visible, (val) => {
@@ -120,7 +139,8 @@ watch(() => props.visible, (val) => {
   activeTab.value = 'basic'
 })
 
-watch(() => props.defaultPythonVersion, () => {
+// 后端默认版本或运行时可用性变化时，若正在新建任务则重新计算默认 Python 版本
+watch([() => props.defaultPythonVersion, () => props.pythonRuntimes], () => {
   if (props.visible && !props.task && !props.prefill?.python_version) {
     form.value.python_version = getDefaultPythonVersion()
   }
@@ -217,12 +237,19 @@ function handleSubmit() {
           <el-form-item label="Python版本">
             <el-select v-model="form.python_version" style="width: 100%">
               <el-option
-                v-for="version in pythonVersionOptions"
-                :key="version"
-                :label="`Python ${version}`"
-                :value="version"
+                v-for="option in pythonVersionOptions"
+                :key="option.version"
+                :label="option.available ? `Python ${option.version}` : `Python ${option.version}（未安装）`"
+                :value="option.version"
+                :disabled="!option.available"
               />
             </el-select>
+            <div
+              v-if="selectedPythonRuntimeMessage"
+              style="font-size: 12px; color: var(--el-color-warning); margin-top: 4px"
+            >
+              {{ selectedPythonRuntimeMessage }}
+            </div>
           </el-form-item>
           <el-form-item label="定时类型" required>
             <el-select v-model="form.task_type" style="width: 100%">

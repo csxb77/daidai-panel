@@ -101,46 +101,39 @@ func IsMagiskModuleRuntime() bool {
 	return false
 }
 
-func detectActiveSystemPythonVersion() string {
-	for _, binary := range []string{"python3", "python"} {
-		resolved, err := exec.LookPath(binary)
-		if err != nil || strings.TrimSpace(resolved) == "" {
-			continue
-		}
-
-		cmd := exec.Command(resolved, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-		cmd.Env = appendPythonBootstrapEnv(SanitizePipEnv(os.Environ()))
-		out, runErr := cmd.CombinedOutput()
-		if runErr != nil {
-			continue
-		}
-
-		version, normalizeErr := NormalizePythonVersionStrict(strings.TrimSpace(string(out)))
-		if normalizeErr == nil && version != "" {
-			return version
-		}
-	}
-	return ""
-}
-
 func resolveEffectivePythonVersionForCurrentRuntime(raw string) string {
 	requested := NormalizePythonVersionOrDefault(raw)
-	if !IsMagiskModuleRuntime() {
-		return requested
+	version, fellBack := resolvePythonFallbackVersion(
+		requested,
+		CurrentPythonRuntimeVersions(),
+		func(v string) bool { return discoverSystemPythonForVersion(v) != "" },
+	)
+	if fellBack {
+		// 回退实际发生，记录 panel 日志，便于用户理解任务为何改用了其它 Python 版本。
+		log.Printf("任务请求 Python %s 未安装，已回退到 %s", requested, version)
 	}
+	return version
+}
 
-	actual := detectActiveSystemPythonVersion()
-	if actual == "" || actual == requested {
-		return requested
+// resolvePythonFallbackVersion 决定运行时最终使用的 Python 小版本。
+// 核心不变量：请求版本只要已安装(probe 命中)就绝不回退，始终尊重请求版本；
+// 只有请求版本探测不到、且受支持集合里另有已装版本时，才回退到那个已装版本。
+// 单版本运行时(Docker 固定版本)受支持集合只含一个版本，因此永远不会回退到别的版本，语义安全。
+// 桌面/二进制版与 Magisk 版共用本函数，回退行为一致。
+// probe 抽为参数便于单测注入，避免真实 exec 探测；返回 (最终版本, 是否发生回退)。
+func resolvePythonFallbackVersion(requested string, supported []string, probe func(string) bool) (string, bool) {
+	if probe(requested) {
+		return requested, false
 	}
-
-	// 如果模块里确实额外装了所请求版本，就继续尊重该版本；
-	// 只有“请求版本不可用，但模块当前真实 python3 是另一个受支持版本”时才自动回退。
-	if discoverSystemPythonForVersion(requested) != "" {
-		return requested
+	for _, candidate := range supported {
+		if candidate == requested {
+			continue
+		}
+		if probe(candidate) {
+			return candidate, true
+		}
 	}
-
-	return actual
+	return requested, false
 }
 
 func LegacyPythonVersion() string {

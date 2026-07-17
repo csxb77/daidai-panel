@@ -470,7 +470,9 @@ func TestDefaultPythonVersionFallsBackToActiveSystemPythonOnMagiskRuntime(t *tes
 	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	fakeDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
-	writeFakeExecutable(t, fakeDir, "python3", []string{"echo 3.11"})
+	// 新版回退探测走 `<binary> --version`（discoverSystemPythonForVersion），
+	// 假 python3 需按真实 `--version` 输出格式（"Python 3.11.4"）响应才能被识别。
+	writeFakeExecutable(t, fakeDir, "python3", []string{"echo Python 3.11.4"})
 
 	if got := DefaultPythonVersion(); got != "3.11" {
 		t.Fatalf("expected Magisk runtime default python version to follow active python3=3.11, got %q", got)
@@ -484,7 +486,8 @@ func TestResolvePythonVersionFromEnvFallsBackToActiveSystemPythonOnMagiskRuntime
 	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	fakeDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
-	writeFakeExecutable(t, fakeDir, "python3", []string{"echo 3.11"})
+	// 同上：假 python3 按真实 `--version` 输出格式响应，供新版探测识别。
+	writeFakeExecutable(t, fakeDir, "python3", []string{"echo Python 3.11.4"})
 
 	envMap := map[string]string{
 		"DAIDAI_PYTHON_VERSION": "3.12",
