@@ -9,6 +9,10 @@ export function useResponsive() {
 
   function updateViewport() {
     if (typeof window === 'undefined') return
+    // 最小化/切后台守卫：Edge/Chromium 在窗口最小化时会派发 innerWidth===0 的 resize 事件。
+    // 若把 0 写进 width，会让 isMobile/dialogFullscreen 误翻为 true，导致弹窗全屏、侧栏收起、全站切移动端。
+    // 这类零尺寸不是真实布局态，直接跳过，等窗口恢复后的真实 resize 再更新；真实移动端/缩放（innerWidth>0）行为不变。
+    if (window.innerWidth === 0 || document.hidden) return
     width.value = window.innerWidth
     height.value = window.innerHeight
   }
