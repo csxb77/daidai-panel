@@ -20,6 +20,13 @@ type SchedulerConfig struct {
 	RateInterval time.Duration
 }
 
+// ExecutionRequest.TriggerType 的取值，供调度器生产端与执行器闸门共用，避免字面量拼写漂移。
+const (
+	TriggerTypeCron    = "cron"
+	TriggerTypeManual  = "manual"
+	TriggerTypeStartup = "startup"
+)
+
 type ExecutionRequest struct {
 	TaskID      uint
 	Task        *model.Task
@@ -292,7 +299,7 @@ func (s *SchedulerV2) AddJob(task *model.Task) error {
 			req := &ExecutionRequest{
 				TaskID:      taskID,
 				Task:        &t,
-				TriggerType: "cron",
+				TriggerType: TriggerTypeCron,
 				RetryIndex:  0,
 			}
 			if err := s.Enqueue(req); err != nil {
@@ -430,7 +437,7 @@ func (s *SchedulerV2) RunNow(taskID uint) error {
 	req := &ExecutionRequest{
 		TaskID:      taskID,
 		Task:        &task,
-		TriggerType: "manual",
+		TriggerType: TriggerTypeManual,
 		RetryIndex:  0,
 	}
 
@@ -481,7 +488,7 @@ func (s *SchedulerV2) EnqueueStartupTasks() int {
 		req := &ExecutionRequest{
 			TaskID:      task.ID,
 			Task:        &task,
-			TriggerType: "startup",
+			TriggerType: TriggerTypeStartup,
 			RetryIndex:  0,
 		}
 		if err := s.Enqueue(req); err != nil {

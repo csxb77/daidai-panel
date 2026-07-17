@@ -57,10 +57,13 @@ func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 	}
 	req.CommandPlan = plan
 
-	randomDelay := resolveTaskRandomDelaySeconds(task, plan)
-	if randomDelay > 0 {
-		delay := rand.Intn(randomDelay) + 1
-		time.Sleep(time.Duration(delay) * time.Second)
+	// 随机延迟只对定时(cron)任务生效；手动执行与开机自启立即运行，避免用户手点后还要等待。
+	if shouldApplyRandomDelayForTrigger(req.TriggerType) {
+		randomDelay := resolveTaskRandomDelaySeconds(task, plan)
+		if randomDelay > 0 {
+			delay := rand.Intn(randomDelay) + 1
+			time.Sleep(time.Duration(delay) * time.Second)
+		}
 	}
 
 	now := time.Now()

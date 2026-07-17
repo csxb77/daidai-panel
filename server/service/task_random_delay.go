@@ -2,6 +2,12 @@ package service
 
 import "daidai-panel/model"
 
+// shouldApplyRandomDelayForTrigger 判断某次执行是否应当应用随机延迟。
+// 随机延迟只对定时(cron)任务生效；手动执行与开机自启一律立即运行、跳过延迟。
+func shouldApplyRandomDelayForTrigger(triggerType string) bool {
+	return triggerType == TriggerTypeCron
+}
+
 func resolveTaskRandomDelaySeconds(task *model.Task, plan *CommandExecutionPlan) int {
 	if task == nil {
 		return 0

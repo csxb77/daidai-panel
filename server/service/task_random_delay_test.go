@@ -51,3 +51,21 @@ func TestResolveTaskRandomDelaySeconds(t *testing.T) {
 		}
 	})
 }
+
+func TestShouldApplyRandomDelayForTrigger(t *testing.T) {
+	// 随机延迟只对定时(cron)任务生效；手动、开机等其它来源都应立即执行、跳过延迟。
+	cases := []struct {
+		trigger string
+		want    bool
+	}{
+		{TriggerTypeCron, true},
+		{TriggerTypeManual, false},
+		{TriggerTypeStartup, false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := shouldApplyRandomDelayForTrigger(c.trigger); got != c.want {
+			t.Fatalf("trigger %q: expected %v, got %v", c.trigger, c.want, got)
+		}
+	}
+}
