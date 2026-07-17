@@ -644,7 +644,7 @@ func TestSendWecomAppMpnews(t *testing.T) {
 				"author":"Author",
 				"content_source_url":"https://example.com/article",
 				"content":"<p>{{content}}</p>",
-				"digest":"Digest description"
+				"digest":"{{content}}"
 			}
 		]`,
 	}, "系统通知", content)
@@ -679,8 +679,13 @@ func TestSendWecomAppMpnews(t *testing.T) {
 	if got := article["thumb_media_id"]; got != "MEDIA_ID" {
 		t.Fatalf("unexpected thumb_media_id: %#v", got)
 	}
-	if got := article["content"]; got != "<p>"+content+"</p>" {
+	// mpnews content 走 HTML 渲染，换行需转成 <br> 才能生效。
+	if got := article["content"]; got != "<p>任务执行完成<br>第二行输出</p>" {
 		t.Fatalf("unexpected article content: %#v", got)
+	}
+	// digest 是纯文本路径，同样的 {{content}} 渲染结果不应被换行转换影响，保持原始 \n。
+	if got := article["digest"]; got != content {
+		t.Fatalf("unexpected article digest: %#v", got)
 	}
 }
 

@@ -656,6 +656,18 @@ func sendWecomAppWithContext(cfg map[string]string, title, content string, conte
 		if !ok || len(articleList) == 0 {
 			return fmt.Errorf("企业微信应用 mpnews 需要至少一条 articles")
 		}
+		// mpnews 正文按 HTML 渲染，纯 \n 不会换行；仅把 content 键的换行替换为 <br>，
+		// 一次处理 \r\n 与 \n 避免残留孤立 \r。不触碰 digest/title（纯文本路径，\n 正常）。
+		contentLineBreakReplacer := strings.NewReplacer("\r\n", "<br>", "\n", "<br>")
+		for _, item := range articleList {
+			article, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if raw, ok := article["content"].(string); ok {
+				article["content"] = contentLineBreakReplacer.Replace(raw)
+			}
+		}
 		body["mpnews"] = map[string]interface{}{
 			"articles": articleList,
 		}
