@@ -81,6 +81,16 @@ $readmeContent = Get-Content -Path (Join-Path $repoRoot "README.md") -Raw -Encod
 if (($readmeContent -notmatch [regex]::Escape($tagVersion)) -or ($readmeContent -notmatch [regex]::Escape("./docs/release-notes/$tagVersion.md"))) {
     Fail-Step "README latest version block not synced."
 }
+# handler.Version 不只用于展示：CheckUpdate / 静默更新 / FinalizePendingAutoUpdateOnStartup 都以它为比较基准。
+# 它一旦滞后，已是最新版的实例会反复提示更新，升级成功后还会误报“静默更新失败”，所以必须在打 tag 前拦住。
+Assert-FileTextContains `
+    -Path (Join-Path $repoRoot "server\handler\version.go") `
+    -Text ('Version = "' + $normalizedVersion + '"') `
+    -Description "backend Version constant"
+Assert-FileTextContains `
+    -Path (Join-Path $repoRoot "web\package.json") `
+    -Text ('"version": "' + $normalizedVersion + '"') `
+    -Description "frontend package.json version"
 $moduleProp = Get-Content -Path (Join-Path $repoRoot "Magisk\module.prop") -Raw -Encoding UTF8
 if (($moduleProp -notmatch [regex]::Escape("version=$tagVersion")) -or ($moduleProp -notmatch [regex]::Escape("versionCode=$versionCode"))) {
     Fail-Step "Magisk module.prop version not synced."

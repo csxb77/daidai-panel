@@ -4,8 +4,8 @@
 #
 # 用法:
 #   bash Magisk/build.sh            # 默认打包 arm64
-#   bash Magisk/build.sh 2.3.1     # 指定版本号
-#   bash Magisk/build.sh 2.3.1 all # 同时打包 arm64 + amd64
+#   bash Magisk/build.sh 3.0.0     # 指定版本号
+#   bash Magisk/build.sh 3.0.0 all # 同时打包 arm64 + amd64
 #
 # 产物: dist/daidai-panel-magisk-v<版本>.zip
 #
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-VERSION="${1:-2.3.1}"
+VERSION="${1:-3.0.0}"
 TARGETS="${2:-arm64}"     # arm64 / amd64 / all
 
 cd "$(dirname "$0")/.."
