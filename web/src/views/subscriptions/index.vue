@@ -777,10 +777,20 @@ function connectPullStream(id: number) {
       // 真正区分靠 data（PullStream 只发这四种）：
       //   finished     收到 \x00DONE 哨兵，拉取确实跑完了
       //   not_running  广播器已不存在，拉取早就结束了
-      //   closed       channel 被关
+      //   closed       订阅 channel 被 close，只可能来自 removeSubBroadcaster
       //   timeout      5 分钟静默
-      // 前两种下 SubLog 已经 Create 完（service 里 Create 在 done() 之前），可以查库；
-      // 后两种下拉取可能还在跑，查到的会是上一次的结果，所以只报「连接中断」。
+      //
+      // 前三种都代表「拉取已经返回」，SubLog 也已经 Create 完
+      // （service 里 Create 在 done() 之前），可以查库拿成功/失败：
+      //   - closed 之所以不是 finished，是因为 done() 往 64 槽缓冲 channel
+      //     非阻塞发哨兵，槽满就丢；而 removeSubBroadcaster 只在
+      //     handler 那个拉取 goroutine 的 defer 里调用，能收到 closed
+      //     就说明 ExecuteSubscriptionPull 早已 return。
+      //   - 唯独 timeout 是 5 分钟静默，拉取可能还在跑（大仓库 clone），
+      //     此刻查库拿到的会是上一次的结果，所以只报「连接中断」。
+      //
+      // 查库本身有 pullBaselineLogId 主键基线守卫兜底：本次没落新记录就降级成
+      // 「已完成」，不会把上一次的旧结果误报成本次结果。
       const reason = event.data.trim();
 
       // not_running 说明广播器已随拉取结束一起销毁，history 也跟着没了，
@@ -801,7 +811,11 @@ function connectPullStream(id: number) {
         pullOutcome.value = "aborted";
         return;
       }
-      if (reason === "finished" || reason === "not_running") {
+      if (
+        reason === "finished" ||
+        reason === "not_running" ||
+        reason === "closed"
+      ) {
         // 用闭包里的 id 而不是 pullingSubId：上面刚把它置空，且这条流本来就是为 id 开的。
         void resolvePullOutcome(id, session);
         return;
@@ -1404,7 +1418,7 @@ function viewLogDetail(log: any) {
         <el-form-item label="白名单" class="form-item--full">
           <el-input
             v-model="editForm.whitelist"
-            placeholder="文件名/路径白名单 (逗号分隔)"
+            placeholder="文件名/路径片段（`,` 或 `|` 分隔，如 jd_|jx_）"
           />
           <div
             style="
@@ -1414,20 +1428,45 @@ function viewLogDetail(log: any) {
               line-height: 1.4;
             "
           >
-            白名单会同时限制实际检出的文件：只有命中白名单的文件会落盘。若主脚本依赖同目录的辅助文件，请把辅助文件名也一并加入白名单。
+            匹配方式是「子串包含」，不是正则也不是
+            glob。片段命中目录名时，该目录下的全部文件（含多级子目录）都算命中。命中白名单的文件会被检出落盘，并建成定时任务。主脚本
+            require 的辅助库文件请填到下面的「依赖规则」，不必再塞进白名单。
           </div>
         </el-form-item>
         <el-form-item label="黑名单">
           <el-input
             v-model="editForm.blacklist"
-            placeholder="文件名/路径黑名单 (逗号分隔，如 Backup)"
+            placeholder="文件名/路径片段（`,` 或 `|` 分隔，如 backUp）"
           />
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            匹配方式同白名单（子串包含）。片段命中目录名时，该目录下的全部文件都会被排除，既不落盘也不建任务；黑名单对白名单与依赖规则都生效。
+          </div>
         </el-form-item>
-        <el-form-item label="依赖说明">
+        <el-form-item label="依赖规则" class="form-item--full">
           <el-input
             v-model="editForm.depend_on"
-            placeholder="用于记录订阅依赖、过滤说明或迁移信息（仅备注，不参与文件检出）"
+            placeholder="辅助库文件名/路径片段（`,` 或 `|` 分隔，如 sendNotify|utils）"
           />
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            对应青龙 ql repo 的第 4
+            个参数。命中的文件会被拉取到脚本目录供主脚本调用，但<strong>不会</strong>建成定时任务——只有命中白名单的文件才建任务；黑名单对两者都生效。匹配方式同白名单（子串包含，片段命中目录名时目录下的全部文件一并检出，所以填
+            utils 就能把 utils/date.js
+            带下来）。含空格或中文的内容会被当作文字备注跳过，不参与检出。
+          </div>
         </el-form-item>
         <el-form-item label="拉取后钩子" class="form-item--full">
           <el-input
@@ -2008,7 +2047,7 @@ function viewLogDetail(log: any) {
 
     // 跨满两列的字段。判定口径：内容天然放不进半列（一键识别的输入框+按钮、URL、
     // 钩子 textarea、仓库鉴权的三个 radio），或说明文字在半列宽下会超过 2 行
-    // （白名单、鉴权用户名）。「指定子目录」「依赖说明」都能在半列内放下，故不跨列。
+    // （白名单、依赖规则、鉴权用户名）。「指定子目录」能在半列内放下，故不跨列。
     :deep(.form-item--full) {
       grid-column: 1 / -1;
     }

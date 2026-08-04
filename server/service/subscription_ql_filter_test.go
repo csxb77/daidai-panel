@@ -117,12 +117,32 @@ func TestBuildSparseCheckoutPatternsForQLRepoCommand(t *testing.T) {
 	}
 
 	patterns, warnings := buildSubscriptionSparseCheckoutPatterns(sub)
-	want := []string{"**/*jd_*", "**/*jx_*", "**/*jddj_*", "!**/*backUp*"}
+	// 白名单三条 + 依赖规则里 5 条安全模式（`^jd[^_]` 含元字符被单独跳过）+ 黑名单排除，
+	// 每个片段成对下发「条目本身」与「条目下全部内容」两条规则：
+	// gitignore 的 `*` 不跨 `/`，只发 `**/*utils*` 拉不到 utils/date.js。
+	want := []string{
+		"**/*jd_*", "**/*jd_*/**",
+		"**/*jx_*", "**/*jx_*/**",
+		"**/*jddj_*", "**/*jddj_*/**",
+		"**/*USER*", "**/*USER*/**",
+		"**/*JD*", "**/*JD*/**",
+		"**/*function*", "**/*function*/**",
+		"**/*sendNotify*", "**/*sendNotify*/**",
+		"**/*utils*", "**/*utils*/**",
+		"!**/*backUp*", "!**/*backUp*/**",
+	}
 	if !reflect.DeepEqual(patterns, want) {
 		t.Fatalf("sparse patterns = %#v, want %#v", patterns, want)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("普通过滤词不应产生告警, got %#v", warnings)
+	// 依赖规则并入检出范围这件事必须可见，含元字符被跳过的那条也必须可见。
+	if len(warnings) != 2 {
+		t.Fatalf("expected 2 warnings (依赖并入 + 元字符跳过), got %#v", warnings)
+	}
+	if !strings.Contains(warnings[0], "sendNotify") || !strings.Contains(warnings[0], "不会建成定时任务") {
+		t.Errorf("第一条应说明依赖规则已并入检出、且不建任务, got %q", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "^jd[^_]") {
+		t.Errorf("第二条应点名被跳过的依赖模式, got %q", warnings[1])
 	}
 	for _, p := range patterns {
 		if strings.Contains(p, "|") {
@@ -156,10 +176,11 @@ func TestBuildSparseCheckoutPatternsFallsBackOnUnsafeWhitelist(t *testing.T) {
 		t.Fatalf("应给出含具体模式的可见告警, got %#v", warnings)
 	}
 
-	// 有黑名单 → 包含全部 + 保留排除规则
+	// 有黑名单 → 包含全部 + 保留排除规则（排除规则同样成对，否则 backUp/jd_old.js
+	// 会重新命中 `*` 而落盘）
 	sub = &model.Subscription{Whitelist: "^jd[^_]|USER", Blacklist: "backUp"}
 	patterns, warnings = buildSubscriptionSparseCheckoutPatterns(sub)
-	want := []string{"*", "!**/*backUp*"}
+	want := []string{"*", "!**/*backUp*", "!**/*backUp*/**"}
 	if !reflect.DeepEqual(patterns, want) {
 		t.Fatalf("sparse patterns = %#v, want %#v", patterns, want)
 	}
@@ -182,7 +203,7 @@ func TestBuildSparseCheckoutPatternsFallsBackOnUnsafeWhitelist(t *testing.T) {
 func TestBuildSparseCheckoutPatternsSkipsUnsafeBlacklist(t *testing.T) {
 	sub := &model.Subscription{Whitelist: "jd_", Blacklist: "back[Uu]p|Archive"}
 	patterns, warnings := buildSubscriptionSparseCheckoutPatterns(sub)
-	want := []string{"**/*jd_*", "!**/*Archive*"}
+	want := []string{"**/*jd_*", "**/*jd_*/**", "!**/*Archive*", "!**/*Archive*/**"}
 	if !reflect.DeepEqual(patterns, want) {
 		t.Fatalf("sparse patterns = %#v, want %#v", patterns, want)
 	}
@@ -194,7 +215,7 @@ func TestBuildSparseCheckoutPatternsSkipsUnsafeBlacklist(t *testing.T) {
 func TestBuildSparseCheckoutPatternsFallsBackOnUnsafeSubPath(t *testing.T) {
 	sub := &model.Subscription{SubPath: "scripts/day[0-9]", Blacklist: "backUp"}
 	patterns, warnings := buildSubscriptionSparseCheckoutPatterns(sub)
-	want := []string{"*", "!**/*backUp*"}
+	want := []string{"*", "!**/*backUp*", "!**/*backUp*/**"}
 	if !reflect.DeepEqual(patterns, want) {
 		t.Fatalf("sparse patterns = %#v, want %#v", patterns, want)
 	}
@@ -226,7 +247,9 @@ func TestMatchesSubscriptionFiltersForQLRepoCommand(t *testing.T) {
 		{"backUp/jx_old.js", false},
 		// 白名单未命中
 		{"README.md", false},
-		// 依赖参数（ql 的 $4）完全不参与筛选，辅助文件仍被白名单挡在外面
+		// 依赖规则（ql 的 $4）只决定「检不检出」，不决定「建不建任务」：
+		// 辅助文件会落盘，但白名单没命中就不会变成定时任务。
+		// 见 TestSubscriptionDependencyOnlyFilesAreCheckedOutButNotScheduled。
 		{"utils/sendNotify.js", false},
 	}
 
@@ -442,10 +465,11 @@ func TestPullGitRepoWithCallbackPipeSeparatedWhitelistChecksOutAllMatches(t *tes
 			t.Errorf("%s 不应被检出, stat err=%v", name, statErr)
 		}
 	}
-	// 刻意不断言 backUp/jd_old.js 是否落盘：
-	// `!**/*backUp*` 在 gitignore 语法下只匹配到 backUp 这个「目录条目」本身，
-	// 子文件 backUp/jd_old.js 会重新命中正向的 `**/*jd_*` 而被检出（gitignore 的
-	// `*` 不跨 `/`，最后匹配者胜出）。这属于既有的黑名单目录未递归排除问题，
-	// 与本次 `|` 分隔修复无关，已单独上报。Go 侧 checkBlacklist 仍会挡住建任务，
-	// 见 TestSyncSubscriptionTasksHandlesQLPipeSeparatedFilters。
+	// 黑名单目录里的文件：以前这条只能「记录不断言」——`!**/*backUp*` 在 gitignore 语法下
+	// 只匹配到 backUp 这个目录条目本身，子文件 backUp/jd_old.js 会重新命中正向的
+	// `**/*jd_*` 而落盘（`*` 不跨 `/`，最后匹配者胜出）。
+	// 现在黑名单同样成对下发 `!**/*backUp*/**`，可以真正断言了。
+	if _, statErr := os.Stat(filepath.Join(destDir, filepath.FromSlash("backUp/jd_old.js"))); !os.IsNotExist(statErr) {
+		t.Errorf("黑名单目录里的 backUp/jd_old.js 不应被检出, stat err=%v", statErr)
+	}
 }
