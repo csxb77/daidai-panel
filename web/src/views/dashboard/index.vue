@@ -141,7 +141,7 @@ const greetingSub = computed(() => {
   return "辛苦一天啦，看看任务运行情况吧~";
 });
 
-// hero 内的日期/星期小胶囊：用 new Date() 直接推导，无需新增数据源
+// hero 内的日期/星期文案：用 new Date() 直接推导，无需新增数据源
 const heroDateLabel = computed(() => {
   void refreshTimestamp.value; // 刷新时一并更新展示
   const now = new Date();
@@ -357,7 +357,8 @@ const resourceItems = computed(() => {
       iconBg: "rgba(59, 130, 246, 0.12)",
       detail: `${s.num_cpu || "-"} 核心`,
       percent: Number(s.cpu_usage) || 0,
-      barColor: "linear-gradient(90deg, #3b82f6, #60a5fa)",
+      // 进度条用纯色，不用渐变，保持整体扁平观感
+      barColor: "#3b82f6",
     },
     {
       key: "memory",
@@ -367,7 +368,7 @@ const resourceItems = computed(() => {
       iconBg: "rgba(6, 182, 212, 0.12)",
       detail: `${formatBytes(s.memory_used)} / ${formatBytes(s.memory_total)}`,
       percent: Number(s.memory_usage) || 0,
-      barColor: "linear-gradient(90deg, #06b6d4, #67e8f9)",
+      barColor: "#06b6d4",
     },
     {
       key: "disk",
@@ -377,7 +378,7 @@ const resourceItems = computed(() => {
       iconBg: "rgba(16, 185, 129, 0.12)",
       detail: `${formatBytes(s.disk_used)} / ${formatBytes(s.disk_total)}`,
       percent: Number(s.disk_usage) || 0,
-      barColor: "linear-gradient(90deg, #10b981, #34d399)",
+      barColor: "#10b981",
     },
   ];
 });
@@ -461,27 +462,6 @@ const avgDuration = computed(() => {
   const sum = valid.reduce((s: number, l: any) => s + (l.duration || 0), 0);
   return Math.round((sum / valid.length) * 10) / 10;
 });
-
-function donutSegments() {
-  const radius = 50;
-  const circ = 2 * Math.PI * radius;
-  const stats = taskStats.value;
-  // gradient 指向 <defs> 中各段渐变，使环形更精致；color 保留用于兜底
-  const segs = [
-    { color: "#10b981", gradient: "url(#donutSuccess)", percent: stats.successPct },
-    { color: "#3b82f6", gradient: "url(#donutRunning)", percent: stats.runningPct },
-    { color: "#ef4444", gradient: "url(#donutFailed)", percent: stats.failedPct },
-    { color: "#f59e0b", gradient: "url(#donutAborted)", percent: stats.abortedPct },
-  ];
-  let offset = 0;
-  return segs.map((s) => {
-    const length = (s.percent / 100) * circ;
-    const dasharray = `${length} ${circ - length}`;
-    const dashoffset = -offset;
-    offset += length;
-    return { ...s, dasharray, dashoffset, circ };
-  });
-}
 
 const loadDashboard = async () => {
   try {
@@ -652,7 +632,7 @@ function rerunLog(log: any) {
 
 <template>
   <div class="dashboard-page dd-scroll-page">
-    <!-- ============ 轻量问候条：坐在页面底色上，问候语 + 快捷操作胶囊 ============ -->
+    <!-- ============ 轻量问候条：坐在页面底色上，问候语 + 快捷操作按钮 ============ -->
     <section class="dash-welcome animate-fade-in-up">
       <!-- 左侧：问候语 + 日期/副标题元信息 -->
       <div class="dash-welcome__greet">
@@ -663,7 +643,7 @@ function rerunLog(log: any) {
           >{{ heroDateLabel }} · {{ greetingSub }}</span
         >
       </div>
-      <!-- 右侧：快捷操作胶囊按钮，复用 quickActions 数据与点击逻辑 -->
+      <!-- 右侧：快捷操作按钮，复用 quickActions 数据与点击逻辑 -->
       <div class="dash-welcome__actions">
         <button
           v-for="action in quickActions"
@@ -731,7 +711,7 @@ function rerunLog(log: any) {
       </div>
     </section>
 
-    <!-- ============ 焦点行：执行趋势（大）+ 执行统计环形 ============ -->
+    <!-- ============ 焦点行：执行趋势（大）+ 执行统计占比条 ============ -->
     <section class="focus-grid animate-fade-in-up delay-100">
       <!-- 执行趋势 -->
       <div class="panel panel--trend">
@@ -779,7 +759,7 @@ function rerunLog(log: any) {
         </div>
       </div>
 
-      <!-- 执行统计环形 -->
+      <!-- 执行统计：横向堆叠占比条 -->
       <div class="panel panel--stats">
         <div class="panel-header">
           <div class="panel-header__title">
@@ -799,98 +779,72 @@ function rerunLog(log: any) {
           </div>
         </div>
         <div class="task-stats-body">
-          <div class="task-donut">
-            <svg viewBox="0 0 140 140">
-              <defs>
-                <!-- 各段渐变：成功绿 / 运行蓝 / 失败红 / 终止黄，各一套，更精致 -->
-                <linearGradient id="donutSuccess" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stop-color="#34d399" />
-                  <stop offset="100%" stop-color="#059669" />
-                </linearGradient>
-                <linearGradient id="donutRunning" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stop-color="#60a5fa" />
-                  <stop offset="100%" stop-color="#2563eb" />
-                </linearGradient>
-                <linearGradient id="donutFailed" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stop-color="#f87171" />
-                  <stop offset="100%" stop-color="#dc2626" />
-                </linearGradient>
-                <linearGradient id="donutAborted" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0%" stop-color="#fbbf24" />
-                  <stop offset="100%" stop-color="#f59e0b" />
-                </linearGradient>
-              </defs>
-              <!-- 轨道底环 -->
-              <circle
-                cx="70"
-                cy="70"
-                r="50"
-                fill="none"
-                stroke="var(--el-fill-color)"
-                stroke-width="14"
-              />
-              <!-- 数据段：stroke 引用对应渐变，整体加柔和投影 -->
-              <g class="task-donut__segments">
-                <circle
-                  v-for="(seg, idx) in donutSegments()"
-                  :key="idx"
-                  cx="70"
-                  cy="70"
-                  r="50"
-                  fill="none"
-                  :stroke="seg.gradient"
-                  stroke-width="14"
-                  stroke-linecap="round"
-                  :stroke-dasharray="seg.dasharray"
-                  :stroke-dashoffset="seg.dashoffset"
-                  transform="rotate(-90 70 70)"
-                  style="
-                    transition:
-                      stroke-dasharray 0.6s ease,
-                      stroke-dashoffset 0.6s ease;
-                  "
-                />
-              </g>
-            </svg>
-            <div class="task-donut__center">
-              <span class="task-donut__value">
-                <CountUp :end-val="taskStats.total" :duration="1.2" />
-              </span>
-              <span class="task-donut__label">总执行数</span>
-            </div>
+          <div class="task-stats__total">
+            <span class="task-stats__total-label">总执行数</span>
+            <span class="task-stats__total-value">
+              <CountUp :end-val="taskStats.total" :duration="1.2" />
+            </span>
           </div>
-          <div class="task-legend">
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #10b981"></span>
-              <span class="legend-row__label">成功</span>
-              <span class="legend-row__value">{{
+          <!-- 横向堆叠占比条：各段宽度直接取 taskStats 已算好的百分比；
+               总执行数为 0 时四段宽度均为 0，只剩条底的空态色，不存在除零 -->
+          <div class="task-stats__bar">
+            <span
+              class="task-stats__seg is-success"
+              :style="{ width: taskStats.successPct + '%' }"
+            ></span>
+            <span
+              class="task-stats__seg is-failed"
+              :style="{ width: taskStats.failedPct + '%' }"
+            ></span>
+            <span
+              class="task-stats__seg is-running"
+              :style="{ width: taskStats.runningPct + '%' }"
+            ></span>
+            <span
+              class="task-stats__seg is-aborted"
+              :style="{ width: taskStats.abortedPct + '%' }"
+            ></span>
+          </div>
+          <div class="task-stats__legend">
+            <div class="task-stats__legend-item">
+              <span class="task-stats__swatch is-success"></span>
+              <span class="task-stats__legend-label">成功</span>
+              <span class="task-stats__legend-value">{{
                 taskStats.success.toLocaleString()
               }}</span>
-              <span class="legend-row__pct">({{ taskStats.successPct }}%)</span>
+              <span class="task-stats__legend-pct"
+                >({{ taskStats.successPct }}%)</span
+              >
             </div>
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #ef4444"></span>
-              <span class="legend-row__label">失败</span>
-              <span class="legend-row__value">{{
+            <div class="task-stats__legend-item">
+              <span class="task-stats__swatch is-failed"></span>
+              <span class="task-stats__legend-label">失败</span>
+              <span class="task-stats__legend-value">{{
                 taskStats.failed.toLocaleString()
               }}</span>
-              <span class="legend-row__pct">({{ taskStats.failedPct }}%)</span>
+              <span class="task-stats__legend-pct"
+                >({{ taskStats.failedPct }}%)</span
+              >
             </div>
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #3b82f6"></span>
-              <span class="legend-row__label">运行中</span>
-              <span class="legend-row__value">{{
+            <div class="task-stats__legend-item">
+              <span class="task-stats__swatch is-running"></span>
+              <span class="task-stats__legend-label">运行中</span>
+              <span class="task-stats__legend-value">{{
                 taskStats.running.toLocaleString()
               }}</span>
-              <span class="legend-row__pct">({{ taskStats.runningPct }}%)</span>
+              <span class="task-stats__legend-pct"
+                >({{ taskStats.runningPct }}%)</span
+              >
             </div>
-            <div class="legend-row">
-              <span class="legend-row__dot" style="background: #f59e0b"></span>
-              <span class="legend-row__label">终止</span>
-              <span class="legend-row__value">{{
+            <div class="task-stats__legend-item">
+              <span class="task-stats__swatch is-aborted"></span>
+              <span class="task-stats__legend-label">终止</span>
+              <span class="task-stats__legend-value">{{
                 taskStats.aborted.toLocaleString()
               }}</span>
-              <span class="legend-row__pct">({{ taskStats.abortedPct }}%)</span>
+              <span class="task-stats__legend-pct"
+                >({{ taskStats.abortedPct }}%)</span
+              >
             </div>
           </div>
         </div>
@@ -1160,7 +1114,7 @@ function rerunLog(log: any) {
   line-height: 1.4;
 }
 
-// 快捷操作胶囊：复用页面令牌，明暗双主题自动适配
+// 快捷操作按钮：复用页面令牌，明暗双主题自动适配
 .dash-welcome__actions {
   display: flex;
   flex-wrap: wrap;
@@ -1172,7 +1126,7 @@ function rerunLog(log: any) {
   align-items: center;
   gap: 7px;
   padding: 7px 14px;
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   color: var(--el-text-color-regular);
@@ -1180,23 +1134,17 @@ function rerunLog(log: any) {
   font-weight: 600;
   cursor: pointer;
   transition:
-    transform var(--dd-motion-fast) var(--dd-ease-spring),
     color var(--dd-motion-fast) var(--dd-ease-standard),
     border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
-    // 边框/文字转品牌色，轻微上浮
+    // 只换边框与文字颜色，不做位移与缩放
     border-color: color-mix(
       in srgb,
       var(--el-color-primary) 45%,
       var(--el-border-color)
     );
     color: var(--el-color-primary);
-    transform: translateY(-1px);
-  }
-
-  &:active {
-    transform: scale(var(--dd-press-scale));
   }
 }
 
@@ -1211,29 +1159,19 @@ function rerunLog(log: any) {
 .stat-card {
   background: var(--el-bg-color);
   position: relative;
+  // 扁平风格下靠 1px 边框与背景色分层，不再使用阴影与上浮
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 14px;
+  border-radius: 0;
   padding: 16px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   cursor: pointer;
-  // 对齐全局表面令牌：弹簧 hover + 标准缓动，静置/悬浮阴影随明暗自动切换
-  transition:
-    transform var(--dd-motion-fast) var(--dd-ease-spring),
-    box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
-    border-color var(--dd-motion-fast) var(--dd-ease-standard);
-  box-shadow: var(--dd-shadow-card);
+  transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
-    transform: translateY(-4px);
-    box-shadow: var(--dd-shadow-card-hover);
     border-color: color-mix(in srgb, var(--el-color-primary) 20%, var(--el-border-color));
-  }
-
-  &:active {
-    transform: scale(0.988);
   }
 }
 
@@ -1294,7 +1232,7 @@ function rerunLog(log: any) {
   gap: 2px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 6px;
+  border-radius: 0;
 
   &.is-up {
     color: #10b981;
@@ -1316,7 +1254,7 @@ function rerunLog(log: any) {
 .stat-card__icon {
   width: 44px;
   height: 44px;
-  border-radius: 12px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1333,7 +1271,7 @@ function rerunLog(log: any) {
   }
 }
 
-// ============ 焦点行 Grid（趋势图大 + 环形）============
+// ============ 焦点行 Grid（趋势图大 + 执行统计占比条）============
 .focus-grid {
   display: grid;
   grid-template-columns: 1.8fr 1fr;
@@ -1351,13 +1289,12 @@ function rerunLog(log: any) {
 .panel {
   background: var(--el-bg-color);
   animation: dd-panel-rise-in 420ms var(--dd-ease-emphasized) both;
+  // 面板与页面底色的分隔完全由 1px 边框承担，不再叠加阴影
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 14px;
+  border-radius: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  // 对齐全局表面令牌：静置阴影随明暗自动切换
-  box-shadow: var(--dd-shadow-card);
 }
 
 .panel-header {
@@ -1406,19 +1343,18 @@ function rerunLog(log: any) {
   color: var(--el-color-primary);
   font-size: 12px;
   padding: 4px 6px;
-  border-radius: 6px;
-  transition: background 0.15s, transform 0.18s ease, border-color 0.18s ease;
+  border-radius: 0;
+  transition: background 0.15s, border-color 0.18s ease;
 
   &:hover {
     background: var(--el-color-primary-light-9);
-    transform: translateX(1px);
   }
 }
 
 .seg-btn-group {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 8px;
+  border-radius: 0;
   padding: 2px;
   gap: 2px;
 
@@ -1432,20 +1368,20 @@ function rerunLog(log: any) {
   background: transparent;
   padding: 4px 10px;
   font-size: 12px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   color: var(--el-text-color-secondary);
-  transition: all 0.18s;
+  transition: background-color 0.18s, color 0.18s;
 
   &:hover {
     color: var(--el-text-color-primary);
   }
 
+  // 选中态只靠底色与字色区分，不再用投影抬起
   &.is-active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
     font-weight: 600;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
   }
 }
 
@@ -1459,9 +1395,10 @@ function rerunLog(log: any) {
 
 .trend-chart-placeholder {
   height: 300px;
-  border-radius: 10px;
+  border-radius: 0;
   padding: 18px;
-  background: linear-gradient(180deg, rgba(64, 158, 255, 0.04), transparent);
+  // 骨架屏用纯色底，不再用渐变
+  background: var(--el-fill-color-lighter);
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
@@ -1470,12 +1407,8 @@ function rerunLog(log: any) {
 
 .placeholder-bar {
   height: 8px;
-  border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    rgba(59, 130, 246, 0.15),
-    rgba(16, 185, 129, 0.08)
-  );
+  border-radius: 0;
+  background: rgba(59, 130, 246, 0.15);
   animation: placeholderPulse 1.6s ease-in-out infinite;
 }
 
@@ -1492,7 +1425,7 @@ function rerunLog(log: any) {
 .placeholder-legend span {
   width: 48px;
   height: 6px;
-  border-radius: 999px;
+  border-radius: 0;
   background: rgba(140, 140, 140, 0.12);
 }
 
@@ -1517,18 +1450,17 @@ function rerunLog(log: any) {
 
 .resource-row {
   display: flex;
-  border-radius: 12px;
+  border-radius: 0;
   padding: 8px 10px;
-  transition: background-color 0.18s ease, transform 0.18s ease;
+  transition: background-color 0.18s ease;
   align-items: flex-start;
   gap: 12px;
 }
 
 .resource-row__icon {
   width: 36px;
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
   height: 36px;
-  border-radius: 10px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1576,26 +1508,16 @@ function rerunLog(log: any) {
 
 .resource-bar {
   height: 6px;
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--el-fill-color);
   overflow: hidden;
 }
 
+// 进度条为纯色直角实心，去掉了原来的流光高亮层
 .resource-bar__fill {
   height: 100%;
-  border-radius: 999px;
-  position: relative;
-  overflow: hidden;
+  border-radius: 0;
   transition: width 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-
-  &::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
-    transform: translateX(-120%);
-    animation: dd-resource-sheen 2.8s ease-in-out infinite;
-  }
 }
 
 .uptime-detail {
@@ -1617,21 +1539,16 @@ function rerunLog(log: any) {
 .uptime-track__dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0;
   background: #f59e0b;
-  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.14);
   flex-shrink: 0;
 }
 
 .uptime-track__line {
   height: 6px;
   flex: 1;
-  border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    rgba(245, 158, 11, 0.35),
-    rgba(245, 158, 11, 0.08)
-  );
+  border-radius: 0;
+  background: rgba(245, 158, 11, 0.28);
   overflow: hidden;
 }
 
@@ -1686,11 +1603,11 @@ function rerunLog(log: any) {
   }
 
   tbody tr {
-    transition: background 0.15s, transform 0.18s ease, box-shadow 0.18s ease;
+    transition: background 0.15s;
 
+    // 行悬浮只换底色，不做位移与投影
     &:hover {
       background: color-mix(in srgb, var(--el-color-primary-light-9) 76%, white);
-      box-shadow: inset 2px 0 0 var(--el-color-primary);
     }
   }
 }
@@ -1765,7 +1682,7 @@ function rerunLog(log: any) {
   justify-content: center;
   min-width: 44px;
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1.4;
@@ -1797,7 +1714,7 @@ function rerunLog(log: any) {
   justify-content: center;
   max-width: 100%;
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: 0;
   font-size: 11.5px;
   font-weight: 500;
   font-family: "Inter", var(--dd-font-ui), sans-serif;
@@ -1809,7 +1726,7 @@ function rerunLog(log: any) {
 
 .log-cell-actions {
   display: inline-flex;
-  border-radius: 999px;
+  border-radius: 0;
   padding: 2px;
   background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
   align-items: center;
@@ -1819,9 +1736,8 @@ function rerunLog(log: any) {
 
 .icon-btn {
   width: 26px;
-  transition: all 0.15s ease;
   height: 26px;
-  border-radius: 6px;
+  border-radius: 0;
   border: none;
   background: transparent;
   display: inline-flex;
@@ -1829,16 +1745,11 @@ function rerunLog(log: any) {
   justify-content: center;
   cursor: pointer;
   color: var(--el-text-color-placeholder);
-  transition: all 0.15s;
+  transition: background-color 0.15s ease, color 0.15s ease;
 
   &:hover {
     background: var(--el-fill-color);
     color: var(--el-color-primary);
-    transform: translateY(-1px);
-  }
-
-  &:active {
-    transform: scale(0.95);
   }
 }
 
@@ -1851,7 +1762,7 @@ function rerunLog(log: any) {
 
 .log-mobile-card {
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
+  border-radius: 0;
   padding: 10px 12px;
   background: var(--el-fill-color-light);
 }
@@ -1877,43 +1788,27 @@ function rerunLog(log: any) {
   color: var(--el-text-color-secondary);
 }
 
-// ============ Task Stats ============
+// ============ Task Stats（总数 + 横向堆叠占比条 + 图例）============
 .task-stats-body {
   flex: 1;
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 14px;
   padding: 14px 18px;
 }
 
-.task-donut {
-  position: relative;
-  width: 140px;
-  height: 140px;
-  flex-shrink: 0;
-
-  svg {
-    width: 100%;
-    height: 100%;
-  }
-}
-
-// 给环形数据段加柔和投影，更精致
-.task-donut__segments {
-  filter: drop-shadow(0 4px 8px rgba(15, 23, 42, 0.14));
-}
-
-.task-donut__center {
-  position: absolute;
-  inset: 0;
+.task-stats__total {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
+  align-items: baseline;
+  gap: 8px;
 }
 
-.task-donut__value {
+.task-stats__total-label {
+  font-size: 12px;
+  color: var(--el-text-color-placeholder);
+}
+
+.task-stats__total-value {
   font-size: 22px;
   font-weight: 700;
   color: var(--el-text-color-primary);
@@ -1923,45 +1818,87 @@ function rerunLog(log: any) {
   letter-spacing: -0.01em;
 }
 
-.task-donut__label {
-  font-size: 11px;
-  color: var(--el-text-color-placeholder);
+.task-stats__bar {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 0;
+  // 总执行数为 0 时四段宽度都是 0，这里的底色就是空态表现
+  background: var(--el-fill-color);
+  overflow: hidden;
 }
 
-.task-legend {
-  flex: 1;
+.task-stats__seg {
+  height: 100%;
+  min-width: 0;
+  transition: width 0.4s var(--dd-ease-standard);
+
+  &.is-success {
+    background: #10b981;
+  }
+
+  &.is-failed {
+    background: #ef4444;
+  }
+
+  &.is-running {
+    background: #3b82f6;
+  }
+
+  &.is-aborted {
+    background: #f59e0b;
+  }
+}
+
+.task-stats__legend {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.legend-row {
+.task-stats__legend-item {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12.5px;
 }
 
-.legend-row__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
+.task-stats__swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 0;
   flex-shrink: 0;
+
+  &.is-success {
+    background: #10b981;
+  }
+
+  &.is-failed {
+    background: #ef4444;
+  }
+
+  &.is-running {
+    background: #3b82f6;
+  }
+
+  &.is-aborted {
+    background: #f59e0b;
+  }
 }
 
-.legend-row__label {
+.task-stats__legend-label {
   flex: 1;
   color: var(--el-text-color-regular);
 }
 
-.legend-row__value {
+.task-stats__legend-value {
   font-weight: 700;
   color: var(--el-text-color-primary);
   font-family: "Inter", var(--dd-font-ui), sans-serif;
   font-variant-numeric: tabular-nums;
 }
 
-.legend-row__pct {
+.task-stats__legend-pct {
   font-size: 11.5px;
   color: var(--el-text-color-placeholder);
 }
@@ -2008,7 +1945,7 @@ function rerunLog(log: any) {
 }
 
 @media (max-width: 768px) {
-  // 窄屏：问候条竖排，actions 占满宽度、胶囊换行不溢出
+  // 窄屏：问候条竖排，actions 占满宽度、按钮换行不溢出
   .dash-welcome {
     flex-direction: column;
     align-items: flex-start;
@@ -2055,16 +1992,8 @@ function rerunLog(log: any) {
   }
 
   .task-stats-body {
-    flex-direction: column;
     gap: 16px;
     padding: 16px;
-  }
-  .task-donut {
-    width: 120px;
-    height: 120px;
-  }
-  .task-legend {
-    width: 100%;
   }
 }
 
@@ -2102,21 +2031,10 @@ function rerunLog(log: any) {
   }
 }
 
-@keyframes dd-resource-sheen {
-  0%,
-  100% {
-    transform: translateX(-120%);
-  }
-  55% {
-    transform: translateX(120%);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .stat-card--cinematic,
   .panel,
-  .log-table__row-cinematic,
-  .resource-bar__fill::after {
+  .log-table__row-cinematic {
     animation: none;
   }
 }

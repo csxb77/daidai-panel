@@ -71,7 +71,7 @@ const isMultiLine = computed(() => normalizedExpressions.value.length > 1)
   align-items: center;
   justify-content: center;
   margin-top: 1px;
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-color-primary) 10%, white);
   color: var(--el-color-primary);
   font-size: 11px;
@@ -84,7 +84,7 @@ const isMultiLine = computed(() => normalizedExpressions.value.length > 1)
   min-width: 0;
   width: 100%;
   padding: 6px 10px;
-  border-radius: 8px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 82%, white);
   border: 1px solid var(--el-border-color-lighter);
   color: var(--el-text-color-secondary);
@@ -99,7 +99,7 @@ const isMultiLine = computed(() => normalizedExpressions.value.length > 1)
   padding: 4px 8px;
   font-size: 11px;
   line-height: 1.45;
-  border-radius: 7px;
+  border-radius: 0;
 }
 
 .task-cron-list--multi .task-cron-list__code {

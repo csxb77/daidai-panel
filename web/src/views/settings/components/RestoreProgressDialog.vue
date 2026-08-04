@@ -440,9 +440,8 @@ onBeforeUnmount(() => {
   --dd-restore-accent: #2563eb;
   --dd-restore-accent-soft: rgba(37, 99, 235, 0.16);
   --dd-restore-accent-strong: rgba(37, 99, 235, 0.28);
-  --dd-restore-surface:
-    radial-gradient(circle at top, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.76)),
-    linear-gradient(180deg, rgba(37, 99, 235, 0.06), rgba(15, 23, 42, 0.02));
+  // 扁平化：头图底色改纯色，不再用光晕渐变堆质感
+  --dd-restore-surface: var(--el-fill-color-light);
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -473,10 +472,10 @@ onBeforeUnmount(() => {
   gap: 22px;
   align-items: center;
   padding: 22px;
-  border-radius: 24px;
+  border-radius: 0;
+  // 扁平化：去掉投影，用纯色底 + 1px 描边划分层次
   background: var(--dd-restore-surface);
   border: 1px solid var(--dd-restore-accent-soft);
-  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
 }
 
 .restore-progress-visual {
@@ -486,6 +485,7 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 
+// 旋转中的加载圆弧：属于运动中的加载指示，方化会变形失去动效意义，保留圆形
 .restore-progress-orbit {
   position: absolute;
   inset: 0;
@@ -496,12 +496,12 @@ onBeforeUnmount(() => {
   animation: restore-spin 5s linear infinite;
 }
 
+// 加载圆弧的同心环，与旋转指示同属一个加载部件，保留圆形；仅去掉 inset 高光
 .restore-progress-rings .ring {
   position: absolute;
   inset: 18px;
   border-radius: 50%;
   border: 1px solid var(--dd-restore-accent-soft);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
 }
 
 .restore-progress-rings .ring--outer {
@@ -523,14 +523,12 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
+  // 圆弧中心的读数盘，与外圈加载指示共用同一圆心，保留圆形
   border-radius: 50%;
   text-align: center;
-  background:
-    radial-gradient(circle at top, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.84)),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.74));
-  box-shadow:
-    0 14px 28px rgba(15, 23, 42, 0.12),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.9);
+  // 扁平化：去掉渐变与投影，纯色底 + 1px 描边与外圈区分
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
 
   strong {
     font-size: 30px;
@@ -571,7 +569,7 @@ onBeforeUnmount(() => {
 .restore-progress-eyebrow {
   display: inline-flex;
   padding: 6px 10px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -590,33 +588,33 @@ onBeforeUnmount(() => {
     align-items: center;
     min-height: 30px;
     padding: 0 12px;
-    border-radius: 999px;
+    border-radius: 0;
     font-size: 12px;
     color: var(--el-text-color-secondary);
-    background: rgba(255, 255, 255, 0.72);
-    border: 1px solid rgba(148, 163, 184, 0.18);
+    background: var(--el-bg-color);
+    border: 1px solid var(--el-border-color-lighter);
   }
 }
 
 .restore-progress-bar {
   padding: 18px 20px;
-  border-radius: 20px;
-  background: rgba(248, 250, 252, 0.9);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
 }
 
 .restore-progress-bar__track {
   position: relative;
   height: 12px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: 0;
   background: rgba(148, 163, 184, 0.16);
 }
 
 .restore-progress-bar__fill {
   position: relative;
   height: 100%;
-  border-radius: inherit;
+  border-radius: 0;
   background: linear-gradient(90deg, color-mix(in srgb, var(--dd-restore-accent) 82%, white), var(--dd-restore-accent));
   transition: width 0.45s ease;
 
@@ -656,14 +654,12 @@ onBeforeUnmount(() => {
   gap: 8px;
   min-height: 34px;
   padding: 0 14px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 12px;
   font-weight: 600;
   color: var(--el-text-color-primary);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(248, 250, 252, 0.88));
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.05);
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
 
   .el-icon {
     color: var(--dd-restore-accent);
@@ -683,21 +679,21 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   padding: 16px 12px;
-  border-radius: 18px;
+  border-radius: 0;
   text-align: center;
-  background: rgba(248, 250, 252, 0.86);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+  background: var(--el-fill-color-lighter);
+  border: 1px solid var(--el-border-color-lighter);
+  // 扁平化：不再上浮与投影，仅靠描边和底色区分步骤状态
+  transition: border-color 0.25s ease, background-color 0.25s ease;
 
   &.is-active {
-    border-color: var(--dd-restore-accent-soft);
-    box-shadow: 0 14px 32px var(--dd-restore-accent-soft);
-    transform: translateY(-2px);
+    border-color: var(--dd-restore-accent);
+    background: var(--dd-restore-accent-soft);
   }
 
   &.is-done {
     border-color: color-mix(in srgb, var(--dd-restore-accent) 36%, white);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), color-mix(in srgb, var(--dd-restore-accent) 8%, white));
+    background: color-mix(in srgb, var(--dd-restore-accent) 8%, var(--el-bg-color));
   }
 
   &.is-failed {
@@ -712,19 +708,19 @@ onBeforeUnmount(() => {
   justify-content: center;
   width: 36px;
   height: 36px;
-  border-radius: 50%;
+  // 静态的步骤序号，方化为直角方块
+  border-radius: 0;
   font-size: 14px;
   font-weight: 700;
   color: var(--el-text-color-secondary);
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
 }
 
 .restore-step.is-active .restore-step__badge,
 .restore-step.is-done .restore-step__badge {
   color: var(--dd-restore-accent);
-  border-color: var(--dd-restore-accent-soft);
-  box-shadow: 0 0 0 6px color-mix(in srgb, var(--dd-restore-accent) 10%, transparent);
+  border-color: var(--dd-restore-accent);
 }
 
 .restore-step.is-failed .restore-step__badge {
@@ -754,7 +750,7 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: start;
   padding: 16px 18px;
-  border-radius: 18px;
+  border-radius: 0;
   background: rgba(254, 242, 242, 0.92);
   border: 1px solid rgba(220, 38, 38, 0.18);
   color: #b42318;
@@ -823,10 +819,8 @@ onBeforeUnmount(() => {
 
 :global(html.dark) {
   .restore-progress-hero {
-    background:
-      radial-gradient(circle at top, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.88)),
-      linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(15, 23, 42, 0.24));
-    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.3);
+    background: var(--el-bg-color-overlay);
+    border-color: var(--el-border-color-darker);
   }
 
   .restore-progress-core,

@@ -81,8 +81,8 @@ const extLabel = computed(() => {
 <style scoped lang="scss">
 .tree-node {
   display: flex;
-  border-radius: 8px;
-  transition: background-color 0.16s ease, transform 0.16s ease;
+  border-radius: 0;
+  transition: background-color 0.16s ease;
   align-items: center;
   gap: 10px;
   flex: 1;
@@ -93,18 +93,16 @@ const extLabel = computed(() => {
   overflow: hidden;
 }
 
+/* 文件类型色标：直角小方块 */
 .tree-node-dot {
   width: 8px;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0;
   flex-shrink: 0;
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--el-bg-color) 70%, transparent);
-  transition: transform 0.2s;
 }
 
 .tree-node.is-folder .tree-node-dot {
-  border-radius: 2px;
+  border-radius: 0;
   width: 9px;
   height: 9px;
   opacity: 0.75;
@@ -128,24 +126,22 @@ const extLabel = computed(() => {
 
 .tree-node-ext {
   font-size: 9.5px;
-  transform: translateY(2px);
   font-weight: 700;
   font-family: var(--dd-font-mono);
   padding: 2px 6px;
-  border-radius: 999px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color) 85%, transparent);
   color: var(--el-text-color-secondary);
   flex-shrink: 0;
   letter-spacing: 0.4px;
   line-height: 1.3;
   opacity: 0;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease;
 }
 
 .tree-node-actions {
   opacity: 0;
-  transform: translateX(4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease;
   flex-shrink: 0;
 
   .more-btn {
@@ -155,18 +151,16 @@ const extLabel = computed(() => {
     padding: 0;
     border: none;
     background: transparent;
-    border-radius: 6px;
+    border-radius: 0;
     color: var(--el-text-color-secondary);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s, color 0.15s, transform 0.15s ease, box-shadow 0.15s ease;
+    transition: background 0.15s, color 0.15s;
 
     &:hover {
       background: var(--el-fill-color);
       color: var(--el-color-primary);
-      transform: translateY(-1px);
-      box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
     }
 
     &:focus-visible {
@@ -179,17 +173,10 @@ const extLabel = computed(() => {
 .tree-node:hover {
   background: color-mix(in srgb, var(--el-fill-color-light) 86%, transparent);
   .tree-node-label { color: var(--el-color-primary); }
-  transform: translateX(1px);
-
-  .tree-node-dot {
-    transform: scale(1.12);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--el-color-primary) 10%, transparent);
-  }
 
   .tree-node-ext,
   .tree-node-actions {
     opacity: 1;
-    transform: translate(0, 0);
   }
 }
 </style>

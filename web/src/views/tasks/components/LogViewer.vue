@@ -604,9 +604,7 @@ function handleClose() {
   justify-content: space-between;
   gap: 16px;
   padding: 14px 18px;
-  background: linear-gradient(180deg,
-    color-mix(in srgb, #6366f1 6%, transparent) 0%,
-    transparent 100%);
+  background: var(--el-bg-color);
   flex-wrap: wrap;
 }
 
@@ -655,7 +653,7 @@ function handleClose() {
   font-weight: 700;
   letter-spacing: 0.5px;
   font-family: var(--dd-font-mono);
-  border-radius: 999px;
+  border-radius: 0;
 
   &--running {
     background: color-mix(in srgb, var(--el-color-warning) 14%, transparent);
@@ -690,12 +688,12 @@ function handleClose() {
   font-family: var(--dd-font-ui);
 }
 
-/* Status orb */
+/* Status orb：方形状态底，靠底色区分运行/成功/失败 */
 .status-orb {
   position: relative;
   width: 22px;
   height: 22px;
-  border-radius: 50%;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -724,16 +722,15 @@ function handleClose() {
 .status-orb-core {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0;
   background: var(--el-color-warning);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--el-color-warning) 22%, transparent);
   animation: orb-core 1.4s ease-in-out infinite;
 }
 
 .status-orb-ripple {
   position: absolute;
   inset: 0;
-  border-radius: 50%;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-color-warning) 40%, transparent);
   animation: orb-ripple 1.8s ease-out infinite;
 }
@@ -766,7 +763,7 @@ function handleClose() {
   border: 1px solid var(--viewer-border-soft, var(--el-border-color-light));
   background: var(--el-bg-color);
   color: var(--el-text-color-regular);
-  border-radius: 8px;
+  border-radius: 0;
   font-size: 12px;
   font-family: var(--dd-font-mono);
   cursor: pointer;
@@ -798,48 +795,36 @@ function handleClose() {
     justify-content: center;
     color: var(--el-text-color-secondary);
     border-color: transparent;
-    border-radius: 10px;
+    border-radius: 0;
     margin-left: 6px;
     position: relative;
     overflow: hidden;
-    transition: color 0.25s, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s;
+    transition: color 0.25s;
 
     .el-icon {
       position: relative;
       z-index: 1;
-      transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
     }
 
+    // hover 时纯色底铺满，不再用缩放的渐变块浮起
     &::before {
       content: '';
       position: absolute;
       inset: 0;
-      border-radius: inherit;
-      background: linear-gradient(135deg, #ef4444, #dc2626);
+      border-radius: 0;
+      background: var(--el-color-danger);
       opacity: 0;
-      transform: scale(0.55);
-      transition: opacity 0.2s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+      transition: opacity 0.2s ease;
     }
 
     &:hover:not(:disabled) {
       color: #fff;
-      transform: scale(1.06);
       border-color: transparent;
       background: transparent;
-      box-shadow: 0 8px 20px -8px rgba(239, 68, 68, 0.55);
 
       &::before {
         opacity: 1;
-        transform: scale(1);
       }
-
-      .el-icon {
-        transform: rotate(90deg);
-      }
-    }
-
-    &:active {
-      transform: scale(0.94);
     }
 
     &:focus-visible {
@@ -853,13 +838,8 @@ function handleClose() {
   .tool-btn--close {
     transition: none;
 
-    .el-icon,
     &::before {
       transition: none;
-    }
-
-    &:hover .el-icon {
-      transform: none;
     }
   }
 }
@@ -1052,7 +1032,7 @@ function handleClose() {
   --viewer-border-soft: color-mix(in srgb, var(--el-border-color-light) 85%, transparent);
 
   width: min(1400px, 92vw);
-  border-radius: 16px;
+  border-radius: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;

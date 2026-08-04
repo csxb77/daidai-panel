@@ -430,10 +430,9 @@ function methodClass(method: string) {
   width: 280px;
   flex-shrink: 0;
   background: var(--el-bg-color);
-  // 圆角对齐卡片令牌、阴影引用全局静置卡片阴影，使侧栏与右侧文档卡观感统一
-  border-radius: var(--dd-card-radius);
+  // 直角 + 1px 边框，使侧栏与右侧文档卡观感统一（不再用阴影浮起）
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: var(--dd-shadow-card);
   overflow: hidden;
   height: 100%;
   display: flex;
@@ -470,28 +469,26 @@ function methodClass(method: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  // 左侧留出 3px 透明边框位，选中时染成品牌色指示条（原为 inset 阴影）
+  padding: 6px 12px 6px 9px;
+  border-left: 3px solid transparent;
   margin: 2px 8px;
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   cursor: pointer;
   // 选中/hover 过渡走令牌（快 + 标准缓动），与全站侧边菜单观感一致
   transition:
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover:not(.active) {
     background: var(--el-fill-color-light);
   }
 
-  // 选中态对齐全局菜单：品牌色浅底渐变 + 左侧品牌色指示条
+  // 选中态对齐全局菜单：品牌色浅底纯色 + 左侧品牌色指示条
   &.active {
-    background: linear-gradient(
-      135deg,
-      var(--el-color-primary-light-8),
-      var(--el-color-primary-light-9)
-    );
-    box-shadow: inset 3px 0 0 var(--el-color-primary);
+    background: var(--el-color-primary-light-9);
+    border-left-color: var(--el-color-primary);
 
     .menu-item-text {
       color: var(--el-color-primary);
@@ -514,7 +511,7 @@ function methodClass(method: string) {
   justify-content: center;
   min-width: 52px;
   padding: 1px 8px;
-  border-radius: 4px;
+  border-radius: 0;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -528,21 +525,21 @@ function methodClass(method: string) {
   padding: 0 5px;
   font-size: 10px;
   line-height: 18px;
-  border-radius: 3px;
+  border-radius: 0;
 }
 
-.method-get { background: linear-gradient(135deg, #52c41a, #73d13d); }
-.method-post { background: linear-gradient(135deg, #1677ff, #4096ff); }
-.method-put { background: linear-gradient(135deg, #fa8c16, #ffa940); }
-.method-delete { background: linear-gradient(135deg, #ff4d4f, #ff7875); }
+// 方法色标改纯色（原为渐变）
+.method-get { background: #52c41a; }
+.method-post { background: #1677ff; }
+.method-put { background: #fa8c16; }
+.method-delete { background: #ff4d4f; }
 
 .api-content {
   flex: 1;
   background: var(--el-bg-color);
-  // 圆角对齐卡片令牌、阴影引用全局静置卡片阴影
-  border-radius: var(--dd-card-radius);
+  // 直角 + 1px 边框，不再用阴影浮起
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: var(--dd-shadow-card);
   padding: 28px 32px;
   overflow: auto;
   min-width: 0;
@@ -570,17 +567,14 @@ function methodClass(method: string) {
   padding: 12px 20px;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   margin-bottom: 24px;
   flex-wrap: wrap;
-  // 过渡走令牌（标准缓动），hover 阴影引用全局静置卡片阴影（暗色自动适配）
-  transition:
-    border-color var(--dd-motion-normal) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-normal) var(--dd-ease-standard);
+  // hover 只加深描边，不再叠阴影
+  transition: border-color var(--dd-motion-normal) var(--dd-ease-standard);
 
   &:hover {
     border-color: var(--el-border-color);
-    box-shadow: var(--dd-shadow-card);
   }
 }
 
@@ -603,7 +597,7 @@ function methodClass(method: string) {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   margin-bottom: 20px;
   font-size: 13px;
 
@@ -612,7 +606,7 @@ function methodClass(method: string) {
     // 用 color-mix 基于当前文字色生成半透明底，明暗双主题都自适应
     background: color-mix(in srgb, currentColor 10%, transparent);
     padding: 2px 6px;
-    border-radius: 4px;
+    border-radius: 0;
   }
 
   // JWT / 无鉴权两种状态：用 Element Plus 语义色 + color-mix 生成浅底，明暗双主题自适应
@@ -630,11 +624,9 @@ function methodClass(method: string) {
 }
 
 .api-card {
-  // 圆角对齐卡片令牌；这些卡用了 shadow="never"，全局静置阴影不会生效，
-  // 故给容器自身一条 lighter 边框 + 静置卡片阴影令牌，保持与全站卡片观感一致（暗色自动适配）。
-  border-radius: var(--dd-card-radius);
+  // 直角卡；这些卡用了 shadow="never"，层次全部交给自身的 1px lighter 边框（暗色自动适配）。
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: var(--dd-shadow-card);
   margin-bottom: 20px;
   overflow: hidden;
 
@@ -664,8 +656,8 @@ function methodClass(method: string) {
     top: 3px;
     bottom: 3px;
     width: 3px;
-    border-radius: 2px;
-    background: linear-gradient(180deg, var(--el-color-primary), var(--el-color-primary-light-3));
+    border-radius: 0;
+    background: var(--el-color-primary);
   }
 }
 
@@ -682,7 +674,7 @@ function methodClass(method: string) {
   font-size: 12px;
   background: var(--el-fill-color);
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 0;
 }
 
 .param-example {
@@ -706,7 +698,7 @@ function methodClass(method: string) {
 
 .code-block-wrapper {
   position: relative;
-  border-radius: 8px;
+  border-radius: 0;
   overflow: hidden;
   margin: 0;
 
@@ -750,20 +742,20 @@ function methodClass(method: string) {
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 13px;
   font-weight: 600;
 
   .status-dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: 0;
     background: var(--el-color-success);
     display: inline-block;
   }
 }
 
-// 200 成功胶囊：用 Element Plus success 语义色 + color-mix 浅底，明暗双主题自适应
+// 200 成功标签：用 Element Plus success 语义色 + color-mix 浅底，明暗双主题自适应
 .status-200 {
   background: color-mix(in srgb, var(--el-color-success) 12%, var(--el-bg-color));
   color: var(--el-color-success);

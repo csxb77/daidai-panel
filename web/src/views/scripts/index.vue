@@ -306,29 +306,27 @@ async function handleCancelEdit() {
   min-height: 0;
   /* 目录树卡与编辑器卡之间的间隙 */
   gap: 14px;
-  /* 容器本身透明，圆角/边框/阴影下放到两张子卡 */
+  /* 容器本身透明，边框下放到两张子卡 */
   background: transparent;
 }
 
-/* ---- 目录树卡（独立圆角卡片）---- */
+/* ---- 目录树卡（直角面板，靠 1px 边框划分层次）---- */
 :deep(.scripts-sidebar) {
   flex: 0 0 300px;
   min-height: 0;
-  overflow: hidden; /* 裁切卡片圆角 */
+  overflow: hidden; /* 裁切内部溢出内容 */
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
 }
 
-/* ---- 编辑器卡（独立圆角卡片）---- */
+/* ---- 编辑器卡（直角面板，靠 1px 边框划分层次）---- */
 :deep(.scripts-editor) {
   min-height: 0;
-  overflow: hidden; /* 裁切卡片圆角 */
+  overflow: hidden; /* 裁切内部溢出内容 */
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
 }
 
 :deep(.editor-hero) {
@@ -355,7 +353,7 @@ async function handleCancelEdit() {
     }
   }
 
-  /* 移动端：两卡纵向堆叠，各占满宽度并保留卡片圆角 */
+  /* 移动端：两卡纵向堆叠，各占满宽度 */
   .scripts-workspace {
     flex-direction: column;
     flex: 1 1 auto;
@@ -369,7 +367,7 @@ async function handleCancelEdit() {
       min-width: unset;
       flex: 1 1 auto;
       min-height: 0;
-      overflow: hidden; /* 裁圆角；目录滚动由内部 .sidebar-tree 负责 */
+      overflow: hidden; /* 目录滚动由内部 .sidebar-tree 负责 */
     }
 
     :deep(.scripts-editor) {

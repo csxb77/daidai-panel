@@ -468,7 +468,6 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
       <el-button
         :icon="themeIcon"
         text
-        circle
         size="large"
         class="theme-toggle-btn"
         @click="themeStore.toggleTheme"
@@ -632,7 +631,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 /* ================= 2FA dialog ================= */
 :deep(.totp-dialog) {
   .el-dialog {
-    border-radius: 16px;
+    border-radius: 0;
     overflow: hidden;
   }
 
@@ -660,13 +659,13 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 .totp-dialog-badge {
   width: 38px;
   height: 38px;
-  border-radius: 10px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: linear-gradient(135deg, #1677ff, #22c3aa);
-  box-shadow: 0 6px 16px -8px rgba(24, 144, 255, 0.45);
+  /* 纯色底，去掉渐变与辉光 */
+  background: #1677ff;
   flex-shrink: 0;
 }
 
@@ -690,7 +689,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 
 .totp-field {
   :deep(.el-input__wrapper) {
-    border-radius: 12px;
+    border-radius: 0;
     padding: 6px 14px;
   }
 
@@ -723,16 +722,16 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   gap: 8px;
 }
 
+/* 提交按钮：直角纯色，去掉渐变与辉光，hover 只加深底色 */
 .totp-submit-btn {
-  border-radius: 10px;
+  border-radius: 0;
   padding: 0 18px;
-  background: linear-gradient(135deg, #1677ff, #22c3aa);
+  background: #1677ff;
   border: none;
-  box-shadow: 0 8px 20px -12px rgba(22, 119, 255, 0.35);
 
   &:hover,
   &:focus {
-    background: linear-gradient(135deg, #1565d8, #1da98f);
+    background: #1565d8;
     border: none;
   }
 
@@ -760,51 +759,55 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   right: 24px;
   z-index: 10;
 
+  /* 主题切换：默认方形图标按钮（原 circle），hover 只换底色不上浮 */
   .theme-toggle-btn {
     width: 44px;
     height: 44px;
+    padding: 0;
+    border-radius: 0;
     font-size: 20px;
     color: #666;
     background: rgba(255, 255, 255, 0.7);
     backdrop-filter: blur(8px);
     border: 1px solid rgba(0, 0, 0, 0.06);
-    transition: all 0.3s;
+    transition:
+      color 0.3s,
+      background-color 0.3s,
+      border-color 0.3s;
 
     &:hover {
       background: rgba(255, 255, 255, 0.9);
-      transform: translateY(-1px);
     }
   }
 }
 
+/* 登录卡：直角 + 1px 边框划分层次，不再用投影浮起 */
 .login-container {
   display: flex;
   width: 940px;
   max-width: 100%;
   min-height: 560px;
-  border-radius: 24px;
+  border-radius: 0;
   overflow: hidden;
-  box-shadow:
-    0 12px 40px rgba(0, 0, 0, 0.08),
-    0 4px 12px rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--el-border-color-lighter);
   animation: loginSlideUp 0.6s ease-out;
-  transition: box-shadow 0.4s ease;
 }
 
 @keyframes loginSlideUp {
   from {
     opacity: 0;
-    transform: translateY(30px) scale(0.97);
+    transform: translateY(30px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 
+/* 插画区底色：纯色（原为上下渐变）；插画本身在 Characters.vue，不受影响 */
 .login-left {
   flex: 1;
-  background: linear-gradient(180deg, #f7fafc 0%, #eef4f8 100%);
+  background: #f7fafc;
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -853,7 +856,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
     justify-content: center;
 
     img {
-      border-radius: 12px;
+      border-radius: 0;
     }
   }
 
@@ -878,20 +881,20 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
     margin-bottom: 18px;
   }
 
+  /* inset 1px 是 Element Plus 输入框的边框实现（功能性，非装饰阴影），保留；
+     只去掉圆角与聚焦时外扩的 3px 辉光 */
   :deep(.el-input__wrapper) {
-    border-radius: 10px;
+    border-radius: 0;
     height: 46px;
     box-shadow: 0 0 0 1px #e0e0e0 inset;
-    transition: all 0.3s;
+    transition: box-shadow 0.3s;
 
     &:hover {
       box-shadow: 0 0 0 1px #1890ff inset;
     }
 
     &.is-focus {
-      box-shadow:
-        0 0 0 1px #1890ff inset,
-        0 0 0 3px rgba(24, 144, 255, 0.15);
+      box-shadow: 0 0 0 1px #1890ff inset;
     }
   }
 }
@@ -906,24 +909,22 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   }
 }
 
+/* 登录按钮：直角纯色，hover 只加深底色，不上浮不加投影 */
 .login-btn {
   width: 100%;
   height: 46px;
-  border-radius: 10px;
+  border-radius: 0;
   font-weight: 600;
   font-size: 15px;
   background: #1f1f1f;
   border: none;
-  transition: all 0.3s;
+  transition:
+    color 0.3s,
+    background-color 0.3s,
+    border-color 0.3s;
 
   &:hover {
     background: #333 !important;
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  }
-
-  &:active {
-    transform: translateY(0);
   }
 }
 
@@ -975,11 +976,11 @@ html.dark {
   }
 
   .login-container {
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+    border-color: var(--el-border-color-lighter);
   }
 
   .login-left {
-    background: linear-gradient(180deg, #17212f 0%, #111927 100%);
+    background: #17212f;
   }
 
   .login-right {
@@ -1000,6 +1001,7 @@ html.dark {
   }
 
   .login-form {
+    // 同亮色：inset 1px 是输入框边框实现，保留；聚焦不再外扩辉光
     .el-input__wrapper {
       background: #252540;
       box-shadow: 0 0 0 1px #3a3a55 inset;
@@ -1009,9 +1011,7 @@ html.dark {
       }
 
       &.is-focus {
-        box-shadow:
-          0 0 0 1px #1890ff inset,
-          0 0 0 3px rgba(24, 144, 255, 0.2);
+        box-shadow: 0 0 0 1px #1890ff inset;
       }
     }
 
@@ -1042,7 +1042,6 @@ html.dark {
 
     &:hover {
       background: #1677ff !important;
-      box-shadow: 0 4px 16px rgba(24, 144, 255, 0.35);
     }
   }
 

@@ -1584,19 +1584,20 @@ function viewLogDetail(log: any) {
   }
 }
 
-// 状态分段控件：与定时任务页/执行日志页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
+// 状态分段控件：与定时任务页/执行日志页一致的直角容器 + 选中态白底品牌色 + 1px 边框
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 7px;
-  border: none;
+  border-radius: 0;
+  // 未选中态用透明边框占位，选中态只换边框颜色，避免尺寸跳动
+  border: 1px solid transparent;
   background: transparent;
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -1605,7 +1606,7 @@ function viewLogDetail(log: any) {
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   &:hover {
     color: var(--el-text-color-primary);
@@ -1613,16 +1614,15 @@ function viewLogDetail(log: any) {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: var(--dd-shadow-card);
+    border-color: var(--el-border-color-lighter);
     font-weight: 600;
   }
 }
 
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：直角无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1707,7 +1707,7 @@ function viewLogDetail(log: any) {
   font-size: 13px;
   line-height: 1.6;
   padding: 12px 16px;
-  border-radius: 6px;
+  border-radius: 0;
   max-height: 560px;
   overflow-y: auto;
   white-space: pre-wrap;

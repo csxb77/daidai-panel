@@ -68,7 +68,7 @@
   display: inline-block;
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: 0;
   background: currentColor;
   flex-shrink: 0;
   position: relative;
@@ -88,8 +88,8 @@ body {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
-  // 给 body 也铺页面底色：外壳 .layout-container 的 margin-top 因 #app 未形成 BFC 会向上塌陷穿透到 body，
-  // 若 body 是默认白底，外壳顶部那条间隙会露出白色。这里让 body 底色 = 页面底色，任何间隙都显示灰蓝，根治顶部白条。
+  // body 铺页面底色：布局外壳已全屏铺满，正常情况下看不到 body，
+  // 但 100dvh 在移动端地址栏收放时会短暂露出底部，用页面底色兜底避免闪白。
   background: var(--el-bg-color-page);
 }
 
@@ -102,7 +102,7 @@ body {
 
 #app {
   height: 100%;
-  // 外壳留白处露出的页面底色（外壳本身用 --el-bg-color）
+  // 页面底色兜底：布局外壳（--el-bg-color）铺满视口，此处仅在外壳未渲染/尺寸抖动时可见
   background: var(--el-bg-color-page);
 }
 
@@ -158,42 +158,51 @@ body {
   --el-color-primary-light-7: #c6e2ff;
   --el-color-primary-light-9: #ecf5ff;
   --el-color-primary-dark-2: #337ecc;
-  --el-border-radius-base: 8px;
-  --el-border-radius-small: 4px;
-  --el-border-radius-round: 20px;
+  // ===== 形状契约：全站直角 =====
+  // v3.0.0 起统一为纯扁平直角（青龙同款观感），所有圆角刻度归零。
+  // 保留这些令牌是为了让 Element Plus 内部引用（它到处用 --el-border-radius-*）也一并方化，
+  // 不要为了「看起来更干净」把令牌删掉，否则 EP 会退回自带的 4px/8px。
+  --el-border-radius-base: 0;
+  --el-border-radius-small: 0;
+  --el-border-radius-round: 0;
+  // 浮层（tooltip / dropdown / select 下拉 / date-picker 面板）的圆角是另一条独立链：
+  //   .el-popper 的 --el-popper-border-radius 取自 --el-popover-border-radius（缺省回退 4px）
+  // 它同样绕开 --el-border-radius-base，不归零的话所有浮层会保留 4px 圆角。
+  // EP 没有在 :root 定义 --el-popover-border-radius，所以这里补 0 能兜住全部普通 popper；
+  // el-popover 自身另有同名令牌声明，见下方 .el-popover 就地归零。
+  --el-popover-border-radius: 0;
+  // 注意：--el-border-radius-circle 属白名单（el-radio 圆点的来源），刻意不动。
   --dd-sidebar-width: 220px;
   --dd-header-height: 56px;
   --dd-page-padding: 20px;
-  // 卡片圆角统一为 14px：与设计基线 / dd-stat-card / dd-data-card 一致（原 12px 偏小不统一）
-  --dd-card-radius: 14px;
+  --dd-card-radius: 0;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  // ===== 表面质感令牌（A+C 混搭，预览 data-scheme="d"）=====
-  // 圆角刻度：外壳 22px、卡片沿用 14px、小控件 10px。
-  --dd-radius-shell: 22px;
-  --dd-radius-sm: 10px;
-  // 外壳四周留白（桌面），矮屏 media 内会收小、移动端归零。
-  --dd-shell-margin: 18px;
-  // 阴影刻度（明色用 rgba(15,23,42,...)，暗色在 html.dark 覆盖为 rgba(0,0,0,...)）。
-  //  - card：卡片静置；card-hover：在静置基础上叠品牌色辉光；shell：外壳更大更柔。
-  --dd-shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 6px 20px rgba(15, 23, 42, 0.05);
-  --dd-shadow-card-hover: 0 2px 6px rgba(15, 23, 42, 0.06), 0 16px 36px rgba(64, 158, 255, 0.1);
-  --dd-shadow-shell: 0 1px 2px rgba(15, 23, 42, 0.05), 0 24px 60px rgba(15, 23, 42, 0.08);
-  // 页面底色（外壳留白处可见，对齐预览）：映射 Element Plus 页底变量。
+  // ===== 表面质感令牌 =====
+  // 圆角刻度（外壳 / 小控件）同样归零，保留令牌名是为了兼容已有引用点。
+  --dd-radius-shell: 0;
+  --dd-radius-sm: 0;
+  // 阴影刻度：纯扁平方案下不再用阴影制造悬浮层次，一律 none；
+  // 需要区分层级的地方改用 1px 边框（--el-border-color-lighter）。
+  --dd-shadow-card: none;
+  --dd-shadow-card-hover: none;
+  --dd-shadow-shell: none;
+  // 页面底色：布局外壳铺满视口后，它主要作为内容区（.layout-main）的背景色。
   --el-bg-color-page: #f4f6fb;
-  // 全局动效 token（A+C 混搭方案）：
+  // 全局动效 token：
   //  - 切页 / 布局 / 浮层这类“位移到位”的动画走 decelerate / emphasized，求顺滑、不越界；
-  //  - 按钮按下、卡片与图标 hover 这类“缩放 / 浮起”的微交互走 spring，带轻回弹，更灵动有高级感。
+  //  - 纯扁平方案下不再有缩放 / 浮起类微交互，hover 只做颜色变化，无需缓动区分。
   --dd-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
   --dd-ease-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
   --dd-ease-decelerate: cubic-bezier(0.16, 1, 0.3, 1);
-  // 温和弹簧：只用于 scale / translateY 浮起类微交互（按钮按下、卡片与图标 hover）。
+  // 温和弹簧：保留定义供未来使用，当前不再被任何形变类微交互引用。
   // 注意：不要用在抽屉、侧栏这种“滑动到屏幕边缘”的动画上，spring 的回弹会越过边缘露出空隙。
   --dd-ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1);
   --dd-motion-fast: 160ms;
   --dd-motion-normal: 240ms;
   --dd-motion-page: 240ms;
   --dd-motion-slow: 360ms;
-  --dd-press-scale: 0.96;
+  // 按下缩放已取消（纯扁平不做形变反馈），保留令牌避免引用点报错。
+  --dd-press-scale: 1;
   --dd-font-mono:
     "JetBrains Mono", "Fira Code", "Cascadia Code", "Consolas", monospace;
   --dd-font-ui:
@@ -220,7 +229,7 @@ a {
 
 ::-webkit-scrollbar-thumb {
   background: var(--el-border-color);
-  border-radius: 3px;
+  border-radius: 0;
   &:hover {
     background: var(--el-text-color-placeholder);
   }
@@ -231,58 +240,25 @@ a {
 }
 
 .el-button {
-  border-radius: var(--el-border-radius-base);
+  border-radius: 0;
   font-weight: 500;
+  // 纯扁平：按钮只做颜色过渡，不再有按下缩放与浮起阴影
   transition:
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    border-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard),
-    transform 140ms var(--dd-ease-spring);
-
-  &:active {
-    // 按下回弹用 spring：松手时轻微越过原尺寸再归位，手感更跟手、更有质感
-    transform: scale(var(--dd-press-scale));
-  }
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-// 主按钮：A+C 混搭——柔和品牌渐变 + 轻微浮起辉光。
-// 只作用于实心 primary，排除 plain / text / link / disabled，避免破坏这些变体的原生样式。
-.el-button--primary:not(.is-plain):not(.is-text):not(.is-link):not(.is-disabled) {
-  background-image: linear-gradient(
-    135deg,
-    var(--el-color-primary),
-    var(--el-color-primary-dark-2)
-  );
-  border-color: transparent;
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.26);
-
-  &:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 6px 18px rgba(64, 158, 255, 0.4);
-  }
-
-  &:active {
-    transform: scale(var(--dd-press-scale));
-  }
-}
+// 主按钮不再做渐变 + 辉光覆盖，直接沿用 Element Plus 原生实心色：
+// 静置 --el-color-primary、hover 换浅一档底色，符合「hover 只换颜色」的扁平规则。
 
 .el-card {
-  border-radius: var(--dd-card-radius);
+  border-radius: 0;
+  // 去阴影后，卡片与页面底色的分隔完全依赖这条 1px 边框
   border: 1px solid var(--el-border-color-lighter);
-  // 静置阴影统一引用令牌（明暗各一套）
-  box-shadow: var(--dd-shadow-card);
-  transition:
-    border-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
-    transform var(--dd-motion-fast) var(--dd-ease-spring);
+  transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
+  // 表格等宽内容溢出时靠它裁切，与圆角无关，不能删
   overflow: hidden;
-
-  &:hover {
-    // 上浮用 spring 轻回弹，阴影叠一层淡淡的品牌色辉光，质感更高级（统一引用令牌）
-    transform: translateY(-2px);
-    box-shadow: var(--dd-shadow-card-hover);
-  }
 
   .el-card__header {
     padding: 16px 20px;
@@ -299,7 +275,7 @@ a {
   --el-dialog-margin-top: clamp(16px, 4vh, 40px) !important;
   animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized);
   transform-origin: center top;
-  border-radius: 16px;
+  border-radius: 0;
   overflow: hidden;
   max-height: calc(100dvh - (var(--el-dialog-margin-top) * 2));
   display: flex;
@@ -326,13 +302,11 @@ a {
   }
 
   &.is-fullscreen {
-    // 全屏模式复位上面对 .el-dialog 的通用装饰，确保真正边到边铺满：
-    // - margin-top 抵消 :299 那条带 !important 的留白，否则全屏框被顶下来一截露缝
-    // - 去圆角，避免四角留白看起来像浮窗
+    // 全屏模式复位上面的通用留白，确保真正边到边铺满：
+    // margin-top 抵消上面那条带 !important 的留白，否则全屏框被顶下来一截露缝
     max-height: 100dvh;
     --el-dialog-margin-top: 0 !important;
     margin: 0;
-    border-radius: 0;
   }
 }
 
@@ -443,21 +417,44 @@ a {
   }
 }
 
+// el-tag 的圆角走 Element Plus 自己的一套独立令牌，**不受 --el-border-radius-* 管辖**：
+//   .el-tag          取 --el-tag-border-radius          （默认 4px）
+//   .el-tag.is-round 取 --el-tag-border-radius-rounded  （默认 9999px，即胶囊）
+// 而且这两条令牌是 EP 定义在 `.el-tag` 元素自身上的，不在 :root，
+// 所以在 :root 里补 0 无效（元素上的同名声明会赢过继承值），必须在 .el-tag 选择器里就地归零。
+// 归零后模板里散落在 6 个文件的 18 处 `round` 属性自动方化，以后新写的 round 标签也一样。
+// （不逐个删模板上的 round：数量多、易漏，令牌兜底更可靠。
+//   顺带一提 el-button 的 round 走的是 --el-border-radius-round，已由上面的 :root 归零覆盖。）
 .el-tag {
-  border-radius: 6px;
+  --el-tag-border-radius: 0;
+  --el-tag-border-radius-rounded: 0;
+  border-radius: 0;
   font-weight: 500;
 }
 
 .el-input {
   .el-input__wrapper {
-    border-radius: var(--el-border-radius-base);
+    border-radius: 0;
+    // 注意：这里的 box-shadow 过渡针对的是 Element Plus 用 inset box-shadow 画的输入框边框，
+    // 属于功能性描边（不是悬浮阴影），不在去阴影范围内。
     transition: box-shadow var(--dd-transition);
   }
 }
 
 .el-select {
   .el-select__wrapper {
-    border-radius: var(--el-border-radius-base);
+    border-radius: 0;
+  }
+}
+
+// el-switch 方化：形状不承载语义（区别于 el-radio 的圆点），轨道与滑块一并改直角
+.el-switch {
+  .el-switch__core {
+    border-radius: 0;
+
+    .el-switch__action {
+      border-radius: 0;
+    }
   }
 }
 
@@ -470,7 +467,7 @@ a {
   border-right: none !important;
 
   .el-menu-item {
-    border-radius: 8px;
+    border-radius: 0;
     margin: 2px 8px;
     height: 44px;
     line-height: 44px;
@@ -479,11 +476,8 @@ a {
     overflow: hidden;
 
     &.is-active {
-      background: linear-gradient(
-        135deg,
-        var(--el-color-primary-light-8),
-        var(--el-color-primary-light-9)
-      );
+      // 纯扁平：选中态用单一浅底色，不再叠品牌色渐变与图标辉光
+      background: var(--el-color-primary-light-9);
       color: var(--el-color-primary);
       font-weight: 600;
 
@@ -495,17 +489,12 @@ a {
         height: 60%;
         width: 3px;
         background: var(--el-color-primary);
-        border-radius: 0 3px 3px 0;
-      }
-
-      .el-icon {
-        filter: drop-shadow(0 0 4px var(--el-color-primary-light-3));
       }
     }
 
+    // hover 只换底色，不再做横向位移
     &:hover:not(.is-active) {
       background: var(--el-fill-color-light);
-      transform: translateX(2px);
     }
   }
 
@@ -520,22 +509,19 @@ a {
       .el-icon {
         margin: 0;
       }
-
-      &:hover:not(.is-active) {
-        transform: none;
-      }
     }
   }
 }
 
 .el-message-box {
-  border-radius: 16px;
+  border-radius: 0;
   padding: 24px;
 }
 
 .el-notification {
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  border-radius: 0;
+  // 去掉浮层阴影后，靠 1px 边框与页面内容分隔
+  border: 1px solid var(--el-border-color-lighter);
 }
 
 .el-drawer {
@@ -552,7 +538,7 @@ a {
 
 .el-pagination {
   .el-pager li {
-    border-radius: 6px;
+    border-radius: 0;
     min-width: 32px;
     height: 32px;
     line-height: 32px;
@@ -561,7 +547,7 @@ a {
 
   .btn-prev,
   .btn-next {
-    border-radius: 6px;
+    border-radius: 0;
   }
 }
 
@@ -569,20 +555,16 @@ html.dark {
   --dd-log-bg-color: #0f172a;
   --dd-log-text-color: #e2e8f0;
   --dd-log-theme-mode: dark;
-  // ===== 表面质感令牌暗色版（明色用 rgba(15,23,42,...)，暗色用 rgba(0,0,0,...)）=====
-  --dd-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.2), 0 6px 20px rgba(0, 0, 0, 0.28);
-  --dd-shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.3), 0 16px 36px rgba(64, 158, 255, 0.1);
-  --dd-shadow-shell: 0 1px 2px rgba(0, 0, 0, 0.3), 0 24px 60px rgba(0, 0, 0, 0.45);
-  // 暗色页面底色（对齐预览）
+  // ===== 表面质感令牌暗色版：纯扁平方案下阴影同样一律 none，层级只靠边框 =====
+  --dd-shadow-card: none;
+  --dd-shadow-card-hover: none;
+  --dd-shadow-shell: none;
+  // 暗色页面底色
   --el-bg-color-page: #0b1120;
 
   .el-card {
+    // 暗色下边框加深一档，保证去阴影后仍能与页面底色分开
     border-color: var(--el-border-color-darker);
-
-    // 静置/hover 阴影改为引用暗色令牌（与 :root 写死值统一）
-    &:hover {
-      box-shadow: var(--dd-shadow-card-hover);
-    }
   }
 
   ::-webkit-scrollbar-thumb {
@@ -600,9 +582,10 @@ html.dark {
     color: var(--el-text-color-regular) !important;
   }
 
-  // Profile 页面顶部紫色 hero
+  // Profile 页面顶部 hero：去装饰渐变，改纯色底 + 深一档描边
   .profile-hero {
-    background: linear-gradient(135deg, #1e1b4b 0%, #1e293b 100%) !important;
+    background: #1e293b !important;
+    border-color: var(--el-border-color-darker) !important;
   }
 
   // 通用 stat-card：dark 下统一边框/底色，避免出现亮白卡片
@@ -625,16 +608,12 @@ html.dark {
     border-color: var(--el-border-color-darker);
   }
 
+  // 更新 / 还原进度头图：去光晕渐变与投影，改纯色底 + 1px 描边
   .update-progress-hero,
   .restore-progress-hero {
-    background:
-      radial-gradient(
-        circle at top,
-        rgba(30, 41, 59, 0.96),
-        rgba(15, 23, 42, 0.88)
-      ),
-      linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(15, 23, 42, 0.24)) !important;
-    box-shadow: 0 18px 42px rgba(0, 0, 0, 0.3) !important;
+    background: var(--el-bg-color-overlay) !important;
+    border: 1px solid var(--el-border-color-darker) !important;
+    box-shadow: none !important;
   }
 
   .update-progress-core,
@@ -654,6 +633,20 @@ html.dark {
     ) !important;
     border-color: var(--el-border-color-darker) !important;
     box-shadow: none !important;
+  }
+
+  // 「当前步骤」必须比上面那条基础 !important 更强，否则暗色下所有步骤长得一模一样、
+  // 进度指示完全丢失（亮色的 .is-active 是「主色边框 + 浅色底」，无 !important，压不过基础规则）。
+  // 与 .is-done 的区分：is-active 用 26% 主色底 + 主色边框（更亮、边框被点亮），
+  // is-done 用 12% 主色底 + 中性深色描边（更暗、边框不点亮），两者在暗色下可清晰区分。
+  .update-step.is-active,
+  .restore-step.is-active {
+    background: color-mix(
+      in srgb,
+      var(--el-color-primary) 26%,
+      var(--el-bg-color-overlay)
+    ) !important;
+    border-color: var(--el-color-primary) !important;
   }
 
   .update-step.is-done,
@@ -683,18 +676,13 @@ html.dark {
     color: #fecaca !important;
   }
 
-  // 侧边栏 logo 区域：color-mix(..., white) 在暗色下偏亮，覆盖为深色适配
+  // 侧边栏 logo 区域：暗色下用纯色底，避免 color-mix(..., white) 偏亮
   .sidebar-logo {
-    background: linear-gradient(
-      180deg,
-      var(--el-bg-color-overlay) 0%,
-      var(--el-bg-color) 100%
-    ) !important;
+    background: var(--el-bg-color) !important;
   }
   .logo-inner {
     background: var(--el-bg-color) !important;
     border-color: var(--el-border-color-darker) !important;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2) !important;
   }
   .logo-version {
     background: color-mix(
@@ -705,11 +693,11 @@ html.dark {
     color: var(--el-color-primary-light-3) !important;
   }
 
-  // 仪表盘面板容器：深色下增加边框对比度和阴影深度
+  // 仪表盘面板容器：深色下加深边框对比度（去阴影后层级完全由边框承担）
   .panel,
   .log-panel {
     border-color: var(--el-border-color-darker) !important;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+    box-shadow: none !important;
   }
 
   // 快捷操作区域
@@ -723,19 +711,9 @@ html.dark {
     background-color: var(--el-fill-color) !important;
   }
 
+  // 赞助墙：去掉两层光晕 + 底色渐变，改纯色底，仅保留橙色描边点题
   .sponsor-wall {
-    background:
-      radial-gradient(
-        circle at top right,
-        rgba(249, 115, 22, 0.12),
-        transparent 28%
-      ),
-      radial-gradient(
-        circle at bottom left,
-        rgba(250, 204, 21, 0.1),
-        transparent 25%
-      ),
-      linear-gradient(135deg, rgba(30, 41, 59, 0.96), rgba(15, 23, 42, 0.94)) !important;
+    background: #1e293b !important;
     border-color: rgba(249, 115, 22, 0.18) !important;
   }
 
@@ -763,13 +741,15 @@ html.dark {
   }
 
   .sponsor-wall .podium-base {
-    background: linear-gradient(
-      180deg,
-      rgba(71, 85, 105, 0.9),
-      rgba(51, 65, 85, 0.88)
-    ) !important;
+    background: #334155 !important;
     border-color: rgba(249, 115, 22, 0.16) !important;
   }
+}
+
+// el-popover 在 `.el-popover` 元素上把 --el-popover-border-radius 重新声明为 4px，
+// 会赢过 :root 的继承值，因此需要就地归零（tooltip / dropdown 已由 :root 兜住）。
+.el-popover {
+  --el-popover-border-radius: 0;
 }
 
 .el-popper.is-dark {
@@ -823,10 +803,7 @@ html.dark {
   background-repeat: no-repeat, no-repeat, no-repeat;
   background-size: cover, auto, auto;
   border: 1px solid var(--dd-log-border-color);
-  border-radius: 16px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 12px 28px rgba(15, 23, 42, 0.16);
+  border-radius: 0;
   color: var(--dd-log-text-color);
   scrollbar-color: var(--dd-log-scrollbar-thumb-color)
     var(--dd-log-scrollbar-track-color);
@@ -840,13 +817,14 @@ html.dark {
 
   &::-webkit-scrollbar-track {
     background: var(--dd-log-scrollbar-track-color);
-    border-radius: 999px;
+    border-radius: 0;
   }
 
+  // 这里的 border 是给 thumb 留出的“内缩留白”，属于功能性写法，只去圆角不要删
   &::-webkit-scrollbar-thumb {
     min-height: 40px;
     border: 3px solid var(--dd-log-scrollbar-track-color);
-    border-radius: 999px;
+    border-radius: 0;
     background: var(--dd-log-scrollbar-thumb-color);
   }
 
@@ -1015,30 +993,19 @@ html.dark {
 
 .dd-stat-card {
   background: var(--el-bg-color);
+  // 去阴影后靠这条边框与页面底色分隔
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 14px;
+  border-radius: 0;
   padding: 16px 18px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  transition:
-    transform var(--dd-motion-fast) var(--dd-ease-spring),
-    box-shadow var(--dd-motion-normal) var(--dd-ease-standard),
-    border-color var(--dd-motion-fast) var(--dd-ease-standard);
-  // 静置阴影统一引用令牌
-  box-shadow: var(--dd-shadow-card);
+  transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
+  // hover 只让描边偏向品牌色，不做上浮 / 缩放
   &:hover {
-    // 上浮 + 品牌色辉光 + 描边微亮，hover 时统计卡片更有“浮起来”的层次感（阴影引用令牌）
-    transform: translateY(-3px);
-    box-shadow: var(--dd-shadow-card-hover);
     border-color: color-mix(in srgb, var(--el-color-primary) 26%, var(--el-border-color-lighter));
-  }
-
-  // hover 时图标轻微放大并带一点点旋转，呼应灵动方案的微交互
-  &:hover .dd-stat-card__icon {
-    transform: scale(1.06) rotate(-3deg);
   }
 }
 
@@ -1089,7 +1056,7 @@ html.dark {
   gap: 2px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 6px;
+  border-radius: 0;
   font-size: 11.5px;
 
   &.is-up {
@@ -1111,12 +1078,11 @@ html.dark {
 .dd-stat-card__icon {
   width: 44px;
   height: 44px;
-  border-radius: 12px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  transition: transform var(--dd-motion-normal) var(--dd-ease-spring);
 
   &.is-blue {
     background: rgba(59, 130, 246, 0.12);
@@ -1151,17 +1117,18 @@ html.dark {
 .dd-seg-group {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 10px;
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 
 .dd-seg-btn {
-  border: none;
+  // 透明 1px 边框占位：选中态只换 border-color，避免加边框时按钮尺寸跳动
+  border: 1px solid transparent;
   background: transparent;
   padding: 6px 14px;
   font-size: 13px;
-  border-radius: 7px;
+  border-radius: 0;
   cursor: pointer;
   color: var(--el-text-color-secondary);
   transition: all 0.18s;
@@ -1171,11 +1138,12 @@ html.dark {
     color: var(--el-text-color-primary);
   }
 
+  // 去掉选中态微阴影，改用描边把选中项从灰底分组里托出来
   &.is-active {
     background: var(--el-bg-color);
+    border-color: var(--el-border-color-lighter);
     color: var(--el-color-primary);
     font-weight: 600;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
   }
 }
 
@@ -1184,7 +1152,7 @@ html.dark {
   align-items: center;
   gap: 4px;
   padding: 2px 10px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1.5;
@@ -1220,7 +1188,7 @@ html.dark {
 .dd-env-chip {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 6px;
+  border-radius: 0;
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -1250,11 +1218,10 @@ html.dark {
 
 .dd-data-card {
   background: var(--el-bg-color);
+  // 去阴影后靠这条边框与页面底色分隔
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 14px;
+  border-radius: 0;
   overflow: hidden;
-  // 静置阴影统一引用令牌
-  box-shadow: var(--dd-shadow-card);
 }
 
 .dd-data-card__toolbar {
@@ -1299,7 +1266,7 @@ html.dark {
 .dd-icon-btn {
   width: 28px;
   height: 28px;
-  border-radius: 6px;
+  border-radius: 0;
   border: none;
   background: transparent;
   display: inline-flex;
@@ -1340,14 +1307,10 @@ html.dark {
 
 .dd-mobile-card {
   padding: var(--dd-mobile-card-padding);
-  border-radius: 18px;
+  border-radius: 0;
+  // 去掉底色渐变与投影，纯色底 + 1px 边框划分卡片
   border: 1px solid var(--el-border-color-lighter);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--el-bg-color) 96%, white) 0%,
-    var(--el-bg-color) 100%
-  );
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+  background: var(--el-bg-color);
 }
 
 .dd-mobile-card__header {
@@ -1483,7 +1446,6 @@ html.dark {
 
   .dd-mobile-card {
     padding: 12px;
-    border-radius: 16px;
   }
 
   .dd-mobile-card__actions {

@@ -858,18 +858,18 @@ onBeforeUnmount(() => {
   }
 }
 
-// 状态分段控件：与定时任务页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
+// 状态分段控件：与定时任务页一致的直角分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 7px;
+  border-radius: 0;
   border: none;
   background: transparent;
   color: var(--el-text-color-secondary);
@@ -878,8 +878,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    background-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
 
   &:hover {
@@ -889,7 +888,6 @@ onBeforeUnmount(() => {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
@@ -900,11 +898,10 @@ onBeforeUnmount(() => {
 }
 
 /* =============== Table Card =============== */
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -998,24 +995,25 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-secondary);
 }
 
+// 状态点：直角小方块，去掉彩色光晕环，只保留纯色块
 .status-indicator {
   position: relative;
   width: 10px;
   height: 10px;
-  border-radius: 50%;
+  border-radius: 0;
   display: inline-block;
   flex-shrink: 0;
 
-  &--success { background: var(--logs-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--logs-accent) 22%, transparent); }
-  &--danger { background: var(--el-color-danger); box-shadow: 0 0 0 3px color-mix(in srgb, var(--el-color-danger) 22%, transparent); }
-  &--warning { background: var(--el-color-warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--el-color-warning) 22%, transparent); }
+  &--success { background: var(--logs-accent); }
+  &--danger { background: var(--el-color-danger); }
+  &--warning { background: var(--el-color-warning); }
   &--info { background: var(--el-text-color-placeholder); }
 }
 
 .status-indicator-pulse {
   position: absolute;
   inset: -3px;
-  border-radius: 50%;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-color-warning) 50%, transparent);
   animation: orb-ripple 1.6s ease-out infinite;
 }
@@ -1029,7 +1027,7 @@ onBeforeUnmount(() => {
   font-weight: 700;
   letter-spacing: 0.5px;
   font-family: var(--dd-font-mono);
-  border-radius: 999px;
+  border-radius: 0;
 
   &--success { background: color-mix(in srgb, var(--logs-accent) 14%, transparent); color: color-mix(in srgb, var(--logs-accent) 80%, var(--el-text-color-primary)); }
   &--danger { background: color-mix(in srgb, var(--el-color-danger) 14%, transparent); color: var(--el-color-danger); }
@@ -1039,7 +1037,7 @@ onBeforeUnmount(() => {
 
 /* =============== Detail dialog =============== */
 :deep(.log-detail-dialog) {
-  border-radius: 14px;
+  border-radius: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1071,6 +1069,7 @@ onBeforeUnmount(() => {
   }
 }
 
+// 详情头部：纯色底，去掉渐变与右下角圆形光晕；与正文的分隔由 .el-dialog__header 的 1px 下边框承担
 .detail-hero {
   display: flex;
   position: relative;
@@ -1078,21 +1077,8 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 16px;
   padding: 18px 20px;
-  background: linear-gradient(180deg,
-    color-mix(in srgb, var(--logs-accent) 6%, transparent) 0%,
-    transparent 100%);
+  background: var(--el-fill-color-lighter);
   overflow: hidden;
-
-  &::after {
-    content: "";
-    position: absolute;
-    inset: auto -20% 0 auto;
-    width: 180px;
-    height: 180px;
-    border-radius: 999px;
-    background: radial-gradient(circle, rgba(34, 197, 94, 0.08), transparent 70%);
-    pointer-events: none;
-  }
 }
 
 .detail-hero-main {
@@ -1137,13 +1123,14 @@ onBeforeUnmount(() => {
   font-family: var(--dd-font-ui);
 }
 
+// 关闭按钮：直角方形，hover 只换底色/文字色，不做缩放、旋转与渐变辉光
 .detail-hero-close {
   width: 34px;
   height: 34px;
   padding: 0;
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 10px;
+  border-radius: 0;
   cursor: pointer;
   color: var(--el-text-color-secondary);
   display: inline-flex;
@@ -1152,47 +1139,21 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
-  transition: color 0.25s, border-color 0.25s, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s;
+  transition: color 0.25s, background-color 0.25s, border-color 0.25s;
 
   .el-icon {
     position: relative;
     z-index: 1;
-    transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-
-  &::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background: linear-gradient(135deg, #ef4444, #dc2626);
-    opacity: 0;
-    transform: scale(0.55);
-    transition: opacity 0.2s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
   &:hover {
     color: #fff;
-    border-color: transparent;
-    transform: scale(1.06);
-    box-shadow: 0 8px 20px -8px rgba(239, 68, 68, 0.55);
-
-    &::before {
-      opacity: 1;
-      transform: scale(1);
-    }
-
-    .el-icon {
-      transform: rotate(90deg);
-    }
-  }
-
-  &:active {
-    transform: scale(0.94);
+    background: var(--el-color-danger);
+    border-color: var(--el-color-danger);
   }
 
   &:focus-visible {
-    outline: 2px solid color-mix(in srgb, #ef4444 60%, transparent);
+    outline: 2px solid color-mix(in srgb, var(--el-color-danger) 60%, transparent);
     outline-offset: 2px;
   }
 }
@@ -1200,15 +1161,6 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) {
   .detail-hero-close {
     transition: none;
-
-    .el-icon,
-    &::before {
-      transition: none;
-    }
-
-    &:hover .el-icon {
-      transform: none;
-    }
   }
 }
 
@@ -1236,7 +1188,6 @@ onBeforeUnmount(() => {
 
 .detail-status-bar {
   display: flex;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.45);
   justify-content: space-between;
   padding: 6px 20px;
   font-family: var(--dd-font-mono);
@@ -1264,15 +1215,6 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-
-  :deep(.el-button) {
-    transition: transform 0.16s ease, box-shadow 0.18s ease;
-  }
-
-  :deep(.el-button:hover) {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
-  }
 }
 
 /* =============== Animations =============== */

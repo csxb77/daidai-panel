@@ -925,7 +925,7 @@ async function handleImport(event: Event) {
         </el-table-column>
         <el-table-column label="状态" width="110" align="center">
           <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)" size="small" round :class="row.status === 2 ? 'tag-with-dot' : ''">
+            <el-tag :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
               <span v-if="row.status === 2" class="pulse-dot"></span>
               {{ getStatusText(row.status) }}
             </el-tag>
@@ -946,7 +946,7 @@ async function handleImport(event: Event) {
         <el-table-column label="上次结果" width="100" align="center">
           <template #default="{ row }">
             <div class="last-run-result">
-              <el-tag :type="getRunStatusType(row.last_run_status)" size="small" round>
+              <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
                 {{ getRunStatusText(row.last_run_status) }}
               </el-tag>
             </div>
@@ -1101,19 +1101,20 @@ async function handleImport(event: Event) {
   }
 }
 
-// 状态分段控件：对齐全站统一的 .dd-seg-group / .dd-seg-btn 观感（胶囊容器 + 选中态白底品牌色 + 轻阴影）
+// 状态分段控件：对齐全站统一的 .dd-seg-group / .dd-seg-btn 观感（直角容器 + 选中态白底品牌色 + 1px 描边）
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 7px;
-  border: none;
+  border-radius: 0;
+  // 透明描边占位，选中时只换 border-color，避免出现 1px 的尺寸跳动
+  border: 1px solid transparent;
   background: transparent;
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -1122,7 +1123,7 @@ async function handleImport(event: Event) {
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
 
   &:hover {
@@ -1132,7 +1133,7 @@ async function handleImport(event: Event) {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: var(--dd-shadow-card);
+    border-color: var(--el-border-color-lighter);
     font-weight: 600;
   }
 }
@@ -1154,11 +1155,10 @@ async function handleImport(event: Event) {
   gap: 5px;
 }
 
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex:1 + 内部滚动由全局规则接管）
+// 表格卡：直角无阴影，仅靠 1px 边框与页面底色区分（dd-fixed-page 下的 flex:1 + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1218,7 +1218,7 @@ async function handleImport(event: Event) {
   &:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--el-color-primary) 45%, transparent);
     outline-offset: 2px;
-    border-radius: 4px;
+    border-radius: 0;
   }
 }
 
@@ -1231,7 +1231,7 @@ async function handleImport(event: Event) {
 
 .task-label {
   font-size: 11px !important;
-  border-radius: 4px;
+  border-radius: 0;
 
   &--type {
     background: rgba(64, 158, 255, 0.08);

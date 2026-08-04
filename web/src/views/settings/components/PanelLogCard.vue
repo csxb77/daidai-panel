@@ -159,7 +159,7 @@ watch(() => props.logs, () => {
 @use './config-card-shared.scss' as *;
 
 .panel-log-card {
-  border-radius: 14px;
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
 }
 
@@ -175,7 +175,7 @@ watch(() => props.logs, () => {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 11px;
   font-weight: 600;
   color: var(--el-color-primary);
@@ -199,7 +199,7 @@ watch(() => props.logs, () => {
 
 .panel-log-toolbar__actions {
   padding: 4px;
-  border-radius: 12px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   display: flex;
   justify-content: flex-end;

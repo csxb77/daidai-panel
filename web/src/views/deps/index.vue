@@ -1737,11 +1737,10 @@ onBeforeUnmount(() => {
 }
 
 // ---------- Table Card ----------
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌；本页是滚动页（dd-scroll-page），不做 fixed 高度链处理。
+// 表格卡：直角无阴影，仅用 1px 边框与页面底色区分；本页是滚动页（dd-scroll-page），不做 fixed 高度链处理。
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1756,7 +1755,7 @@ onBeforeUnmount(() => {
 .dep-name-avatar {
   width: 24px;
   height: 24px;
-  border-radius: 8px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1764,7 +1763,6 @@ onBeforeUnmount(() => {
   font-size: 11px;
   font-weight: 700;
   color: #fff;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
 }
 
 .deps-tabs {
@@ -1775,20 +1773,21 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-// 状态分段控件：与定时任务页/执行日志页/订阅页/环境变量页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌。
+// 状态分段控件：与定时任务页/执行日志页/订阅页/环境变量页一致的直角容器 + 选中态白底品牌色 + 1px 边框。
 // 本页有两组：①运行时切换（Node/Python3/Linux）②状态筛选（.status-tabs--filter，含已安装/失败计数），
 // 共用同一套观感，使两组视觉统一。
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 .status-tab {
   padding: 6px 14px;
-  border-radius: 7px;
-  border: none;
+  border-radius: 0;
+  // 未选中态用透明边框占位，选中态只换边框颜色，避免尺寸跳动
+  border: 1px solid transparent;
   background: transparent;
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -1797,7 +1796,7 @@ onBeforeUnmount(() => {
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
@@ -1808,7 +1807,7 @@ onBeforeUnmount(() => {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: var(--dd-shadow-card);
+    border-color: var(--el-border-color-lighter);
     font-weight: 600;
   }
   // 成功/失败筛选选中态用语义色，与计数徽标协调
@@ -1827,7 +1826,7 @@ onBeforeUnmount(() => {
   height: 18px;
   line-height: 18px;
   text-align: center;
-  border-radius: 9px;
+  border-radius: 0;
   background: var(--el-fill-color);
   color: var(--el-text-color-secondary);
   display: inline-block;
@@ -1937,7 +1936,7 @@ onBeforeUnmount(() => {
 
 // ---------- Log dialog ----------
 .log-content {
-  border-radius: 6px;
+  border-radius: 0;
   padding: 16px;
   font-family: var(--dd-font-mono);
   font-size: 13px;
@@ -2089,7 +2088,7 @@ onBeforeUnmount(() => {
 }
 .runtime-item {
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  border-radius: 0;
   padding: 12px 14px;
   margin-bottom: 12px;
   background: var(--el-fill-color-lighter);
@@ -2129,7 +2128,7 @@ onBeforeUnmount(() => {
 }
 .android-runtime-log pre {
   background: var(--el-fill-color);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 10px 12px;
   font-size: 12px;
   max-height: 240px;

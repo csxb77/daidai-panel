@@ -104,7 +104,7 @@ const { isMobile, dialogFullscreen } = useResponsive()
 
 .card-header-buttons {
   padding: 2px;
-  border-radius: 12px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   display: flex;
   gap: 8px;

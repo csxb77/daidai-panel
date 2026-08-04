@@ -138,8 +138,8 @@ watch(searchKeyword, (val) => {
   flex-direction: column;
   gap: 0;
   padding: 0;
-  /* 卡片表面/边框/阴影由 index.vue 的 :deep(.scripts-sidebar) 统一负责，
-     这里不再画 border-right 分隔线与方向性投影（两卡独立后无需分隔） */
+  /* 卡片表面/边框由 index.vue 的 :deep(.scripts-sidebar) 统一负责，
+     这里不再画 border-right 分隔线（两卡独立后无需分隔） */
   background: var(--el-bg-color);
   box-sizing: border-box;
   font-family: var(--dd-font-ui);
@@ -159,7 +159,7 @@ watch(searchKeyword, (val) => {
 
 .sidebar-search-input {
   :deep(.el-input__wrapper) {
-    border-radius: 8px;
+    border-radius: 0;
     padding: 4px 12px;
     box-shadow: 0 0 0 1px var(--el-border-color-lighter) inset;
     transition: box-shadow 0.2s, background 0.2s;
@@ -202,7 +202,7 @@ watch(searchKeyword, (val) => {
 .sidebar-toolbar-actions {
   display: flex;
   padding: 2px;
-  border-radius: 12px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 6px;
@@ -210,9 +210,9 @@ watch(searchKeyword, (val) => {
 
 .primary-new-btn {
   height: 30px;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+  transition: border-color 0.18s ease;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: 0;
   font-size: 12.5px;
   font-weight: 500;
   display: inline-flex;
@@ -223,27 +223,16 @@ watch(searchKeyword, (val) => {
     font-size: 10px;
     margin-left: 2px;
     opacity: 0.7;
-    transition: transform 0.18s ease;
-  }
-
-  &:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 10px 20px rgba(64, 158, 255, 0.12);
-  }
-
-  &:hover .chevron {
-    transform: translateY(1px);
   }
 }
 
 .icon-btn {
   width: 30px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
   height: 30px;
   padding: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
-  border-radius: 8px;
+  border-radius: 0;
   color: var(--el-text-color-secondary);
   cursor: pointer;
   display: inline-flex;
@@ -255,8 +244,6 @@ watch(searchKeyword, (val) => {
     color: var(--el-color-primary);
     border-color: color-mix(in srgb, var(--el-color-primary) 40%, var(--el-border-color-lighter));
     background: color-mix(in srgb, var(--el-color-primary) 6%, transparent);
-    transform: translateY(-1px);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
   }
 
   &:focus-visible {
@@ -285,10 +272,9 @@ watch(searchKeyword, (val) => {
 
   :deep(.el-tree-node__content) {
     height: 34px;
-    transition: background 0.15s, transform 0.16s ease, box-shadow 0.16s ease;
     min-width: 0;
     padding-left: 4px;
-    border-radius: 6px;
+    border-radius: 0;
     transition: background 0.15s;
     font-size: 13px;
     overflow: hidden;
@@ -296,8 +282,6 @@ watch(searchKeyword, (val) => {
 
   :deep(.el-tree-node__content:hover) {
     background: var(--el-fill-color-light);
-    transform: translateX(2px);
-    box-shadow: inset 2px 0 0 color-mix(in srgb, var(--el-color-primary) 30%, transparent);
   }
 
   :deep(.el-tree-node.is-current > .el-tree-node__content) {
@@ -311,7 +295,7 @@ watch(searchKeyword, (val) => {
       top: 6px;
       bottom: 6px;
       width: 2.5px;
-      border-radius: 2px;
+      border-radius: 0;
       background: var(--el-color-primary);
     }
   }
@@ -325,7 +309,7 @@ watch(searchKeyword, (val) => {
   :deep(.el-tree__drop-indicator) {
     height: 2px;
     background: var(--el-color-primary);
-    border-radius: 1px;
+    border-radius: 0;
   }
 
   :deep(.el-tree-node.is-dragging > .el-tree-node__content) {
@@ -353,36 +337,17 @@ watch(searchKeyword, (val) => {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--el-fill-color-light);
   color: inherit;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.2s;
+  transition: background 0.15s, border-color 0.15s;
 
   &:hover {
     background: color-mix(in srgb, var(--scripts-accent, #22c55e) 8%, var(--el-fill-color-light));
     border-color: color-mix(in srgb, var(--scripts-accent, #22c55e) 40%, var(--el-border-color-lighter));
-    box-shadow: 0 10px 22px rgba(15, 23, 42, 0.08);
-    transform: translateY(-2px);
-  }
-
-  &::after {
-    content: "";
-    position: absolute;
-    inset: -55% 0 auto;
-    height: 70%;
-    background: linear-gradient(180deg, rgba(255,255,255,0.3), transparent);
-    opacity: 0;
-    transform: translateY(-10px);
-    transition: opacity 180ms ease, transform 180ms ease;
-    pointer-events: none;
-  }
-
-  &:hover::after {
-    opacity: 1;
-    transform: translateY(0);
   }
 
   &:focus-visible {
@@ -393,9 +358,8 @@ watch(searchKeyword, (val) => {
 
 .runner-card-icon {
   width: 30px;
-  box-shadow: 0 8px 18px rgba(34, 197, 94, 0.12);
   height: 30px;
-  border-radius: 8px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -456,14 +420,6 @@ html.dark {
   .scripts-sidebar .sidebar-toolbar-actions,
   .scripts-sidebar .runner-card {
     background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black);
-  }
-
-  .scripts-sidebar .primary-new-btn {
-    box-shadow: 0 10px 20px rgba(37, 99, 235, 0.16);
-  }
-
-  .scripts-sidebar .runner-card:hover {
-    box-shadow: 0 14px 26px rgba(0,0,0,0.28);
   }
 }
 </style>

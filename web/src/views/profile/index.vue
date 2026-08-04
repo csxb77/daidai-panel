@@ -471,7 +471,6 @@ onUnmounted(() => {
               v-if="hasAvatar"
               class="avatar-delete-btn"
               :icon="Delete"
-              circle
               size="small"
               @click.stop="handleDeleteAvatar"
               title="删除头像"
@@ -938,34 +937,16 @@ onUnmounted(() => {
   position: relative;
   overflow: hidden;
   padding: 30px 34px;
-  /* 圆角对齐令牌；阴影改用表面质感令牌，明暗双主题自动切换。
-     注意：暗色下 hero 背景由 global.scss 的 `.profile-hero` 覆盖接管，此处仅负责明色渐变 */
-  border-radius: var(--dd-card-radius);
-  background:
-    linear-gradient(
-      135deg,
-      rgba(167, 139, 250, 0.18) 0%,
-      rgba(96, 165, 250, 0.12) 50%,
-      rgba(34, 197, 94, 0.06) 100%
-    ),
-    var(--profile-surface);
-  border: 1px solid
-    color-mix(in srgb, var(--profile-accent) 12%, var(--profile-border));
-  box-shadow: var(--dd-shadow-card);
+  /* 直角纯色底：去掉紫蓝渐变与阴影，层次仅靠 1px 描边。
+     注意：暗色下 hero 背景由 global.scss 的 `.profile-hero` 覆盖接管为纯色，与此处一致 */
+  border-radius: 0;
+  background: var(--profile-surface);
+  border: 1px solid var(--profile-border);
 }
 
+/* 原右下角紫色光晕已移除，容器保留占位以免模板结构变动 */
 .profile-hero-aura {
-  position: absolute;
-  inset: auto -100px -140px auto;
-  width: 340px;
-  height: 340px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle at center,
-    rgba(139, 92, 246, 0.18) 0%,
-    transparent 70%
-  );
-  pointer-events: none;
+  display: none;
 }
 
 .profile-hero-main {
@@ -989,11 +970,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
+/* 头像：直角方块 + 纯色底，hover 只显示遮罩，不再缩放 */
 .profile-avatar {
   position: relative;
   width: 72px;
   height: 72px;
-  border-radius: 18px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1001,16 +983,12 @@ onUnmounted(() => {
   font-family: var(--dd-font-ui);
   font-size: 28px;
   font-weight: 700;
-  background: linear-gradient(135deg, #10b981 0%, #3b82f6 100%);
-  box-shadow: 0 8px 20px -6px rgba(16, 185, 129, 0.45);
+  background: var(--el-color-primary);
   flex-shrink: 0;
   cursor: pointer;
   overflow: hidden;
-  transition: transform 0.18s;
 
   &:hover {
-    transform: scale(1.04);
-
     .profile-avatar-overlay {
       opacity: 1;
     }
@@ -1028,7 +1006,7 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: inherit;
+  border-radius: 0;
   z-index: 1;
 }
 
@@ -1040,7 +1018,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.4);
-  border-radius: inherit;
+  border-radius: 0;
   opacity: 0;
   transition: opacity 0.2s;
   color: #fff;
@@ -1057,16 +1035,19 @@ onUnmounted(() => {
   z-index: 3;
   width: 22px;
   height: 22px;
-  border-radius: 50%;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--profile-surface);
+  /* 去阴影后靠 2px 描边与头像本体分隔 */
   border: 2px solid var(--profile-border);
   color: var(--el-text-color-secondary);
   cursor: pointer;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
-  transition: all 0.2s;
+  transition:
+    color 0.2s,
+    border-color 0.2s,
+    background-color 0.2s;
 
   &:hover {
     color: var(--profile-accent);
@@ -1074,15 +1055,20 @@ onUnmounted(() => {
   }
 }
 
+/* 删除头像按钮：默认方形图标按钮（原 circle），去阴影，靠 1px 描边与头像分隔 */
 .avatar-delete-btn {
   position: absolute;
   bottom: -2px;
   right: -2px;
   z-index: 3;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  padding: 0 !important;
+  border-radius: 0 !important;
   color: var(--el-color-danger) !important;
-  border-color: var(--profile-border) !important;
+  border: 1px solid var(--profile-border) !important;
   background: var(--profile-surface) !important;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
 
   &:hover {
     color: #fff !important;
@@ -1100,7 +1086,7 @@ onUnmounted(() => {
 .profile-avatar-ring {
   position: absolute;
   inset: -4px;
-  border-radius: inherit;
+  border-radius: 0;
   border: 2.5px solid rgba(34, 197, 94, 0.25);
   z-index: 0;
 }
@@ -1135,7 +1121,7 @@ onUnmounted(() => {
   gap: 5px;
   height: 24px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.2px;
@@ -1163,16 +1149,16 @@ onUnmounted(() => {
   color: #16a34a;
 }
 
+/* 2FA 状态点：直角小方块，去掉外圈光晕 */
 .hero-chip-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: 0;
   background: var(--el-color-danger);
 }
 
 .hero-chip-dot--on {
   background: var(--profile-accent);
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
 }
 
 .profile-hero-login {
@@ -1210,11 +1196,10 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 4px;
   background: var(--profile-surface);
+  /* 直角 + 1px 边框，与卡片外壳风格统一（不再用阴影浮起） */
   border: 1px solid var(--profile-border);
-  /* 圆角/阴影对齐令牌，与卡片外壳风格统一 */
-  border-radius: var(--dd-card-radius);
+  border-radius: 0;
   padding: 12px;
-  box-shadow: var(--dd-shadow-card);
   align-self: flex-start;
 }
 
@@ -1223,7 +1208,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: 0;
   border: none;
   background: transparent;
   color: var(--el-text-color-regular);
@@ -1259,17 +1244,11 @@ onUnmounted(() => {
 .profile-card {
   position: relative;
   background: var(--profile-surface);
+  /* 直角 + 1px 边框划分层次，不再用阴影浮起 */
   border: 1px solid var(--profile-border);
-  /* 圆角/阴影对齐表面质感令牌（明暗双主题自动切换） */
-  border-radius: var(--dd-card-radius);
+  border-radius: 0;
   padding: 20px 24px;
   overflow: hidden;
-  box-shadow: var(--dd-shadow-card);
-  transition: box-shadow var(--dd-motion-normal) var(--dd-ease-standard);
-
-  &:hover {
-    box-shadow: var(--dd-shadow-card-hover);
-  }
 }
 
 .profile-card-header {
@@ -1342,7 +1321,7 @@ onUnmounted(() => {
     display: flex;
     gap: 10px;
     padding: 10px 14px;
-    border-radius: 10px;
+    border-radius: 0;
     background: var(--profile-surface-muted);
     border: 1px solid var(--profile-border);
     font-size: 12.5px;
@@ -1355,7 +1334,7 @@ onUnmounted(() => {
   flex-shrink: 0;
   width: 20px;
   height: 20px;
-  border-radius: 50%;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1379,53 +1358,40 @@ onUnmounted(() => {
   }
 
   :deep(.el-input__wrapper) {
-    border-radius: 8px;
+    border-radius: 0;
   }
 }
 
+/* 主行动按钮：纯绿色底，去掉渐变与辉光，hover 只加深底色 */
 .primary-cta {
-  border-radius: 8px;
+  border-radius: 0;
   height: 38px;
   padding: 0 20px;
   font-weight: 600;
-  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  background: #22c55e;
   border: none;
-  box-shadow: 0 4px 12px -4px rgba(34, 197, 94, 0.45);
 
   &:hover,
   &:focus {
-    background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+    background: #16a34a;
     border: none;
   }
 }
 
-/* Two-factor card */
+/* Two-factor card：纯色底，状态差异只体现在描边颜色上 */
 .profile-card--twofa {
   border-color: rgba(245, 108, 108, 0.18);
-  background:
-    linear-gradient(135deg, rgba(245, 108, 108, 0.03) 0%, transparent 55%),
-    var(--profile-surface);
+  background: var(--profile-surface);
 
   &.is-on {
     border-color: rgba(34, 197, 94, 0.22);
-    background:
-      linear-gradient(135deg, rgba(34, 197, 94, 0.04) 0%, transparent 60%),
-      var(--profile-surface);
+    background: var(--profile-surface);
   }
 }
 
+/* 原右下角圆形光晕已移除，容器保留占位以免模板结构变动 */
 .twofa-halo {
-  position: absolute;
-  inset: auto -60px -80px auto;
-  width: 180px;
-  height: 180px;
-  border-radius: 50%;
-  background: radial-gradient(
-    circle,
-    rgba(99, 102, 241, 0.14) 0%,
-    transparent 70%
-  );
-  pointer-events: none;
+  display: none;
 }
 
 .twofa-status {
@@ -1434,7 +1400,7 @@ onUnmounted(() => {
   gap: 6px;
   height: 24px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 11.5px;
   font-weight: 700;
   font-family: var(--dd-font-mono);
@@ -1451,7 +1417,7 @@ onUnmounted(() => {
 .twofa-status-dot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: 0;
   background: currentColor;
 }
 
@@ -1469,7 +1435,7 @@ onUnmounted(() => {
 }
 
 .danger-outline-btn {
-  border-radius: 8px;
+  border-radius: 0;
   height: 38px;
   padding: 0 18px;
   font-weight: 600;
@@ -1498,17 +1464,10 @@ onUnmounted(() => {
   gap: 14px;
   flex-wrap: wrap;
   padding: 18px 22px;
-  /* 圆角/阴影对齐令牌（保留赞助卡的琥珀色渐变外观） */
-  border-radius: var(--dd-card-radius);
+  /* 直角纯色底：去掉琥珀渐变与阴影，只保留琥珀描边点题 */
+  border-radius: 0;
   border: 1px solid rgba(245, 158, 11, 0.16);
-  background:
-    linear-gradient(
-      135deg,
-      rgba(245, 158, 11, 0.06) 0%,
-      rgba(245, 158, 11, 0.02) 100%
-    ),
-    var(--profile-surface);
-  box-shadow: var(--dd-shadow-card);
+  background: var(--profile-surface);
 }
 
 .sponsor-toolbar-copy {
@@ -1544,13 +1503,13 @@ onUnmounted(() => {
 }
 
 .sponsor-refresh-btn {
-  border-radius: 8px;
+  border-radius: 0;
 }
 
 /* ================= Setup dialog ================= */
 :deep(.setup-2fa-dialog) {
   .el-dialog {
-    border-radius: 12px;
+    border-radius: 0;
     overflow: hidden;
   }
 
@@ -1578,12 +1537,12 @@ onUnmounted(() => {
 .setup-dialog-badge {
   width: 36px;
   height: 36px;
-  border-radius: 10px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: linear-gradient(135deg, #1890ff, #36cfc9);
+  background: var(--el-color-primary);
 }
 
 .setup-dialog-title {
@@ -1619,7 +1578,7 @@ onUnmounted(() => {
 .step-num {
   width: 22px;
   height: 22px;
-  border-radius: 50%;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1627,7 +1586,7 @@ onUnmounted(() => {
   font-weight: 700;
   font-family: var(--dd-font-mono);
   color: #fff;
-  background: linear-gradient(135deg, #22c55e, #16a34a);
+  background: #16a34a;
 }
 
 .step-title {
@@ -1652,14 +1611,14 @@ onUnmounted(() => {
   width: 220px;
   height: 220px;
   padding: 10px;
-  border-radius: 12px;
+  border-radius: 0;
   background: #fff;
   border: 1px solid var(--profile-border);
 }
 
 .secret-box {
   padding: 14px 16px;
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--profile-surface-muted);
   border: 1px dashed var(--profile-border);
   text-align: center;
@@ -1677,7 +1636,7 @@ onUnmounted(() => {
 
 .totp-input {
   :deep(.el-input__wrapper) {
-    border-radius: 10px;
+    border-radius: 0;
   }
 
   :deep(.el-input__inner) {

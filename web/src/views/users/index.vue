@@ -395,34 +395,33 @@ function getRoleName(role: string) {
   &__search { width: 260px; }
 }
 
-// 角色分段控件：与定时任务页/订阅管理页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
+// 角色分段控件：与定时任务页/订阅管理页一致的直角分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
 .status-tabs {
-  display: inline-flex; background: var(--el-fill-color-light); border-radius: var(--dd-radius-sm); padding: 3px; gap: 2px;
+  display: inline-flex; background: var(--el-fill-color-light); border-radius: 0; padding: 3px; gap: 2px;
 }
 
 .status-tab {
-  padding: 6px 14px; border-radius: 7px; border: none; background: transparent;
+  padding: 6px 14px; border-radius: 0; border: none; background: transparent;
   color: var(--el-text-color-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    background-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   &:hover { color: var(--el-text-color-primary); }
-  &.active { background: var(--el-bg-color); color: var(--el-color-primary); box-shadow: var(--dd-shadow-card); font-weight: 600; }
+  &.active { background: var(--el-bg-color); color: var(--el-color-primary); font-weight: 600; }
 }
 
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
-  background: var(--el-bg-color); border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card); border: 1px solid var(--el-border-color-lighter); overflow: hidden;
+  background: var(--el-bg-color); border-radius: 0;
+  border: 1px solid var(--el-border-color-lighter); overflow: hidden;
 }
 
 .user-name-cell { display: flex; align-items: center; gap: 12px; }
 .user-avatar {
-  width: 36px; height: 36px; border-radius: 50%;
-  // 头像渐变改用品牌色令牌，明暗双主题一致（原写死蓝色与主色相略有偏差）
-  background: linear-gradient(135deg, var(--el-color-primary), var(--el-color-primary-light-3));
+  width: 36px; height: 36px; border-radius: 0;
+  // 头像改为直角方块 + 品牌纯色底（原为圆形 + 渐变）
+  background: var(--el-color-primary);
   color: #fff; display: flex; align-items: center; justify-content: center;
   font-weight: 600; font-size: 14px; flex-shrink: 0;
 }

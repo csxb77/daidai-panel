@@ -114,9 +114,9 @@ const statusText = computed(() => {
 
 <style scoped lang="scss">
 .usc {
-  border-radius: 14px;
+  border-radius: 0;
+  // 扁平化：不再用投影制造浮起，仅靠 1px 描边与页面底色区分
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
   height: 100%;
 
   :deep(.el-card__body) {
@@ -154,13 +154,10 @@ const statusText = computed(() => {
   align-items: center;
   gap: 14px;
   padding: 16px;
-  border-radius: 12px;
-  background: linear-gradient(
-    135deg,
-    rgba(24, 144, 255, 0.07) 0%,
-    rgba(54, 207, 201, 0.05) 100%
-  );
-  border: 1px solid rgba(59, 130, 246, 0.1);
+  border-radius: 0;
+  // 扁平化：装饰渐变换成主色浅底纯色
+  background: var(--el-color-primary-light-9);
+  border: 1px solid var(--el-border-color-lighter);
   margin-bottom: 20px;
   flex: 1;
 }
@@ -168,13 +165,13 @@ const statusText = computed(() => {
 .usc-switch-icon-wrap {
   width: 40px;
   height: 40px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #1890ff, #36cfc9);
+  border-radius: 0;
+  // 扁平化：装饰渐变与辉光换成主色纯底
+  background: var(--el-color-primary);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  box-shadow: 0 4px 12px rgba(24, 144, 255, 0.28);
 }
 
 .usc-switch-svg {
@@ -217,21 +214,19 @@ const statusText = computed(() => {
 .usc-footer-dot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  // 装饰圆点方化为直角小方块，并去掉外圈辉光
+  border-radius: 0;
   flex-shrink: 0;
   margin-top: 4px;
 
   &--blue {
     background: #3b82f6;
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
   }
   &--green {
     background: #10b981;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.15);
   }
   &--cyan {
     background: #36cfc9;
-    box-shadow: 0 0 0 3px rgba(54, 207, 201, 0.18);
   }
 }
 

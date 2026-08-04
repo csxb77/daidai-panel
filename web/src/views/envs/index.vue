@@ -1065,12 +1065,12 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
           <template #default="{ row }">
             <div class="action-group">
               <el-tooltip content="编辑" placement="top">
-                <el-button size="small" type="primary" plain circle @click="openEdit(row)">
+                <el-button size="small" type="primary" plain @click="openEdit(row)">
                   <el-icon><Edit /></el-icon>
                 </el-button>
               </el-tooltip>
               <el-tooltip content="复制同名变量" placement="top">
-                <el-button size="small" plain circle @click="openDuplicate(row)">
+                <el-button size="small" plain @click="openDuplicate(row)">
                   <el-icon><CopyDocument /></el-icon>
                 </el-button>
               </el-tooltip>
@@ -1080,14 +1080,13 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                   :type="isTopPinned(row) ? 'info' : 'warning'"
                   :class="{ 'top-action-active': isTopPinned(row) }"
                   plain
-                  circle
                   @click="handleToggleTop(row)"
                 >
                   <el-icon><Top /></el-icon>
                 </el-button>
               </el-tooltip>
               <el-tooltip content="删除" placement="top">
-                <el-button size="small" type="danger" plain circle @click="handleDelete(row.id)">
+                <el-button size="small" type="danger" plain @click="handleDelete(row.id)">
                   <el-icon><Delete /></el-icon>
                 </el-button>
               </el-tooltip>
@@ -1243,19 +1242,20 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
-// 状态分段控件：与定时任务页/执行日志页/订阅页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
+// 状态分段控件：与定时任务页/执行日志页/订阅页一致的直角容器 + 选中态白底品牌色 + 1px 边框
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 7px;
-  border: none;
+  border-radius: 0;
+  // 未选中态用透明边框占位，选中态只换边框颜色，避免尺寸跳动
+  border: 1px solid transparent;
   background: transparent;
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -1264,7 +1264,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
 
   &:hover {
@@ -1274,7 +1274,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: var(--dd-shadow-card);
+    border-color: var(--el-border-color-lighter);
     font-weight: 600;
   }
 }
@@ -1285,11 +1285,10 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Table Card ---- */
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：直角无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1377,7 +1376,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 12px;
 }
 
-// 桌面空态/骨架容器（特有元素）：圆角/阴影对齐卡片令牌，明暗自动适配；保留自定义空态结构与渐变观感
+// 桌面空态/骨架容器（特有元素）：直角纯色底 + 1px 边框，明暗自动适配；保留自定义空态结构
 .env-desktop-state {
   display: flex;
   align-items: center;
@@ -1385,10 +1384,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   min-height: 360px;
   padding: 28px 24px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: var(--dd-card-radius);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--el-fill-color-lighter) 62%, white) 0%, var(--el-bg-color) 100%);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
+  background: var(--el-bg-color);
 }
 
 .env-desktop-state--loading {
@@ -1402,7 +1399,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 .env-skeleton {
   position: relative;
   overflow: hidden;
-  border-radius: var(--dd-card-radius);
+  border-radius: 0;
   background: var(--el-fill-color);
 }
 
@@ -1477,7 +1474,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   justify-content: center;
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-fill-color-light);
-  border-radius: 8px;
+  border-radius: 0;
   color: var(--el-text-color-secondary);
   cursor: grab;
   touch-action: none;
@@ -1509,19 +1506,24 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   flex: 1 1 calc(33.33% - 6px);
 }
 
-// 置顶移动卡（特有元素）：保留置顶语义的橙色左缘标识，环境光阴影对齐卡片令牌
+// 置顶移动卡（特有元素）：只保留置顶语义的橙色左缘标识，不再叠加环境光阴影
 .env-card--pinned {
   border-color: rgba(245, 166, 35, 0.28);
-  box-shadow:
-    inset 4px 0 0 #f5a623,
-    var(--dd-shadow-card);
+  box-shadow: inset 4px 0 0 #f5a623;
 }
 
 /* ---- Cell Styles ---- */
+// 表格操作列：对齐定时任务页/依赖管理页 .action-btns 的写法——
+// 居中排布 + 4px 间隙 + 紧凑内边距，方形图标按钮（不再用 circle）。
 .action-group {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 4px;
+
+  :deep(.el-button) {
+    padding: 4px 8px;
+  }
 }
 
 .env-name-wrap {
@@ -1542,18 +1544,19 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   white-space: nowrap;
 }
 
+// 置顶标签：直角纯色底 + 1px 边框（原胶囊渐变与内描边已去掉）
 .pinned-chip {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 12px;
   font-weight: 700;
   color: #8a4b00;
-  background: linear-gradient(135deg, #fff1bf 0%, #ffd66b 100%);
-  box-shadow: inset 0 0 0 1px rgba(196, 118, 0, 0.18);
+  background: #ffd66b;
+  border: 1px solid rgba(196, 118, 0, 0.28);
 }
 
 .env-value-text,
@@ -1597,6 +1600,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   color: var(--el-text-color-placeholder);
 }
 
+// 分组标签：直角纯色底；原来的内描边改成真实 1px 边框，保证浅底在白色表格上仍有分隔
 .group-pill {
   --group-hue: 210;
   display: inline-flex;
@@ -1604,12 +1608,12 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 6px;
   max-width: 100%;
   padding: 4px 10px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 12px;
   font-weight: 600;
   color: hsl(var(--group-hue) 55% 32%);
   background: hsl(var(--group-hue) 85% 96%);
-  box-shadow: inset 0 0 0 1px hsl(var(--group-hue) 72% 78% / 0.7);
+  border: 1px solid hsl(var(--group-hue) 72% 78% / 0.7);
 }
 
 .group-pill-list {
@@ -1631,10 +1635,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   white-space: nowrap;
 }
 
+// 分组色标：直角小方块
 .group-dot {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: 0;
   background: hsl(var(--group-hue) 72% 48%);
   flex-shrink: 0;
 }
@@ -1689,15 +1694,15 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   padding: 0 !important;
 }
 
+// 已置顶按钮：用边框颜色标记，不再叠加外描边阴影
 .top-action-active {
-  box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.2);
+  border-color: rgba(245, 166, 35, 0.55);
 }
 
 /* ---- Pinned Row ---- */
+// 置顶行：整行纯色淡橙底（原来的横向渐变已去掉），左缘 4px 橙色标识保留
 :deep(.env-row-pinned > td) {
-  background:
-    linear-gradient(90deg, rgba(255, 214, 107, 0.22) 0, rgba(255, 214, 107, 0.08) 32px, transparent 220px),
-    var(--el-table-tr-bg-color);
+  background: color-mix(in srgb, #ffd66b 12%, var(--el-table-tr-bg-color));
 }
 
 :deep(.env-row-pinned > td:first-child) {
@@ -1714,7 +1719,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 .export-preview {
   background: var(--el-bg-color-page);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 16px;
   font-family: var(--dd-font-mono);
   font-size: 13px;
@@ -1840,25 +1845,21 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 /* 这些类由 sortablejs 在运行时动态加到 el-table 行 / body 上的拖拽克隆上，
    不在本组件 scoped 作用域内，必须用全局样式才能命中。 */
 
-/* 被拖起的克隆行：放大悬浮 + 多层立体阴影 + 主色描边，做出 3D 抬起质感。
-   注意用 scale 独立属性，绝不能用 transform（会覆盖 sortable 的 translate3d 跟手定位）。 */
+/* 被拖起的克隆行：不做放大与投影，改为直角实底 + 主色描边标出正在拖动的行。
+   用 outline 而不是 border：el-table 是 border-collapse: separate，tr 上的 border 不会绘制。 */
 .sortable-drag {
   background: var(--el-bg-color);
   opacity: 1 !important;
-  scale: 1.03;
-  border-radius: 10px;
+  border-radius: 0;
   cursor: grabbing;
-  box-shadow:
-    0 2px 8px rgba(15, 23, 42, 0.14),
-    0 26px 54px rgba(15, 23, 42, 0.28),
-    0 0 0 1px color-mix(in srgb, var(--el-color-primary) 32%, transparent);
+  outline: 1px solid var(--el-color-primary);
+  outline-offset: -1px;
 }
 
-/* 落点占位：高亮"插槽"，清楚指示会落到哪 */
+/* 落点占位：高亮"插槽"，清楚指示会落到哪（主色浅底本身已足够区分，不再叠内描边） */
 .sortable-ghost {
   background: var(--el-color-primary-light-9) !important;
-  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--el-color-primary) 45%, transparent);
-  border-radius: 8px;
+  border-radius: 0;
 }
 .sortable-ghost > td {
   opacity: 0.25;

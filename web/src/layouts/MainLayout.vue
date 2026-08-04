@@ -412,17 +412,13 @@ async function loadVersion() {
 </template>
 
 <style scoped lang="scss">
-// ==================== 悬浮圆角外壳 ====================
-// 桌面：在最外层包一层留白 + 圆角 + 阴影 + 描边的「悬浮外壳」，包住侧栏 + 主区。
-// 外壳自身用表面色，留白处露出 #app 的页面底色；overflow: hidden 用于圆角裁切。
-// 注意：内部滚动链（layout-main / route-shell / dd-*-page）保持不动，外壳只在最外层加壳。
+// ==================== 全屏外壳 ====================
+// 桌面与移动端一致：外壳直接铺满视口，无留白、无圆角、无阴影、无外描边。
+// overflow: hidden 用于把内部滚动锁在 layout-main / route-shell 里，不让整页产生滚动条。
+// 注意：内部滚动链（layout-main / route-shell / dd-*-page）保持不动。
 .layout-container {
-  margin: var(--dd-shell-margin);
-  // 高度扣掉上下两侧留白，保证外壳整体在视口内、不溢出
-  height: calc(100dvh - var(--dd-shell-margin) * 2);
-  border-radius: var(--dd-radius-shell);
-  box-shadow: var(--dd-shadow-shell);
-  border: 1px solid var(--el-border-color-light);
+  margin: 0;
+  height: 100dvh;
   background: var(--el-bg-color);
   overflow: hidden;
 }
@@ -430,7 +426,6 @@ async function loadVersion() {
 // ==================== Sidebar ====================
 .layout-aside {
   width: 220px;
-  box-shadow: 8px 0 24px rgba(15, 23, 42, 0.03);
   display: flex;
   flex-direction: column;
   background: var(--el-bg-color);
@@ -453,11 +448,8 @@ async function loadVersion() {
   padding: 8px 10px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--el-border-color-light);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--el-color-primary-light-9) 48%, white) 0%,
-    var(--el-bg-color) 100%
-  );
+  // 去装饰渐变，用与侧栏一致的纯色底，靠底部 1px 分隔线划分区域
+  background: var(--el-bg-color);
 
   &.is-collapsed {
     justify-content: center;
@@ -470,20 +462,15 @@ async function loadVersion() {
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
-  border-radius: 14px;
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--el-bg-color) 88%, white) 0%,
-    var(--el-bg-color) 100%
-  );
+  border-radius: 0;
+  background: var(--el-bg-color);
   border: 1px solid color-mix(in srgb, var(--el-color-primary) 10%, var(--el-border-color-lighter));
-  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.04);
-  transition: box-shadow 0.3s, border-color 0.3s;
+  transition: border-color 0.3s;
   width: 100%;
   min-height: 42px;
 
+  // hover 只加深描边，不再叠阴影
   &:hover {
-    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
     border-color: color-mix(in srgb, var(--el-color-primary) 18%, var(--el-border-color-lighter));
   }
 }
@@ -498,19 +485,14 @@ async function loadVersion() {
 .logo-icon-wrap {
   width: 28px;
   height: 28px;
-  border-radius: 9px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: linear-gradient(145deg, var(--el-color-primary-light-8), var(--el-color-primary-light-9));
+  // 纯色底 + 1px 品牌色描边，去掉渐变、内高光与外投影，hover 也不再上浮
+  background: var(--el-bg-color);
   border: 1px solid color-mix(in srgb, var(--el-color-primary) 18%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55), 0 4px 10px rgba(64, 158, 255, 0.12);
-  transition: transform 0.3s, box-shadow 0.3s;
-
-  .logo-inner:hover & {
-    transform: translateY(-1px);
-  }
 }
 
 .logo-icon {
@@ -532,7 +514,7 @@ async function loadVersion() {
 .logo-version {
   flex-shrink: 0;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: 0;
   font-family: var(--dd-font-mono);
   font-size: 10px;
   font-weight: 700;
@@ -556,7 +538,7 @@ async function loadVersion() {
 
   &::-webkit-scrollbar-thumb {
     background: transparent;
-    border-radius: 3px;
+    border-radius: 0;
   }
 
   &:hover::-webkit-scrollbar-thumb {
@@ -615,7 +597,7 @@ async function loadVersion() {
 .envs-add-btn {
   width: 20px;
   height: 20px;
-  border-radius: 4px;
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   display: flex;
@@ -626,9 +608,7 @@ async function loadVersion() {
   transition:
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    border-color var(--dd-motion-fast) var(--dd-ease-standard),
-    transform var(--dd-motion-fast) var(--dd-ease-emphasized),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     border-color: var(--el-color-primary);
@@ -649,21 +629,20 @@ async function loadVersion() {
   align-items: center;
   gap: 8px;
   padding: 5px 6px;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.2s;
 
+  // hover 只换底色
   &:hover {
     background: var(--el-fill-color-light);
-    transform: translateY(-1px);
-    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
   }
 }
 
 .env-dot {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: 0;
   flex-shrink: 0;
 }
 
@@ -706,31 +685,13 @@ async function loadVersion() {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border-radius: 10px;
+  border-radius: 0;
   cursor: pointer;
   transition: background 0.2s;
 
+  // hover 只换底色：去掉上浮阴影与顶部白色高光扫过（::after 装饰层已整体移除）
   &:hover {
     background: var(--el-fill-color-light);
-    transform: translateY(-1px);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
-  }
-
-  &::after {
-    content: "";
-    position: absolute;
-    inset: -50% 0 auto;
-    height: 75%;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent);
-    opacity: 0;
-    transform: translateY(-8px);
-    transition: opacity 180ms ease, transform 180ms ease;
-    pointer-events: none;
-  }
-
-  &:hover::after {
-    opacity: 1;
-    transform: translateY(0);
   }
 
   .is-collapsed & {
@@ -742,7 +703,7 @@ async function loadVersion() {
 .user-avatar {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: 0;
   object-fit: cover;
   flex-shrink: 0;
 }
@@ -751,7 +712,7 @@ async function loadVersion() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--el-color-primary-light-5), var(--el-color-primary));
+  background: var(--el-color-primary);
   color: #fff;
   font-size: 14px;
   font-weight: 700;
@@ -788,7 +749,7 @@ async function loadVersion() {
   gap: 6px;
   height: 40px;
   margin: 4px 12px 10px;
-  border-radius: 8px;
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   cursor: pointer;
@@ -797,14 +758,12 @@ async function loadVersion() {
   transition:
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    transform var(--dd-motion-fast) var(--dd-ease-emphasized),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     background: var(--el-fill-color-light);
     color: var(--el-color-primary);
     border-color: var(--el-color-primary-light-7);
-    transform: translateY(-1px);
   }
 }
 
@@ -838,9 +797,8 @@ async function loadVersion() {
 
 .header-toggle-btn {
   width: 34px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
   height: 34px;
-  border-radius: 8px;
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   display: flex;
@@ -855,15 +813,13 @@ async function loadVersion() {
     background: var(--el-fill-color-light);
     color: var(--el-color-primary);
     border-color: var(--el-color-primary-light-7);
-    transform: translateY(-1px);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
   }
 }
 
 .header-breadcrumb {
   display: flex;
   padding: 6px 10px;
-  border-radius: 10px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 76%, transparent);
   align-items: center;
   gap: 6px;
@@ -904,7 +860,7 @@ async function loadVersion() {
   width: 100%;
   height: 36px;
   padding: 0 14px;
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--el-fill-color-light);
   border: 1px solid transparent;
   cursor: pointer;
@@ -933,7 +889,7 @@ async function loadVersion() {
 .search-kbd {
   flex-shrink: 0;
   padding: 2px 6px;
-  border-radius: 4px;
+  border-radius: 0;
   font-size: 11px;
   font-family: var(--dd-font-mono);
   color: var(--el-text-color-placeholder);
@@ -945,7 +901,7 @@ async function loadVersion() {
 .header-right {
   display: flex;
   padding: 4px 6px;
-  border-radius: 14px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
   align-items: center;
   gap: 6px;
@@ -954,7 +910,7 @@ async function loadVersion() {
 .header-icon-btn {
   width: 34px;
   height: 34px;
-  border-radius: 8px;
+  border-radius: 0;
   border: none;
   background: transparent;
   display: flex;
@@ -964,9 +920,7 @@ async function loadVersion() {
   color: var(--el-text-color-regular);
   transition:
     background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    color var(--dd-motion-fast) var(--dd-ease-standard),
-    transform var(--dd-motion-fast) var(--dd-ease-emphasized),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    color var(--dd-motion-fast) var(--dd-ease-standard);
   position: relative;
 
   &:hover {
@@ -975,11 +929,7 @@ async function loadVersion() {
   }
 }
 
-.theme-toggle {
-  &:hover {
-    transform: translateY(-1px) scale(1.03);
-  }
-}
+// 主题切换按钮的 hover 反馈与其他 header 图标按钮一致（换底色），不再额外做上浮 + 放大
 
 .notification-dot {
   position: absolute;
@@ -987,7 +937,7 @@ async function loadVersion() {
   right: 7px;
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: 0;
   background: #f56c6c;
   border: 1.5px solid var(--el-bg-color);
 }
@@ -999,39 +949,21 @@ async function loadVersion() {
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  border-radius: 8px;
+  border-radius: 0;
   cursor: pointer;
   transition: all 0.2s;
   outline: none;
 
+  // hover 只换底色：去掉上浮阴影与顶部白色高光扫过（::after 装饰层已整体移除）
   &:hover {
     background: var(--el-fill-color-light);
-    transform: translateY(-1px);
-    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
-  }
-
-  &::after {
-    content: "";
-    position: absolute;
-    inset: -50% 0 auto;
-    height: 70%;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), transparent);
-    opacity: 0;
-    transform: translateY(-10px);
-    transition: opacity 180ms ease, transform 180ms ease;
-    pointer-events: none;
-  }
-
-  &:hover::after {
-    opacity: 1;
-    transform: translateY(0);
   }
 }
 
 .header-user-avatar {
   width: 28px;
   height: 28px;
-  border-radius: 50%;
+  border-radius: 0;
   object-fit: cover;
   flex-shrink: 0;
 }
@@ -1040,7 +972,7 @@ async function loadVersion() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, var(--el-color-primary-light-5), var(--el-color-primary));
+  background: var(--el-color-primary);
   color: #fff;
   font-size: 12px;
   font-weight: 700;
@@ -1118,11 +1050,8 @@ async function loadVersion() {
 }
 
 @media screen and (max-height: 820px) and (min-width: 769px) {
-  // 矮屏：外壳四周留白收小，给内容腾出更多垂直空间
-  .layout-container {
-    --dd-shell-margin: 10px;
-  }
-
+  // 矮屏：外壳本身已铺满视口，这里只收紧 header / main / footer 的内边距，
+  // 给内容腾出更多垂直空间
   .layout-header {
     height: 52px;
     padding: 0 16px;
@@ -1202,15 +1131,7 @@ async function loadVersion() {
 
 // ==================== Mobile responsive ====================
 @media screen and (max-width: 768px) {
-  // 移动端：取消悬浮外壳，回到全屏，避免小屏留白浪费；drawer 行为不变
-  .layout-container {
-    margin: 0;
-    height: 100dvh;
-    border-radius: 0;
-    box-shadow: none;
-    border: none;
-  }
-
+  // 外壳在桌面端也已全屏铺满，这里不需要再复位；只调整内部间距与滚动行为，drawer 行为不变
   .layout-header {
     height: 54px;
     padding: 0 12px;

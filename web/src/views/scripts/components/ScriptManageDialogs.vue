@@ -355,7 +355,7 @@ watch(showVersionDiffDialog, (visible) => {
   gap: 4px;
   padding: 10px 12px;
   border: 1px solid var(--el-border-color-light);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--el-fill-color-light);
 }
 
@@ -407,7 +407,7 @@ watch(showVersionDiffDialog, (visible) => {
   align-items: center;
   gap: 10px;
   padding: 8px 12px;
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--el-fill-color-light);
   color: var(--el-text-color-secondary);
   font-size: 12px;
@@ -421,7 +421,7 @@ watch(showVersionDiffDialog, (visible) => {
   align-items: center;
   justify-content: center;
   border: 1px dashed var(--el-border-color);
-  border-radius: 14px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 72%, white);
 }
 

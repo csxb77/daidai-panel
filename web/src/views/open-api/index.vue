@@ -883,18 +883,18 @@ onMounted(loadApps);
   }
 }
 
-// 状态分段控件：与定时任务页/订阅页一致的胶囊容器 + 选中态白底品牌色 + 卡片阴影令牌
+// 状态分段控件：与定时任务页/订阅页一致的直角分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 7px;
+  border-radius: 0;
   border: none;
   background: transparent;
   color: var(--el-text-color-secondary);
@@ -903,8 +903,7 @@ onMounted(loadApps);
   cursor: pointer;
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
-    background-color var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard);
+    background-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   &:hover {
     color: var(--el-text-color-primary);
@@ -912,16 +911,14 @@ onMounted(loadApps);
   &.active {
     background: var(--el-bg-color);
     color: var(--el-color-primary);
-    box-shadow: var(--dd-shadow-card);
     font-weight: 600;
   }
 }
 
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（本页为滚动页，无需 fixed 高度链）
+// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（本页为滚动页，无需 fixed 高度链）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -932,10 +929,11 @@ onMounted(loadApps);
   gap: 10px;
 }
 
+// 应用头像：直角方块（原圆形）
 .app-avatar {
   width: 34px;
   height: 34px;
-  border-radius: 50%;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -986,7 +984,7 @@ onMounted(loadApps);
   word-break: break-all;
   background: var(--el-fill-color-light);
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   font-family: var(--dd-font-mono);
   flex: 1;
@@ -1049,20 +1047,14 @@ onMounted(loadApps);
 }
 
 .info-card {
-  // 信息卡：色面/边框/阴影统一走令牌，明暗自动适配（原写死白底浅灰会在暗色串色）
+  // 信息卡：直角 + 1px 边框，色面走令牌明暗自动适配；hover 只加深描边，不上浮
   background: var(--el-bg-color);
-  transition:
-    transform var(--dd-motion-fast) var(--dd-ease-standard),
-    box-shadow var(--dd-motion-fast) var(--dd-ease-standard),
-    border-color var(--dd-motion-fast) var(--dd-ease-standard);
-  border-radius: var(--dd-card-radius);
+  transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
+  border-radius: 0;
   padding: 24px;
-  box-shadow: var(--dd-shadow-card);
   border: 1px solid var(--el-border-color-lighter);
 
   &:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--dd-shadow-card-hover);
     border-color: color-mix(
       in srgb,
       var(--el-color-primary) 18%,
@@ -1080,7 +1072,7 @@ onMounted(loadApps);
   &__icon {
     width: 40px;
     height: 40px;
-    border-radius: 10px;
+    border-radius: 0;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1116,7 +1108,7 @@ onMounted(loadApps);
 
 .secret-display-card {
   background: var(--el-fill-color-light);
-  border-radius: 8px;
+  border-radius: 0;
   padding: 20px;
   border: 1px solid var(--el-border-color-lighter);
 }
@@ -1143,7 +1135,7 @@ onMounted(loadApps);
   gap: 8px;
   background: var(--el-fill-color-blank);
   border: 1px solid var(--el-border-color);
-  border-radius: 6px;
+  border-radius: 0;
   padding: 10px 12px;
 }
 

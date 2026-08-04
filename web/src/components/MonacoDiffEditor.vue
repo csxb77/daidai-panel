@@ -405,7 +405,7 @@ onBeforeUnmount(() => {
   gap: 12px;
   background: var(--dd-editor-bg-color, #111827);
   color: var(--dd-editor-fg-color, #e5e7eb);
-  border-radius: 4px;
+  border-radius: 0;
   font-size: 14px;
 }
 

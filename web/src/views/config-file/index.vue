@@ -214,12 +214,12 @@ async function copyConfigScript() {
   align-items: start;
 }
 
+// 直角卡：层次交给 1px 边框，不再用阴影浮起
 .editor-card,
 .info-card,
 .tips-card {
-  border-radius: var(--dd-card-radius);
-  border-color: var(--el-border-color-lighter);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
+  border: 1px solid var(--el-border-color-lighter);
 }
 
 .editor-card {
@@ -323,7 +323,7 @@ async function copyConfigScript() {
 
 code {
   padding: 1px 5px;
-  border-radius: var(--dd-radius-sm);
+  border-radius: 0;
   background: var(--el-fill-color-lighter);
   color: var(--el-text-color-primary);
   font-family: var(--dd-font-mono);

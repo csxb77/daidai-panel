@@ -855,11 +855,10 @@ function getChannelConfigSummary(row: any): string[] {
   &__filter { width: 130px; }
 }
 
-// 表格卡：圆角/阴影/边框全部对齐卡片令牌（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: var(--dd-card-radius);
-  box-shadow: var(--dd-shadow-card);
+  border-radius: 0;
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -871,11 +870,11 @@ function getChannelConfigSummary(row: any): string[] {
 }
 
 // 渠道头像：底色/文字色保留按类型的品牌识别色（来自模板内联 style），
-// 这里只统一通用尺寸与轻边框，边框走令牌以适配明暗。
+// 这里只统一通用尺寸与轻边框（直角方块），边框走令牌以适配明暗。
 .channel-avatar {
   width: 36px;
   height: 36px;
-  border-radius: 50%;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;

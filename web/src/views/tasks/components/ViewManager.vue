@@ -276,7 +276,7 @@ defineExpose({ loadViews })
                 <el-option v-for="opt in statusOptions" :key="opt.value" :label="opt.label" :value="opt.value" />
               </el-select>
               <el-input v-else v-model="filter.value" placeholder="请输入内容" size="small" style="flex: 1" />
-              <el-button v-if="editForm.filters.length > 1" :icon="Delete" size="small" circle @click="removeFilter(index)" />
+              <el-button v-if="editForm.filters.length > 1" :icon="Delete" size="small" @click="removeFilter(index)" />
             </div>
             <el-button size="small" type="primary" link @click="addFilter">+ 新增筛选条件</el-button>
           </div>
@@ -291,7 +291,7 @@ defineExpose({ loadViews })
               <el-select v-model="rule.direction" style="width: 100px" size="small">
                 <el-option v-for="d in sortDirections" :key="d.value" :label="d.label" :value="d.value" />
               </el-select>
-              <el-button :icon="Delete" size="small" circle @click="removeSortRule(index)" />
+              <el-button :icon="Delete" size="small" @click="removeSortRule(index)" />
             </div>
             <el-button size="small" type="primary" link @click="addSortRule">+ 新增排序方式</el-button>
           </div>

@@ -197,7 +197,7 @@ function handleClose() {
 .file-list {
   width: 280px;
   border: 1px solid var(--el-border-color);
-  border-radius: 4px;
+  border-radius: 0;
   overflow-y: auto;
   flex-shrink: 0;
 }
@@ -254,7 +254,7 @@ function handleClose() {
 .file-content {
   flex: 1;
   border: 1px solid var(--el-border-color);
-  border-radius: 4px;
+  border-radius: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;

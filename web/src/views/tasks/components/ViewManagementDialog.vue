@@ -179,12 +179,12 @@ watch(
           <span class="view-row-name">{{ view.name }}</span>
           <div class="view-row-actions">
             <el-tooltip content="编辑" placement="top">
-              <el-button size="small" type="primary" plain circle @click="handleEdit(view)">
+              <el-button size="small" type="primary" plain @click="handleEdit(view)">
                 <el-icon><Edit /></el-icon>
               </el-button>
             </el-tooltip>
             <el-tooltip content="删除" placement="top">
-              <el-button size="small" type="danger" plain circle @click="handleDelete(view)">
+              <el-button size="small" type="danger" plain @click="handleDelete(view)">
                 <el-icon><Delete /></el-icon>
               </el-button>
             </el-tooltip>
@@ -253,7 +253,7 @@ watch(
   padding: 8px 10px;
   background: var(--el-fill-color-lighter);
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 0;
   transition: border-color 0.15s, background 0.15s, opacity 0.15s;
 
   &:hover {
@@ -301,7 +301,8 @@ watch(
   background: var(--el-fill-color);
 }
 
+/* 拖拽中不再靠阴影浮起，改用描边标出当前拖动的行 */
 .view-row-dragging {
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+  border-color: var(--el-border-color);
 }
 </style>

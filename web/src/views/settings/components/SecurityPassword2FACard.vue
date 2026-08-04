@@ -148,7 +148,7 @@ form {
     .qr-code-img {
       width: 200px;
       height: 200px;
-      border-radius: 8px;
+      border-radius: 0;
       border: 1px solid var(--el-border-color-light);
     }
   }
@@ -156,7 +156,7 @@ form {
   .secret-display {
     padding: 12px;
     background: var(--el-fill-color-light);
-    border-radius: 4px;
+    border-radius: 0;
     text-align: center;
 
     code {

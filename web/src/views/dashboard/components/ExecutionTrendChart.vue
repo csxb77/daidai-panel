@@ -33,7 +33,6 @@ const colors = computed(() => {
       splitLine: '#1e293b',
       labelColor: '#94a3b8',
       pointBorder: '#1e293b',
-      shadow: 'rgba(0,0,0,0.25)',
     }
   }
   return {
@@ -44,7 +43,6 @@ const colors = computed(() => {
     splitLine: '#f5f5f5',
     labelColor: '#8c8c8c',
     pointBorder: '#fff',
-    shadow: 'rgba(0,0,0,0.08)',
   }
 })
 
@@ -63,11 +61,13 @@ function renderChart() {
       borderColor: c.tooltipBorder,
       borderWidth: 1,
       textStyle: { color: c.tooltipText, fontSize: 12 },
-      extraCssText: `border-radius: 8px; box-shadow: 0 2px 8px ${c.shadow};`,
+      // 提示框与全局扁平风格一致：直角、无投影，仅靠 1px 边框与背景色区分层次
+      extraCssText: 'border-radius: 0; box-shadow: none;',
     },
     legend: {
       data: ['执行总数', '成功', '失败', '终止'],
-      icon: 'circle',
+      // 图例色标用方块，与页面其余色标形状统一
+      icon: 'rect',
       itemWidth: 8,
       textStyle: { fontSize: 12, color: c.labelColor },
       top: 0,
@@ -102,11 +102,10 @@ function renderChart() {
         data: props.stats.map(
           (item) => (item.success || 0) + (item.failed || 0) + (item.aborted || 0),
         ),
-        // 主线更顺、symbol/线宽统一；面积渐变更明显，强调"执行总数"主线
+        // 主线更顺、线宽统一；面积渐变保留（属于数据表达），但不画圆形数据点标记
         smooth: 0.5,
         showSymbol: false,
-        symbol: 'circle',
-        symbolSize: 6,
+        symbol: 'none',
         lineStyle: { width: 3, color: '#409EFF' },
         itemStyle: { color: '#409EFF', borderWidth: 2, borderColor: c.pointBorder },
         // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
@@ -123,8 +122,7 @@ function renderChart() {
         data: props.stats.map((item) => item.success || 0),
         smooth: 0.5,
         showSymbol: false,
-        symbol: 'circle',
-        symbolSize: 6,
+        symbol: 'none',
         lineStyle: { width: 2.5, color: '#67C23A' },
         itemStyle: { color: '#67C23A', borderWidth: 2, borderColor: c.pointBorder },
         // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
@@ -141,8 +139,7 @@ function renderChart() {
         data: props.stats.map((item) => item.failed || 0),
         smooth: 0.5,
         showSymbol: false,
-        symbol: 'circle',
-        symbolSize: 6,
+        symbol: 'none',
         lineStyle: { width: 2.5, color: '#F56C6C' },
         itemStyle: { color: '#F56C6C', borderWidth: 2, borderColor: c.pointBorder },
         // 不用 focus:'series'：带渐变面积时它会让 hover 每帧重绘整图，导致掉帧
@@ -154,8 +151,7 @@ function renderChart() {
         data: props.stats.map((item) => item.aborted || 0),
         smooth: 0.5,
         showSymbol: false,
-        symbol: 'circle',
-        symbolSize: 6,
+        symbol: 'none',
         lineStyle: { width: 2.5, color: '#E6A23C' },
         itemStyle: { color: '#E6A23C', borderWidth: 2, borderColor: c.pointBorder },
         // 不用 focus:'series'：保持和其它线一致，避免 hover 时整图频繁重绘。

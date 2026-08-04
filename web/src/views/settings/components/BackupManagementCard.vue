@@ -383,7 +383,7 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
 .card-header-buttons,
 .backup-actions {
   padding: 2px;
-  border-radius: 12px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   display: flex;
   gap: 8px;
@@ -407,7 +407,7 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
   gap: 4px;
   padding: 12px 14px;
   border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--el-fill-color-extra-light);
   transition: border-color 0.2s ease, background 0.2s ease;
   cursor: pointer;
@@ -524,7 +524,7 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
 @media (max-width: 768px) {
   .card-header-buttons {
   padding: 2px;
-  border-radius: 12px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
     width: 100%;
   }

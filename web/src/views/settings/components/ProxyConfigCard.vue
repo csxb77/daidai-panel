@@ -239,13 +239,13 @@ const binaryProxyOptions = [
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--el-fill-color-lighter);
 
   code {
     display: block;
     padding: 7px 9px;
-    border-radius: 6px;
+    border-radius: 0;
     background: var(--el-bg-color);
     color: var(--el-text-color-primary);
     font-family: var(--dd-font-mono);
@@ -272,7 +272,7 @@ const binaryProxyOptions = [
   margin-bottom: 12px;
   padding: 10px 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--el-fill-color-lighter);
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -294,7 +294,7 @@ const binaryProxyOptions = [
   min-height: 40px;
   padding: 9px 12px;
   border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--el-bg-color);
   color: var(--el-text-color-primary);
   cursor: pointer;

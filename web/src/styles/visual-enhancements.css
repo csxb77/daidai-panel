@@ -1,9 +1,12 @@
+/* 通用表面 / 控件工具类。
+   v3.0.0 起统一为纯扁平直角：无圆角、无悬浮阴影、无装饰渐变、无 hover 形变，
+   层级一律靠 1px 边框和底色区分。 */
+
 .glass-card {
   background: rgba(255, 255, 255, 0.7);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.3);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
 }
 
 .glass-card-dark {
@@ -11,38 +14,35 @@
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
 }
 
+/* 原本靠内外投影做凸起/凹陷的拟物面，扁平化后只保留底色 + 描边 */
 .neumorphism {
   background: #f0f0f0;
-  box-shadow:
-    8px 8px 16px rgba(163, 177, 198, 0.6),
-    -8px -8px 16px rgba(255, 255, 255, 0.5);
-  border-radius: 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 0;
 }
 
 .neumorphism-inset {
   background: #f0f0f0;
-  box-shadow:
-    inset 4px 4px 8px rgba(163, 177, 198, 0.4),
-    inset -4px -4px 8px rgba(255, 255, 255, 0.5);
-  border-radius: 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 0;
 }
 
 .gradient-border {
   position: relative;
   background: #fff;
-  border-radius: 12px;
+  border-radius: 0;
 }
 
+/* 渐变描边改纯品牌色描边，mask 结构保留（它负责只显示边框那 2px） */
 .gradient-border::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: 12px;
+  border-radius: 0;
   padding: 2px;
-  background: linear-gradient(135deg, #409eff, #36cfc9);
+  background: var(--el-color-primary);
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
     linear-gradient(#fff 0 0);
@@ -52,55 +52,41 @@
 
 .card-modern {
   background: #fff;
-  border-radius: 16px;
+  border-radius: 0;
   border: 1px solid rgba(0, 0, 0, 0.06);
-  box-shadow:
-    0 2px 8px rgba(0, 0, 0, 0.04),
-    0 1px 2px rgba(0, 0, 0, 0.06);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* hover 只换描边颜色，不上浮、不加投影 */
 .card-modern:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 12px 24px rgba(0, 0, 0, 0.08),
-    0 4px 8px rgba(0, 0, 0, 0.06);
   border-color: rgba(64, 158, 255, 0.2);
 }
 
 .card-elevated {
   background: #fff;
-  border-radius: 20px;
-  box-shadow:
-    0 4px 16px rgba(0, 0, 0, 0.08),
-    0 2px 4px rgba(0, 0, 0, 0.04);
+  border-radius: 0;
+  border: 1px solid var(--el-border-color-lighter);
 }
 
 .card-flat {
   background: #fff;
-  border-radius: 12px;
+  border-radius: 0;
   border: 1px solid #f0f0f0;
 }
 
+/* 原「渐变主按钮」改纯品牌色，hover 只换底色 */
 .btn-gradient {
-  background: linear-gradient(135deg, #409eff 0%, #36cfc9 100%);
+  background: var(--el-color-primary);
   border: none;
   color: #fff;
   font-weight: 600;
-  border-radius: 10px;
+  border-radius: 0;
   padding: 10px 24px;
-  transition: all 0.3s ease;
-  box-shadow: 0 4px 12px rgba(64, 158, 255, 0.3);
+  transition: background-color 0.3s ease;
 }
 
 .btn-gradient:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(64, 158, 255, 0.4);
-  background: linear-gradient(135deg, #1677ff 0%, #14b8a6 100%);
-}
-
-.btn-gradient:active {
-  transform: translateY(0);
+  background: var(--el-color-primary-dark-2);
 }
 
 .btn-glass {
@@ -108,7 +94,7 @@
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255, 255, 255, 0.3);
   color: #fff;
-  border-radius: 10px;
+  border-radius: 0;
   padding: 10px 24px;
   transition: all 0.3s ease;
 }
@@ -118,102 +104,81 @@
   border-color: rgba(255, 255, 255, 0.5);
 }
 
+/* 徽标：直角标签 + 纯语义色，去掉渐变与彩色投影 */
 .badge-modern {
   display: inline-flex;
   align-items: center;
   padding: 4px 12px;
-  border-radius: 20px;
+  border-radius: 0;
   font-size: 12px;
   font-weight: 600;
-  background: linear-gradient(135deg, #409eff 0%, #36cfc9 100%);
+  background: var(--el-color-primary);
   color: #fff;
-  box-shadow: 0 2px 8px rgba(64, 158, 255, 0.3);
 }
 
 .badge-success {
-  background: linear-gradient(135deg, #67c23a 0%, #85ce61 100%);
-  box-shadow: 0 2px 8px rgba(103, 194, 58, 0.3);
+  background: #67c23a;
 }
 
 .badge-warning {
-  background: linear-gradient(135deg, #e6a23c 0%, #f0c78a 100%);
-  box-shadow: 0 2px 8px rgba(230, 162, 60, 0.3);
+  background: #e6a23c;
 }
 
 .badge-error {
-  background: linear-gradient(135deg, #f56c6c 0%, #f89898 100%);
-  box-shadow: 0 2px 8px rgba(245, 108, 108, 0.3);
+  background: #f56c6c;
 }
 
 .progress-modern {
   height: 8px;
-  border-radius: 10px;
+  border-radius: 0;
   background: #f0f0f0;
   overflow: hidden;
   position: relative;
 }
 
+/* 进度条填充改纯色；原来叠在上面的流光高亮属于装饰层，已整体移除 */
 .progress-modern-bar {
   height: 100%;
-  border-radius: 10px;
-  background: linear-gradient(90deg, #409eff 0%, #36cfc9 100%);
+  border-radius: 0;
+  background: var(--el-color-primary);
   transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
   position: relative;
   overflow: hidden;
 }
 
-.progress-modern-bar::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.3),
-    transparent
-  );
-  animation: shimmerEffect 2s infinite;
-}
-
 .divider-gradient {
   height: 2px;
-  background: linear-gradient(90deg, transparent, #409eff, transparent);
+  background: var(--el-border-color);
   border: none;
   margin: 24px 0;
 }
 
+/* 状态点方化：形状不承载语义，靠颜色 + 呼吸透明度表达状态 */
 .status-dot {
   display: inline-block;
   width: 8px;
   height: 8px;
-  border-radius: 50%;
+  border-radius: 0;
   margin-right: 8px;
 }
 
 .status-dot-success {
   background: #67c23a;
-  box-shadow: 0 0 8px rgba(103, 194, 58, 0.6);
   animation: breathe 2s ease-in-out infinite;
 }
 
 .status-dot-warning {
   background: #e6a23c;
-  box-shadow: 0 0 8px rgba(230, 162, 60, 0.6);
   animation: breathe 2s ease-in-out infinite;
 }
 
 .status-dot-error {
   background: #f56c6c;
-  box-shadow: 0 0 8px rgba(245, 108, 108, 0.6);
   animation: breathe 2s ease-in-out infinite;
 }
 
 .status-dot-processing {
   background: #409eff;
-  box-shadow: 0 0 8px rgba(64, 158, 255, 0.6);
   animation: breathe 2s ease-in-out infinite;
 }
 
@@ -236,11 +201,6 @@
 }
 
 @media (max-width: 768px) {
-  .card-modern,
-  .card-elevated {
-    border-radius: 12px;
-  }
-
   .btn-gradient,
   .btn-glass {
     padding: 8px 16px;

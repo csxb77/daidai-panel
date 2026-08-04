@@ -330,11 +330,10 @@ const groupedTemplates = computed(() => {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  background: linear-gradient(135deg, #67c23a 0%, #85ce61 100%);
-  border-radius: 14px;
+  background: var(--el-color-success);
+  border-radius: 0;
   color: #fff;
   font-weight: 500;
-  box-shadow: 0 2px 6px rgba(103, 194, 58, 0.25);
 
   .badge-icon {
     font-size: 14px;
@@ -352,11 +351,10 @@ const groupedTemplates = computed(() => {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  background: linear-gradient(135deg, #f56c6c 0%, #f78989 100%);
-  border-radius: 14px;
+  background: var(--el-color-danger);
+  border-radius: 0;
   color: #fff;
   font-weight: 500;
-  box-shadow: 0 2px 6px rgba(245, 108, 108, 0.25);
 
   .badge-icon {
     font-size: 14px;
@@ -372,8 +370,8 @@ const groupedTemplates = computed(() => {
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  background: linear-gradient(135deg, var(--el-color-primary-light-9) 0%, var(--el-color-primary-light-8) 100%);
-  border-radius: 14px;
+  background: var(--el-color-primary-light-9);
+  border-radius: 0;
   color: var(--el-color-primary);
   font-weight: 500;
   border: 1px solid var(--el-color-primary-light-7);
@@ -412,8 +410,8 @@ const groupedTemplates = computed(() => {
   justify-content: space-between;
   margin-bottom: 12px;
   padding: 10px 12px;
-  background: linear-gradient(135deg, var(--el-fill-color-light) 0%, var(--el-fill-color) 100%);
-  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  border-radius: 0;
   border-left: 4px solid var(--el-color-primary);
 }
 
@@ -428,7 +426,7 @@ const groupedTemplates = computed(() => {
   color: var(--el-text-color-secondary);
   background: var(--el-bg-color);
   padding: 2px 8px;
-  border-radius: 10px;
+  border-radius: 0;
 }
 
 .group-items {
@@ -440,19 +438,18 @@ const groupedTemplates = computed(() => {
 .template-item {
   padding: 12px;
   border: 1px solid var(--el-border-color-light);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--el-bg-color);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: border-color 0.2s ease, background-color 0.2s ease;
 
   &:hover {
     border-color: var(--el-color-primary-light-5);
-    box-shadow: 0 6px 14px rgba(64, 158, 255, 0.12);
   }
 
   &.active {
     border-color: var(--el-color-primary);
-    background: linear-gradient(135deg, var(--el-color-primary-light-9), var(--el-bg-color));
+    background: var(--el-color-primary-light-9);
   }
 }
 

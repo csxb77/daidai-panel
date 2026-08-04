@@ -143,9 +143,9 @@ defineProps<{
 
 <style scoped lang="scss">
 .hero-card {
-  border-radius: 14px;
+  border-radius: 0;
+  // 扁平化：不再用投影制造浮起，仅靠 1px 描边与页面底色区分
   border: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
   height: 100%;
 
   :deep(.el-card__body) { padding: 0; height: 100%; }
@@ -176,9 +176,8 @@ defineProps<{
 .hero-logo {
   width: 72px;
   height: 72px;
-  border-radius: 20px;
+  border-radius: 0;
   overflow: hidden;
-  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.15), 0 2px 6px rgba(0, 0, 0, 0.06);
   margin-bottom: 14px;
 }
 
@@ -245,7 +244,7 @@ defineProps<{
   font-weight: 600 !important;
   font-size: 13px !important;
   padding: 8px 18px !important;
-  border-radius: 20px !important;
+  border-radius: 0 !important;
 }
 
 .hero-btn-icon {
@@ -297,7 +296,7 @@ defineProps<{
   max-height: 46vh;
   overflow: auto;
   padding: 16px;
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-light);
   white-space: pre-wrap;

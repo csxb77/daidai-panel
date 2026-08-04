@@ -183,7 +183,7 @@ function markDebugCodeChanged() {
   min-width: 0;
   min-height: 0;
   border: 1px solid var(--el-border-color-light);
-  border-radius: 8px;
+  border-radius: 0;
   overflow: hidden;
   background: var(--el-bg-color);
 }

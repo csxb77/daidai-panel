@@ -240,11 +240,10 @@ function handleKeyDown(event: KeyboardEvent) {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  background: linear-gradient(135deg, #67c23a 0%, #85ce61 100%);
-  border-radius: 14px;
+  background: var(--el-color-success);
+  border-radius: 0;
   color: #fff;
   font-weight: 500;
-  box-shadow: 0 2px 6px rgba(103, 194, 58, 0.25);
 
   .badge-icon {
     font-size: 14px;
@@ -261,11 +260,10 @@ function handleKeyDown(event: KeyboardEvent) {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  background: linear-gradient(135deg, #f56c6c 0%, #f78989 100%);
-  border-radius: 14px;
+  background: var(--el-color-danger);
+  border-radius: 0;
   color: #fff;
   font-weight: 500;
-  box-shadow: 0 2px 6px rgba(245, 108, 108, 0.25);
 
   .badge-icon {
     font-size: 14px;
@@ -281,8 +279,8 @@ function handleKeyDown(event: KeyboardEvent) {
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  background: linear-gradient(135deg, var(--el-color-warning-light-9) 0%, var(--el-color-warning-light-8) 100%);
-  border-radius: 14px;
+  background: var(--el-color-warning-light-9);
+  border-radius: 0;
   color: var(--el-color-warning);
   font-weight: 500;
   border: 1px solid var(--el-color-warning-light-7);

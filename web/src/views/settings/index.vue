@@ -497,7 +497,7 @@ watch(
   align-items: center;
   margin-bottom: 12px;
   padding: 4px;
-  border-radius: 14px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
 }
 
@@ -571,7 +571,7 @@ watch(
   // 下划线指示条：品牌色，跟随选中项滑动，无填充背景不会被裁切
   .el-tabs__active-bar {
     height: 3px;
-    border-radius: 3px;
+    border-radius: 0;
     background-color: var(--el-color-primary);
   }
 }

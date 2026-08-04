@@ -131,7 +131,6 @@ watch(
     <!-- Empty state -->
     <div v-if="!selectedFile" class="editor-empty animate-fade-in-up">
       <div class="empty-card">
-        <div class="empty-aura" aria-hidden="true"></div>
         <div class="empty-badge">
           <el-icon :size="20"><Plus /></el-icon>
         </div>
@@ -350,7 +349,7 @@ watch(
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* 卡片表面用令牌，明暗自动适配（卡片边框/圆角/阴影由 index.vue 负责） */
+  /* 卡片表面用令牌，明暗自动适配（卡片边框由 index.vue 负责） */
   background: var(--el-bg-color);
   animation: dd-editor-shell-in 360ms var(--dd-ease-emphasized) both;
   font-family: var(--dd-font-ui);
@@ -374,45 +373,22 @@ watch(
   width: 100%;
   padding: 36px 32px 32px;
   text-align: center;
-  border-radius: 16px;
+  border-radius: 0;
   background: var(--el-fill-color-light);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
-  isolation: isolate;
-}
-
-.empty-aura {
-  position: absolute;
-  inset: -2px;
-  z-index: -1;
-  padding: 1px;
-  border-radius: inherit;
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, #409eff 40%, transparent) 0%,
-    color-mix(in srgb, #36cfc9 30%, transparent) 50%,
-    color-mix(in srgb, #10b981 26%, transparent) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0.7;
-  pointer-events: none;
 }
 
 .empty-badge {
   width: 44px;
   height: 44px;
   margin: 0 auto 14px;
-  border-radius: 12px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: #fff;
-  background: linear-gradient(135deg, #1890ff, #36cfc9);
-  box-shadow: 0 6px 18px -8px rgba(24, 144, 255, 0.42);
+  background: var(--el-color-primary);
 }
 
 .empty-title {
@@ -437,20 +413,9 @@ watch(
   justify-content: center;
 }
 
+/* 主 CTA 使用全局主按钮纯色样式，这里只约束宽度 */
 .create-cta {
-  background: linear-gradient(135deg, #2563eb, #0ea5e9);
-  transition: transform 0.18s ease, box-shadow 0.2s ease, filter 0.2s ease;
-  border: none;
   min-width: 160px;
-
-  &:hover,
-  &:focus {
-    background: linear-gradient(135deg, #1d4ed8, #0284c7);
-    border: none;
-    transform: translateY(-1px);
-    box-shadow: 0 14px 28px rgba(37, 99, 235, 0.2);
-    filter: saturate(1.05);
-  }
 }
 
 /* ---------------- Hero header ---------------- */
@@ -462,7 +427,6 @@ watch(
   gap: 14px;
   /* 卡片内顶部分区线（明暗令牌自适配） */
   border-bottom: 1px solid var(--el-border-color-lighter);
-  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.03);
   background: var(--el-bg-color);
   flex-shrink: 0;
   position: relative;
@@ -479,10 +443,8 @@ watch(
 
 .file-icon {
   width: 36px;
-  box-shadow: 0 8px 18px rgba(64, 158, 255, 0.08);
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
   height: 36px;
-  border-radius: 10px;
+  border-radius: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -541,11 +503,11 @@ watch(
 
 .file-pill {
   display: inline-flex;
-  transition: transform 0.16s ease, background-color 0.16s ease, color 0.16s ease;
+  transition: background-color 0.16s ease, color 0.16s ease;
   align-items: center;
   height: 20px;
   padding: 0 8px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.4px;
@@ -570,20 +532,20 @@ watch(
 
 .unsaved-pulse {
   display: inline-flex;
-  box-shadow: inset 0 0 0 1px rgba(230, 162, 60, 0.08);
   align-items: center;
   gap: 5px;
   height: 20px;
   padding: 0 9px 0 6px;
-  border-radius: 999px;
+  border-radius: 0;
   font-size: 11px;
   color: #e6a23c;
   background: rgba(230, 162, 60, 0.1);
 
+  /* 未保存标记：直角小方块 + 明暗呼吸（不做缩放形变） */
   .unsaved-dot {
     width: 6px;
     height: 6px;
-    border-radius: 50%;
+    border-radius: 0;
     background: #e6a23c;
     animation: unsaved-pulse 1.6s ease-in-out infinite;
   }
@@ -597,12 +559,10 @@ watch(
 @keyframes unsaved-pulse {
   0%,
   100% {
-    transform: scale(1);
     opacity: 1;
   }
   50% {
-    transform: scale(1.25);
-    opacity: 0.55;
+    opacity: 0.4;
   }
 }
 
@@ -615,7 +575,7 @@ watch(
 .hero-actions {
   display: inline-flex;
   padding: 4px;
-  border-radius: 12px;
+  border-radius: 0;
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 8px;
@@ -623,23 +583,9 @@ watch(
 }
 
 .action-btn {
-  border-radius: 8px;
+  border-radius: 0;
   font-weight: 500;
-  transition: transform 0.16s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-
-  &:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
-  }
-
-  &:active {
-    transform: scale(0.985);
-  }
-}
-
-.action-btn--primary {
-  box-shadow: 0 4px 12px -6px
-    color-mix(in srgb, var(--el-color-primary) 50%, transparent);
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
 
 .action-btn--cancel {
@@ -697,7 +643,7 @@ watch(
   margin: 24px;
   padding: 24px 28px;
   border: 1px dashed var(--el-border-color);
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--el-fill-color-light);
 
   .binary-card-title {
@@ -720,7 +666,6 @@ watch(
 /* ---------------- Status bar ---------------- */
 .editor-statusbar {
   flex-shrink: 0;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
   position: relative;
   display: flex;
   align-items: center;
@@ -781,7 +726,7 @@ watch(
     .file-icon {
       width: 30px;
       height: 30px;
-      border-radius: 8px;
+      border-radius: 0;
     }
 
     .file-title {
