@@ -117,6 +117,13 @@ function handleCopy(text: string, key: string) {
   }
 }
 
+// 鉴权提示条样式：jwt=Bearer 鉴权，ticket=只认 URL 票据（原始日志直传下载），其余按无需鉴权。
+function authBannerClass(auth?: ApiEndpoint['auth']) {
+  if (auth === 'jwt') return 'auth-jwt'
+  if (auth === 'ticket') return 'auth-ticket'
+  return 'auth-none'
+}
+
 function methodClass(method: string) {
   const m = method.toLowerCase()
   if (m === 'get') return 'method-get'
@@ -199,11 +206,16 @@ function methodClass(method: string) {
 
           <p class="api-description">{{ currentEndpoint.description }}</p>
 
-          <div class="auth-banner" :class="currentEndpoint.auth === 'jwt' ? 'auth-jwt' : 'auth-none'">
+          <div class="auth-banner" :class="authBannerClass(currentEndpoint.auth)">
             <el-icon v-if="currentEndpoint.auth === 'jwt'"><Lock /></el-icon>
+            <el-icon v-else-if="currentEndpoint.auth === 'ticket'"><Key /></el-icon>
             <el-icon v-else><Unlock /></el-icon>
             <span v-if="currentEndpoint.auth === 'jwt'">
               使用 JWT Token 鉴权，请在请求头中添加 <code>Authorization: Bearer &lt;TOKEN&gt;</code>
+            </span>
+            <span v-else-if="currentEndpoint.auth === 'ticket'">
+              票据鉴权：本接口不走 JWT，只认 URL 上的 <code>?ticket=</code>（先调同路径的 <code>-ticket</code> 接口换票）。
+              只带 <code>Authorization: Bearer &lt;TOKEN&gt;</code> 而不带票据同样会被拒绝
             </span>
             <span v-else>此接口无需鉴权即可访问</span>
           </div>
@@ -350,7 +362,8 @@ function methodClass(method: string) {
               <span class="status-dot" />
               200 成功
             </span>
-            <span class="response-type">application/json</span>
+            <!-- 文件流类接口（如原始日志直传下载）返回的不是 JSON，按条目声明的类型展示 -->
+            <span class="response-type">{{ currentEndpoint.responseContentType || 'application/json' }}</span>
           </div>
 
           <div class="response-section">
@@ -600,6 +613,12 @@ function methodClass(method: string) {
   border-radius: 0;
   margin-bottom: 20px;
   font-size: 13px;
+  line-height: 1.7;
+
+  // 票据鉴权那条说明会换行，图标不能被文字挤扁
+  .el-icon {
+    flex-shrink: 0;
+  }
 
   code {
     font-size: 12px;
@@ -614,6 +633,13 @@ function methodClass(method: string) {
     background: color-mix(in srgb, var(--el-color-warning) 10%, var(--el-bg-color));
     border: 1px solid color-mix(in srgb, var(--el-color-warning) 32%, transparent);
     color: var(--el-color-warning);
+  }
+
+  // 票据鉴权：既不是常规 Bearer，也不是「无需鉴权」，用品牌色单列一档避免被误读成公开接口
+  &.auth-ticket {
+    background: color-mix(in srgb, var(--el-color-primary) 10%, var(--el-bg-color));
+    border: 1px solid color-mix(in srgb, var(--el-color-primary) 32%, transparent);
+    color: var(--el-color-primary);
   }
 
   &.auth-none {

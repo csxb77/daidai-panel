@@ -7,6 +7,11 @@ import (
 )
 
 func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
+	// 原始日志文件直传下载：浏览器原生下载带不了 Authorization 头，改用短期票据鉴权，
+	// 因此不能放进下面带 JWTAuth 的 tasks 组。票据由 /log-files/:filename/raw-ticket 签发，
+	// 那条接口的鉴权与其它日志文件接口完全一致。
+	r.GET("/tasks/:id/log-files/:filename/raw", h.DownloadRawLogFile)
+
 	tasks := r.Group("/tasks", middleware.JWTAuth(), middleware.OpenAPIAccess("tasks"))
 	{
 		tasks.GET("", middleware.RequireRole("viewer"), h.List)
@@ -16,6 +21,7 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.GET("/:id/log-files", middleware.RequireRole("viewer"), h.LogFiles)
 		tasks.GET("/:id/log-files/:filename", middleware.RequireRole("viewer"), h.LogFileContent)
 		tasks.GET("/:id/log-files/:filename/download", middleware.RequireRole("viewer"), h.DownloadLogFile)
+		tasks.GET("/:id/log-files/:filename/raw-ticket", middleware.RequireRole("viewer"), h.RawLogFileDownloadTicket)
 		tasks.GET("/:id/stats", middleware.RequireRole("viewer"), h.Stats)
 		tasks.GET("/export", middleware.RequireRole("viewer"), h.Export)
 		tasks.POST("/cron/parse", middleware.RequireRole("viewer"), h.CronParse)

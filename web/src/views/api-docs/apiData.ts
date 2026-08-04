@@ -12,13 +12,14 @@ export interface ApiEndpoint {
   path: string
   title: string
   description: string
-  auth?: 'jwt' | 'open_api' | 'none'
+  auth?: 'jwt' | 'open_api' | 'none' | 'ticket'
   pathParams?: ApiParam[]
   queryParams?: ApiParam[]
   bodyParams?: ApiParam[]
   helperExamples?: Record<string, string>
   responseExample?: string
   responseFields?: ApiParam[]
+  responseContentType?: string
 }
 
 export interface ApiCategory {
@@ -482,16 +483,20 @@ panel.add_or_update_env(
         method: 'GET',
         path: '/api/logs',
         title: '获取日志列表',
-        description: '获取任务执行日志，支持按状态过滤和分页',
+        description: '获取任务执行日志，支持按任务、状态过滤和分页',
         auth: 'jwt',
         queryParams: [
+          { name: 'task_id', type: 'integer', description: '按任务 ID 过滤', example: '1' },
           { name: 'status', type: 'integer', description: '状态过滤：0=成功, 1=失败, 2=运行中, 3=已终止' },
+          { name: 'keyword', type: 'string', description: '按任务名称模糊匹配（子串包含，不是通配符）', example: '签到' },
           { name: 'page', type: 'integer', description: '页码', example: '1' },
-          { name: 'page_size', type: 'integer', description: '每页数量', example: '20' },
+          { name: 'page_size', type: 'integer', description: '每页数量，最大 100，超出或非法时按 20 处理', example: '20' },
         ],
         responseExample: JSON.stringify({
           data: [{ id: 1, task_id: 1, task_name: '签到任务', status: 0, content: '执行成功', duration: 2.5, started_at: '2026-03-10T09:00:00' }],
           total: 1,
+          page: 1,
+          page_size: 20,
         }, null, 2),
       },
       {
@@ -499,22 +504,122 @@ panel.add_or_update_env(
         method: 'GET',
         path: '/api/logs/:id',
         title: '获取日志详情',
-        description: '获取单条日志的详细内容',
+        description: '获取单条日志的详细内容。content 返回的是按终端语义折叠过裸 \\r（回车覆盖）之后的文本，进度条之类的刷新输出会被折叠成最终一帧；需要磁盘上一模一样的原始字节，请改用下面的「原始日志下载」两步接口。log_path 为该日志在日志目录内的相对路径，为 null 表示这条日志的内容只存在数据库里、没有独立的日志文件。',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '日志 ID' }],
         responseExample: JSON.stringify({
-          id: 1, task_id: 1, task_name: '签到任务', status: 0, content: '签到成功\n获得 10 积分', duration: 2.5, started_at: '2026-03-10T09:00:00', ended_at: '2026-03-10T09:00:02',
+          id: 1, task_id: 1, task_name: '签到任务', status: 0, content: '签到成功\n获得 10 积分', duration: 2.5, log_path: 'task_1_签到/2026-03-10-09-00-00.log', started_at: '2026-03-10T09:00:00', ended_at: '2026-03-10T09:00:02',
         }, null, 2),
+      },
+      {
+        id: 'logs-raw-ticket',
+        method: 'GET',
+        path: '/api/logs/:id/raw-ticket',
+        title: '签发原始日志下载票据',
+        description: '下载原始日志分两步，这是第一步「换票」，不能跳过它直接调 /raw。面板其它日志接口给出的都是按终端语义折叠过裸 \\r 的文本，只有这条链路能拿到磁盘文件的原始字节（含未被折叠的终端控制序列）。本接口的鉴权与 GET /api/logs/:id 完全一致：走正常的 Authorization: Bearer（用户 JWT 或带 logs 权限的 Open API Token，viewer 及以上角色）。校验通过并在磁盘上定位到文件后，签发一张有效期 120 秒、且只对这一条日志生效的票据，返回体里的 url 已经把 ticket 拼好，是一个相对路径，直接接在面板地址后面即可，不要自行改写其中的参数。失败情况：日志 ID 不是数字返回 400「无效的日志ID」；日志记录不存在返回 404「日志不存在」；日志内容只存在数据库里（log_path 为空，这类记录的内容会被压缩后直接写进 content 字段）时没有原始文件可下，返回 404「该日志没有独立的原始日志文件（内容仅存于数据库）」；文件已被清理或路径异常返回 404「原始日志文件不存在或已被清理」；签名失败返回 500「签发下载票据失败」。错误响应体统一为 {"error": "..."}。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '日志 ID' }],
+        responseExample: JSON.stringify({
+          url: '/api/logs/12/raw?ticket=v1.YWRtaW4.1785000120.3Qk8x1r0Zq2m9v7bN4pS6cW8dY0aE2gH5jK7lM9nQ1s',
+          filename: '签到任务-12-raw.log',
+          size: 20480,
+          expires_at: '2026-08-04T12:02:00+08:00',
+          expires_in: 120,
+        }, null, 2),
+        responseFields: [
+          { name: 'url', type: 'string', description: '已拼好票据的下载地址（相对路径），直接接在面板地址后访问即可；请整段照用，改写任何参数都会导致验签失败' },
+          { name: 'filename', type: 'string', description: '建议保存的文件名，格式为 <任务名>-<日志ID>-raw.log；-raw 后缀用于和前端「折叠后」的下载区分' },
+          { name: 'size', type: 'integer', description: '磁盘文件字节数' },
+          { name: 'expires_at', type: 'string', description: '票据过期时间（RFC3339）' },
+          { name: 'expires_in', type: 'integer', description: '票据有效期（秒），当前为 120' },
+        ],
+      },
+      {
+        id: 'logs-raw',
+        method: 'GET',
+        path: '/api/logs/:id/raw',
+        title: '下载原始日志文件',
+        description: '下载原始日志的第二步：凭票据直传文件。这条路由刻意没有挂 JWT 中间件，只认 URL 上的 ticket —— 因为浏览器原生下载（<a download> / window.open）带不上 Authorization 头；反过来也成立：只带 Bearer 而不带 ticket 一样会被拒（401「缺少下载票据」）。票据由上一步的 raw-ticket 签发，HMAC 签名里绑定了具体的日志 ID，挪到另一条日志上用会 401「下载票据无效」；超过 120 秒返回 401「下载票据已过期，请重新发起下载」。票据不落库、不是一次性的，有效期内可重复使用，且只在请求开始时校验一次，传输本身持续多久都不受影响（浏览器断线重试 / Range 续传因此不会失败）。响应是文件流而不是 JSON：Content-Type 为 text/plain; charset=utf-8，服务端按 32KB 分块直传不整体读进内存，并支持 Range 续传；Content-Disposition 同时给出 ASCII 回退名 filename="..." 和 RFC 5987 的 filename*=UTF-8\'\'...（中文文件名不会乱码）。日志被清理时返回 404「原始日志文件不存在或已被清理」。',
+        auth: 'ticket',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '日志 ID，必须与换票时的一致' }],
+        queryParams: [
+          { name: 'ticket', type: 'string', required: true, description: '上一步 raw-ticket 签发的票据（已包含在返回的 url 里，正常无需手动拼）', example: 'v1.YWRtaW4.1785000120.3Qk8...' },
+        ],
+        responseContentType: 'text/plain; charset=utf-8（文件流）',
+        responseExample: `HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 20480
+Content-Disposition: attachment; filename="____-12-raw.log"; filename*=UTF-8''%E7%AD%BE%E5%88%B0%E4%BB%BB%E5%8A%A1-12-raw.log
+Accept-Ranges: bytes
+Cache-Control: no-store, no-cache, must-revalidate
+X-Content-Type-Options: nosniff
+
+<磁盘日志文件的原始字节，保留裸 \\r 等终端控制序列，未做任何折叠处理>`,
+      },
+      {
+        id: 'tasks-log-file-raw-ticket',
+        method: 'GET',
+        path: '/api/tasks/:id/log-files/:filename/raw-ticket',
+        title: '签发任务日志文件下载票据',
+        description: '任务日志文件（任务详情里「日志文件」列表中的 .log）原始内容下载的第一步：换票，同样不能跳过它直接调 /raw。鉴权与 GET /api/tasks/:id/log-files/:filename 完全一致（Authorization: Bearer + viewer 及以上角色）。文件定位口径也与日志文件预览 / 删除 / 下载一致：优先取查询参数 path（日志目录内的相对路径），没传或为空时回落到路径参数 filename。票据有效期 120 秒，并绑定「任务 ID + 本次传入的定位参数」，换不到别的任务或别的文件上去用。签发时传了 path，返回的 url 会把它原样带回，请整段照用、不要自己拼。失败情况：任务 ID 不是数字返回 400「无效的任务ID」；文件不存在、首段目录不是该任务的 task_<id>[_label] 目录、或存在路径穿越（../、绝对路径、软链逃逸）一律返回 404「原始日志文件不存在或已被清理」；签名失败返回 500「签发下载票据失败」。',
+        auth: 'jwt',
+        pathParams: [
+          { name: 'id', type: 'integer', required: true, description: '任务 ID' },
+          { name: 'filename', type: 'string', required: true, description: '日志文件名，需 URL 编码；传了 path 时它只作占位', example: '2026-03-10-09-00-00.log' },
+        ],
+        queryParams: [
+          { name: 'path', type: 'string', description: '日志目录内的相对路径，首段必须是该任务的 task_<id>[_label] 目录；同名文件分散在多个任务目录时用它精确定位', example: 'task_1_签到/2026-03-10-09-00-00.log' },
+        ],
+        responseExample: JSON.stringify({
+          url: '/api/tasks/1/log-files/2026-03-10-09-00-00.log/raw?path=task_1_%E7%AD%BE%E5%88%B0%2F2026-03-10-09-00-00.log&ticket=v1.YWRtaW4.1785000120.3Qk8x1r0Zq2m9v7bN4pS6cW8dY0aE2gH5jK7lM9nQ1s',
+          filename: '2026-03-10-09-00-00.log',
+          size: 20480,
+          expires_at: '2026-08-04T12:02:00+08:00',
+          expires_in: 120,
+        }, null, 2),
+        responseFields: [
+          { name: 'url', type: 'string', description: '已拼好 path 与 ticket 的下载地址（相对路径）；path 必须与换票时完全一致，所以请整段照用' },
+          { name: 'filename', type: 'string', description: '建议保存的文件名，取相对路径的最后一段' },
+          { name: 'size', type: 'integer', description: '磁盘文件字节数' },
+          { name: 'expires_at', type: 'string', description: '票据过期时间（RFC3339）' },
+          { name: 'expires_in', type: 'integer', description: '票据有效期（秒），当前为 120' },
+        ],
+      },
+      {
+        id: 'tasks-log-file-raw',
+        method: 'GET',
+        path: '/api/tasks/:id/log-files/:filename/raw',
+        title: '下载任务日志文件原始内容',
+        description: '任务日志文件原始内容下载的第二步：凭票据直传。与 /logs/:id/raw 一样，这条路由没有挂 JWT 中间件、只认 URL 上的 ticket，带 Bearer 而不带 ticket 会被拒（401「缺少下载票据」）。票据绑定的是「任务 ID + 原样的定位参数」，所以 path 必须和换票时一模一样（直接用返回的 url 最稳）：改了 path、换了任务、或者试图用 ../ 穿越，都会先在验签这一关被拒（401「下载票据无效」），根本碰不到磁盘；票据过期返回 401「下载票据已过期，请重新发起下载」。有效期内票据可重复使用，只在请求开始时校验一次。响应是文件流而不是 JSON：Content-Type 为 text/plain; charset=utf-8，支持 Range 续传，Content-Disposition 同时给出 ASCII 回退名和 RFC 5987 的 filename*=UTF-8\'\'...；文件内容保留裸 \\r 等终端控制序列，不做任何折叠。文件已被清理时返回 404「原始日志文件不存在或已被清理」。',
+        auth: 'ticket',
+        pathParams: [
+          { name: 'id', type: 'integer', required: true, description: '任务 ID，必须与换票时的一致' },
+          { name: 'filename', type: 'string', required: true, description: '日志文件名（URL 编码）；传了 path 时它只作占位' },
+        ],
+        queryParams: [
+          { name: 'ticket', type: 'string', required: true, description: '上一步 raw-ticket 签发的票据（已包含在返回的 url 里）', example: 'v1.YWRtaW4.1785000120.3Qk8...' },
+          { name: 'path', type: 'string', description: '必须与换票时传入的值完全一致，否则验签失败；换票时没传就不要传', example: 'task_1_签到/2026-03-10-09-00-00.log' },
+        ],
+        responseContentType: 'text/plain; charset=utf-8（文件流）',
+        responseExample: `HTTP/1.1 200 OK
+Content-Type: text/plain; charset=utf-8
+Content-Length: 20480
+Content-Disposition: attachment; filename="2026-03-10-09-00-00.log"; filename*=UTF-8''2026-03-10-09-00-00.log
+Accept-Ranges: bytes
+Cache-Control: no-store, no-cache, must-revalidate
+X-Content-Type-Options: nosniff
+
+<磁盘日志文件的原始字节，保留裸 \\r 等终端控制序列，未做任何折叠处理>`,
       },
       {
         id: 'logs-delete',
         method: 'DELETE',
         path: '/api/logs/:id',
         title: '删除日志',
-        description: '删除指定日志记录',
+        description: '删除指定日志记录。日志不存在时返回 404「日志不存在」',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '日志 ID' }],
-        responseExample: JSON.stringify({ message: '删除成功' }, null, 2),
+        responseExample: JSON.stringify({ message: '日志已删除' }, null, 2),
       },
     ],
   },
@@ -680,9 +785,11 @@ panel.add_or_update_env(
           { name: 'url', type: 'string', required: true, description: '仓库 URL（HTTP/HTTPS）' },
           { name: 'branch', type: 'string', description: '分支，默认 main', example: 'main' },
           { name: 'schedule', type: 'string', description: 'Cron 表达式', example: '0 0 * * *' },
-          { name: 'whitelist', type: 'string', description: '白名单 glob（逗号分隔）' },
-          { name: 'blacklist', type: 'string', description: '黑名单 glob（逗号分隔）' },
-          { name: 'target_dir', type: 'string', description: '存放子目录' },
+          { name: 'whitelist', type: 'string', description: '白名单：文件名/路径片段，「子串包含」匹配（非 glob、非正则），多个用 , 或 | 分隔；片段命中目录名时该目录下的全部文件（含多级子目录）都算命中。命中的文件才会检出落盘并建成定时任务；留空表示全部命中', example: 'jd_|jx_|jddj_' },
+          { name: 'blacklist', type: 'string', description: '黑名单：匹配规则同白名单（片段命中目录名时整个目录都被排除）。命中的文件既不检出也不建任务', example: 'backUp' },
+          { name: 'depend_on', type: 'string', description: '依赖规则：对应青龙 ql repo 的第 4 个参数 dependence，匹配规则同白名单（填 utils 会把 utils/ 目录下的文件一并检出）。命中的文件会被检出落盘供主脚本调用，但不会建成定时任务；白名单为空时本字段不生效', example: 'sendNotify|utils' },
+          { name: 'sub_path', type: 'string', description: '只检出仓库内的指定子目录（多个用 , 或 | 分隔），优先级高于白名单' },
+          { name: 'save_dir', type: 'string', description: '脚本存放子目录，留空则按仓库名推导' },
         ],
         responseExample: JSON.stringify({ message: '创建成功', data: { id: 1 } }, null, 2),
       },
@@ -691,7 +798,7 @@ panel.add_or_update_env(
         method: 'PUT',
         path: '/api/subscriptions/:id',
         title: '更新订阅',
-        description: '更新指定订阅配置',
+        description: '更新指定订阅配置。请求体为部分更新，字段与「创建订阅」一致（含 whitelist / blacklist / depend_on / sub_path），只提交需要修改的字段即可。',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '订阅 ID' }],
         responseExample: JSON.stringify({ message: '更新成功' }, null, 2),
@@ -1089,6 +1196,12 @@ export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, stri
   const url = `${getApiBaseOrigin()}${path}`
   const hasBody = bodyParams && bodyParams.length > 0 && method !== 'GET'
 
+  // 票据鉴权的下载接口不能套用通用模板：它没有 Authorization 头，响应也不是 JSON，
+  // 而且必须先调同路径的 -ticket 接口换票，示例要把这两步一起给出来。
+  if (auth === 'ticket') {
+    return generateTicketDownloadExamples(url)
+  }
+
   const bodyObj: Record<string, any> = {}
   if (hasBody) {
     bodyParams!.forEach(p => {
@@ -1134,6 +1247,50 @@ export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, stri
     python += `res = requests.${method.toLowerCase()}("${url}"${auth === 'jwt' ? ', headers=headers' : ''})\n`
   }
   python += `print(res.json())`
+
+  return { Shell: shell, JavaScript: js, Python: python }
+}
+
+function generateTicketDownloadExamples(downloadUrl: string): Record<string, string> {
+  const origin = getApiBaseOrigin()
+  const ticketUrl = `${downloadUrl}-ticket`
+
+  const shell = `# 1. 换票：这一步走正常 Bearer 鉴权
+curl -X GET "${ticketUrl}" \\
+  -H "Authorization: Bearer <TOKEN>"
+# → {"url":"...?ticket=...","filename":"...","size":20480,"expires_in":120}
+
+# 2. 直传下载：票据在 URL 上，这一步不要再带 Authorization
+#    url 是相对路径，拼到面板地址后面即可；-OJ 按 Content-Disposition 存盘
+curl -OJ "${origin}<上一步返回的 url>"`
+
+  const js = `// 1. 换票：这一步走正常 Bearer 鉴权
+const res = await fetch("${ticketUrl}", {
+  headers: {
+    "Authorization": "Bearer <TOKEN>",
+  },
+})
+const ticket = await res.json()
+
+// 2. 直传下载：交给浏览器原生下载，文件不进 JS 内存，也带不上 Authorization 头
+const anchor = document.createElement("a")
+anchor.href = ticket.url
+anchor.download = ticket.filename
+anchor.click()`
+
+  const python = `import requests
+
+BASE = "${origin}"
+
+# 1. 换票：这一步走正常 Bearer 鉴权
+ticket = requests.get("${ticketUrl}", headers={"Authorization": "Bearer <TOKEN>"}).json()
+
+# 2. 直传下载：票据在 URL 上，这一步不要再带 Authorization；响应是文件流，不是 JSON
+with requests.get(BASE + ticket["url"], stream=True) as res:
+    res.raise_for_status()
+    with open(ticket["filename"], "wb") as f:
+        for chunk in res.iter_content(65536):
+            f.write(chunk)`
 
   return { Shell: shell, JavaScript: js, Python: python }
 }

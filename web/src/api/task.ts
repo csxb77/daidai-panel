@@ -1,4 +1,5 @@
 import request from './request'
+import type { RawLogDownloadTicket } from '@/utils/rawLogDownload'
 
 export const taskApi = {
   list(params?: { keyword?: string; status?: number | string; label?: string; page?: number; page_size?: number; filters?: string; sort_rules?: string; all?: 0 | 1 }) {
@@ -67,6 +68,11 @@ export const taskApi = {
 
   deleteLogFile(id: number, filename: string, path?: string) {
     return request.delete(`/tasks/${id}/log-files/${encodeURIComponent(filename)}`, { params: path ? { path } : undefined }) as Promise<{ message: string }>
+  },
+
+  // 换取「下载原始日志文件」的短期票据。真正的文件由浏览器原生下载去拉，不走 axios。
+  logFileRawDownloadTicket(id: number, filename: string, path?: string) {
+    return request.get(`/tasks/${id}/log-files/${encodeURIComponent(filename)}/raw-ticket`, { params: path ? { path } : undefined }) as Promise<RawLogDownloadTicket>
   },
 
   stats(id: number, days?: number) {

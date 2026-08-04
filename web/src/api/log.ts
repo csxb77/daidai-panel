@@ -1,4 +1,5 @@
 import request from './request'
+import type { RawLogDownloadTicket } from '@/utils/rawLogDownload'
 
 export const logApi = {
   list(params?: { task_id?: number; status?: number; keyword?: string; page?: number; page_size?: number }) {
@@ -7,6 +8,11 @@ export const logApi = {
 
   detail(id: number) {
     return request.get(`/logs/${id}`) as Promise<any>
+  },
+
+  // 换取「下载原始日志」的短期票据。真正的文件由浏览器原生下载去拉，不走 axios。
+  rawDownloadTicket(id: number) {
+    return request.get(`/logs/${id}/raw-ticket`) as Promise<RawLogDownloadTicket>
   },
 
   delete(id: number) {

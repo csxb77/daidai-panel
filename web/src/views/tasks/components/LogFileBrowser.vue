@@ -4,6 +4,8 @@ import { taskApi } from '@/api/task'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
 import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
+import { startRawLogDownload } from '@/utils/rawLogDownload'
+import { extractError } from '@/utils/error'
 
 const props = defineProps<{
   visible: boolean
@@ -20,6 +22,8 @@ const loading = ref(false)
 const selectedFile = ref<string | null>(null)
 const fileContent = ref('')
 const contentLoading = ref(false)
+// 正在换取下载票据的文件 key，避免连点重复请求
+const downloadingKey = ref<string | null>(null)
 const { dialogFullscreen } = useResponsive()
 
 function getFileKey(file: any) {
@@ -110,6 +114,24 @@ async function viewFile(file: any) {
   }
 }
 
+// 「下载原始文件」：服务端直接把磁盘上的日志文件流式吐给浏览器。
+// 右侧预览按终端语义折叠了裸 \r，这里下载到的是未经折叠的原始字节。
+// 走浏览器原生下载而不是 axios blob——大日志不会被整份读进 JS 内存。
+async function downloadRawFile(file: any) {
+  const taskId = props.taskId
+  const fileKey = getFileKey(file)
+  if (!taskId || downloadingKey.value) return
+
+  downloadingKey.value = fileKey
+  try {
+    startRawLogDownload(await taskApi.logFileRawDownloadTicket(taskId, file.filename, file.path))
+  } catch (err) {
+    ElMessage.error(extractError(err, '下载原始日志文件失败'))
+  } finally {
+    downloadingKey.value = null
+  }
+}
+
 async function deleteFile(file: any) {
   const filename = file.filename
   const fileKey = getFileKey(file)
@@ -165,6 +187,14 @@ function handleClose() {
           <div class="file-actions">
             <span class="file-size">{{ formatBytes(file.size) }}</span>
             <el-button
+              type="primary"
+              text
+              size="small"
+              :loading="downloadingKey === getFileKey(file)"
+              title="下载原始日志文件：由服务端直传磁盘上的字节，回车符与终端控制序列一个不少（右侧预览是折叠后的）"
+              @click.stop="downloadRawFile(file)"
+            >下载原始</el-button>
+            <el-button
               type="danger"
               text
               size="small"
@@ -195,7 +225,8 @@ function handleClose() {
 }
 
 .file-list {
-  width: 280px;
+  // 每行多了「下载原始」入口，比原来的 280px 需要更多横向空间
+  width: 340px;
   border: 1px solid var(--el-border-color);
   border-radius: 0;
   overflow-y: auto;
@@ -244,6 +275,7 @@ function handleClose() {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .file-size {

@@ -11,6 +11,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE, type TerminalLineBuffer } from '@/utils/ansi'
+import { downloadTextAsFile, foldedLogDownloadName, startRawLogDownload } from '@/utils/rawLogDownload'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -40,6 +41,9 @@ const logFiles = ref<any[]>([])
 const logFilesLoading = ref(false)
 const showFileContent = ref(false)
 const fileContentName = ref('')
+// 当前预览的日志文件，换「下载原始文件」票据时要用它的定位参数
+const fileContentSource = ref<{ filename: string; path?: string } | null>(null)
+const rawDownloading = ref(false)
 const hasRunningLogs = computed(() => logs.value.some(l => l.status === 2))
 const routeTaskId = ref<number | null>(null)
 const pendingOpenTaskLog = ref(false)
@@ -326,16 +330,58 @@ function downloadCurrentLog() {
   const logId = detailLog.value?.id ?? 'detail'
   const filename = `${taskName}-${logId}.log`.replace(/[\\/:*?"<>|]/g, '_')
   // 纯文本按需还原，不进渲染路径
-  const blob = new Blob([detailBuffer.toText()], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
+  downloadTextAsFile(filename, detailBuffer.toText())
   ElMessage.success('已下载')
+}
+
+// 这条日志有没有磁盘上的原始文件。内容压缩后直接存库的短日志没有，此时不给下载入口。
+const detailHasRawFile = computed(() => Boolean(detailLog.value?.log_path))
+
+// 「下载原始日志」：服务端直接把磁盘文件流式吐给浏览器。
+// 走浏览器原生下载而不是 axios blob —— 前端不缓存第二份全文，内存不翻倍。
+async function downloadCurrentRawLog() {
+  const logId = detailLog.value?.id
+  if (!logId) {
+    ElMessage.warning('暂无可下载的日志记录')
+    return
+  }
+  if (rawDownloading.value) return
+
+  rawDownloading.value = true
+  try {
+    startRawLogDownload(await logApi.rawDownloadTicket(logId))
+  } catch (err) {
+    ElMessage.error(extractError(err, '下载原始日志失败'))
+  } finally {
+    rawDownloading.value = false
+  }
+}
+
+function downloadCurrentLogFile() {
+  if (!fileHasContent.value) {
+    ElMessage.warning('暂无内容可下载')
+    return
+  }
+  downloadTextAsFile(foldedLogDownloadName(fileContentName.value), fileBuffer.toText())
+  ElMessage.success('已下载')
+}
+
+async function downloadCurrentRawLogFile() {
+  const source = fileContentSource.value
+  if (!source) {
+    ElMessage.warning('暂无可下载的日志文件')
+    return
+  }
+  if (rawDownloading.value) return
+
+  rawDownloading.value = true
+  try {
+    startRawLogDownload(await taskApi.logFileRawDownloadTicket(currentTaskId.value, source.filename, source.path))
+  } catch (err) {
+    ElMessage.error(extractError(err, '下载原始日志文件失败'))
+  } finally {
+    rawDownloading.value = false
+  }
 }
 
 async function copyCurrentLog() {
@@ -489,6 +535,7 @@ async function viewLogFile(file: any) {
     fileBuffer.append(res.content || '(空文件)')
     fileRevision.value++
     fileContentName.value = file.filename
+    fileContentSource.value = { filename: file.filename, path: file.path }
     showFileContent.value = true
   } catch (err) {
     ElMessage.error(extractError(err, '读取日志文件失败'))
@@ -755,9 +802,21 @@ onBeforeUnmount(() => {
             <el-icon><DocumentCopy /></el-icon>
             <span>复制</span>
           </el-button>
-          <el-button @click="downloadCurrentLog" :disabled="!detailHasContent">
+          <el-button
+            @click="downloadCurrentLog"
+            :disabled="!detailHasContent"
+            title="下载当前看到的内容：进度条帧的回车符已折叠成单行，与页面显示一致"
+          >
             <el-icon><Download /></el-icon>
-            <span>下载</span>
+            <span>下载（折叠后）</span>
+          </el-button>
+          <el-button
+            @click="downloadCurrentRawLog"
+            :disabled="!detailHasRawFile || rawDownloading"
+            :title="detailHasRawFile ? '由服务端直传磁盘上的原始日志文件，逐字节保留回车符与终端控制序列' : '这条日志的内容存在数据库里，没有独立的原始日志文件'"
+          >
+            <el-icon><Download /></el-icon>
+            <span>下载原始日志</span>
           </el-button>
           <el-button type="primary" @click="detailVisible = false">关闭</el-button>
         </div>
@@ -805,6 +864,28 @@ onBeforeUnmount(() => {
         </template>
         <span v-else>(空文件)</span>
       </div>
+
+      <template #footer>
+        <div class="detail-footer">
+          <el-button
+            @click="downloadCurrentLogFile"
+            :disabled="!fileHasContent"
+            title="下载当前看到的内容：进度条帧的回车符已折叠成单行，与页面显示一致"
+          >
+            <el-icon><Download /></el-icon>
+            <span>下载（折叠后）</span>
+          </el-button>
+          <el-button
+            @click="downloadCurrentRawLogFile"
+            :disabled="!fileContentSource || rawDownloading"
+            title="由服务端直传这个日志文件的原始字节，回车符与终端控制序列一个不少"
+          >
+            <el-icon><Download /></el-icon>
+            <span>下载原始文件</span>
+          </el-button>
+          <el-button type="primary" @click="showFileContent = false">关闭</el-button>
+        </div>
+      </template>
     </el-dialog>
   </div>
 </template>
