@@ -1,0 +1,54 @@
+name: Checks
+
+# 可复用工作流：常规 CI（ci.yml）与发布门禁（release.yml）共用同一份检查逻辑，
+# 避免两边各写一份后随时间漂移——门禁一旦和 CI 不一致，门禁就失去意义。
+on:
+  workflow_call:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  checks:
+    name: go vet / go test / 前端构建
+    # 必须是 Linux：Docker 镜像与各发行包都是 Linux，这里才是实际部署平台。
+    # 此前后端测试从未在 Linux 上跑过，导致一个只在 Linux 复现的路径解析 bug 长期未被发现。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Go 版本以 server/go.mod 为准（go 1.25.0），与 Dockerfile 的 golang:1.25-alpine 一致。
+      # 用 go-version-file 而非硬编码，保证升级 go.mod 时 CI 自动跟随。
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: server/go.mod
+          cache: true
+          cache-dependency-path: server/go.sum
+
+      # Node 版本与 Dockerfile 的 node:20.19.0-bookworm-slim 对齐，
+      # 让 CI 的前端构建环境与发布镜像里的构建环境保持一致。
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20.19.0'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Go vet
+        working-directory: server
+        run: go vet ./...
+
+      # 部分测试依赖 bash 与 git（缺失时会 t.Skip），ubuntu-latest runner 自带，无需额外安装。
+      - name: Go test
+        working-directory: server
+        run: go test ./...
+
+      - name: 安装前端依赖
+        working-directory: web
+        run: npm ci
+
+      # npm run build 内含 vue-tsc -b，因此这一步同时覆盖前端类型检查。
+      - name: 前端构建（含 vue-tsc 类型检查）
+        working-directory: web
+        run: npm run build

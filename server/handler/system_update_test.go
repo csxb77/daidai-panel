@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -781,15 +782,29 @@ func TestBuildPanelUpdatePlanForReleaseFallsBackToBinaryWhenDockerEnvVarsLeak(t 
 	t.Setenv("IMAGE_NAME", "linzixuanzz/daidai-panel:latest")
 	t.Setenv("CONTAINER_NAME", "daidai-panel")
 
+	// 本用例验证的语义是「只有 Docker 环境变量泄漏、但并不在容器里时回退到二进制更新」，
+	// 与宿主机是什么平台无关。因此 fixture 按 release.yml 实际发布的全部制品构造，
+	// 保证任何受支持平台都能命中；断言目标再按当前 GOOS/GOARCH 推导，不写死单一平台制品名。
+	expectedAsset, _, err := resolveBinaryReleaseTarget(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Skipf("平台 %s/%s 本就没有二进制更新包，不存在可回退的方案: %v", runtime.GOOS, runtime.GOARCH, err)
+	}
+
 	release := &panelReleaseInfo{
 		TagName: "v2.2.19",
 		Name:    "v2.2.19",
-		Assets: []panelReleaseAsset{
-			{
-				Name:               "daidai-windows-amd64.zip",
-				BrowserDownloadURL: "https://example.com/daidai-windows-amd64.zip",
-			},
-		},
+	}
+	for _, name := range []string{
+		"daidai-windows-amd64.zip",
+		"daidai-linux-amd64.tar.gz",
+		"daidai-linux-arm64.tar.gz",
+		"daidai-linux-386.tar.gz",
+		"daidai-linux-armv7.tar.gz",
+	} {
+		release.Assets = append(release.Assets, panelReleaseAsset{
+			Name:               name,
+			BrowserDownloadURL: "https://example.com/" + name,
+		})
 	}
 
 	plan, err := buildPanelUpdatePlanForRelease(release)
@@ -799,7 +814,13 @@ func TestBuildPanelUpdatePlanForReleaseFallsBackToBinaryWhenDockerEnvVarsLeak(t 
 	if plan.DeploymentType != panelUpdateDeploymentBinary {
 		t.Fatalf("expected binary fallback plan, got %#v", plan)
 	}
-	if plan.AssetName != "daidai-windows-amd64.zip" {
-		t.Fatalf("expected windows binary asset fallback, got %#v", plan)
+	if plan.UpdateManager != panelUpdateManagerPanel {
+		t.Fatalf("expected binary fallback to be managed by the panel itself, got %#v", plan)
+	}
+	if plan.AssetName != expectedAsset {
+		t.Fatalf("expected current platform asset %q, got %#v", expectedAsset, plan)
+	}
+	if plan.AssetURL != "https://example.com/"+expectedAsset {
+		t.Fatalf("expected plan to carry the matching asset url, got %#v", plan)
 	}
 }

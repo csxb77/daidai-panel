@@ -13,8 +13,13 @@ permissions:
   contents: write
 
 jobs:
+  # 发布门禁：复用与常规 CI 完全相同的检查逻辑，检查不过就不产出任何制品。
+  checks:
+    uses: ./.github/workflows/checks.yml
+
   release:
     runs-on: ubuntu-latest
+    needs: checks
     steps:
       - uses: actions/checkout@v5
 
@@ -177,7 +182,7 @@ jobs:
 
   magisk-module:
     runs-on: ubuntu-latest
-    needs: release
+    needs: [checks, release]
     steps:
       - uses: actions/checkout@v5
 
@@ -270,7 +275,7 @@ jobs:
 
   docker-alpine:
     runs-on: ubuntu-latest
-    needs: release
+    needs: [checks, release]
     name: Docker Alpine (${{ matrix.tag_channel }})
     strategy:
       fail-fast: false
@@ -401,7 +406,7 @@ jobs:
 
   docker-debian:
     runs-on: ubuntu-latest
-    needs: docker-alpine
+    needs: [checks, docker-alpine]
     name: Docker Debian (${{ matrix.tag_channel }})
     strategy:
       fail-fast: false

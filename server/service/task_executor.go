@@ -697,7 +697,9 @@ func extractRequireESMPackageName(output string) string {
 		if len(matches) < 2 {
 			continue
 		}
-		packageName := normalizeNodeRequireSpecifier(filepath.ToSlash(matches[1]))
+		// 这里处理的是从 Node 报错文本里捕获出来的路径，不是宿主机文件系统路径，
+		// 因此不能用 filepath.ToSlash（它按宿主机分隔符工作，在 Linux 上是空操作）。
+		packageName := normalizeNodeRequireSpecifier(strings.ReplaceAll(matches[1], "\\", "/"))
 		if packageName != "" {
 			return packageName
 		}
@@ -716,7 +718,8 @@ func extractRequireESMPackageName(output string) string {
 }
 
 func normalizeNodeRequireSpecifier(spec string) string {
-	spec = strings.TrimSpace(filepath.ToSlash(spec))
+	// 入参可能来自 Node 报错文本中的 Windows 风格路径，规范化必须与宿主机平台无关。
+	spec = strings.TrimSpace(strings.ReplaceAll(spec, "\\", "/"))
 	if spec == "" ||
 		strings.HasPrefix(spec, ".") ||
 		strings.HasPrefix(spec, "/") ||
