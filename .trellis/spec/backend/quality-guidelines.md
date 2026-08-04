@@ -844,19 +844,23 @@ pythonVersion.value = resolveDisplayPythonVersion(
 
 ---
 
-## 场景：Docker Python 单版本 / 全版本镜像拆分
+## 场景：Docker 镜像档位、Python 运行时与更新托管
 
 ### 1. Scope / Trigger
 
-- 触发：修改 `Dockerfile`、`Dockerfile.debian`、`docker/install-python-runtimes.sh`、`.github/workflows/release.yml`、`server/service/python_runtime.go`、`server/service/runtime_exec.go`、`server/handler/deps.go` 或任务 Python 版本选择逻辑时必须看本节。
-- 原因：默认 Docker 镜像不再同时塞入 `3.10 / 3.11 / 3.12` 三套 Python。单版本镜像需要只暴露当前小版本，并在老用户从三版本镜像升级后清理多余托管 venv，避免依赖页和任务执行继续指向已移除版本。
+- 触发：修改 Dockerfile、Python 安装脚本、发布矩阵、Compose / Watchtower 配置、面板更新 API / CLI，或任务 Python 版本选择逻辑时必须看本节。
+- 原因：镜像标签同时决定基础系统、Python 小版本、工具档位和更新方式。任一层漂移都会造成标签与实际内容不符、重复 Python、旧标签断更，或页面显示更新成功但容器没有被选中。
 
 ### 2. Signatures
 
 - 构建参数：`PYTHON_RUNTIME_MODE=single|all`
 - 构建参数：`PYTHON_RUNTIME_VERSION=3.10|3.11|3.12`
-- 运行时环境：`DAIDAI_PYTHON_RUNTIME_MODE`
-- 运行时环境：`DAIDAI_PYTHON_VERSION`
+- 工具档位：`INSTALL_FULL_TOOLS=true|false`
+- 运行时环境：`DAIDAI_PYTHON_RUNTIME_MODE`、`DAIDAI_PYTHON_VERSION`
+- Compose 环境：`DAIDAI_PANEL_IMAGE` -> `image` + `IMAGE_NAME`
+- 更新管理环境：`PANEL_UPDATE_MANAGER=watchtower`、`WATCHTOWER_HTTP_API_URL`、`WATCHTOWER_HTTP_API_TOKEN`
+- Watchtower 调用：`POST /v1/update?async=true&container=<锚定且转义的容器名>`
+- 更新状态：`idle|running|restarting|completed|failed`，Watchtower 接管终态为 `completed / watchtower-triggered`
 - 当前镜像版本列表：`CurrentPythonRuntimeVersions() []string`
 - 单版本识别：`SinglePythonRuntimeVersion() (string, bool)`
 - 启动策略修正：`ApplySinglePythonRuntimePolicyOnStartup()`
@@ -864,29 +868,76 @@ pythonVersion.value = resolveDisplayPythonVersion(
 
 ### 3. Contracts
 
+- 正式浮动标签固定为 10 个：`latest`、`latest-full`、`latest-3.10`、`latest-3.11`、`latest-all`、`debian`、`debian-full`、`debian-3.10`、`debian-3.11`、`debian-all`。
 - `latest` / `debian` 默认使用 `PYTHON_RUNTIME_MODE=single` 和 `PYTHON_RUNTIME_VERSION=3.12`，只内置 Python `3.12`。
-- `latest3.10`、`latest3.11`、`debian3.10`、`debian3.11` 分别只内置对应 Python 小版本。
-- `latestall`、`debianall` 使用 `PYTHON_RUNTIME_MODE=all`，必须同时安装 `3.10 / 3.11 / 3.12`。
-- Alpine 的 `latest3.10`、`latest3.11`、`latestall` 只发布 `amd64 / arm64`；如果某个平台没有 python-build-standalone 资产，脚本必须失败而不是回退成错误版本。默认 `latest` 可以在 32 位平台保留发行版 Python 3.12。
+- `latest-3.10`、`latest-3.11`、`debian-3.10`、`debian-3.11` 分别只内置对应 Python 小版本；`latest-all`、`debian-all` 同时安装 `3.10 / 3.11 / 3.12`。
+- `latest-full` 与 `debian-full` 仍只保留一套 Python 3.12；`INSTALL_FULL_TOOLS=true` 只增加 Go、Docker CLI、wget 和原生编译工具，不能重新引入发行版 Python。
+- Alpine 的 `latest-3.10`、`latest-3.11`、`latest-all` 只发布 `amd64 / arm64`；如果某个平台没有 python-build-standalone 资产，脚本必须失败而不是回退成错误版本。默认 `latest` / `latest-full` 可以在 32 位平台使用经过小版本校验的发行版 Python 3.12。
+- Debian 所有变体和 Alpine 64 位变体只使用 `/opt/daidai-python` 独立运行时；all 镜像只能有三套目标 Python，不能再附带系统 Python。
+- 六个旧无连字符浮动标签和 Debian 旧固定版本格式必须与新标签由同一个 build-push 矩阵项推送，不能增加重复构建任务。
+- 精简镜像的页面手动更新、静默自动更新和 `ddp update` 统一调用 Watchtower HTTP API；请求必须使用 `async=true` 并精确限定当前容器，202 纯文本响应也属于“已接管”成功态。
+- Watchtower 只能刷新容器当前镜像引用。官方固定版本标签和 digest 必须禁用一键/自动更新并提示切换到同族浮动标签，不能把“请求已接管”误报成能够跨版本升级。
+- Compose 的实际 `image` 与容器内 `IMAGE_NAME` 必须共用 `DAIDAI_PANEL_IMAGE`；Watchtower API 地址使用稳定服务名 `http://watchtower:8080`。
 - 单版本镜像启动后，后端 `SupportedPythonVersions()` / 依赖安装版本 / 任务表单选项必须只暴露当前镜像小版本。
 - 单版本镜像启动后，必须把 `python_default_version` 和历史任务 `python_version` 切回当前镜像小版本；默认 `latest` / `debian` 即 `3.12`。
 - 单版本镜像启动清理只能删除 `data/deps/python/<不支持版本>` 这类面板托管 Python 小版本目录，不能删除脚本、日志、备份、Node.js 依赖或未知目录。
 - `all` 镜像不得清理 `3.10 / 3.11 / 3.12` 任意一个托管目录。
 
-### 4. Tests Required
+### 4. Validation & Error Matrix
+
+- `PYTHON_RUNTIME_MODE` 不是 `single|all` -> 构建失败，不得回退到 single。
+- `PYTHON_RUNTIME_VERSION` 不是 `3.10|3.11|3.12` -> 构建失败，不得回退到 3.12。
+- 独立 Python patch 版本、pip 或 venv 校验失败 -> 构建失败，不得发布该标签。
+- 64 位或 Debian 镜像检测到系统 `python3` -> 构建失败，防止双 Python 回归。
+- 精简镜像检测到 Go、gofmt、Docker CLI、wget 或编译链 -> 构建失败。
+- Watchtower 缺 URL / token -> 禁用手动触发并给出缺失配置提示；定时轮询状态仍可展示。
+- 官方固定版本标签或 digest 使用 Watchtower -> 禁用一键 / 自动更新，提示切换到同族浮动标签。
+- 旧 Docker Socket 链目标不是 `latest-full|debian-full` -> 拉取前失败并提示改用 Watchtower 或 full 镜像。
+- Watchtower 返回 202 纯文本 `Accepted` -> 记录为“已接管”，不能宣称镜像已完成更新；4xx / 5xx -> 进入 failed 并允许重试。
+
+### 5. Good/Base/Bad Cases
+
+- Good：`debian-full` 只有独立 Python 3.12，同时具备 Go、gofmt、Docker CLI、wget 和编译链；页面触发后显示 Watchtower 已接管。
+- Base：`latest` 在 amd64 只有独立 Python 3.12 和精简工具；Alpine 386 / arm/v7 使用经过版本校验的单套系统 Python 3.12。
+- Bad：给 `debian-all` 再安装系统 Python，或把 `debian-full` 更新目标静默改成 `latest`。
+- Bad：Watchtower 请求同时使用容器名和可能过期的 `IMAGE_NAME` 过滤，收到 202 后实际零匹配。
+
+### 6. Tests Required
 
 - `SupportedPythonVersions()` 在 `DAIDAI_PYTHON_RUNTIME_MODE=single` 时只返回当前版本。
 - `CleanupManagedPythonArtifactsOnStartup()` 在 single `3.12` 时删除 `3.10 / 3.11` 目录并保留 `3.12`。
 - `CleanupManagedPythonArtifactsOnStartup()` 在 `all` 时保留三个版本目录。
 - `ApplySinglePythonRuntimePolicyOnStartup()` 必须把旧默认版本和旧任务版本切回镜像版本。
 - Python 依赖创建在 single 镜像里只创建当前小版本依赖记录。
-- 发布 workflow 必须用 matrix 平台列表限制 Alpine 非默认 Python 变体，避免 32 位平台推送错误运行时镜像。
+- 发布 workflow 必须逐 job 验证 10 个正式标签、6 个旧浮动别名、3 个 Debian 旧固定别名及同一次 build-push 输出。
+- `latest-full`、`debian-full` 的 Docker Socket 兼容边界，以及精简 / 自定义固定标签的拒绝行为必须有表格测试。
+- Watchtower 请求必须断言只有 `async=true` 和锚定容器过滤；故意设置 stale `IMAGE_NAME` 时不得生成 image 过滤。
+- 前端必须识别 `completed`，停止轮询、解除 loading，并允许关闭“Watchtower 已接管”弹窗。
+- 三份 Compose 必须通过 `docker compose config`，且展开后 `image == IMAGE_NAME`、面板 / Watchtower token 一致、Socket 只挂给 Watchtower。
 - 修改后至少运行：
 
 ```bash
 cd server
 go test ./service -run "TestSupportedPythonVersions|TestCleanupManagedPythonArtifactsOnStartup|TestApplySinglePythonRuntimePolicy" -count=1
 go test ./handler -run "TestPythonDependencyCreate" -count=1
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```text
+full_tools=true -> 安装系统 Python + 独立 Python
+Watchtower -> /v1/update?image=<可能过期的 IMAGE_NAME>
+固定标签 2.4.0-debian-full -> 显示可自动升级到后续版本
+```
+
+#### Correct
+
+```text
+full_tools=true -> 只增加开发工具，Python 仍只有目标运行时
+Watchtower -> /v1/update?async=true&container=^daidai-panel$
+固定标签 / digest -> 明确提示先切换到 debian-full 等同族浮动标签
 ```
 
 ---

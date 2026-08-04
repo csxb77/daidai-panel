@@ -2,7 +2,7 @@ name: daidai-panel
 
 services:
   daidai-panel:
-    image: linzixuanzz/daidai-panel:latest
+    image: ${DAIDAI_PANEL_IMAGE:-linzixuanzz/daidai-panel:latest}
     container_name: daidai-panel
     restart: unless-stopped
     ports:
@@ -12,8 +12,13 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - CONTAINER_NAME=daidai-panel
-      - IMAGE_NAME=linzixuanzz/daidai-panel:latest
+      # 镜像地址与上面的 image 共用一个变量，切换标签时只需要改一处。
+      - IMAGE_NAME=${DAIDAI_PANEL_IMAGE:-linzixuanzz/daidai-panel:latest}
       - PANEL_UPDATE_MANAGER=watchtower
+      # 面板通过容器网络触发 Watchtower，API 不向宿主机开放端口。
+      - WATCHTOWER_HTTP_API_URL=${WATCHTOWER_HTTP_API_URL:-http://watchtower:8080}
+      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-daidai-panel-watchtower-token}
+      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=true
       # === 飞牛 OS / 群晖 / 绿联等 NAS 可选环境变量 ===========================
       # 让容器以宿主机用户身份运行，使 SMB/NFS 共享的目录权限一致。
       # 不设则默认 root（与历史行为兼容）。运行 `id` 查看你的 UID/GID。
@@ -34,6 +39,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
       - com.centurylinklabs.watchtower.enable=false
+    environment:
+      # 开放 update endpoint，并与面板共用令牌；服务地址只需要配置在面板容器。
+      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-daidai-panel-watchtower-token}
+      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=true
+      - WATCHTOWER_HTTP_API_ENDPOINTS=update
     command:
       - --label-enable
       - --cleanup

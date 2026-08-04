@@ -128,7 +128,7 @@ name: daidai-panel
 
 services:
   daidai-panel:
-    image: linzixuanzz/daidai-panel:latest
+    image: ${DAIDAI_PANEL_IMAGE:-linzixuanzz/daidai-panel:latest}
     container_name: daidai-panel
     restart: unless-stopped
     ports:
@@ -138,8 +138,11 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - CONTAINER_NAME=daidai-panel
-      - IMAGE_NAME=linzixuanzz/daidai-panel:latest
+      - IMAGE_NAME=${DAIDAI_PANEL_IMAGE:-linzixuanzz/daidai-panel:latest}
       - PANEL_UPDATE_MANAGER=watchtower
+      - WATCHTOWER_HTTP_API_URL=${WATCHTOWER_HTTP_API_URL:-http://watchtower:8080}
+      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-daidai-panel-watchtower-token}
+      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=true
     labels:
       - com.centurylinklabs.watchtower.enable=true
 
@@ -151,6 +154,10 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
       - com.centurylinklabs.watchtower.enable=false
+    environment:
+      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:-daidai-panel-watchtower-token}
+      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=true
+      - WATCHTOWER_HTTP_API_ENDPOINTS=update
     command:
       - --label-enable
       - --cleanup
@@ -164,19 +171,20 @@ docker compose up -d
 
 首次访问 `http://localhost:5700` 会进入管理员初始化。
 
-如果 Docker Hub 访问慢，可以把 `image` 和 `IMAGE_NAME` 改成你自己信任的镜像加速地址；README 默认不再内置固定第三方镜像源。也可以到 [容器镜像监控](https://status.anye.xyz/) 查看更多 Docker Hub 镜像加速源状态，再选择可用地址填写。
+如果 Docker Hub 访问慢，可以设置一次 `DAIDAI_PANEL_IMAGE`，让 `image` 和 `IMAGE_NAME` 同时使用你信任的镜像加速地址；README 默认不再内置固定第三方镜像源。也可以到 [容器镜像监控](https://status.anye.xyz/) 查看更多 Docker Hub 镜像加速源状态，再选择可用地址填写。
 
 这份 compose 已经是推荐的可直接上线版本：
 
 1. 面板容器只挂业务数据目录 `./Dumb-Panel:/app/Dumb-Panel`
 2. `docker.sock` 只暴露给 Watchtower，不暴露给面板容器
-3. 只有打了 `com.centurylinklabs.watchtower.enable=true` 标签的容器会被自动更新
-4. Watchtower 自己显式打了 `com.centurylinklabs.watchtower.enable=false`，避免被这套规则误纳入管理
-5. `--cleanup` 会在更新后清理旧镜像
-6. `--interval 3600` 表示每 1 小时检查一次更新
-7. 当前默认使用 `nickfedor/watchtower:latest`，用于兼容新版 Docker API
+3. `DAIDAI_PANEL_IMAGE` 同时控制容器实际镜像和面板记录的 `IMAGE_NAME`，切换标签只改一处
+4. 只有打了 `com.centurylinklabs.watchtower.enable=true` 标签的容器会被自动更新
+5. Watchtower 自己显式打了 `com.centurylinklabs.watchtower.enable=false`，避免被这套规则误纳入管理
+6. `WATCHTOWER_HTTP_API_ENDPOINTS=update` 开放面板所需的更新入口；API 只在 Compose 内部网络使用，没有向宿主机开放端口
+7. `WATCHTOWER_HTTP_API_PERIODIC_POLLS=true` 保留定时轮询，`--interval 3600` 表示每 1 小时检查一次更新
+8. `--cleanup` 会在更新后清理旧镜像；当前使用 `nickfedor/watchtower:latest` 兼容新版 Docker API
 
-如果你不想自动更新，可以删除 `watchtower` 服务、`labels` 和 `PANEL_UPDATE_MANAGER=watchtower`，然后改成在宿主机手动执行：
+如果你不想自动更新，可以删除 `watchtower` 服务、`labels`、`PANEL_UPDATE_MANAGER=watchtower` 和 `WATCHTOWER_HTTP_API_*`，然后改成在宿主机手动执行：
 
 ```bash
 docker compose pull
@@ -186,22 +194,33 @@ docker compose up -d
 想用 `docker run` 而不是 compose，推荐等价方式是分别启动面板容器和 Watchtower 容器：
 
 ```bash
+docker network create daidai-panel-net
+WATCHTOWER_API_TOKEN=daidai-panel-watchtower-token
+
 docker run -d --pull=always \
   --name daidai-panel \
+  --network daidai-panel-net \
   --restart unless-stopped \
   -p 5700:5700 \
-  -v $(pwd)/Dumb-Panel:/app/Dumb-Panel \
+  -v "$(pwd)/Dumb-Panel:/app/Dumb-Panel" \
   -e TZ=Asia/Shanghai \
   -e CONTAINER_NAME=daidai-panel \
   -e IMAGE_NAME=linzixuanzz/daidai-panel:latest \
   -e PANEL_UPDATE_MANAGER=watchtower \
+  -e WATCHTOWER_HTTP_API_URL=http://daidai-watchtower:8080 \
+  -e WATCHTOWER_HTTP_API_TOKEN="$WATCHTOWER_API_TOKEN" \
+  -e WATCHTOWER_HTTP_API_PERIODIC_POLLS=true \
   --label com.centurylinklabs.watchtower.enable=true \
   linzixuanzz/daidai-panel:latest
 
 docker run -d \
   --name daidai-watchtower \
+  --network daidai-panel-net \
   --restart unless-stopped \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -e WATCHTOWER_HTTP_API_TOKEN="$WATCHTOWER_API_TOKEN" \
+  -e WATCHTOWER_HTTP_API_PERIODIC_POLLS=true \
+  -e WATCHTOWER_HTTP_API_ENDPOINTS=update \
   --label com.centurylinklabs.watchtower.enable=false \
   nickfedor/watchtower:latest \
   --label-enable \
@@ -217,28 +236,66 @@ docker run -d \
 |------|---------|
 | `linux/amd64` | x86_64 服务器、PC、绝大多数 NAS |
 | `linux/arm64` | 树莓派 4 / 5、Oracle ARM 云、Apple Silicon |
-| `linux/386` | **v2.0.9 新增**：32 位 x86 老 PC、瘦客户端（仅 `:latest` 有，`:debian` 无） |
+| `linux/386` | 32 位 x86 老 PC、瘦客户端（仅 `latest` / `latest-full`，Debian 镜像不支持） |
 | `linux/arm/v7` | **v2.0.9 新增**：树莓派 2 / 3 / Zero 2W、老 ARMv7 盒子 / 路由器 / NAS |
 
-> Python 运行时说明：从 `v2.3.5` 起，默认 `:latest` / `:debian` 镜像只内置默认 Python `3.12`，镜像体积更小、升级后也会自动清理旧的 `3.10 / 3.11` 托管环境。需要指定小版本时请使用 `:latest3.10` / `:latest3.11` / `:debian3.10` / `:debian3.11`；确实需要三套 Python 同时存在时使用 `:latestall` / `:debianall`。
+### Alpine 与 Debian 运行时和镜像标签
 
-### Alpine vs Debian 运行时
+镜像分成两个基础系统和两个工具档位。Alpine 使用 `apk`，体积更小；Debian 使用 `apt` 和 glibc，适合依赖 Debian/Ubuntu 软件包的脚本。
 
-面板提供两套运行时镜像，差别只在容器内的包管理器：
+| 工具档位 | 默认包含 | 额外工具或限制 |
+|----------|----------|----------------|
+| 精简版 | 目标 Python 与 pip/venv、Node.js/npm、`apk` 或 `apt`、Git/SSH、bash、curl、Nginx 和基础运行库 | 不含 Go、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config |
+| 完整版 | 精简版的全部内容 | 额外包含 Go/gofmt、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config |
 
-| Tag | 基础镜像 | Python 运行时 | Linux 包管理 | 支持架构 | 适合谁 |
-|-----|---------|---------------|-------------|---------|--------|
-| `linzixuanzz/daidai-panel:latest` / `:<版本>` | `alpine:3.22`（`apk` 安装 Node.js / npm） | 单版本 `3.12` | `apk` | amd64 / arm64 / 386 / arm/v7 | 默认推荐，绝大多数场景 |
-| `linzixuanzz/daidai-panel:latest3.10` | `alpine:3.22` | 单版本 `3.10` | `apk` | amd64 / arm64 | 任务明确需要 Python 3.10 |
-| `linzixuanzz/daidai-panel:latest3.11` | `alpine:3.22` | 单版本 `3.11` | `apk` | amd64 / arm64 | 任务明确需要 Python 3.11 |
-| `linzixuanzz/daidai-panel:latestall` | `alpine:3.22` | `3.10 / 3.11 / 3.12` | `apk` | amd64 / arm64 | 需要同时维护多个 Python 小版本依赖环境 |
-| `linzixuanzz/daidai-panel:debian` | `node:20.19.0-bookworm-slim` | 单版本 `3.12` | `apt` | amd64 / arm64 / arm/v7 | 需要安装只在 Debian/Ubuntu 仓库存在、`apk` 没打包的 Linux 软件 |
-| `linzixuanzz/daidai-panel:debian3.10` | `node:20.19.0-bookworm-slim` | 单版本 `3.10` | `apt` | amd64 / arm64 / arm/v7 | Debian 运行时且任务明确需要 Python 3.10 |
-| `linzixuanzz/daidai-panel:debian3.11` | `node:20.19.0-bookworm-slim` | 单版本 `3.11` | `apt` | amd64 / arm64 / arm/v7 | Debian 运行时且任务明确需要 Python 3.11 |
-| `linzixuanzz/daidai-panel:debianall` | `node:20.19.0-bookworm-slim` | `3.10 / 3.11 / 3.12` | `apt` | amd64 / arm64 / arm/v7 | Debian 运行时且需要三个 Python 小版本共存 |
+从首个包含本次镜像拆分的版本开始，**Go 任务必须使用 `latest-full` 或 `debian-full`。** 安装需要现场编译原生扩展的 pip/npm 依赖时，也建议使用完整版。普通 Python、JavaScript、TypeScript 和 Shell 任务优先使用体积更小的精简版。
 
-> 说明：`:latest` 从 v2.2.16 起使用 `alpine:3.22` 作为运行时底座，并通过 `apk` 安装 Alpine 官方仓库的 `nodejs/npm`。这样可以满足 `node >= 20.19.0` 的依赖要求，同时保留 Alpine `x86` 仓库支持，继续构建 `linux/386` 镜像。
-> Python 架构说明：Alpine 的 `latest3.10` / `latest3.11` / `latestall` 依赖独立 Python 运行时资产，目前仅发布 `amd64 / arm64`；32 位 x86 和 ARMv7 继续使用默认 `latest`（Python 3.12）或切换到支持 ARMv7 的 Debian 变体。
+下一版本计划发布下面 10 个浮动标签，其中包含 `debian-full`。当前最新稳定版 `v2.3.9` 尚未发布 full 和新连字符标签，请等包含本改动的新版本发布后再切换。表里的 `<版本>` 表示届时实际发布的版本号；在 Watchtower 或 Compose 部署中，浮动标签会持续收到新版，固定版本标签用于锁定环境。
+
+| 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
+|--------------|------------------|----------|--------|----------|----------|
+| `latest` | `<版本>` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `<版本>-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `<版本>-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `<版本>-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `<版本>-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `<版本>-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `<版本>-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `<版本>-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `<版本>-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `<版本>-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+
+正式发布时只替换 `<版本>`，后缀保持不变。
+
+#### Python 去重与 32 位例外
+
+- Alpine 的 `amd64 / arm64` 和全部 Debian 镜像不再同时安装系统 Python，只保留 `/opt/daidai-python` 下的目标独立运行时。
+- `latest-all` 和 `debian-all` 只包含 Python 3.10、3.11、3.12 三套独立运行时，不会再多装一套系统 Python。
+- Alpine 的 `linux/386` 与 `linux/arm/v7` 没有对应的独立 Python 资产，因此 `latest`、`latest-full` 在这两个平台只使用 Alpine 系统 Python 3.12。这是 32 位平台的兼容例外，仍然只有一套 Python。
+- `latest-3.10`、`latest-3.11`、`latest-all` 只发布 `amd64 / arm64`，不会发布“标签写 3.10，实际却是 3.12”的 32 位镜像。
+
+#### 新标签与旧别名迁移
+
+下一版本发布后，新的连字符标签会成为正式名称。下面 6 个旧浮动标签会继续由同一次构建推送，现有 Watchtower 部署不会因为改名而断更：
+
+| 旧兼容别名 | 新正式标签 |
+|------------|------------|
+| `latest3.10` | `latest-3.10` |
+| `latest3.11` | `latest-3.11` |
+| `latestall` | `latest-all` |
+| `debian3.10` | `debian-3.10` |
+| `debian3.11` | `debian-3.11` |
+| `debianall` | `debian-all` |
+
+Debian 的旧固定版本格式也会保留兼容别名：`<版本>-debian3.10`、`<版本>-debian3.11`、`<版本>-debianall` 分别对应新的 `<版本>-debian-3.10`、`<版本>-debian-3.11`、`<版本>-debian-all`。新部署请直接使用新名称。
+
+相关新版本发布后，仓库里的两份基础 Compose 都只需要设置一次镜像变量。例如切换到 Alpine 完整版：
+
+```bash
+DAIDAI_PANEL_IMAGE=linzixuanzz/daidai-panel:latest-full docker compose up -d
+```
+
+也可以在 `.env` 中设置 `DAIDAI_PANEL_IMAGE=linzixuanzz/daidai-panel:latest-full` 后再运行 `docker compose up -d`。Compose 会把同一个值同时写入 `image` 和 `IMAGE_NAME`，不会出现容器运行标签和更新标签不一致。
 
 切到 Debian 运行时：
 
@@ -247,25 +304,59 @@ docker run -d \
 docker compose -f docker-compose.debian.yml up -d
 
 # 或基于源码本地构建
-docker build --build-arg VERSION=2.2.20 -f Dockerfile.debian -t daidai-panel:debian-local .
+docker build --build-arg VERSION=dev -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
-如果要本地构建指定 Python 版本镜像，可以额外传入：
+本地构建时，`PYTHON_RUNTIME_MODE` 决定单版本或三版本，`PYTHON_RUNTIME_VERSION` 决定单版本镜像的 Python 版本，`INSTALL_FULL_TOOLS=true` 决定是否安装完整开发工具。下面的命令可以直接运行：
 
 ```bash
-# 单版本 Python 3.10
+# Alpine：单版本 Python 3.10 精简版；改成 3.11 或 3.12 可构建对应单版本
 docker build \
-  --build-arg VERSION=2.2.20 \
+  --build-arg VERSION=dev \
   --build-arg PYTHON_RUNTIME_MODE=single \
   --build-arg PYTHON_RUNTIME_VERSION=3.10 \
-  -t daidai-panel:latest3.10-local .
+  --build-arg INSTALL_FULL_TOOLS=false \
+  -t daidai-panel:latest-3.10-local .
 
-# 三版本合集
+# Alpine：默认 Python 3.12 完整版
 docker build \
-  --build-arg VERSION=2.2.20 \
+  --build-arg VERSION=dev \
+  --build-arg PYTHON_RUNTIME_MODE=single \
+  --build-arg PYTHON_RUNTIME_VERSION=3.12 \
+  --build-arg INSTALL_FULL_TOOLS=true \
+  -t daidai-panel:latest-full-local .
+
+# Alpine：Python 3.10 / 3.11 / 3.12 三版本精简版
+docker build \
+  --build-arg VERSION=dev \
   --build-arg PYTHON_RUNTIME_MODE=all \
   --build-arg PYTHON_RUNTIME_VERSION=3.12 \
-  -t daidai-panel:latestall-local .
+  --build-arg INSTALL_FULL_TOOLS=false \
+  -t daidai-panel:latest-all-local .
+
+# Debian：单版本 Python 3.11 精简版
+docker build -f Dockerfile.debian \
+  --build-arg VERSION=dev \
+  --build-arg PYTHON_RUNTIME_MODE=single \
+  --build-arg PYTHON_RUNTIME_VERSION=3.11 \
+  --build-arg INSTALL_FULL_TOOLS=false \
+  -t daidai-panel:debian-3.11-local .
+
+# Debian：默认 Python 3.12 完整版
+docker build -f Dockerfile.debian \
+  --build-arg VERSION=dev \
+  --build-arg PYTHON_RUNTIME_MODE=single \
+  --build-arg PYTHON_RUNTIME_VERSION=3.12 \
+  --build-arg INSTALL_FULL_TOOLS=true \
+  -t daidai-panel:debian-full-local .
+
+# Debian：Python 3.10 / 3.11 / 3.12 三版本精简版
+docker build -f Dockerfile.debian \
+  --build-arg VERSION=dev \
+  --build-arg PYTHON_RUNTIME_MODE=all \
+  --build-arg PYTHON_RUNTIME_VERSION=3.12 \
+  --build-arg INSTALL_FULL_TOOLS=false \
+  -t daidai-panel:debian-all-local .
 ```
 
 ### Windows 单机版（不走 Docker）
@@ -446,27 +537,36 @@ server {
 
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
-- **Docker 部署**：推荐交给 Watchtower 自动拉取并重建容器；面板会识别 `PANEL_UPDATE_MANAGER=watchtower` 的托管状态。早期挂载 Docker Socket 的部署仍可继续使用面板内一键更新。
+- **Docker 精简版**：从首个包含本次镜像拆分的版本开始，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
+- **Docker 完整版**：新版本发布后同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用固定标签 `<版本>-full` 或 `<版本>-debian-full` 触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 
 ### 手动更新
 
-```bash
-# Alpine 运行时
-docker pull linzixuanzz/daidai-panel:latest
-docker compose up -d
+先在项目目录的 `.env` 中持久写入实际使用的镜像。例如 Alpine 默认镜像写入：
 
-# Debian 运行时
-docker pull linzixuanzz/daidai-panel:debian
-docker compose -f docker-compose.debian.yml up -d
+```dotenv
+DAIDAI_PANEL_IMAGE=linzixuanzz/daidai-panel:latest
 ```
 
-如果你使用的是指定 Python 小版本镜像，把上面的 tag 替换成正在使用的版本，例如 `latest3.10`、`latest3.11`、`latestall`、`debian3.10`、`debian3.11` 或 `debianall`，并同步更新 compose 里的 `IMAGE_NAME`，这样面板内一键更新和 Watchtower 才会继续拉取同一条镜像线。
+然后只拉取并重建面板服务，`image` 与容器内 `IMAGE_NAME` 会继续使用同一个值：
+
+```bash
+# Alpine Compose
+docker compose pull daidai-panel
+docker compose up -d daidai-panel
+
+# Debian Compose
+docker compose -f docker-compose.debian.yml pull daidai-panel
+docker compose -f docker-compose.debian.yml up -d daidai-panel
+```
+
+包含本次镜像拆分的新版本发布后，可以把 `.env` 中的 `DAIDAI_PANEL_IMAGE` 改成对应正式标签，例如 `latest-full`、`latest-3.10`、`latest-3.11`、`latest-all`、`debian-full`、`debian-3.10`、`debian-3.11` 或 `debian-all`。
 
 本地基于源码自己构建的镜像，重新 build 即可：
 
 ```bash
-docker build --build-arg VERSION=2.2.20 -f Dockerfile.debian -t daidai-panel:debian-local .
+docker build --build-arg VERSION=dev -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
 ## 容器命令 `ddp`
@@ -484,7 +584,7 @@ docker exec -it daidai-panel ddp <subcommand>
 ```bash
 ddp help                 # 查看所有子命令
 ddp status               # 版本、数据目录、端口、任务数、资源占用、服务状态
-ddp check                # 检查配置、数据库、运行目录、运行时命令、Docker Socket
+ddp check                # 检查配置、数据库、运行目录、运行时命令和更新托管方式
 ddp logs --lines 200     # 查看 panel.log
 ```
 
@@ -587,6 +687,12 @@ Dumb-Panel/
 | `PANEL_PORT` | 容器内 Nginx 端口 | `5700` |
 | `SERVER_PORT` | 容器内 Go 后端端口（**不要改**） | `5701` |
 | `CONTAINER_NAME` / `IMAGE_NAME` | 面板内一键更新识别自己用 | 空 |
+| `PANEL_UPDATE_MANAGER` | Docker 更新管理方式；精简镜像应设为 `watchtower` | 空 |
+| `WATCHTOWER_HTTP_API_URL` | 面板触发 Watchtower 更新的容器内部地址，不需要映射到宿主机 | `http://watchtower:8080`（基础 Compose 的稳定服务名） |
+| `WATCHTOWER_HTTP_API_TOKEN` | 面板与 Watchtower 共用的 HTTP API 令牌 | 基础 Compose 提供内部默认值，正式环境建议自定义 |
+| `WATCHTOWER_HTTP_API_PERIODIC_POLLS` | 是否保留 Watchtower 定时轮询 | `true`（基础 Compose） |
+
+`DAIDAI_PANEL_IMAGE` 是宿主机上的 Compose 变量，不是容器内变量。两份基础 Compose 都用它同时设置 `image` 和 `IMAGE_NAME`。
 
 ## 技术栈
 

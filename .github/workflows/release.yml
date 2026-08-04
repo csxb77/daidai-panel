@@ -7,6 +7,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  DOCKER_IMAGE_REPOSITORY: linzixuanzz/daidai-panel
 
 permissions:
   contents: write
@@ -276,24 +277,44 @@ jobs:
       matrix:
         include:
           - tag_channel: latest
+            legacy_tag_channel: ''
             python_mode: single
             python_version: '3.12'
             version_suffix: ''
+            legacy_version_suffix: ''
+            full_tools: false
             platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7
-          - tag_channel: latest3.10
+          - tag_channel: latest-full
+            legacy_tag_channel: ''
+            python_mode: single
+            python_version: '3.12'
+            version_suffix: '-full'
+            legacy_version_suffix: ''
+            full_tools: true
+            platforms: linux/amd64,linux/arm64,linux/386,linux/arm/v7
+          - tag_channel: latest-3.10
+            legacy_tag_channel: latest3.10
             python_mode: single
             python_version: '3.10'
             version_suffix: '-3.10'
+            legacy_version_suffix: ''
+            full_tools: false
             platforms: linux/amd64,linux/arm64
-          - tag_channel: latest3.11
+          - tag_channel: latest-3.11
+            legacy_tag_channel: latest3.11
             python_mode: single
             python_version: '3.11'
             version_suffix: '-3.11'
+            legacy_version_suffix: ''
+            full_tools: false
             platforms: linux/amd64,linux/arm64
-          - tag_channel: latestall
+          - tag_channel: latest-all
+            legacy_tag_channel: latestall
             python_mode: all
             python_version: '3.12'
             version_suffix: '-all'
+            legacy_version_suffix: ''
+            full_tools: false
             platforms: linux/amd64,linux/arm64
     steps:
       - uses: actions/checkout@v5
@@ -305,12 +326,26 @@ jobs:
       - name: Resolve Docker tags
         id: docker_tags
         shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ env.DOCKER_IMAGE_REPOSITORY }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG_CHANNEL: ${{ matrix.tag_channel }}
+          LEGACY_TAG_CHANNEL: ${{ matrix.legacy_tag_channel }}
+          VERSION_SUFFIX: ${{ matrix.version_suffix }}
+          LEGACY_VERSION_SUFFIX: ${{ matrix.legacy_version_suffix }}
         run: |
           set -euo pipefail
           {
             echo "tags<<EOF"
-            echo "linzixuanzz/daidai-panel:${{ matrix.tag_channel }}"
-            echo "linzixuanzz/daidai-panel:${{ steps.version.outputs.VERSION }}${{ matrix.version_suffix }}"
+            echo "$IMAGE_REPOSITORY:$TAG_CHANNEL"
+            echo "$IMAGE_REPOSITORY:$VERSION$VERSION_SUFFIX"
+            # 旧浮动标签继续指向同一次构建，避免已有部署在升级时断开。
+            if [[ -n "$LEGACY_TAG_CHANNEL" ]]; then
+              echo "$IMAGE_REPOSITORY:$LEGACY_TAG_CHANNEL"
+            fi
+            if [[ -n "$LEGACY_VERSION_SUFFIX" ]]; then
+              echo "$IMAGE_REPOSITORY:$VERSION$LEGACY_VERSION_SUFFIX"
+            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -350,16 +385,17 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          # Alpine latest keeps 32-bit platforms; 3.10 / 3.11 / all only publish amd64 / arm64 with standalone Python assets.
+          # Alpine 3.12 精简版和完整版保留 32 位平台；3.10、3.11、all 仅发布带独立 Python 的 64 位平台。
           platforms: ${{ matrix.platforms }}
           push: true
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
             PYTHON_RUNTIME_MODE=${{ matrix.python_mode }}
             PYTHON_RUNTIME_VERSION=${{ matrix.python_version }}
+            INSTALL_FULL_TOOLS=${{ matrix.full_tools }}
           # GHA cache 导出偶发 504 时，会出现“镜像其实已经 push 成功，但 job 最终仍失败”的假红。
           # 这里改成 registry + inline cache，牺牲一点缓存效率，换取发布链稳定性。
-          cache-from: type=registry,ref=linzixuanzz/daidai-panel:${{ matrix.tag_channel }}
+          cache-from: type=registry,ref=${{ env.DOCKER_IMAGE_REPOSITORY }}:${{ matrix.tag_channel }}
           cache-to: type=inline
           tags: ${{ steps.docker_tags.outputs.tags }}
 
@@ -372,24 +408,44 @@ jobs:
       matrix:
         include:
           - tag_channel: debian
+            legacy_tag_channel: ''
             python_mode: single
             python_version: '3.12'
             version_suffix: '-debian'
+            legacy_version_suffix: ''
+            full_tools: false
             platforms: linux/amd64,linux/arm64,linux/arm/v7
-          - tag_channel: debian3.10
+          - tag_channel: debian-full
+            legacy_tag_channel: ''
+            python_mode: single
+            python_version: '3.12'
+            version_suffix: '-debian-full'
+            legacy_version_suffix: ''
+            full_tools: true
+            platforms: linux/amd64,linux/arm64,linux/arm/v7
+          - tag_channel: debian-3.10
+            legacy_tag_channel: debian3.10
             python_mode: single
             python_version: '3.10'
-            version_suffix: '-debian3.10'
+            version_suffix: '-debian-3.10'
+            legacy_version_suffix: '-debian3.10'
+            full_tools: false
             platforms: linux/amd64,linux/arm64,linux/arm/v7
-          - tag_channel: debian3.11
+          - tag_channel: debian-3.11
+            legacy_tag_channel: debian3.11
             python_mode: single
             python_version: '3.11'
-            version_suffix: '-debian3.11'
+            version_suffix: '-debian-3.11'
+            legacy_version_suffix: '-debian3.11'
+            full_tools: false
             platforms: linux/amd64,linux/arm64,linux/arm/v7
-          - tag_channel: debianall
+          - tag_channel: debian-all
+            legacy_tag_channel: debianall
             python_mode: all
             python_version: '3.12'
-            version_suffix: '-debianall'
+            version_suffix: '-debian-all'
+            legacy_version_suffix: '-debianall'
+            full_tools: false
             platforms: linux/amd64,linux/arm64,linux/arm/v7
     steps:
       - uses: actions/checkout@v5
@@ -401,12 +457,26 @@ jobs:
       - name: Resolve Docker tags
         id: docker_tags
         shell: bash
+        env:
+          IMAGE_REPOSITORY: ${{ env.DOCKER_IMAGE_REPOSITORY }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          TAG_CHANNEL: ${{ matrix.tag_channel }}
+          LEGACY_TAG_CHANNEL: ${{ matrix.legacy_tag_channel }}
+          VERSION_SUFFIX: ${{ matrix.version_suffix }}
+          LEGACY_VERSION_SUFFIX: ${{ matrix.legacy_version_suffix }}
         run: |
           set -euo pipefail
           {
             echo "tags<<EOF"
-            echo "linzixuanzz/daidai-panel:${{ matrix.tag_channel }}"
-            echo "linzixuanzz/daidai-panel:${{ steps.version.outputs.VERSION }}${{ matrix.version_suffix }}"
+            echo "$IMAGE_REPOSITORY:$TAG_CHANNEL"
+            echo "$IMAGE_REPOSITORY:$VERSION$VERSION_SUFFIX"
+            # Debian 还保留旧版本号格式，确保固定旧标签的用户仍可获取本次发布。
+            if [[ -n "$LEGACY_TAG_CHANNEL" ]]; then
+              echo "$IMAGE_REPOSITORY:$LEGACY_TAG_CHANNEL"
+            fi
+            if [[ -n "$LEGACY_VERSION_SUFFIX" ]]; then
+              echo "$IMAGE_REPOSITORY:$VERSION$LEGACY_VERSION_SUFFIX"
+            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -453,6 +523,7 @@ jobs:
             VERSION=${{ steps.version.outputs.VERSION }}
             PYTHON_RUNTIME_MODE=${{ matrix.python_mode }}
             PYTHON_RUNTIME_VERSION=${{ matrix.python_version }}
-          cache-from: type=registry,ref=linzixuanzz/daidai-panel:${{ matrix.tag_channel }}
+            INSTALL_FULL_TOOLS=${{ matrix.full_tools }}
+          cache-from: type=registry,ref=${{ env.DOCKER_IMAGE_REPOSITORY }}:${{ matrix.tag_channel }}
           cache-to: type=inline
           tags: ${{ steps.docker_tags.outputs.tags }}

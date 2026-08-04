@@ -1,8 +1,5 @@
 #!/bin/sh
-# Install versioned CPython runtimes for Docker images.
-#
-# The panel creates per-version venvs at runtime, but Docker images must still
-# provide the matching python3.10 / python3.11 / python3.12 bootstrap binaries.
+# 为 Docker 镜像安装指定小版本的 CPython；面板运行时再按版本创建托管 venv。
 
 set -eu
 
@@ -27,8 +24,8 @@ case "$PYTHON_RUNTIME_MODE" in
   all|single)
     ;;
   *)
-    log "unknown PYTHON_RUNTIME_MODE=${PYTHON_RUNTIME_MODE}, fallback to single"
-    PYTHON_RUNTIME_MODE=single
+    log "invalid PYTHON_RUNTIME_MODE=${PYTHON_RUNTIME_MODE}; expected single or all"
+    exit 1
     ;;
 esac
 
@@ -36,8 +33,8 @@ case "$PYTHON_RUNTIME_VERSION" in
   3.10|3.11|3.12)
     ;;
   *)
-    log "unknown PYTHON_RUNTIME_VERSION=${PYTHON_RUNTIME_VERSION}, fallback to 3.12"
-    PYTHON_RUNTIME_VERSION=3.12
+    log "invalid PYTHON_RUNTIME_VERSION=${PYTHON_RUNTIME_VERSION}; expected 3.10, 3.11 or 3.12"
+    exit 1
     ;;
 esac
 
@@ -107,8 +104,23 @@ install_python() {
   export PATH="${dest}/bin:${PATH}"
   export LD_LIBRARY_PATH="${dest}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-  "python${minor}" --version
+  # 下载包名、解释器真实版本、pip 和 venv 必须同时通过，避免发布标签与实际版本不一致的镜像。
+  actual_version=$("python${minor}" -c 'import platform; print(platform.python_version())')
+  if [ "$actual_version" != "$full_version" ]; then
+    log "Python ${minor} version mismatch: expected ${full_version}, got ${actual_version}"
+    exit 1
+  fi
   "python${minor}" -m pip --version
+  smoke_venv="/tmp/daidai-python-${minor}-venv-smoke"
+  rm -rf "$smoke_venv"
+  "python${minor}" -m venv "$smoke_venv"
+  smoke_version=$("${smoke_venv}/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+  if [ "$smoke_version" != "$minor" ]; then
+    log "Python ${minor} venv version mismatch: got ${smoke_version}"
+    exit 1
+  fi
+  "${smoke_venv}/bin/python" -m pip --version
+  rm -rf "$smoke_venv"
 }
 
 should_install_python() {
@@ -122,12 +134,40 @@ should_install_python() {
 PLATFORM=$(python_platform "$RUNTIME_FLAVOR" "$TARGET_ARCH" "$TARGET_VARIANT" || true)
 
 if [ -z "$PLATFORM" ]; then
-  # 默认 3.12 镜像在 Alpine 32 位平台上可以继续使用发行版 python3；
-  # 但 3.10 / 3.11 / all 镜像如果没有独立运行时资产，必须直接失败，避免推送“名字是 3.10，实际却只有系统 Python”的假镜像。
-  if [ "$PYTHON_RUNTIME_MODE" = "single" ] && [ "$PYTHON_RUNTIME_VERSION" = "3.12" ]; then
-    log "no standalone CPython asset for flavor=${RUNTIME_FLAVOR} arch=${TARGET_ARCH} variant=${TARGET_VARIANT}; keep distro python only"
+  # 仅 Alpine 386/armv7 默认 3.12 可使用发行版 Python；其他缺资产组合必须失败。
+  use_distro_python=false
+  if [ "$RUNTIME_FLAVOR" = "alpine" ] && [ "$PYTHON_RUNTIME_MODE" = "single" ] && [ "$PYTHON_RUNTIME_VERSION" = "3.12" ]; then
+    case "${TARGET_ARCH}/${TARGET_VARIANT}" in
+      386/|arm/v7) use_distro_python=true ;;
+    esac
+  fi
+
+  if [ "$use_distro_python" = "true" ]; then
+    actual_minor=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    if [ "$actual_minor" != "3.12" ]; then
+      log "distro Python version mismatch: expected 3.12, got ${actual_minor}"
+      exit 1
+    fi
+    python3 -m pip --version
+    smoke_venv=/tmp/daidai-python-distro-venv-smoke
+    rm -rf "$smoke_venv"
+    python3 -m venv "$smoke_venv"
+    smoke_version=$("${smoke_venv}/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    if [ "$smoke_version" != "3.12" ]; then
+      log "distro Python venv version mismatch: expected 3.12, got ${smoke_version}"
+      exit 1
+    fi
+    "${smoke_venv}/bin/python" -m pip --version
+    rm -rf "$smoke_venv"
+
+    # 确认真实小版本后再补标准命令名，供显式 python3.12 任务与 pip 调用使用。
+    ln -sf "$(command -v python3)" /usr/local/bin/python3.12
+    ln -sf "$(command -v pip3)" /usr/local/bin/pip3.12
+    ln -sf "$(command -v pip3)" /usr/local/bin/pip
+    log "use verified Alpine distro Python 3.12 for arch=${TARGET_ARCH} variant=${TARGET_VARIANT}"
     exit 0
   fi
+
   log "no standalone CPython asset for flavor=${RUNTIME_FLAVOR} arch=${TARGET_ARCH} variant=${TARGET_VARIANT}; cannot build mode=${PYTHON_RUNTIME_MODE} version=${PYTHON_RUNTIME_VERSION}"
   exit 1
 fi
@@ -143,16 +183,22 @@ if should_install_python "3.12"; then
 fi
 
 # 让通用 python3 / pip3 落到当前镜像默认版本；all 镜像仍默认 3.12。
-# 这样 latest3.10 / debian3.10 这类单版本镜像里，任务和 venv 创建都会优先使用对应小版本。
+# 这样指定版本镜像里的任务和 venv 创建都会优先使用对应小版本。
 default_root="${INSTALL_ROOT}/${PYTHON_RUNTIME_VERSION}"
-if [ ! -d "${default_root}/bin" ] && [ -d "${INSTALL_ROOT}/3.12/bin" ]; then
-  default_root="${INSTALL_ROOT}/3.12"
-  PYTHON_RUNTIME_VERSION=3.12
+if [ ! -d "${default_root}/bin" ]; then
+  log "default Python runtime ${PYTHON_RUNTIME_VERSION} was not installed"
+  exit 1
 fi
-if [ -d "${default_root}/bin" ]; then
-  ln -sf "${default_root}/bin/python${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/python3"
-  ln -sf "${default_root}/bin/pip${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/pip3"
-  ln -sf "${default_root}/bin/pip${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/pip"
+ln -sf "${default_root}/bin/python${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/python3"
+ln -sf "${default_root}/bin/pip${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/pip3"
+ln -sf "${default_root}/bin/pip${PYTHON_RUNTIME_VERSION}" "/usr/local/bin/pip"
+
+# 最后从通用命令再验一次默认解释器，防止软链接落到其他系统 Python。
+default_minor=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+if [ "$default_minor" != "$PYTHON_RUNTIME_VERSION" ]; then
+  log "default python3 version mismatch: expected ${PYTHON_RUNTIME_VERSION}, got ${default_minor}"
+  exit 1
 fi
+python3 -m pip --version
 
 log "Python runtimes installed under ${INSTALL_ROOT} (mode=${PYTHON_RUNTIME_MODE}, default=${PYTHON_RUNTIME_VERSION})"
