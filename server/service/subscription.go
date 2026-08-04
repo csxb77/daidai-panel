@@ -154,6 +154,15 @@ func runCmdWithCallback(ctx context.Context, cmd *exec.Cmd, emit PullCallback) (
 	if ctx != nil && ctx.Err() != nil {
 		return buf.String(), fmt.Errorf("拉取已停止")
 	}
+	if err != nil {
+		// clone / fetch / checkout / reset / sparse-checkout 全部走这一个出口，
+		// 所以错误识别也统一放这里：调用方拿到的只有 `exit status 128`，
+		// 真正的原因在刚刚 emit 出去的那几行 fatal 里。这里紧跟着追加一条
+		// 中文提示，让「原因」和「原始输出」在日志里挨着，原始输出一行不删。
+		if hint := classifyGitFailure(buf.String(), err); hint != "" {
+			emit(hint)
+		}
+	}
 	return buf.String(), err
 }
 
@@ -167,7 +176,9 @@ func gitHasWorkingTreeChanges(ctx context.Context, repoDir string, env []string)
 		if ctx != nil && ctx.Err() != nil {
 			return false, fmt.Errorf("拉取已停止")
 		}
-		return false, err
+		// 这条命令用的是 cmd.Output()，stderr 不进日志流；直接抛 err 的话
+		// 用户只能看到 `exit status 128`，所以把 stderr 原文一并带上。
+		return false, wrapGitCommandError("检查本地改动", gitCommandStderr(err), err)
 	}
 
 	return strings.TrimSpace(string(output)) != "", nil
@@ -361,7 +372,8 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 	emit(fmt.Sprintf("[git clone] %s -> %s", authCfg.DisplayURL, saveDir))
 	os.MkdirAll(destDir, 0755)
 	args := []string{"clone", "--depth", "1"}
-	sparsePatterns := buildSubscriptionSparseCheckoutPatterns(sub)
+	// 告警统一在 applySparseCheckout 里 emit，这里只关心「要不要延后检出」。
+	sparsePatterns, _ := buildSubscriptionSparseCheckoutPatterns(sub)
 	if len(sparsePatterns) > 0 {
 		// 有指定子目录/白名单时，先不检出工作区，避免 clone 阶段把整个仓库文件落盘。
 		// --filter=blob:none 对 GitHub 这类支持 partial clone 的远端能少下载无关 blob；
@@ -396,12 +408,53 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 	return output, nil
 }
 
-func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) []string {
+// subscriptionSparseUnsafeChars 列出会让 sparse-checkout「静默少匹配」的 gitignore 元字符。
+//
+// `git sparse-checkout set --no-cone` 用的是 gitignore 语法：`?` 匹配任意单字符、
+// `[...]` 是字符类、`\` 是转义符。我们把用户填的过滤词包成 `**/*词*` 时，
+// 词里若含这些字符，git 会按通配语义解释而不是字面量，结果往往是
+// 「一个文件都没检出、且完全不报错」——本类 bug 最难排查的形态。
+//
+// `*` 刻意不在此列：它只会放宽匹配、不会导致漏检出，方向是安全的。
+// `|` 也不在此列：它在 gitignore 里就是普通字符，现在已经在
+// splitSubscriptionFilterPatterns 阶段被当作分隔符拆掉了。
+const subscriptionSparseUnsafeChars = "?[]\\"
+
+// subscriptionSparseUnsafeCharsHint 是给用户看的可读版本（日志里直接打元字符会糊成一团）。
+const subscriptionSparseUnsafeCharsHint = "? [ ] \\"
+
+// splitSubscriptionSparseTargets 把过滤字段拆成两组：
+// 能安全下发给 sparse-checkout 的模式，和含 gitignore 元字符、下发后会静默失配的模式。
+func splitSubscriptionSparseTargets(raw string) (safe []string, risky []string) {
+	for _, p := range splitSubscriptionFilterPatterns(raw) {
+		p = normalizeSubscriptionFilterTarget(p)
+		if p == "" || isWildcardFilterPattern(p) {
+			continue
+		}
+		if strings.ContainsAny(p, subscriptionSparseUnsafeChars) {
+			risky = append(risky, p)
+			continue
+		}
+		safe = append(safe, p)
+	}
+	return safe, risky
+}
+
+func formatSubscriptionPatternList(patterns []string) string {
+	quoted := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		quoted = append(quoted, "`"+p+"`")
+	}
+	return strings.Join(quoted, " / ")
+}
+
+// buildSubscriptionSparseCheckoutPatterns 返回下发给 git sparse-checkout 的规则，
+// 以及需要打给用户看的告警（调用方负责 emit）。
+func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns []string, warnings []string) {
 	if sub == nil {
-		return nil
+		return nil, nil
 	}
 
-	var patterns []string
 	seen := map[string]bool{}
 	addPattern := func(pattern string) {
 		pattern = strings.TrimSpace(filepath.ToSlash(pattern))
@@ -414,48 +467,69 @@ func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) []string {
 		patterns = append(patterns, pattern)
 	}
 
-	// 指定子目录优先级最高：它代表用户明确只想要仓库里的某几个目录/文件。
-	hasSubPath := false
-	for _, p := range splitSubscriptionFilterPatterns(sub.SubPath) {
-		p = normalizeSubscriptionFilterTarget(p)
-		if p == "" || isWildcardFilterPattern(p) {
-			continue
-		}
-		hasSubPath = true
-		addPattern(p)
-	}
+	subPaths, unsafeSubPaths := splitSubscriptionSparseTargets(sub.SubPath)
+	whitelist, unsafeWhitelist := splitSubscriptionSparseTargets(sub.Whitelist)
+	blacklist, unsafeBlacklist := splitSubscriptionSparseTargets(sub.Blacklist)
 
-	// 没有指定子目录时，才用白名单限制真实检出的文件范围。
-	// 白名单历史上是"路径包含匹配"，这里用 **/*xxx* 尽量保持同样的直觉。
-	if !hasSubPath && hasNonWildcardSubscriptionFilter(sub.Whitelist) {
-		for _, p := range splitSubscriptionFilterPatterns(sub.Whitelist) {
-			p = normalizeSubscriptionFilterTarget(p)
-			if p == "" || isWildcardFilterPattern(p) {
-				continue
-			}
+	// 包含侧（指定子目录 / 白名单）是「或」语义：只跳过其中一条不安全的子模式，
+	// 会让那条本该命中的文件静默检不出来，用户看到的还是「拉取成功但任务是空的」。
+	// 所以只要有一条不安全，就整体放弃包含侧的 sparse 限制、改为检出完整仓库，
+	// 再交给 Go 侧的 matchesSubscriptionFilters 决定给哪些脚本建任务。
+	// 宁可多落几个文件，也不要静默丢文件。
+	switch {
+	case len(unsafeSubPaths) > 0:
+		warnings = append(warnings, fmt.Sprintf(
+			"[警告] 指定子目录 %s 含 git 通配特殊字符（%s），无法安全转成 sparse-checkout 规则；本次改为检出完整仓库，请改用不含这些字符的普通路径片段",
+			formatSubscriptionPatternList(unsafeSubPaths), subscriptionSparseUnsafeCharsHint))
+	case len(subPaths) > 0:
+		// 指定子目录优先级最高：它代表用户明确只想要仓库里的某几个目录/文件。
+		for _, p := range subPaths {
+			addPattern(p)
+		}
+	case len(unsafeWhitelist) > 0:
+		warnings = append(warnings, fmt.Sprintf(
+			"[警告] 白名单 %s 含 git 通配特殊字符（%s），无法安全转成 sparse-checkout 规则；本次改为检出完整仓库，扫描任务时仍按白名单过滤。白名单是「子串包含」匹配，不支持正则",
+			formatSubscriptionPatternList(unsafeWhitelist), subscriptionSparseUnsafeCharsHint))
+	default:
+		// 没有指定子目录时，才用白名单限制真实检出的文件范围。
+		// 白名单历史上是"路径包含匹配"，这里用 **/*xxx* 尽量保持同样的直觉。
+		for _, p := range whitelist {
 			addPattern("**/*" + p + "*")
 		}
 	}
 
-	// 只有黑名单时先包含全部，再用 !pattern 排除，避免"黑名单目录"也落到 scripts 里。
-	if len(patterns) == 0 && hasNonWildcardSubscriptionFilter(sub.Blacklist) {
-		addPattern("*")
-	}
-	if len(patterns) > 0 && hasNonWildcardSubscriptionFilter(sub.Blacklist) {
-		for _, p := range splitSubscriptionFilterPatterns(sub.Blacklist) {
-			p = normalizeSubscriptionFilterTarget(p)
-			if p == "" || isWildcardFilterPattern(p) {
-				continue
-			}
-			addPattern("!**/*" + p + "*")
-		}
+	// 黑名单是「排除」语义：跳过一条不安全的排除规则，只会让对应文件多落一份盘，
+	// Go 侧的 checkBlacklist 仍然会把它们挡在定时任务之外，方向是安全的，逐条跳过即可。
+	if len(unsafeBlacklist) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"[警告] 黑名单 %s 含 git 通配特殊字符（%s），已跳过对应的 sparse-checkout 排除规则；这些文件仍会落盘，但不会被建成定时任务",
+			formatSubscriptionPatternList(unsafeBlacklist), subscriptionSparseUnsafeCharsHint))
 	}
 
-	return patterns
+	if len(blacklist) == 0 {
+		// 包含侧被迫放弃、又没有可用排除规则时 patterns 为空，
+		// 等价于「不做任何过滤」，直接返回空让调用方关掉 sparse-checkout。
+		return patterns, warnings
+	}
+
+	// 只有黑名单（或包含侧被迫放弃）时先包含全部，再用 !pattern 排除，
+	// 避免"黑名单目录"也落到 scripts 里。
+	if len(patterns) == 0 {
+		addPattern("*")
+	}
+	for _, p := range blacklist {
+		addPattern("!**/*" + p + "*")
+	}
+
+	return patterns, warnings
 }
 
 func applySparseCheckout(ctx context.Context, repoDir string, sub *model.Subscription, env []string, emit PullCallback) error {
-	patterns := buildSubscriptionSparseCheckoutPatterns(sub)
+	patterns, warnings := buildSubscriptionSparseCheckoutPatterns(sub)
+	// 先把告警打出来：这类问题的杀伤力全在「静默」，哪怕后面走了兜底也要让用户看见。
+	for _, warning := range warnings {
+		emit(warning)
+	}
 	if len(patterns) == 0 {
 		// 用户清空子目录/白名单后，要把之前的 sparse-checkout 关掉，
 		// 否则旧过滤规则会一直残留，导致后续看起来"仓库文件丢了"。
@@ -475,7 +549,7 @@ func applySparseCheckout(ctx context.Context, repoDir string, sub *model.Subscri
 		return nil
 	}
 
-	emit(fmt.Sprintf("[sparse-checkout] 设置订阅路径过滤: %s", strings.Join(patterns, ", ")))
+	emit(fmt.Sprintf("[sparse-checkout] 设置订阅路径过滤（共 %d 条）: %s", len(patterns), strings.Join(patterns, ", ")))
 
 	cmd := exec.CommandContext(ctx, "git", "sparse-checkout", "init", "--no-cone")
 	cmd.Dir = repoDir
@@ -523,7 +597,12 @@ func syncGitRemoteWithCallback(ctx context.Context, repoDir, remoteURL string, e
 
 	remoteOutput, err := cmd.Output()
 	if err != nil {
-		return "", err
+		if ctx != nil && ctx.Err() != nil {
+			return "", fmt.Errorf("拉取已停止")
+		}
+		// 同 gitHasWorkingTreeChanges：cmd.Output() 的 stderr 不会 emit 出去，
+		// 不带上原文的话用户只能看到一句退出码。
+		return "", wrapGitCommandError("读取远端配置", gitCommandStderr(err), err)
 	}
 
 	args := []string{"remote", "add", "origin", remoteURL}
@@ -652,13 +731,40 @@ func subscriptionFilterContains(target string, pattern string) bool {
 	return strings.Contains(target, pattern)
 }
 
+// splitSubscriptionFilterPatterns 把「指定子目录 / 白名单 / 黑名单」这三个过滤字段
+// 拆成一组独立模式。分隔符同时接受 `,` 和 `|`。
+//
+// 为什么必须认 `|`：用户最主要的配置来源是青龙的 `ql repo` 命令，它的第 2/3/4 个
+// 位置参数是 `grep -E` 模式，天然用 `|` 分隔：
+//
+//	ql repo https://github.com/6dylan6/jdpro.git "jd_|jx_|jddj_" "backUp" "..."
+//
+// 旧实现只按 `,` 拆 → 整串 `jd_|jx_|jddj_` 被当成一个模式，三条链路同时失效：
+//  1. buildSubscriptionSparseCheckoutPatterns 生成 `**/*jd_|jx_|jddj_*`，
+//     而 gitignore 语法里 `|` 只是普通字符不是「或」→ sparse-checkout 检出 0 个文件；
+//  2. matchesSubscriptionWhitelist 做 strings.Contains(路径, "jd_|jx_|jddj_") → 恒 false；
+//  3. checkBlacklist 同理。
+//
+// 表现就是「git 拉取成功、日志没有任何报错、但扫描 0 个候选文件、一个定时任务都没建」。
+//
+// 注意：这里只改「分隔」，不引入正则。本项目既有语义是子串包含
+// （见 subscriptionFilterContains），贸然改成正则会让现存配置里含 `.` `*` `+` `(`
+// 的普通子串行为突变，属于破坏性变更。
 func splitSubscriptionFilterPatterns(raw string) []string {
 	var patterns []string
-	for _, pattern := range strings.Split(raw, ",") {
+	seen := make(map[string]bool)
+	for _, pattern := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '|'
+	}) {
 		pattern = strings.TrimSpace(pattern)
-		if pattern != "" {
-			patterns = append(patterns, pattern)
+		// 空段必须丢弃：`jd_||jx_`、`jd_,,jx_`、`|jd_|` 这类首尾/连续分隔符很常见，
+		// 而空模式会让 subscriptionFilterContains 恒 false，
+		// 也会让 sparse-checkout 生成 `**/**` 这种含义完全跑偏的规则。
+		if pattern == "" || seen[pattern] {
+			continue
 		}
+		seen[pattern] = true
+		patterns = append(patterns, pattern)
 	}
 	return patterns
 }
@@ -693,13 +799,11 @@ func matchesSubscriptionFilters(sub *model.Subscription, filePath string) bool {
 	return checkBlacklist(sub, filePath)
 }
 
+// checkBlacklist 复用 splitSubscriptionFilterPatterns，不再自己写一份 strings.Split(",")。
+// 之前那份重复实现是 `|` 分隔失效的三个现场之一：白名单改好了黑名单还是不认 `|`。
 func checkBlacklist(sub *model.Subscription, filePath string) bool {
-	if sub.Blacklist == "" {
-		return true
-	}
-	for _, pattern := range strings.Split(sub.Blacklist, ",") {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" || isWildcardFilterPattern(pattern) {
+	for _, pattern := range splitSubscriptionFilterPatterns(sub.Blacklist) {
+		if isWildcardFilterPattern(pattern) {
 			continue
 		}
 		if subscriptionFilterContains(filePath, pattern) {
@@ -728,6 +832,11 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 		scriptsDir, scannedFileCount, len(candidates)))
 	if len(candidates) == 0 && scannedFileCount > 0 {
 		emit("[提示] 仓库内有脚本但没有识别到 cron 表达式：请检查脚本头部是否含 `cron <表达式>` 注释，或在系统设置 default_cron_rule 里配置默认 cron")
+	}
+	// 扫到 0 个文件是「静默失败」最典型的落点：拉取全绿、日志无错、任务列表空。
+	// 把最可能的三个原因直接摊开，别让用户去猜。
+	if scannedFileCount == 0 {
+		emit("[提示] 没有扫描到任何候选脚本，常见原因：1) 指定子目录/白名单/黑名单把文件全过滤掉了（多个模式用 `,` 或 `|` 分隔，匹配方式是「子串包含」而非正则）；2) 上一步 sparse-checkout 规则没命中任何文件；3) 系统设置 repo_file_extensions 不含该脚本扩展名")
 	}
 
 	var managedTasks []model.Task
