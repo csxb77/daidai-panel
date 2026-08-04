@@ -122,11 +122,13 @@ async function copyConfigScript() {
         </template>
 
         <!-- Monaco 初始化较重，等接口返回后再挂载，避免先闪一下空内容。 -->
+        <!-- fill-height：桌面双栏下由 .config-layout → .editor-card → .el-card__body 的 flex 链撑满剩余高度；
+             窄屏/移动端父级没有确定高度，改由本页 media query 给 560px 下限，行为与改造前一致。 -->
         <MonacoEditor
           v-if="!loading"
           v-model="content"
           language="shell"
-          min-height="560px"
+          :fill-height="true"
         />
         <div v-else class="editor-placeholder">
           正在读取配置文件...
@@ -330,6 +332,61 @@ code {
   font-size: 12px;
 }
 
+// ===== 桌面双栏：整页固定高度，编辑器吃掉剩余高度 =====
+// 只在双栏断点以上启用。1080px 以下是单栏（说明栏在编辑器下方），
+// 固定高度反而会让编辑器和说明栏抢同一份垂直空间，保持原来的滚动布局更合适。
+@media screen and (min-width: 1081px) {
+  .config-file-page {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    // 覆盖 .dd-scroll-page 的 overflow: auto，滚动下沉到 .side-panel 内部
+    overflow: hidden;
+  }
+
+  .page-header {
+    flex-shrink: 0;
+  }
+
+  .config-layout {
+    flex: 1 1 0;
+    min-height: 0;
+    // 单行 auto 轨道 + align-content 默认 stretch，行高会拉满容器
+    align-items: stretch;
+  }
+
+  .editor-card {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+
+    :deep(.el-card__header) {
+      flex-shrink: 0;
+    }
+
+    :deep(.el-card__body) {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+  }
+
+  .editor-placeholder {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  // 说明栏内容很短，保持自然高度顶部对齐，不跟着拉成长条
+  .side-panel {
+    align-self: start;
+    max-height: 100%;
+    overflow: auto;
+  }
+}
+
 @media (max-width: 1080px) {
   .config-layout {
     grid-template-columns: 1fr;
@@ -338,6 +395,12 @@ code {
   .side-panel {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  // 单栏/移动端父级高度不确定，fill-height 拿不到可撑满的高度，
+  // 这里给回改造前的 560px 下限（选择器带 .editor-card，特异性高于组件内的默认规则）
+  .editor-card :deep(.monaco-editor-wrapper) {
+    min-height: 560px;
   }
 }
 

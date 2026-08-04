@@ -1041,15 +1041,16 @@ function viewLogDetail(log: any) {
     <el-dialog
       v-model="showEditDialog"
       :title="isCreate ? '新建订阅' : '编辑订阅'"
-      width="600px"
+      width="800px"
       :fullscreen="dialogFullscreen"
     >
       <el-form
+        class="subscription-form"
         :model="editForm"
-        :label-width="dialogFullscreen ? 'auto' : '100px'"
+        :label-width="dialogFullscreen ? 'auto' : '88px'"
         :label-position="dialogFullscreen ? 'top' : 'right'"
       >
-        <el-form-item v-if="isCreate" label="一键识别">
+        <el-form-item v-if="isCreate" label="一键识别" class="form-item--full">
           <div style="display: flex; gap: 8px; width: 100%">
             <el-input
               v-model="qlCommand"
@@ -1069,7 +1070,7 @@ function viewLogDetail(log: any) {
             <el-radio value="single-file">单文件</el-radio>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="URL">
+        <el-form-item label="URL" class="form-item--full">
           <el-input
             v-model="editForm.url"
             placeholder="仓库地址或文件下载链接"
@@ -1109,7 +1110,11 @@ function viewLogDetail(log: any) {
             留空拉取全部内容，填写后仅检出指定子目录（如 scripts/daily, utils）
           </div>
         </el-form-item>
-        <el-form-item v-if="editForm.type === 'git-repo'" label="仓库鉴权">
+        <el-form-item
+          v-if="editForm.type === 'git-repo'"
+          label="仓库鉴权"
+          class="form-item--full"
+        >
           <el-radio-group v-model="editForm.auth_type">
             <el-radio value="">无鉴权</el-radio>
             <el-radio value="ssh">SSH 密钥</el-radio>
@@ -1150,6 +1155,7 @@ function viewLogDetail(log: any) {
         <el-form-item
           v-if="editForm.type === 'git-repo' && editForm.auth_type === 'token'"
           label="鉴权用户名"
+          class="form-item--full"
         >
           <el-input
             v-model="editForm.auth_username"
@@ -1170,6 +1176,7 @@ function viewLogDetail(log: any) {
         <el-form-item
           v-if="editForm.type === 'git-repo' && editForm.auth_type === 'token'"
           label="Access Token"
+          class="form-item--full"
         >
           <el-input
             v-model="editForm.auth_token"
@@ -1196,7 +1203,7 @@ function viewLogDetail(log: any) {
             }}
           </div>
         </el-form-item>
-        <el-form-item label="白名单">
+        <el-form-item label="白名单" class="form-item--full">
           <el-input
             v-model="editForm.whitelist"
             placeholder="文件名/路径白名单 (逗号分隔)"
@@ -1224,7 +1231,7 @@ function viewLogDetail(log: any) {
             placeholder="用于记录订阅依赖、过滤说明或迁移信息（仅备注，不参与文件检出）"
           />
         </el-form-item>
-        <el-form-item label="拉取后钩子">
+        <el-form-item label="拉取后钩子" class="form-item--full">
           <el-input
             v-model="editForm.hook_script"
             type="textarea"
@@ -1258,7 +1265,11 @@ function viewLogDetail(log: any) {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="content" label="内容" show-overflow-tooltip />
+        <el-table-column
+          prop="content"
+          label="内容"
+          class-name="log-content-cell"
+        />
         <el-table-column prop="duration" label="耗时" width="100">
           <template #default="{ row }">{{
             typeof row.duration === "number"
@@ -1342,22 +1353,20 @@ function viewLogDetail(log: any) {
         />
       </div>
       <template #footer>
-        <el-tag
-          v-if="pullRunning"
-          type="warning"
-          effect="plain"
-          size="small"
-          style="margin-right: auto"
-          >运行中</el-tag
-        >
-        <el-tag
+        <!--
+          状态指示靠 `margin-right: auto` 推到最左，这依赖 .el-dialog__footer 是 flex 容器
+          （已在 global.scss 的 .el-dialog 块里统一改为 flex；Element Plus 原生只有 text-align:right，
+          在那种 inline 上下文里 auto 外边距不产生推挤，所以这里换回 el-tag 会重新贴到按钮上）。
+        -->
+        <span v-if="pullRunning" class="pull-status is-running">
+          <span class="pull-status__mark" aria-hidden="true"></span>运行中
+        </span>
+        <span
           v-else-if="pullLogLines.length > 0"
-          type="success"
-          effect="plain"
-          size="small"
-          style="margin-right: auto"
-          >已完成</el-tag
+          class="pull-status is-finished"
         >
+          <span class="pull-status__mark" aria-hidden="true"></span>已完成
+        </span>
         <el-button v-if="pullRunning" type="danger" @click="handleStopPull"
           >停止</el-button
         >
@@ -1690,6 +1699,14 @@ function viewLogDetail(log: any) {
   .el-table__cell {
     padding: 12px 0;
   }
+  // 拉取日志「内容」列：已移除 show-overflow-tooltip（详情走「查看」按钮），
+  // 需自行补回单行截断，否则会退回 .el-table .cell 的 white-space: normal 换行，
+  // 长日志会把行高撑爆。
+  .log-content-cell .cell {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 }
 
 .subscription-card__title-row {
@@ -1723,11 +1740,108 @@ function viewLogDetail(log: any) {
   align-items: center;
   gap: 8px;
 }
+
+// 拉取日志弹窗底部的状态指示。
+// 用「方形色标 + 次级文字」替代原来的 el-tag：颜色只落在 8px 色标上，
+// 文字保持 --el-text-color-secondary，不跟右侧的「停止 / 关闭」抢视觉重量。
+// 形状严格直角，无边框底色块、无阴影、无渐变。
+.pull-status {
+  // footer 已是 flex 容器，这条才真正把状态推到最左侧
+  margin-right: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
+  user-select: none;
+}
+
+.pull-status__mark {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  background: var(--el-text-color-placeholder);
+}
+
+.pull-status.is-running .pull-status__mark {
+  background: #f59e0b;
+}
+
+.pull-status.is-finished .pull-status__mark {
+  background: #10b981;
+}
+
 .settings-hint {
   color: var(--el-text-color-secondary);
   font-size: 12px;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+// ===== 新建 / 编辑订阅弹窗：桌面端双列 =====
+// 只在 ≥769px 生效；≤768px 不套任何 grid，表单退回默认块级流（天然单列），
+// 且此时 dialogFullscreen 为 true（useResponsive 的断点同为 768），label 走 top 布局，
+// .form-item--full 的 grid-column 在块级流下不生效，对移动端零副作用。
+//
+// 用 Grid 而不是 el-row/el-col：表单里「分支 / 指定子目录 / 仓库鉴权 / SSH 密钥 /
+// 鉴权用户名 / Access Token」都是条件字段，固定栅格在字段隐藏时会留下死格，
+// 而 Grid 的自动流会让后面的字段自动补位。
+@media (min-width: 769px) {
+  .subscription-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 20px;
+    // 行高不拉伸：同一行里矮的那个（如「保存目录」）不跟着带说明文字的那个一起变高，
+    // 两列的 label 才能对齐在同一条基线上
+    align-items: start;
+
+    // 行间距沿用 el-form-item 自带的 margin-bottom，不再叠 row-gap，避免双倍间距
+    :deep(.el-form-item) {
+      min-width: 0;
+      margin-bottom: 18px;
+    }
+
+    // 跨满两列的字段。判定口径：内容天然放不进半列（一键识别的输入框+按钮、URL、
+    // 钩子 textarea、仓库鉴权的三个 radio），或说明文字在半列宽下会超过 2 行
+    // （白名单、鉴权用户名）。「指定子目录」「依赖说明」都能在半列内放下，故不跨列。
+    :deep(.form-item--full) {
+      grid-column: 1 / -1;
+    }
+
+    // 800px 弹窗的可用宽度：800 − .el-dialog 自带 16px×2 − .el-dialog__body 24px×2 = 720px，
+    // 两列减去 20px 列间距后每列 350px，减 88px 标签宽后输入框还有 262px。
+    // 88px 标签宽可容下 5 个中文字（70px + 12px 右内边距 = 82px）不折行；
+    // 但「Access Token」这类拉丁文标签更宽，而 EP 给 .el-form-item__label 写死了
+    // height:32px / line-height:32px，一旦折行第二行会溢出压到下一行。
+    //
+    // 放开高度必须同时写下面三条，缺一不可：
+    // 1) height:auto + min-height:32px —— 折行时由标签内容自然撑高，不再溢出。
+    // 2) align-self:flex-start —— 【关键，删掉就会复发】.el-form-item 是 display:flex 且
+    //    没有声明 align-items，因此 flex 子元素默认 align-self:stretch。EP 原本那个显式的
+    //    height:32px 恰好压住了 stretch（stretch 只在 cross-size 为 auto 时才生效）；
+    //    一旦改成 height:auto，stretch 立即恢复，label 盒子会被拉伸到整个表单项的高度
+    //    （输入框 + 下方 12px 说明文字），第 3 条的 align-items:center 就会把标签文字居中到
+    //    这个大盒子的正中，导致「仓库鉴权 / 白名单 / 鉴权用户名 / Access Token」等带说明
+    //    文字的项标签明显下沉，两列并排时同一行左右两个标签还会错开。锚在顶部后，
+    //    label 盒子高度 = max(内容高, 32px)，才能对齐输入框/radio 那一行；
+    //    「拉取后钩子」的多行 textarea 同理，标签对齐 textarea 顶行而不是垂直居中。
+    // 3) align-items:center —— label 自身是 inline-flex，且 EP 给它设了 align-items:flex-start，
+    //    而这里把 line-height 从 32px 收成 1.4（≈19.6px），不居中的话单行标签会贴着盒子顶端。
+    //
+    // 仅限左右布局：全屏（dialogFullscreen）时 label-position 切成 top，EP 会给
+    // .el-form-item--label-top 设 display:block，label 不再是 flex 子元素，
+    // min-height:32px 反而会在标签与控件之间垫出多余空隙，故用 :not() 排除。
+    // 常态下本媒体查询（≥769px）与全屏（≤768px）互斥，但 useResponsive 有 document.hidden
+    // 守卫会让 width 滞后，后台放大窗口再切回来的瞬间两者可能同时成立，这里做兜底。
+    :deep(.el-form-item:not(.el-form-item--label-top) .el-form-item__label) {
+      align-self: flex-start;
+      height: auto;
+      min-height: 32px;
+      line-height: 1.4;
+      align-items: center;
+    }
+  }
 }
 
 @media (max-width: 768px) {

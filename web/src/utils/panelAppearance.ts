@@ -4,10 +4,20 @@ export interface PanelAppearanceSettings extends PanelSettingsPayload {}
 
 const DEFAULT_LOG_BACKGROUND_COLOR_LIGHT = '#f8fafc'
 const DEFAULT_LOG_BACKGROUND_COLOR_DARK = '#0f172a'
-const DEFAULT_EDITOR_BACKGROUND_COLOR = '#111827'
+// 编辑器底色的「留空默认值」跟随面板明暗主题：浅色模式白底深字，深色模式深底浅字。
+// 注意：只有 editor_background_color 留空时才走这里；用户在系统设置里显式设过颜色一律以用户值为准。
+const DEFAULT_EDITOR_BACKGROUND_COLOR_LIGHT = '#ffffff'
+const DEFAULT_EDITOR_BACKGROUND_COLOR_DARK = '#111827'
 const DEFAULT_EDITOR_FOREGROUND_COLOR = '#e5e7eb'
 const DEFAULT_LOG_TEXT_COLOR_LIGHT = '#111827'
 const DEFAULT_LOG_TEXT_COLOR_DARK = '#e2e8f0'
+
+/**
+ * 面板外观（编辑器/日志底色等）变更事件。
+ * Monaco 主题是在挂载时一次性 defineTheme 的，切主题或改配置后必须靠这个事件重新定义并 setTheme，
+ * 否则已挂载的编辑器不会跟着变色。
+ */
+export const PANEL_APPEARANCE_CHANGE_EVENT = 'dd:panel-appearance-change'
 
 function toCSSImageValue(image?: string) {
   const trimmed = image?.trim() || ''
@@ -50,10 +60,11 @@ function parseColor(color?: string) {
   return Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b) ? null : { r, g, b }
 }
 
-function getReadableTextColor(background?: string) {
+export function isDarkColor(background?: string) {
   const rgb = parseColor(background)
   if (!rgb) {
-    return DEFAULT_EDITOR_FOREGROUND_COLOR
+    // 解析不出来时按深色处理，与历史行为一致（前景色回退到浅字）
+    return true
   }
 
   const toLinear = (channel: number) => {
@@ -62,7 +73,19 @@ function getReadableTextColor(background?: string) {
   }
 
   const luminance = 0.2126 * toLinear(rgb.r) + 0.7152 * toLinear(rgb.g) + 0.0722 * toLinear(rgb.b)
-  return luminance < 0.45 ? DEFAULT_EDITOR_FOREGROUND_COLOR : '#111827'
+  return luminance < 0.45
+}
+
+export function getReadableTextColor(background?: string) {
+  return isDarkColor(background) ? DEFAULT_EDITOR_FOREGROUND_COLOR : DEFAULT_LOG_TEXT_COLOR_LIGHT
+}
+
+export function isPanelDarkMode() {
+  return typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+}
+
+export function getDefaultEditorBackgroundColor(isDark: boolean) {
+  return isDark ? DEFAULT_EDITOR_BACKGROUND_COLOR_DARK : DEFAULT_EDITOR_BACKGROUND_COLOR_LIGHT
 }
 
 function getDefaultLogBackgroundColor(isDark: boolean) {
@@ -73,17 +96,33 @@ function getDefaultLogTextColor(isDark: boolean) {
   return isDark ? DEFAULT_LOG_TEXT_COLOR_DARK : DEFAULT_LOG_TEXT_COLOR_LIGHT
 }
 
+// 最近一次显式传入的外观设置。
+// 主题切换只需要重新推导「留空默认值」，不应该把用户已保存的自定义颜色一起抹掉，
+// 所以 applyPanelAppearance() 不传参时复用这里的缓存。
+let lastAppliedSettings: PanelAppearanceSettings | null = null
+
 export function applyPanelAppearance(settings?: PanelAppearanceSettings | null) {
+  if (typeof settings !== 'undefined') {
+    lastAppliedSettings = settings
+  }
+
+  const effective = lastAppliedSettings
   const root = document.documentElement
   const isDark = root.classList.contains('dark')
-  const editorBackground = settings?.editor_background_color?.trim() || DEFAULT_EDITOR_BACKGROUND_COLOR
-  const logBackground = settings?.log_background_color?.trim() || getDefaultLogBackgroundColor(isDark)
+  const editorBackground =
+    effective?.editor_background_color?.trim() || getDefaultEditorBackgroundColor(isDark)
+  const logBackground = effective?.log_background_color?.trim() || getDefaultLogBackgroundColor(isDark)
   root.style.setProperty('--dd-editor-bg-color', editorBackground)
   root.style.setProperty('--dd-editor-fg-color', getReadableTextColor(editorBackground))
   root.style.setProperty('--dd-log-bg-color', logBackground)
   root.style.setProperty('--dd-log-text-color', getReadableTextColor(logBackground) || getDefaultLogTextColor(isDark))
   root.style.setProperty('--dd-log-theme-mode', isDark ? 'dark' : 'light')
-  root.style.setProperty('--dd-log-bg-image', toCSSImageValue(settings?.log_background_image))
+  root.style.setProperty('--dd-log-bg-image', toCSSImageValue(effective?.log_background_image))
+
+  // CSS 变量已经写完，通知已挂载的 Monaco 实例重新 defineTheme + setTheme
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(PANEL_APPEARANCE_CHANGE_EVENT))
+  }
 }
 
 export async function fetchAndApplyPanelAppearance() {

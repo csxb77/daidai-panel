@@ -252,8 +252,8 @@ a {
 // 主按钮不再做渐变 + 辉光覆盖，直接沿用 Element Plus 原生实心色：
 // 静置 --el-color-primary、hover 换浅一档底色，符合「hover 只换颜色」的扁平规则。
 
+// 圆角走 --el-card-border-radius，归零见文件末尾的「Element Plus 圆角兜底」一块。
 .el-card {
-  border-radius: 0;
   // 去阴影后，卡片与页面底色的分隔完全依赖这条 1px 边框
   border: 1px solid var(--el-border-color-lighter);
   transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
@@ -277,6 +277,14 @@ a {
   transform-origin: center top;
   border-radius: 0;
   overflow: hidden;
+  // 注意：这条 margin-bottom 不能删。Element Plus 原生写的是
+  //     `margin: var(--el-dialog-margin-top, 15vh) auto 50px;`
+  // ——下边距是写死的 50px，跟上边距不对称。而下面的 max-height 是按「上下等距」算的
+  // （margin-top × 2），于是弹窗的垂直实占是 (margin-top + 50px)，永远比预留的
+  // (margin-top × 2) 多出 (50px - margin-top)；margin-top 取到 clamp 上限 40px 时正好差 10px。
+  // .el-overlay-dialog 自带 overflow:auto，这点差额不会让内容在弹窗内滚动，
+  // 而是变成「整个弹窗能上下挪一点」的无意义滚动条。这里把下边距显式对齐回上边距，把差额消掉。
+  margin-bottom: var(--el-dialog-margin-top);
   max-height: calc(100dvh - (var(--el-dialog-margin-top) * 2));
   display: flex;
   flex-direction: column;
@@ -295,15 +303,47 @@ a {
     overflow: auto;
   }
 
+  // Element Plus 原生只给了 `text-align: right`，不是 flex 容器。
+  // 后果：footer 里想靠 `margin-right: auto` 把状态标签推到最左的写法（订阅「拉取日志」用过）
+  // 从来就不生效——`margin: auto` 只在 flex/grid 上下文里吃掉剩余空间，
+  // 在 inline 布局里对 inline-block 元素等于 0。
+  // 这里统一改成 flex，让 footer 具备「左侧状态 + 右侧按钮」的能力。
+  //
+  // 全库 37 处 <template #footer> 逐个核过，只有两种形态：
+  //   a) 直接放若干 <el-button>（32 处）——flex + justify-content:flex-end 与原 text-align:right 等价；
+  //   b) 外面套一层已经是 `display:flex; justify-content:flex-end` 的 wrapper div（5 处：
+  //      login .totp-dialog-footer / logs .detail-footer / profile .setup-dialog-footer /
+  //      RestoreProgressDialog .restore-progress-footer / UpdateProgressDialog .update-progress-footer）
+  //      ——wrapper 变成 flex item 后按 max-content 收宽并靠右，视觉不变。
+  // 没有裸文本节点的 footer（纯空白不会生成匿名 flex item），也没有用 `center` prop 的弹窗
+  // （`.el-dialog--center .el-dialog__footer { text-align: inherit }` 因此不会被影响）。
   .el-dialog__footer {
     padding: 16px 24px 20px;
     border-top: 1px solid var(--el-border-color-lighter);
     flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    // 按钮多的 footer（脚本调试弹窗有 4 个）在窄屏要能换行，
+    // 否则 flex 默认 nowrap 会把按钮压扁——原来的 inline 布局是会换行的。
+    flex-wrap: wrap;
+    // 间距对齐 Element Plus 原生的 `.el-button+.el-button{margin-left:12px}`，
+    // 并在下面把那条 margin 清零，避免 gap 与 margin 叠成 24px 双倍间距。
+    gap: 12px;
+  }
+
+  // 只清直接子级：套了 wrapper div 的那 5 处，按钮不是 footer 的直接子元素，
+  // 其间距仍由各自 wrapper 的 gap + EP margin 决定，维持现状不动。
+  .el-dialog__footer > .el-button + .el-button {
+    margin-left: 0;
   }
 
   &.is-fullscreen {
     // 全屏模式复位上面的通用留白，确保真正边到边铺满：
-    // margin-top 抵消上面那条带 !important 的留白，否则全屏框被顶下来一截露缝
+    // margin-top 抵消上面那条带 !important 的留白，否则全屏框被顶下来一截露缝。
+    // 这里的 margin 简写（.el-dialog.is-fullscreen，特异性 0,2,0）高于上面那条
+    // .el-dialog { margin-bottom }（0,1,0），所以上面的下边距对齐不会漏进全屏态；
+    // 与源码顺序无关，不要因为「后写的覆盖先写的」而把这条挪走。
     max-height: 100dvh;
     --el-dialog-margin-top: 0 !important;
     margin: 0;
@@ -417,18 +457,9 @@ a {
   }
 }
 
-// el-tag 的圆角走 Element Plus 自己的一套独立令牌，**不受 --el-border-radius-* 管辖**：
-//   .el-tag          取 --el-tag-border-radius          （默认 4px）
-//   .el-tag.is-round 取 --el-tag-border-radius-rounded  （默认 9999px，即胶囊）
-// 而且这两条令牌是 EP 定义在 `.el-tag` 元素自身上的，不在 :root，
-// 所以在 :root 里补 0 无效（元素上的同名声明会赢过继承值），必须在 .el-tag 选择器里就地归零。
-// 归零后模板里散落在 6 个文件的 18 处 `round` 属性自动方化，以后新写的 round 标签也一样。
-// （不逐个删模板上的 round：数量多、易漏，令牌兜底更可靠。
-//   顺带一提 el-button 的 round 走的是 --el-border-radius-round，已由上面的 :root 归零覆盖。）
+// el-tag 的圆角走 EP 自己的私有令牌（--el-tag-border-radius / -rounded），
+// 归零逻辑统一放到文件末尾的「Element Plus 圆角兜底」一块，这里只留排版相关的声明。
 .el-tag {
-  --el-tag-border-radius: 0;
-  --el-tag-border-radius-rounded: 0;
-  border-radius: 0;
   font-weight: 500;
 }
 
@@ -447,16 +478,9 @@ a {
   }
 }
 
-// el-switch 方化：形状不承载语义（区别于 el-radio 的圆点），轨道与滑块一并改直角
-.el-switch {
-  .el-switch__core {
-    border-radius: 0;
-
-    .el-switch__action {
-      border-radius: 0;
-    }
-  }
-}
+// el-switch 方化统一放到文件末尾的「Element Plus 圆角兜底」一块。
+// 这里原先写的 `.el-switch .el-switch__core` 与 EP 的尺寸变体
+// `.el-switch--small/--large .el-switch__core` 特异性打平，压不住，见那一块的说明。
 
 .el-form-item__label {
   font-weight: 500;
@@ -513,8 +537,8 @@ a {
   }
 }
 
+// 圆角走 --el-messagebox-border-radius，归零见文件末尾的「Element Plus 圆角兜底」一块。
 .el-message-box {
-  border-radius: 0;
   padding: 24px;
 }
 
@@ -536,19 +560,144 @@ a {
   }
 }
 
+// 圆角走 --el-pagination-border-radius，归零见文件末尾的「Element Plus 圆角兜底」一块。
 .el-pagination {
   .el-pager li {
-    border-radius: 0;
     min-width: 32px;
     height: 32px;
     line-height: 32px;
     font-weight: 500;
   }
+}
 
-  .btn-prev,
-  .btn-next {
-    border-radius: 0;
-  }
+// ============================================================================
+// Element Plus 圆角兜底
+// ----------------------------------------------------------------------------
+// EP 有三类机制会绕过 :root 里的 --el-border-radius-* 基础令牌，前两轮排查各只
+// 覆盖了一类，所以一直有漏网的圆角。这里集中处理，新增覆盖请一律加到本块内。
+//
+// 机制 A：私有圆角令牌，且声明在**组件根元素**上而不是 :root
+//   例：`.el-tag{--el-tag-border-radius:4px}`、`.el-pagination{--el-pagination-border-radius:2px}`
+//   在 :root 补 0 无效——元素上的同名声明会赢过继承值，必须在同名选择器上就地覆盖。
+//
+// 机制 B：硬编码像素圆角直接写在基础选择器上
+//   例：`.el-switch__core{10px}`、`.el-progress-bar__outer{100px}`、`.el-scrollbar__bar{4px}`
+//   这类按令牌名去枚举根本扫不到，只能逐个组件读 theme-chalk 的 CSS 才能发现。
+//
+// 机制 C：硬编码像素圆角写在**尺寸变体**选择器上
+//   例：`.el-switch--small .el-switch__core{8px}`、`.el-switch--large .el-switch__core{12px}`
+//   这类选择器是 (0,2,0)，和朴素写法 `.el-switch .el-switch__core` 正好打平。
+//
+// 为什么本块统一用 !important（其它地方仍应尽量不用）：
+//   vite.config.ts 里 ElementPlusResolver 配的是 `importStyle: 'css'`，EP 组件样式是
+//   跟着 SFC 懒注入的；而 router/index.ts 里所有路由都是动态 import()。于是组件 CSS
+//   必然排在入口包中的 global.scss **之后**。CSS 在特异性相同时由后加载者获胜，
+//   凡是跟 EP 打平的覆盖都会静默失效——上面 el-switch / el-tag / el-pagination 三处
+//   就是这么失效的。源码顺序在这里不可靠，只能靠 !important 把结果钉死。
+//   （同类先例：上面 .el-dialog 的 --el-dialog-margin-top、下面的暗色补丁段。）
+//
+// 白名单，刻意不动，别顺手加进来：
+//   - `--el-border-radius-circle`：el-radio 圆点的取值来源，圆=单选是通用可供性。
+//     下面方化 el-switch 滑块时也只按选择器就地压，不碰这个全局令牌。
+//   - loading 旋转圆弧（.el-loading-spinner / .el-button .el-icon.is-loading / LoadingMotion.vue）。
+//   - 更新与恢复进度弹窗的 .update-progress-orbit / .ring / .update-progress-core
+//     （三者共用圆心，方化会穿破内圈环；它们是自绘 div，不走 el-progress）。
+//   - views/login/Characters.vue 的插画。
+//
+// 只覆盖项目实际用到的组件。以下变体项目未使用，故意不覆盖以免样式膨胀：
+//   el-tabs 的 card / border-card 模式与可关闭、可新增标签页；el-table 的列筛选浮层
+//   （无 :filters）与必填表头红点；el-upload 的 picture / picture-card；
+//   el-button 的 is-circle（模板里的 circle 属性已全部移除）；
+//   以及 el-slider / el-carousel / el-timeline / el-steps / el-tour / el-rate /
+//   el-cascader / el-segmented / el-avatar / el-badge / el-date-picker 等未引入的组件。
+// ============================================================================
+
+// —— 机制 A：组件私有令牌，在组件根元素上就地归零 ——
+// 下面这几个是全部用到的组件里仅有的「硬编码像素值」私有圆角令牌，其余（--el-input-border-radius /
+// --el-dialog-border-radius / --el-alert-border-radius-base / --el-checkbox-border-radius）
+// 都取自 --el-border-radius-base|small，已被 :root 归零覆盖，不必重复处理。
+.el-card {
+  // `.el-card{--el-card-border-radius:4px}`——整个系统设置页都是 el-card，漏了很显眼。
+  --el-card-border-radius: 0 !important;
+}
+
+.el-tag {
+  // .el-tag 取 --el-tag-border-radius（4px）；.el-tag.is-round 取 -rounded（9999px 胶囊）。
+  // 归零后模板里散落的 `round` 属性自动方化，不必逐个去删。
+  --el-tag-border-radius: 0 !important;
+  --el-tag-border-radius-rounded: 0 !important;
+}
+
+.el-pagination {
+  // 一条令牌同时管 .el-pager li 与 .btn-prev / .btn-next（EP 两处都是 2px）。
+  --el-pagination-border-radius: 0 !important;
+}
+
+// --el-messagebox-border-radius(4px) 是少数几个 EP 写在 :root 而非组件根元素上的。
+// el-message-box.css 在 main.ts 里是 eager import 且排在 global.scss 之前，所以原来那条
+// `.el-message-box{border-radius:0}` 靠加载顺序侥幸赢了——但这依赖 main.ts 的 import 顺序，
+// 谁挪一下那两行就会静默回退。这里改成压令牌 + !important，跟其它组件保持同一种处理方式。
+:root {
+  --el-messagebox-border-radius: 0 !important;
+}
+
+// —— 机制 B / C：硬编码像素圆角 ——
+
+// el-switch：轨道 10px，且 --large 12px、--small 8px 各有一条尺寸变体规则。
+// 表格里的开关全是 size="small"，正好命中打平的那一档，这就是上一轮方化没生效的原因。
+// 用 !important 一条通吃三档，不必按变体逐条列。
+.el-switch__core {
+  border-radius: 0 !important;
+}
+
+// 滑块：EP 写的是 `.el-switch__core .el-switch__action`，取值来自 --el-border-radius-circle。
+// 这里刻意**不**去改那个令牌（它是 el-radio 圆点的来源，属白名单），只按选择器就地归零；
+// 这样即使 EP 以后把滑块改成硬编码像素值，这条覆盖依然有效。
+.el-switch__core .el-switch__action {
+  border-radius: 0 !important;
+}
+
+// el-progress：线形进度条的轨道与填充都写死 100px（胶囊）。
+// 全库无 type="circle"，不存在需要保留的环形进度。
+.el-progress-bar__outer,
+.el-progress-bar__inner {
+  border-radius: 0 !important;
+}
+
+// el-scrollbar：.el-scrollbar__bar 写死 4px，thumb 是 border-radius:inherit，压住 bar 即可。
+// 影响面很大——select 下拉、table、drawer、tree 内部都嵌了 el-scrollbar。
+.el-scrollbar__bar {
+  border-radius: 0 !important;
+}
+
+// el-tag 可关闭标签：图标底与关闭按钮各写死 50%（TaskForm 的标签编辑区在用）。
+.el-tag .el-icon,
+.el-tag .el-tag__close {
+  border-radius: 0 !important;
+}
+
+// el-upload：ScriptManageDialogs 用了 drag + 文件列表，拖拽区 6px、列表项 4px。
+.el-upload-dragger,
+.el-upload-list__item {
+  border-radius: 0 !important;
+}
+
+// el-color-picker：SystemConfigCard 的两个取色器。触发块与展开面板各 4px。
+// 面板内部的色相/透明度滑块（1px）与取色游标（50%，仅 4×4px）保持原样：
+// 它们是取值精度指示器，且尺寸小到方圆不可辨，改了只增加规则不改变观感。
+.el-color-picker__trigger,
+.el-color-picker-panel.is-border {
+  border-radius: 0 !important;
+}
+
+// el-input：内部滚动条 thumb 写死 5px，比文件开头那条全局 ::-webkit-scrollbar-thumb 更特异。
+.el-input::-webkit-scrollbar-thumb {
+  border-radius: 0 !important;
+}
+
+// el-tabs：键盘焦点环 3px（settings / api-docs / TaskForm 的标签页都可键盘切换）。
+.el-tabs__item:focus-visible {
+  border-radius: 0 !important;
 }
 
 html.dark {
@@ -752,10 +901,57 @@ html.dark {
   --el-popover-border-radius: 0;
 }
 
+// ===== 暗色浮层（tooltip）=====
+// 命中范围：el-tooltip（effect 缺省就是 dark）、el-table 的 show-overflow-tooltip
+// （内部走 createTablePopper，仍旧是一个 ElTooltip）、侧栏折叠时 el-menu-item 的标题气泡。
+//
+// 【限高为什么不能直接写在 .el-popper 上】
+// element-plus/theme-chalk/el-popper.css 里，箭头是 popper 的**直接子元素**，
+// 且四个方向都靠 -5px 负偏移挂在盒子外侧：
+//   .el-popper[data-popper-placement^="top"] > .el-popper__arrow { bottom: -5px }
+// 一旦在 .el-popper 上开 overflow，它就变成滚动容器：朝上/朝左的负偏移会被直接裁掉，
+// 朝下/朝右的则被算进滚动区域，凭空多出一条没有意义的滚动条。
+// 所以滚动容器必须下沉一层，挂到内容元素上，把箭头留在滚动容器外面。
+//
+// 【内容元素是哪一个】
+// ElPopperContent 渲染的就是单个 div.el-popper，里面直接放 ElFocusTrap（renderless，
+// 只 renderSlot 不产生额外 DOM）和箭头 span。ElTooltip 的 content 缺省渲染成
+// <span>{{ content }}</span>，表格的 show-overflow-tooltip 同样是把 cell.innerText
+// 当 content 传进来，所以 `> *:not(.el-popper__arrow)` 命中的正是那个 span。
+// （折叠菜单把 #title 直接透传成裸文本节点，选不中——但它只有几个字，本就不会超高。）
 .el-popper.is-dark {
   max-width: 400px;
   word-break: break-all;
   line-height: 1.6;
+  // 日志类内容自带 \n，默认 white-space: normal 会把换行折成空格挤成一坨。
+  // 站内暗色 tooltip 的内容全是单行短语（复制 / 编辑 / 折叠菜单标题…），既不含换行，
+  // 也没有哪处靠折叠空白来排版，pre-wrap 对它们等价于 normal。
+  // 与既有的 word-break: break-all 不冲突：pre-wrap 管的是「保留空白 + 允许软换行」，
+  // break-all 管的是「给超长无空格串补断点」，两者作用在换行决策的不同环节。
+  white-space: pre-wrap;
+
+  > *:not(.el-popper__arrow) {
+    // span 默认 inline，不吃 max-height / overflow，必须先转块级。
+    // popper 是 shrink-to-fit 的绝对定位盒，块级子元素不改变它的收缩宽度。
+    display: block;
+    // 上限取 min(42vh, 360px)：EP 的 popper 只开了 preventOverflow 的主轴（水平），
+    // 垂直方向仅有 flip 兜底，触发点落在视口正中时上下各只剩约 50vh。
+    // 800px 视口下 42vh = 336px，加 popper 的 10px 内边距 + 2px 边框 + 12px offset
+    // 约 360px，仍小于可用的 400px —— 触发点在任何位置都不会顶出视口。
+    max-height: min(42vh, 360px);
+    overflow: auto;
+    // 滚到底不要把底下的表格 / 弹窗一起带着滚。
+    overscroll-behavior: contain;
+    // is-dark 的底色取自 --el-text-color-primary，明暗两套主题下正好是反的
+    // （亮色主题深底浅字，暗色主题浅底深字）。文件开头那条固定色的滚动条 thumb
+    // 必然在其中一套里贴近底色看不见，这里改用 currentColor 派生，两套都有对比度。
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, currentColor 45%, transparent) transparent;
+
+    &::-webkit-scrollbar-thumb {
+      background: color-mix(in srgb, currentColor 45%, transparent);
+    }
+  }
 }
 
 .dd-log-surface {
@@ -1477,7 +1673,11 @@ html.dark {
   .el-dialog {
     --el-dialog-width: 92vw !important;
     width: 92vw !important;
-    margin: 4vh auto !important;
+    // 必须复用 --el-dialog-margin-top，不能写死 4vh：max-height 是用这个变量算的，
+    // 而 4vh 在高视口下会超过 clamp 的 40px 上限，上下边距（4vh × 2）就会大于
+    // max-height 预留的（clamp 值 × 2），又冒出跟 50px 同源的那种溢出滚动。
+    // 另外全屏态下 .is-fullscreen 已把该变量置 0，这里跟着解析成 0，不会把全屏顶下来。
+    margin: var(--el-dialog-margin-top) auto !important;
 
     .el-dialog__body {
       padding: 16px;

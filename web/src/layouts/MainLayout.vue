@@ -394,19 +394,6 @@ async function loadVersion() {
           </router-view>
         </div>
       </main>
-
-      <!-- Footer -->
-      <footer class="layout-footer">
-        <span>© {{ new Date().getFullYear() }} {{ panelTitle }}</span>
-        <span class="footer-sep">·</span>
-        <span>开源自动化任务调度面板</span>
-        <span class="footer-sep">·</span>
-        <a href="javascript:void(0)" class="footer-link">文档中心</a>
-        <span class="footer-sep">·</span>
-        <a href="javascript:void(0)" class="footer-link">使用条款</a>
-        <span class="footer-sep">·</span>
-        <a href="javascript:void(0)" class="footer-link">隐私政策</a>
-      </footer>
     </el-container>
   </el-container>
 </template>
@@ -1034,23 +1021,8 @@ async function loadVersion() {
   }
 }
 
-// ==================== Footer ====================
-.layout-footer {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 12px 20px;
-  font-size: 12px;
-  color: var(--el-text-color-placeholder);
-  background: var(--el-bg-color-page);
-  border-top: 1px solid var(--el-border-color-lighter);
-  flex-wrap: wrap;
-}
-
 @media screen and (max-height: 820px) and (min-width: 769px) {
-  // 矮屏：外壳本身已铺满视口，这里只收紧 header / main / footer 的内边距，
+  // 矮屏：外壳本身已铺满视口，这里只收紧 header / main 的内边距，
   // 给内容腾出更多垂直空间
   .layout-header {
     height: 52px;
@@ -1059,24 +1031,6 @@ async function loadVersion() {
 
   .layout-main {
     padding: 14px 16px;
-  }
-
-  .layout-footer {
-    padding: 8px 16px;
-    font-size: 11px;
-  }
-}
-
-.footer-sep {
-  color: var(--el-border-color);
-}
-
-.footer-link {
-  color: var(--el-text-color-secondary);
-  transition: color 0.2s;
-
-  &:hover {
-    color: var(--el-color-primary);
   }
 }
 
@@ -1171,11 +1125,6 @@ async function loadVersion() {
 
   .header-right {
     gap: 2px;
-  }
-
-  .layout-footer {
-    padding: 10px 12px;
-    font-size: 11px;
   }
 }
 </style>
