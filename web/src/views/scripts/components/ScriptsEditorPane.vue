@@ -16,7 +16,7 @@ import {
   VideoPlay,
 } from "@element-plus/icons-vue";
 import MonacoEditor from "@/components/MonacoEditor.vue";
-import { loadMonacoEditor } from "@/utils/monaco";
+import { getMonacoLoadErrorMessage, loadMonacoEditor } from "@/utils/monaco";
 
 const fileContent = defineModel<string>("fileContent", { required: true });
 const isEditing = defineModel<boolean>("isEditing", { required: true });
@@ -98,9 +98,17 @@ function startEdit() {
 
 const monacoEditorRef = ref<{ focus?: () => void } | null>(null);
 
+// 空状态（还没选文件）时页面上没有 MonacoEditor 实例，这里提前把加载链路跑起来，
+// 让用户点开第一个脚本时能直接命中已记忆化的结果。
+// 失败只记日志即可：loadMonacoEditor 失败会清空自身记忆化结果，
+// 真正打开文件时 MonacoEditor 会重新加载，并在组件内展示具体原因 + 重试按钮。
 onMounted(() => {
   void loadMonacoEditor().catch((error) => {
-    console.warn("Monaco 编辑器预加载失败，将在打开文件时重试。", error);
+    const reason = getMonacoLoadErrorMessage(error);
+    console.warn(
+      `Monaco 编辑器预加载失败，将在打开文件时重试。${reason ? `原因：${reason}` : ""}`,
+      error,
+    );
   });
 });
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, onActivated, computed, nextTick, watch, type Ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { logApi } from '@/api/log'
 import { taskApi } from '@/api/task'
@@ -10,7 +10,7 @@ import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
-import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
+import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE, type TerminalLineBuffer } from '@/utils/ansi'
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -22,7 +22,6 @@ const statusFilter = ref<string>('')
 const keyword = ref('')
 const loading = ref(false)
 const detailVisible = ref(false)
-const detailContent = ref('')
 const detailLog = ref<any>(null)
 const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
@@ -34,14 +33,12 @@ let logEventSource: EventStreamConnection | null = null
 const logContentRef = ref<HTMLElement>()
 let sseBuffer: string[] = []
 let sseFlushRaf = 0
-let detailContentCarriageReturnPending = false
 
 const showFileBrowser = ref(false)
 const currentTaskId = ref<number>(0)
 const logFiles = ref<any[]>([])
 const logFilesLoading = ref(false)
 const showFileContent = ref(false)
-const fileContentData = ref('')
 const fileContentName = ref('')
 const hasRunningLogs = computed(() => logs.value.some(l => l.status === 2))
 const routeTaskId = ref<number | null>(null)
@@ -51,106 +48,92 @@ const canOperateLogs = computed(() => canOperate(authStore.user?.role))
 const allSelectedOnPage = computed(() => logs.value.length > 0 && logs.value.every(l => selectedIdSet.value.has(l.id)))
 const someSelectedOnPage = computed(() => selectedIds.value.length > 0 && !allSelectedOnPage.value)
 
-const renderedDetailContent = computed(() => renderTerminalText(detailContent.value || '（正在加载日志...）'))
-const renderedFileContent = computed(() => renderTerminalText(fileContentData.value || '(空文件)'))
-const detailLineCount = computed(() => {
-  if (!renderedDetailContent.value) return 0
-  return renderedDetailContent.value.split('\n').length
-})
-const detailByteLabel = computed(() => {
-  if (!renderedDetailContent.value) return ''
-  const bytes = new Blob([renderedDetailContent.value]).size
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-})
-const detailContentHtml = computed(() => ansiToHtml(normalizeAnsi(renderedDetailContent.value)))
-const fileContentHtml = computed(() => ansiToHtml(normalizeAnsi(renderedFileContent.value)))
+// 日志正文改成「按行 + 按块」增量渲染。
+// 旧实现每次内容变化都要重跑 renderTerminalText + ansiToHtml + 整块 v-html 替换，
+// 运行中任务的 SSE 流式追加下整体是 O(n²)；打开超大日志文件时也会长时间阻塞主线程。
+// 行缓冲内部已经按终端语义处理 \n / \r\n / 裸 \r，并缓存每行的 HTML 与块 HTML。
+const detailBuffer = createTerminalLineBuffer()
+const detailRevision = ref(0)
+const detailExpanded = ref(false)
+const fileBuffer = createTerminalLineBuffer()
+const fileRevision = ref(0)
+const fileExpanded = ref(false)
+
+// 渲染窗口封顶：默认只渲染最后 5000 行，避免超大日志把 DOM 撑爆
+const RENDER_WINDOW_CHUNKS = 50
+const MAX_RENDERED_LINES = RENDER_WINDOW_CHUNKS * TERMINAL_RENDER_CHUNK_SIZE
+
+// 日志详情与日志文件预览共用同一套「分块 + 窗口封顶」派生逻辑。
+// 行缓冲是普通对象，靠 revision 计数接进 Vue 的响应式。
+function createTerminalView(buffer: TerminalLineBuffer, revision: Ref<number>, expanded: Ref<boolean>) {
+  const renderWindow = computed(() => expanded.value ? 0 : RENDER_WINDOW_CHUNKS)
+  return {
+    hasContent: computed(() => {
+      void revision.value
+      return !buffer.isEmpty
+    }),
+    chunks: computed(() => {
+      void revision.value
+      return buffer.visibleChunks(renderWindow.value)
+    }),
+    omittedLines: computed(() => {
+      void revision.value
+      return buffer.omittedLineCount(renderWindow.value)
+    }),
+    pendingHtml: computed(() => {
+      void revision.value
+      return buffer.pendingLineHtml()
+    }),
+    lineCount: computed(() => {
+      void revision.value
+      return buffer.displayLineCount
+    }),
+    byteLabel: computed(() => {
+      void revision.value
+      const bytes = buffer.byteLength
+      if (bytes === 0) return ''
+      if (bytes < 1024) return `${bytes} B`
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    }),
+  }
+}
+
+const {
+  hasContent: detailHasContent,
+  chunks: detailChunks,
+  omittedLines: detailOmittedLines,
+  pendingHtml: detailPendingHtml,
+  lineCount: detailLineCount,
+  byteLabel: detailByteLabel,
+} = createTerminalView(detailBuffer, detailRevision, detailExpanded)
+
+const {
+  hasContent: fileHasContent,
+  chunks: fileChunks,
+  omittedLines: fileOmittedLines,
+  pendingHtml: filePendingHtml,
+} = createTerminalView(fileBuffer, fileRevision, fileExpanded)
+
+function resetDetailBuffer() {
+  detailBuffer.reset()
+  detailExpanded.value = false
+  detailRevision.value++
+}
+
+function expandDetailWindow() {
+  const previousHeight = logContentRef.value?.scrollHeight ?? 0
+  const previousTop = logContentRef.value?.scrollTop ?? 0
+  detailExpanded.value = true
+  void nextTick(() => {
+    const el = logContentRef.value
+    if (!el) return
+    // 补齐的内容是往上长的，按高度差补偿滚动位置，避免视口整个跳走
+    el.scrollTop = previousTop + (el.scrollHeight - previousHeight)
+  })
+}
 
 let mounted = false
-
-function mergeTerminalText(previous: string, chunk: string) {
-  if (!chunk) {
-    return previous
-  }
-
-  const lines = previous.split('\n')
-  if (lines.length === 0) {
-    lines.push('')
-  }
-
-  for (let i = 0; i < chunk.length; i++) {
-    const char = chunk[i] ?? ''
-
-    if (char === '\r') {
-      if ((chunk[i + 1] ?? '') === '\n') {
-        lines.push('')
-        detailContentCarriageReturnPending = false
-        i++
-        continue
-      }
-      // 裸 \r 表示光标回到当前行开头，下一批普通字符才会覆盖旧内容。
-      // 不能把它当成换行，否则进度条每秒刷新一次就会在 Web 里刷成很多行。
-      detailContentCarriageReturnPending = true
-      continue
-    }
-
-    if (char === '\n') {
-      lines.push('')
-      detailContentCarriageReturnPending = false
-      continue
-    }
-
-    if (detailContentCarriageReturnPending) {
-      lines[lines.length - 1] = ''
-      detailContentCarriageReturnPending = false
-    }
-    lines[lines.length - 1] += char
-  }
-
-  return lines.join('\n')
-}
-
-function renderTerminalText(text: string) {
-  let currentLine = ''
-  let pendingCarriageReturn = false
-  const lines: string[] = []
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i] ?? ''
-    if (char === '\r') {
-      if ((text[i + 1] ?? '') === '\n') {
-        lines.push(currentLine)
-        currentLine = ''
-        pendingCarriageReturn = false
-        i++
-        continue
-      }
-      // 历史日志和日志文件也要按终端语义处理裸 \r，只保留同一行的最终覆盖结果。
-      pendingCarriageReturn = true
-      continue
-    }
-
-    if (char === '\n') {
-      lines.push(currentLine)
-      currentLine = ''
-      pendingCarriageReturn = false
-      continue
-    }
-
-    if (pendingCarriageReturn) {
-      currentLine = ''
-      pendingCarriageReturn = false
-    }
-    currentLine += char
-  }
-
-  if (currentLine !== '' || lines.length === 0) {
-    lines.push(currentLine)
-  }
-
-  return lines.join('\n')
-}
 
 async function loadLogs() {
   loading.value = true
@@ -276,8 +259,7 @@ function formatTime(t: string | null) {
 
 async function viewDetail(log: any) {
   detailLog.value = log
-  detailContent.value = ''
-  detailContentCarriageReturnPending = false
+  resetDetailBuffer()
   detailVisible.value = true
   closeLogSSE()
 
@@ -290,13 +272,18 @@ async function viewDetail(log: any) {
         if (!sseFlushRaf) {
           sseFlushRaf = requestAnimationFrame(() => {
             for (const chunk of sseBuffer) {
-              detailContent.value = mergeTerminalText(detailContent.value, chunk)
+              detailBuffer.append(chunk)
             }
             sseBuffer = []
             sseFlushRaf = 0
-            if (logContentRef.value) {
-              logContentRef.value.scrollTop = logContentRef.value.scrollHeight
-            }
+            // 整批只触发一次重渲染
+            detailRevision.value++
+            // 等 DOM 真正更新完再滚底，否则会停在这一帧之前的高度上
+            void nextTick(() => {
+              if (logContentRef.value) {
+                logContentRef.value.scrollTop = logContentRef.value.scrollHeight
+              }
+            })
           })
         }
       },
@@ -314,7 +301,9 @@ async function viewDetail(log: any) {
     try {
       const res = await logApi.detail(log.id)
       detailLog.value = res
-      detailContent.value = res.content || '(无日志内容)'
+      resetDetailBuffer()
+      detailBuffer.append(res.content || '(无日志内容)')
+      detailRevision.value++
     } catch (err) {
       ElMessage.error(extractError(err, '获取日志详情失败'))
     }
@@ -329,14 +318,15 @@ function closeLogSSE() {
 }
 
 function downloadCurrentLog() {
-  if (!detailContent.value) {
+  if (!detailHasContent.value) {
     ElMessage.warning('暂无内容可下载')
     return
   }
   const taskName = detailLog.value?.task_name || 'log'
   const logId = detailLog.value?.id ?? 'detail'
   const filename = `${taskName}-${logId}.log`.replace(/[\\/:*?"<>|]/g, '_')
-  const blob = new Blob([detailContent.value], { type: 'text/plain;charset=utf-8' })
+  // 纯文本按需还原，不进渲染路径
+  const blob = new Blob([detailBuffer.toText()], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -349,16 +339,17 @@ function downloadCurrentLog() {
 }
 
 async function copyCurrentLog() {
-  if (!detailContent.value) {
+  if (!detailHasContent.value) {
     ElMessage.warning('暂无内容可复制')
     return
   }
+  const text = detailBuffer.toText()
   try {
-    await navigator.clipboard.writeText(detailContent.value)
+    await navigator.clipboard.writeText(text)
     ElMessage.success('已复制到剪贴板')
   } catch {
     const ta = document.createElement('textarea')
-    ta.value = detailContent.value
+    ta.value = text
     ta.style.position = 'fixed'
     ta.style.left = '-9999px'
     document.body.appendChild(ta)
@@ -493,7 +484,10 @@ async function browseLogFiles(log: any) {
 async function viewLogFile(file: any) {
   try {
     const res = await taskApi.logFileContent(currentTaskId.value, file.filename, file.path)
-    fileContentData.value = res.content || '(空文件)'
+    fileBuffer.reset()
+    fileExpanded.value = false
+    fileBuffer.append(res.content || '(空文件)')
+    fileRevision.value++
     fileContentName.value = file.filename
     showFileContent.value = true
   } catch (err) {
@@ -729,7 +723,20 @@ onBeforeUnmount(() => {
       </template>
 
       <div class="detail-body">
-        <pre ref="logContentRef" class="detail-log dd-log-surface" v-html="detailContentHtml"></pre>
+        <div ref="logContentRef" class="detail-log dd-log-surface">
+          <template v-if="detailHasContent">
+            <button
+              v-if="detailOmittedLines > 0"
+              type="button"
+              class="log-omitted-notice"
+              title="超长日志默认只渲染末尾部分，避免页面卡顿。展开完整日志在内容极多时可能需要等待片刻，也可以直接用底部「下载」拿到全部内容。"
+              @click="expandDetailWindow"
+            >已省略前 {{ detailOmittedLines }} 行（默认只渲染最后 {{ MAX_RENDERED_LINES }} 行）· 点击展开完整日志</button>
+            <span v-for="chunk in detailChunks" :key="chunk.key" v-html="chunk.html"></span>
+            <span v-html="detailPendingHtml"></span>
+          </template>
+          <span v-else>（正在加载日志...）</span>
+        </div>
         <div class="detail-status-bar">
           <div class="detail-status-group">
             <span class="detail-status-item">{{ detailLineCount }} 行</span>
@@ -744,11 +751,11 @@ onBeforeUnmount(() => {
 
       <template #footer>
         <div class="detail-footer">
-          <el-button @click="copyCurrentLog" :disabled="!detailContent">
+          <el-button @click="copyCurrentLog" :disabled="!detailHasContent">
             <el-icon><DocumentCopy /></el-icon>
             <span>复制</span>
           </el-button>
-          <el-button @click="downloadCurrentLog" :disabled="!detailContent">
+          <el-button @click="downloadCurrentLog" :disabled="!detailHasContent">
             <el-icon><Download /></el-icon>
             <span>下载</span>
           </el-button>
@@ -784,7 +791,20 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <el-dialog v-model="showFileContent" :title="fileContentName" width="1100px" :fullscreen="dialogFullscreen">
-      <pre class="detail-log dd-log-surface" v-html="fileContentHtml"></pre>
+      <div class="detail-log dd-log-surface">
+        <template v-if="fileHasContent">
+          <button
+            v-if="fileOmittedLines > 0"
+            type="button"
+            class="log-omitted-notice"
+            title="超大日志文件默认只渲染末尾部分，避免页面卡顿。展开完整内容在文件很大时可能需要等待片刻。"
+            @click="fileExpanded = true"
+          >已省略前 {{ fileOmittedLines }} 行（默认只渲染最后 {{ MAX_RENDERED_LINES }} 行）· 点击展开完整内容</button>
+          <span v-for="chunk in fileChunks" :key="chunk.key" v-html="chunk.html"></span>
+          <span v-html="filePendingHtml"></span>
+        </template>
+        <span v-else>(空文件)</span>
+      </div>
     </el-dialog>
   </div>
 </template>
@@ -1171,6 +1191,9 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
+// 正文容器用 div + white-space:pre-wrap 代替 <pre>：
+// Vue 模板编译器会原样保留 <pre> 内部的缩进空白，而这里正文要拆成多个子节点分块渲染，
+// 缩进会被当成正文渲染出来。等宽字体与换行语义都在这条规则里，视觉与原来的 <pre> 完全一致。
 .detail-log {
   margin: 0;
   flex: 1;
@@ -1184,6 +1207,32 @@ onBeforeUnmount(() => {
   word-break: break-all;
   color: var(--dd-log-text-color, #e2e8f0);
   border-radius: 0;
+}
+
+// 渲染窗口封顶提示：扁平直角虚线块，颜色全部从日志前景色派生，明暗两态自动适配
+.log-omitted-notice {
+  display: block;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px dashed color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 32%, transparent);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 8%, transparent);
+  color: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 70%, transparent);
+  font-family: var(--dd-font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  text-align: left;
+  white-space: normal;
+  word-break: normal;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+
+  &:hover {
+    color: var(--dd-log-text-color, #e2e8f0);
+    border-color: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 52%, transparent);
+    background: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 14%, transparent);
+  }
 }
 
 .detail-status-bar {

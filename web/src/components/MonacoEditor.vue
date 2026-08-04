@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from "vue";
 import type * as MonacoType from "monaco-editor";
-import { defineMonacoTheme, loadMonacoEditor } from "@/utils/monaco";
+import {
+  canRetryMonacoInPlace,
+  defineMonacoTheme,
+  getMonacoLoadErrorMessage,
+  loadMonacoEditor,
+} from "@/utils/monaco";
 import { PANEL_APPEARANCE_CHANGE_EVENT } from "@/utils/panelAppearance";
 import LoadingMotion from "./LoadingMotion.vue";
 
@@ -25,10 +30,15 @@ const emit = defineEmits<{
 const editorRef = ref<HTMLElement>();
 const isLoading = ref(true);
 const loadError = ref("");
+// @monaco-editor/loader 的 init() 单例一旦 reject 就永久失败，页内重试拿到的还是同一个错误。
+// 这种情况下只能提示刷新页面，不能给一个点了没反应的「重新加载」按钮。
+const canRetryInPlace = ref(true);
 let editor: MonacoType.editor.IStandaloneCodeEditor | null = null;
 let monacoInstance: typeof MonacoType | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let layoutFrame: number | null = null;
+// 防止「加载中又点重试」把编辑器初始化两遍
+let initializing = false;
 
 function scheduleEditorLayout() {
   if (layoutFrame !== null) return;
@@ -46,19 +56,30 @@ function syncEditorTheme() {
   monacoInstance.editor.setTheme(theme.themeName);
 }
 
-onMounted(async () => {
-  window.addEventListener(PANEL_APPEARANCE_CHANGE_EVENT, syncEditorTheme);
+function reloadPage() {
+  window.location.reload();
+}
 
+// 加载失败后是否允许页内重试，由 canRetryMonacoInPlace() 决定：
+// 只有「底层 loader 还在跑、只是我们这边等超时」时重试才真的可能拿到不同结果；
+// 底层已经 reject 时必须走整页刷新，否则重试只是把同一个错误再显示一遍。
+async function setupEditor() {
+  if (initializing) return;
   if (!editorRef.value) return;
 
+  initializing = true;
+  isLoading.value = true;
+  loadError.value = "";
+
   try {
-    loadError.value = "";
     const { monaco, source } = await loadMonacoEditor();
     monacoInstance = monaco as typeof MonacoType;
     if (!editorRef.value) return;
     const container = editorRef.value;
     const theme = defineMonacoTheme(monacoInstance);
 
+    // 重试路径上可能残留上一次的实例，先清干净再建，避免叠出两个编辑器
+    editor?.dispose();
     editor = monacoInstance.editor.create(container, {
       value: props.modelValue,
       language: props.language || "javascript",
@@ -75,6 +96,7 @@ onMounted(async () => {
     // automaticLayout 已经会跟随容器尺寸，但撑满模式下高度来自 flex 链，
     // 这里再挂一层 ResizeObserver 兜底，避免拖窗口/折叠侧栏后编辑器错位。
     if (typeof ResizeObserver !== "undefined") {
+      resizeObserver?.disconnect();
       resizeObserver = new ResizeObserver(() => {
         scheduleEditorLayout();
       });
@@ -92,10 +114,21 @@ onMounted(async () => {
     });
   } catch (error) {
     console.error("Monaco 编辑器初始化失败", error);
-    loadError.value = "编辑器加载失败，请检查网络或稍后重试。";
+    // 优先展示加载链路给出的具体原因（本地资源残缺 / CDN 连不上 / 超时），
+    // 只有拿不到具体原因时才退回泛化文案。
+    loadError.value =
+      getMonacoLoadErrorMessage(error) ||
+      "编辑器加载失败，请检查网络或稍后重试。";
+    canRetryInPlace.value = canRetryMonacoInPlace();
   } finally {
+    initializing = false;
     isLoading.value = false;
   }
+}
+
+onMounted(() => {
+  window.addEventListener(PANEL_APPEARANCE_CHANGE_EVENT, syncEditorTheme);
+  void setupEditor();
 });
 
 watch(
@@ -177,8 +210,19 @@ function resolveMinHeight(value: string | number | undefined) {
         tone="primary"
       />
     </div>
-    <div v-else-if="loadError" class="monaco-loading monaco-error">
-      <span>{{ loadError }}</span>
+    <div v-else-if="loadError" class="monaco-loading monaco-error" role="alert">
+      <span class="monaco-error-text">{{ loadError }}</span>
+      <el-button
+        v-if="canRetryInPlace"
+        class="monaco-retry"
+        size="small"
+        @click="setupEditor"
+      >
+        重新加载编辑器
+      </el-button>
+      <el-button v-else class="monaco-retry" size="small" @click="reloadPage">
+        刷新页面
+      </el-button>
     </div>
     <div
       ref="editorRef"
@@ -233,5 +277,16 @@ function resolveMinHeight(value: string | number | undefined) {
 .monaco-error {
   color: #f56c6c;
   text-align: center;
+  padding: 16px;
+}
+
+.monaco-error-text {
+  max-width: 520px;
+  line-height: 1.6;
+}
+
+/* 扁平直角：与面板整体基调一致 */
+.monaco-retry {
+  border-radius: 0;
 }
 </style>

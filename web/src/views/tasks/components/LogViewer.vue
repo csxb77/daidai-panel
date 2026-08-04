@@ -15,7 +15,7 @@ import {
 import { taskApi } from '@/api/task'
 import { openAuthorizedEventStream, type EventStreamConnection } from '@/utils/sse'
 import { useResponsive } from '@/composables/useResponsive'
-import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
+import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE } from '@/utils/ansi'
 
 const props = defineProps<{
   visible: boolean
@@ -28,8 +28,13 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
-const logLines = ref<string[]>([])
-const logTail = ref('')
+// 日志正文改成「按行 + 按块」增量渲染。
+// 历史行一旦落定就不会再变，块 HTML 只解析一次并缓存；
+// 每次 SSE flush 只需重算「最后一个未写满的块」和「正在刷新的当前行」，
+// 不再像以前那样每帧对整份日志重跑 ansiToHtml + 整块 v-html 替换。
+const logBuffer = createTerminalLineBuffer()
+// 行缓冲本身是普通对象，用这个计数器把它的变更接进 Vue 的响应式
+const logRevision = ref(0)
 const done = ref(false)
 const error = ref<string | null>(null)
 const emptyMessage = ref<string | null>(null)
@@ -38,45 +43,73 @@ const logContainerRef = ref<HTMLElement>()
 const autoScroll = ref(false)
 const fontSize = ref<'sm' | 'md' | 'lg'>('md')
 const wrap = ref(true)
+// 渲染窗口封顶：默认只渲染最后 5000 行，避免超长日志把 DOM 撑到几十万节点，
+// 让每次滚动/布局都变慢。用户可以点顶部提示展开完整日志。
+const RENDER_WINDOW_CHUNKS = 50
+const MAX_RENDERED_LINES = RENDER_WINDOW_CHUNKS * TERMINAL_RENDER_CHUNK_SIZE
+const renderWindowExpanded = ref(false)
 const { dialogFullscreen } = useResponsive()
 let eventSource: EventStreamConnection | null = null
-let logBuffer: string[] = []
+let pendingSseChunks: string[] = []
 let logFlushTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let hiddenAt: number | null = null
 let pendingScrollRestore: number | null = null
-let logTailCarriageReturnPending = false
 // reconnect 风暴熔断：连续重连且无新数据时累加，超过上限即按完成处理，避免无限重连+全量重渲染卡顿。
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 5
 
-const hasLogs = computed(() => logLines.value.length > 0 || logTail.value.length > 0)
-const renderedLogText = computed(() => {
-  const lines = [...logLines.value]
-  if (logTail.value !== '' || lines.length === 0) {
-    lines.push(logTail.value)
-  }
-  return lines.join('\n')
+// 下面这批 computed 都要跟着行缓冲走，读一下 logRevision 建立依赖即可
+const activeRenderWindow = computed(() => renderWindowExpanded.value ? 0 : RENDER_WINDOW_CHUNKS)
+
+const hasLogs = computed(() => {
+  void logRevision.value
+  return !logBuffer.isEmpty
 })
 
-const renderedLogHtml = computed(() => {
-  return ansiToHtml(normalizeAnsi(renderedLogText.value))
+const renderChunks = computed(() => {
+  void logRevision.value
+  return logBuffer.visibleChunks(activeRenderWindow.value)
+})
+
+const omittedLineCount = computed(() => {
+  void logRevision.value
+  return logBuffer.omittedLineCount(activeRenderWindow.value)
+})
+
+const pendingLineHtml = computed(() => {
+  void logRevision.value
+  return logBuffer.pendingLineHtml()
 })
 
 const lineCount = computed(() => {
-  if (!renderedLogText.value) return 0
-  return renderedLogText.value.split('\n').length
+  void logRevision.value
+  return logBuffer.displayLineCount
 })
 
 const byteLabel = computed(() => {
-  if (!renderedLogText.value) return ''
-  const bytes = new Blob([renderedLogText.value]).size
+  void logRevision.value
+  const bytes = logBuffer.byteLength
+  if (bytes === 0) return ''
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 })
 
 const fontSizeClass = computed(() => `log-font-${fontSize.value}`)
+
+function expandRenderWindow() {
+  const container = logContainerRef.value
+  const previousHeight = container?.scrollHeight ?? 0
+  const previousTop = container?.scrollTop ?? 0
+  renderWindowExpanded.value = true
+  void nextTick(() => {
+    const el = logContainerRef.value
+    if (!el) return
+    // 补齐的内容是往上长的，按高度差补偿滚动位置，避免视口整个跳走
+    el.scrollTop = previousTop + (el.scrollHeight - previousHeight)
+  })
+}
 
 watch(() => props.visible, (visible) => {
   if (visible && props.taskId) {
@@ -139,7 +172,7 @@ async function startStream(isReconnect = false) {
       }
       // 收到真实日志数据 = 有实质进展，不算空重连风暴，重置熔断计数。
       reconnectAttempts = 0
-      logBuffer.push(data)
+      pendingSseChunks.push(data)
       scheduleBufferFlush()
     },
     onEvent(event) {
@@ -237,63 +270,24 @@ async function fetchLatestLog(retryCount = 0, scrollMode: 'top' | 'bottom' | 'pr
 }
 
 function resetLogOutput() {
-  logLines.value = []
-  logTail.value = ''
-  logTailCarriageReturnPending = false
+  logBuffer.reset()
+  renderWindowExpanded.value = false
+  logRevision.value++
 }
 
-function pushLogLine() {
-  logLines.value.push(logTail.value)
-  logTail.value = ''
-  logTailCarriageReturnPending = false
+function appendLogChunk(chunk: string) {
+  logBuffer.append(chunk)
+  logRevision.value++
 }
 
-function appendLogChunk(chunk: string, commitBoundary = false) {
-  if (!chunk && !commitBoundary) return
-
-  let endedWithLineBreak = false
-  let sawCarriageReturn = false
-  for (let i = 0; i < chunk.length; i++) {
-    const char = chunk[i]
-    if (char === '\r') {
-      if (chunk[i + 1] === '\n') {
-        pushLogLine()
-        endedWithLineBreak = true
-        sawCarriageReturn = false
-        i++
-        continue
-      }
-      // 裸 \r 表示终端希望“回到当前行开头”，不是换行。
-      // 这里先标记等待下一批字符覆盖，避免 SSE 分片刚好停在 \r 后面时把进度条临时清空。
-      logTailCarriageReturnPending = true
-      endedWithLineBreak = false
-      sawCarriageReturn = true
-      continue
-    }
-
-    if (char === '\n') {
-      pushLogLine()
-      endedWithLineBreak = true
-      sawCarriageReturn = false
-      continue
-    }
-
-    if (logTailCarriageReturnPending) {
-      // 收到裸 \r 后的第一段普通字符，才真正覆盖当前行。
-      // 这样进度条在 Web 面板里会像终端一样留在同一行刷新。
-      logTail.value = ''
-      logTailCarriageReturnPending = false
-    }
-    logTail.value += char
-    endedWithLineBreak = false
-  }
-
-  // 只有真正确定这一批内容已经形成稳定的一行时才落行。
-  // 如果这批内容里出现过裸 \r，说明它更像“正在刷新的终端行”，
-  // 需要继续留在 tail，等待后续覆盖或最终的 \n 收尾。
-  if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
-    pushLogLine()
-  }
+// 合帧间隔按日志体量放大：增量渲染后每次 flush 的渲染开销只和新增行有关，
+// 但开启自动跟随时仍要对整篇文档强制一次布局，日志越长这一步越贵。
+// 放大到 48 / 120ms 肉眼仍然无感，却能显著减少长日志下的主线程占用。
+function flushDelayMs(): number {
+  const lines = logBuffer.lineCount
+  if (lines < 2000) return 16
+  if (lines < 10000) return 48
+  return 120
 }
 
 function scheduleBufferFlush() {
@@ -303,7 +297,7 @@ function scheduleBufferFlush() {
   logFlushTimer = setTimeout(() => {
     logFlushTimer = null
     flushBufferedLogs()
-  }, 16)
+  }, flushDelayMs())
 }
 
 function flushBufferedLogs() {
@@ -311,16 +305,18 @@ function flushBufferedLogs() {
     clearTimeout(logFlushTimer)
     logFlushTimer = null
   }
-  if (logBuffer.length === 0) {
+  if (pendingSseChunks.length === 0) {
     return
   }
 
-  for (const chunk of logBuffer) {
+  for (const chunk of pendingSseChunks) {
     // 不把“每个 SSE 消息结束”当成真实换行。
     // 真实终端只有遇到 \n / \r\n 才落新行，裸 \r 则继续覆盖当前行。
-    appendLogChunk(chunk)
+    logBuffer.append(chunk)
   }
-  logBuffer = []
+  pendingSseChunks = []
+  // 整批只触发一次重渲染
+  logRevision.value++
 
   if (pendingScrollRestore !== null) {
     const target = pendingScrollRestore
@@ -364,7 +360,7 @@ function cleanup() {
     clearTimeout(logFlushTimer)
     logFlushTimer = null
   }
-  logBuffer = []
+  pendingSseChunks = []
   if (eventSource) {
     eventSource.close()
     eventSource = null
@@ -413,12 +409,14 @@ async function handleCopy() {
     ElMessage.warning('暂无内容可复制')
     return
   }
+  // 纯文本按需还原，不进渲染路径
+  const text = logBuffer.toText()
   try {
-    await navigator.clipboard.writeText(renderedLogText.value)
+    await navigator.clipboard.writeText(text)
     ElMessage.success('已复制')
   } catch {
     const ta = document.createElement('textarea')
-    ta.value = renderedLogText.value
+    ta.value = text
     ta.style.position = 'fixed'
     ta.style.left = '-9999px'
     document.body.appendChild(ta)
@@ -440,7 +438,7 @@ function handleDownload() {
   }
   const safeName = (props.taskName || 'task').replace(/[\\/:*?"<>|]/g, '_')
   const filename = `${safeName}-${props.taskId ?? 'log'}.log`
-  const blob = new Blob([renderedLogText.value], { type: 'text/plain;charset=utf-8' })
+  const blob = new Blob([logBuffer.toText()], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -574,7 +572,17 @@ function handleClose() {
           <el-icon :size="22"><Loading /></el-icon>
           <span>等待日志输出...</span>
         </div>
-        <pre v-else class="viewer-log-content" :class="{ 'viewer-log-content--nowrap': !wrap }" v-html="renderedLogHtml"></pre>
+        <div v-else class="viewer-log-content" :class="{ 'viewer-log-content--nowrap': !wrap }">
+          <button
+            v-if="omittedLineCount > 0"
+            type="button"
+            class="log-omitted-notice"
+            title="超长日志默认只渲染末尾部分，避免页面卡顿。展开完整日志在内容极多时可能需要等待片刻，也可以直接用上方「下载」拿到全部内容。"
+            @click="expandRenderWindow"
+          >已省略前 {{ omittedLineCount }} 行（默认只渲染最后 {{ MAX_RENDERED_LINES }} 行）· 点击展开完整日志</button>
+          <span v-for="chunk in renderChunks" :key="chunk.key" v-html="chunk.html"></span>
+          <span v-html="pendingLineHtml"></span>
+        </div>
       </div>
 
       <div class="viewer-statusbar">
@@ -882,6 +890,10 @@ function handleClose() {
   color: var(--dd-log-text-color, #e2e8f0);
 }
 
+// 正文容器用 div + white-space:pre-wrap 代替 <pre>：
+// Vue 模板编译器会原样保留 <pre> 内部的缩进空白，而这里正文要拆成多个子节点分块渲染，
+// 缩进会被当成正文渲染出来。等宽字体来自父级 .viewer-log，换行语义由这里的 white-space 承担，
+// 视觉与原来的 <pre> 完全一致。
 .viewer-log-content {
   margin: 0;
   white-space: pre-wrap;
@@ -890,6 +902,32 @@ function handleClose() {
   &--nowrap {
     white-space: pre;
     word-break: normal;
+  }
+}
+
+// 渲染窗口封顶提示：扁平直角虚线块，颜色全部从日志前景色派生，明暗两态自动适配
+.log-omitted-notice {
+  display: block;
+  width: 100%;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px dashed color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 32%, transparent);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 8%, transparent);
+  color: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 70%, transparent);
+  font-family: var(--dd-font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.3px;
+  text-align: left;
+  white-space: normal;
+  word-break: normal;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+
+  &:hover {
+    color: var(--dd-log-text-color, #e2e8f0);
+    border-color: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 52%, transparent);
+    background: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 14%, transparent);
   }
 }
 
