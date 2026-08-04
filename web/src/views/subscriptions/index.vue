@@ -112,6 +112,54 @@ const pullLogRef = ref<HTMLElement>();
 let pullBuffer: string[] = [];
 let pullFlushRaf = 0;
 
+// 拉取结束后的「业务结果」。注意它和 pullRunning 是两回事：
+// pullRunning 描述的是 SSE 连接/拉取是否还在进行，pullOutcome 描述的是跑完之后成没成。
+// idle = 还没有可展示的终态；unknown = 判不出来（回退到改造前的「已完成」）。
+type PullOutcome =
+  | "idle"
+  | "success"
+  | "failed"
+  | "aborted"
+  | "disconnected"
+  | "unknown";
+const pullOutcome = ref<PullOutcome>("idle");
+
+// 竞态守卫：每开始一次拉取会话就递增。异步查库回来时比对会话号，
+// 对不上就整个丢弃 —— 覆盖「弹窗已关」「用户切到别的订阅」「又发起了一次拉取」三种情况。
+let pullSessionSeq = 0;
+let pullSession = 0;
+
+// 本次拉取开始前，该订阅最新一条 sub_log 的 id（一条都没有时记 0）。
+// null 表示基线没取到（查询失败），此时不做业务状态判定。
+let pullBaselineLogId: number | null = null;
+
+// 用户是否点过「停止」。后端把「拉取已停止」记成 status=1，跟真失败无法区分；
+// 但前端知道是主动终止，所以本地打标记，done 之后直接显示「已终止」，不查库。
+let pullStopRequested = false;
+
+// footer 左侧状态指示：色标 tone + 文案。
+// 恒返回对象而不是 `对象 | null`，是为了让模板里 v-if 和 :class 能挂在同一个元素上
+// 而不依赖类型收窄 —— text 为空串即表示不渲染。
+const pullStatusView = computed<{ tone: string; text: string }>(() => {
+  if (pullRunning.value) return { tone: "running", text: "运行中" };
+  switch (pullOutcome.value) {
+    case "success":
+      return { tone: "success", text: "成功" };
+    case "failed":
+      return { tone: "failed", text: "失败" };
+    case "aborted":
+      return { tone: "aborted", text: "已终止" };
+    case "disconnected":
+      return { tone: "disconnected", text: "连接中断" };
+    default:
+      // 判不出业务状态时严格回退到改造前的表现：有输出就「已完成」，没输出就什么都不显示。
+      return {
+        tone: "unknown",
+        text: pullLogLines.value.length > 0 ? "已完成" : "",
+      };
+  }
+});
+
 async function loadData() {
   loading.value = true;
   try {
@@ -538,9 +586,104 @@ async function handleToggle(row: any) {
   }
 }
 
+async function fetchLatestSubLog(subId: number) {
+  const res = await subscriptionApi.logs(subId, { page: 1, page_size: 1 });
+  // 后端按 created_at DESC 排序，page_size=1 拿到的就是最新一条。
+  return (res.data || [])[0] || null;
+}
+
+// 取「当前最新一条日志的 id」当基线。取不到（网络/权限）返回 null，后续就不判业务状态。
+async function readPullLogBaseline(subId: number): Promise<number | null> {
+  try {
+    const latest = await fetchLatestSubLog(subId);
+    const id = Number(latest?.id);
+    // 一条日志都没有时基线记 0：之后任何新记录的自增 id 都会大于 0。
+    return Number.isFinite(id) ? id : 0;
+  } catch {
+    return null;
+  }
+}
+
+// 「全新一次拉取」的会话初始化：基线、停止标记、业务结果全部重来。
+// 重连（关掉弹窗后再打开）不能走这里，见下面的 reattachPullStream。
+function beginPullSession(subId: number, baseline: number | null) {
+  pullSession = ++pullSessionSeq;
+  pullBaselineLogId = baseline;
+  pullStopRequested = false;
+  pullOutcome.value = "idle";
+  pullRunning.value = true;
+  pullingSubId.value = subId;
+  showPullLog.value = true;
+}
+
+// 拉取途中关掉弹窗（handlePullDialogClose 切断了 SSE，但 pullRunning 保持 true），
+// 再次点同一条订阅的「拉取」时走这里：把 SSE 重新接回来，而不是只把弹窗显示出来。
+// PullStream 对新订阅者会先补发 broadcaster.history() 的全部历史行再进实时循环，
+// 所以重连能拿回完整日志；广播器已经销毁（拉取早就结束）时后端直接回 done/not_running，
+// 状态也能收敛掉，不会再永远卡在「运行中」。
+function reattachPullStream(subId: number) {
+  // 必须清空：后端会把 history() 整体重发一遍，不清的话弹窗里已有的行 + 补发的历史
+  // 会整体重复一遍。顺带把还没 flush 的缓冲和在途的 rAF 也一起清掉，否则那一帧
+  // 会把清空前的旧行再补回来。
+  pullLogLines.value = [];
+  pullBuffer = [];
+  if (pullFlushRaf) {
+    cancelAnimationFrame(pullFlushRaf);
+    pullFlushRaf = 0;
+  }
+
+  // 只 bump 会话号，不碰其余状态 —— 这正是不能复用 beginPullSession 的原因：
+  //   pullBaselineLogId 重读会把本次拉取已经落库的那条记录也算进基线，
+  //     导致 latestId > baseline 不成立、降级成 unknown，白白丢掉成功/失败判定；
+  //   pullStopRequested 清掉的话，用户停止后关弹窗再打开会显示成「失败」而不是「已终止」。
+  // 关弹窗时 handlePullDialogClose 已经 bump 过一次（作废在途的查库结果），
+  // 这里再 bump 出一个「当前有效」的会话号，让本次重连的 resolvePullOutcome 能写进状态。
+  pullSession = ++pullSessionSeq;
+
+  showPullLog.value = true;
+  // connectPullStream 内部第一件事就是 closePullStream()，已有连接会先关再连，不会叠加。
+  connectPullStream(subId);
+}
+
+// 拉取结束后去查最近一条 sub_log，拿 status 区分成功/失败。
+async function resolvePullOutcome(subId: number, session: number) {
+  if (pullBaselineLogId === null) {
+    pullOutcome.value = "unknown";
+    return;
+  }
+  const baseline = pullBaselineLogId;
+
+  let latest: any = null;
+  try {
+    latest = await fetchLatestSubLog(subId);
+  } catch {
+    // 查库失败不弹错、也不让 UI 卡在运行中，直接回退成改造前的「已完成」。
+    if (pullSession === session) pullOutcome.value = "unknown";
+    return;
+  }
+  if (pullSession !== session) return;
+
+  const latestId = Number(latest?.id);
+  if (!latest || !Number.isFinite(latestId) || latestId <= baseline) {
+    // 本次拉取压根没落下新记录。ExecuteSubscriptionPull 在「订阅不存在」和
+    // 「该订阅正在拉取中」两条路径上直接 return，PullSubscriptionWithContext 又在
+    // 「写 SSH 密钥失败」和「构建 git 鉴权配置失败」两处提前 return，
+    // 这四条都走不到 database.DB.Create(&subLog)。此时查到的是上一次拉取的结果，
+    // 拿来当本次状态就是误报，所以标成 unknown。
+    pullOutcome.value = "unknown";
+    return;
+  }
+
+  pullOutcome.value = Number(latest.status) === 0 ? "success" : "failed";
+}
+
 async function handlePull(row: any) {
+  // 同一条订阅、且前端认为还在拉取中：这次点击的语义是「回到那次拉取」而不是「再拉一次」，
+  // 所以不弹确认、不重取基线，直接重连 SSE。
+  // 只显示弹窗是不够的：弹窗关掉时 SSE 已经被切断，没有任何事件能把 pullRunning 置回 false，
+  // 状态会永远停在「运行中」。点别的订阅不命中这条守卫，仍走下面的确认 + 拉取流程。
   if (pullingSubId.value === row.id && pullRunning.value) {
-    showPullLog.value = true;
+    reattachPullStream(row.id);
     return;
   }
 
@@ -558,18 +701,22 @@ async function handlePull(row: any) {
     return;
   }
 
+  // 基线必须在拉取真正开始「之前」取：sub_logs.id 是自增主键，本次拉取一旦落库，
+  // 新记录的 id 必然大于基线，据此就能判断「这次到底有没有产生新记录」。
+  const baseline = await readPullLogBaseline(row.id);
+
   try {
     await subscriptionApi.pull(row.id);
     pullLogLines.value = [];
-    pullRunning.value = true;
-    pullingSubId.value = row.id;
-    showPullLog.value = true;
+    beginPullSession(row.id, baseline);
     connectPullStream(row.id);
   } catch (err: any) {
     if (err?.response?.data?.error?.includes("拉取中")) {
-      pullRunning.value = true;
-      pullingSubId.value = row.id;
-      showPullLog.value = true;
+      // 已在拉取中：SubLog 是整个拉取跑完之后才 Create 的，
+      // 所以此刻的最新记录仍然属于上一次，直接拿来当基线是准的。
+      // 这里同样要清空 —— 后端会补发 history()，残留旧行会和补发的历史重复。
+      pullLogLines.value = [];
+      beginPullSession(row.id, baseline);
       connectPullStream(row.id);
       return;
     }
@@ -589,6 +736,10 @@ async function handleStopPull() {
       cancelButtonText: "取消",
     });
     await subscriptionApi.stopPull(pullingSubId.value);
+    // 后端把「拉取已停止」当成 pullErr，落库就是 status=1，跟真正的失败无法区分。
+    // 这里打个本地标记，done 之后直接显示「已终止」，从而不必给 SubLog.Status
+    // 加第三个取值、也不必跟着改订阅列表状态列和日志表格。
+    pullStopRequested = true;
     ElMessage.success("已发送停止请求");
   } catch (err: any) {
     if (err === "cancel" || err?.toString?.() === "cancel") return;
@@ -614,17 +765,55 @@ function connectPullStream(id: number) {
       }
     },
     onEvent(event) {
-      if (event.event === "done") {
-        pullRunning.value = false;
-        pullingSubId.value = null;
-        closePullStream();
-        loadData();
+      if (event.event !== "done") return;
+
+      const session = pullSession;
+      pullRunning.value = false;
+      pullingSubId.value = null;
+      closePullStream();
+      loadData();
+
+      // done 只说明「这条 SSE 连接结束了」，是传输状态不是业务状态。
+      // 真正区分靠 data（PullStream 只发这四种）：
+      //   finished     收到 \x00DONE 哨兵，拉取确实跑完了
+      //   not_running  广播器已不存在，拉取早就结束了
+      //   closed       channel 被关
+      //   timeout      5 分钟静默
+      // 前两种下 SubLog 已经 Create 完（service 里 Create 在 done() 之前），可以查库；
+      // 后两种下拉取可能还在跑，查到的会是上一次的结果，所以只报「连接中断」。
+      const reason = event.data.trim();
+
+      // not_running 说明广播器已随拉取结束一起销毁，history 也跟着没了，
+      // 这条流一行日志都补发不出来。空日志配一个孤零零的状态太突兀，补一行指路。
+      // 放在 pullStopRequested 分支之前：用户点过停止后关掉弹窗再打开，同样是空日志。
+      // 最常见的触发路径就是「拉取途中关掉弹窗，等跑完之后再打开」。
+      if (
+        reason === "not_running" &&
+        pullLogLines.value.length === 0 &&
+        pullBuffer.length === 0
+      ) {
+        pullLogLines.value.push(
+          "[提示] 本次拉取已结束，完整日志请在订阅列表的「日志」中查看",
+        );
       }
+
+      if (pullStopRequested) {
+        pullOutcome.value = "aborted";
+        return;
+      }
+      if (reason === "finished" || reason === "not_running") {
+        // 用闭包里的 id 而不是 pullingSubId：上面刚把它置空，且这条流本来就是为 id 开的。
+        void resolvePullOutcome(id, session);
+        return;
+      }
+      pullOutcome.value = "disconnected";
     },
     onError() {
       pullRunning.value = false;
       pullingSubId.value = null;
       closePullStream();
+      // 断网 / 刷新 token 失败等：拉取多半还在后端跑着，同样不查库。
+      pullOutcome.value = pullStopRequested ? "aborted" : "disconnected";
     },
   });
 }
@@ -634,6 +823,15 @@ function closePullStream() {
     pullEventSource.close();
     pullEventSource = null;
   }
+}
+
+function handlePullDialogClose() {
+  // 弹窗关掉之后，在途的日志查询回来不能再写状态（否则会盖到下一次拉取上）。
+  // 递增会话号即可让 resolvePullOutcome 的守卫把结果整个丢弃。
+  pullSession = ++pullSessionSeq;
+  closePullStream();
+  // 这里刻意不动 pullRunning / pullingSubId / pullBaselineLogId / pullStopRequested：
+  // 后端拉取还在跑，这四个值是重新打开弹窗时 reattachPullStream 恢复现场的依据。
 }
 
 async function handleBatchDelete() {
@@ -1328,7 +1526,7 @@ function viewLogDetail(log: any) {
       width="900px"
       :fullscreen="dialogFullscreen"
       :close-on-click-modal="false"
-      @close="closePullStream"
+      @close="handlePullDialogClose"
     >
       <div ref="pullLogRef" class="pull-log-content dd-log-surface">
         <div
@@ -1358,14 +1556,13 @@ function viewLogDetail(log: any) {
           （已在 global.scss 的 .el-dialog 块里统一改为 flex；Element Plus 原生只有 text-align:right，
           在那种 inline 上下文里 auto 外边距不产生推挤，所以这里换回 el-tag 会重新贴到按钮上）。
         -->
-        <span v-if="pullRunning" class="pull-status is-running">
-          <span class="pull-status__mark" aria-hidden="true"></span>运行中
-        </span>
         <span
-          v-else-if="pullLogLines.length > 0"
-          class="pull-status is-finished"
+          v-if="pullStatusView.text"
+          class="pull-status"
+          :class="`is-${pullStatusView.tone}`"
         >
-          <span class="pull-status__mark" aria-hidden="true"></span>已完成
+          <span class="pull-status__mark" aria-hidden="true"></span
+          >{{ pullStatusView.text }}
         </span>
         <el-button v-if="pullRunning" type="danger" @click="handleStopPull"
           >停止</el-button
@@ -1757,6 +1954,8 @@ function viewLogDetail(log: any) {
   user-select: none;
 }
 
+// 色标默认就是 placeholder 灰，所以「连接中断」(is-disconnected) 和
+// 判不出状态时的「已完成」(is-unknown) 不需要单独写规则，直接吃这个默认值。
 .pull-status__mark {
   width: 8px;
   height: 8px;
@@ -1764,12 +1963,17 @@ function viewLogDetail(log: any) {
   background: var(--el-text-color-placeholder);
 }
 
-.pull-status.is-running .pull-status__mark {
+.pull-status.is-running .pull-status__mark,
+.pull-status.is-aborted .pull-status__mark {
   background: #f59e0b;
 }
 
-.pull-status.is-finished .pull-status__mark {
+.pull-status.is-success .pull-status__mark {
   background: #10b981;
+}
+
+.pull-status.is-failed .pull-status__mark {
+  background: #ef4444;
 }
 
 .settings-hint {
