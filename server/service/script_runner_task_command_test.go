@@ -330,6 +330,44 @@ func TestRunHookScriptHandlesLargeEnvWithoutExecArgLimit(t *testing.T) {
 	}
 }
 
+// desi / conc 的存在意义就是「只跑选中的账号」。如果它们仍然把全量 cookie 塞进
+// 子进程环境，账号越多越容易撞上 execve 的 MAX_ARG_STRLEN，分批执行也就白分了。
+func TestDesiAndConcNarrowEnvToSelectedAccounts(t *testing.T) {
+	full := "cookie-one&cookie-two&cookie-three&cookie-four"
+	envVars := map[string]string{
+		"JD_COOKIE": full,
+		"OTHER":     "keep-me",
+	}
+
+	desiPlan := &CommandExecutionPlan{Mode: commandModeDesi, EnvName: "JD_COOKIE", AccountSpec: "2 3"}
+	desiEnv, err := applyCommandEnvOverrides(desiPlan, envVars)
+	if err != nil {
+		t.Fatalf("apply desi env overrides: %v", err)
+	}
+	if got, want := desiEnv["JD_COOKIE"], "cookie-two&cookie-three"; got != want {
+		t.Fatalf("expected desi env narrowed to %q, got %q", want, got)
+	}
+	if desiEnv["OTHER"] != "keep-me" {
+		t.Fatalf("expected unrelated env untouched, got %q", desiEnv["OTHER"])
+	}
+	if envVars["JD_COOKIE"] != full {
+		t.Fatalf("expected source env map untouched, got %q", envVars["JD_COOKIE"])
+	}
+
+	concPlan := &CommandExecutionPlan{Mode: commandModeConc, EnvName: "JD_COOKIE", AccountSpec: "1-max"}
+	selections, err := resolveTaskAccountSelections(envVars, concPlan.EnvName, concPlan.AccountSpec)
+	if err != nil {
+		t.Fatalf("resolve conc selections: %v", err)
+	}
+	if len(selections) != 4 {
+		t.Fatalf("expected 4 conc selections, got %d", len(selections))
+	}
+	concEnv := applyConcurrentAccountEnv(concPlan, envVars, selections[2])
+	if got, want := concEnv["JD_COOKIE"], "cookie-three"; got != want {
+		t.Fatalf("expected conc env narrowed to %q, got %q", want, got)
+	}
+}
+
 func TestResolveTaskAccountSelections(t *testing.T) {
 	envVars := map[string]string{
 		"JD_COOKIE": "a&b&c",

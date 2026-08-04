@@ -9,7 +9,7 @@
  *
  * 代价是原生下载带不了 `Authorization` 头（项目用的是 Bearer JWT，不是 Cookie），
  * 所以要先用带头的普通请求换一张短期票据，再让浏览器去访问带票据的 URL。
- * 票据由后端 `pkg/dlticket` 签发：绑定单个文件、60 秒过期。
+ * 票据由后端 `pkg/dlticket` 签发：绑定单个文件、120 秒过期（见 handler/log_raw_download.go 的 rawLogTicketTTL）。
  */
 export interface RawLogDownloadTicket {
   /** 已经拼好票据的下载地址，直接交给浏览器即可 */

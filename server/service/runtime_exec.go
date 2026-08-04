@@ -109,7 +109,10 @@ fi
 . "$__dd_script" "$@"
 `
 
-const shellEnvExportValueMaxBytes = 128 * 1024
+// bash 任务的 env.sh 里，超过 MAX_ARG_STRLEN 的变量只赋值不 export，
+// 否则 bash 自己往下 exec 任何命令都会直接 E2BIG。
+// 预算上限再额外压一道，避免一堆中等大小的变量叠加撞上 ARG_MAX。
+const shellEnvExportValueMaxBytes = linuxMaxArgStrLenBytes
 const shellEnvExportBudgetBytes = 512 * 1024
 
 const goEnvBootstrapSource = `package main
@@ -1183,20 +1186,10 @@ func writeManagedRuntimeShellEnvFile(envVars map[string]string) (string, string,
 		b.WriteByte('\n')
 	}
 
-	exportedBytes := 0
-	for _, key := range keys {
-		value := envVars[key]
-		if !isValidShellEnvName(key) || isDangerousShellEnvName(key) || strings.ContainsRune(value, 0) {
-			continue
-		}
-		entryBytes := len(key) + 1 + len(value) + 1
-		if entryBytes > shellEnvExportValueMaxBytes || exportedBytes+entryBytes > shellEnvExportBudgetBytes {
-			continue
-		}
+	for _, key := range planShellEnvExport(envVars).Exported {
 		b.WriteString("export ")
 		b.WriteString(key)
 		b.WriteByte('\n')
-		exportedBytes += entryBytes
 	}
 
 	envFile := filepath.Join(tempDir, "env.sh")
@@ -1206,6 +1199,55 @@ func writeManagedRuntimeShellEnvFile(envVars map[string]string) (string, string,
 	}
 
 	return tempDir, envFile, cleanup, nil
+}
+
+// shellEnvExportPlan 是 writeManagedRuntimeShellEnvFile 的导出决策结果。
+// 单独抽出来是为了让诊断提示（buildRuntimeEnvLimitWarnings）能复用同一套规则，
+// 不至于两边阈值各写一份然后慢慢漂移。
+type shellEnvExportPlan struct {
+	// Exported 是真正会写 `export KEY` 的变量名，按 key 升序。
+	Exported []string
+	// SkippedTooLong 是单条就超过 MAX_ARG_STRLEN、只赋值不导出的变量。
+	SkippedTooLong []runtimeEnvEntrySize
+	// SkippedBudget 是单条不超限、但累计超过导出预算被让位的变量。
+	SkippedBudget []runtimeEnvEntrySize
+}
+
+func planShellEnvExport(envVars map[string]string) shellEnvExportPlan {
+	keys := make([]string, 0, len(envVars))
+	for key := range envVars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	plan := shellEnvExportPlan{Exported: make([]string, 0, len(keys))}
+	exportedBytes := 0
+	for _, key := range keys {
+		value := envVars[key]
+		if !isValidShellEnvName(key) || isDangerousShellEnvName(key) || strings.ContainsRune(value, 0) {
+			continue
+		}
+		entry := runtimeEnvEntrySize{Name: key, Bytes: runtimeEnvEntryBytes(key, value)}
+		if entry.Bytes > shellEnvExportValueMaxBytes {
+			plan.SkippedTooLong = append(plan.SkippedTooLong, entry)
+			continue
+		}
+		if exportedBytes+entry.Bytes > shellEnvExportBudgetBytes {
+			plan.SkippedBudget = append(plan.SkippedBudget, entry)
+			continue
+		}
+		plan.Exported = append(plan.Exported, key)
+		exportedBytes += entry.Bytes
+	}
+	return plan
+}
+
+// shellEnvExportSkippedByBudget 只返回「因为预算被挤掉」的变量，按体积降序，
+// 供诊断提示列出来。超过单条上限的那批由 buildRuntimeEnvLimitWarnings 单独讲。
+func shellEnvExportSkippedByBudget(envVars map[string]string) []runtimeEnvEntrySize {
+	skipped := planShellEnvExport(envVars).SkippedBudget
+	sortRuntimeEnvEntries(skipped)
+	return skipped
 }
 
 func isValidShellEnvName(name string) bool {
