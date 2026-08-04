@@ -76,7 +76,7 @@ const binaryProxyOptions = [
         </el-button>
       </div>
       <span class="form-hint">
-        Docker 部署更新使用，可填写镜像加速地址或自建镜像源；也可以到 status.anye.xyz 查看更多镜像源状态；留空则直接从默认镜像仓库拉取更新镜像。
+        仅用于旧 Docker Socket 一键更新。Watchtower 部署请在 .env 中设置 DAIDAI_PANEL_IMAGE，让容器镜像与 IMAGE_NAME 同步使用镜像加速或自建仓库。
       </span>
     </div>
 

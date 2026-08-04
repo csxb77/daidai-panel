@@ -78,7 +78,7 @@ var registeredSystemConfigSpecs = []systemConfigSpec{
 	newTrimmedStringConfig("notify_panel_label", "", "通知标题前缀的面板名称（多面板区分用，留空不附带）", "alerts"),
 	newBoolConfig("notify_on_login", "false", "登录成功发送通知", "security"),
 	newValidatedStringConfig("proxy_url", "", "出站请求代理地址", "network", normalizeProxyURL),
-	newValidatedStringConfig("update_image_mirror", "", "系统更新拉取镜像时使用的可选镜像源（留空直连 Docker Hub）", "network", normalizeUpdateImageMirror),
+	newValidatedStringConfig("update_image_mirror", "", "旧 Docker Socket 更新链路使用的可选镜像源（Watchtower 部署请通过 DAIDAI_PANEL_IMAGE 配置仓库）", "network", normalizeUpdateImageMirror),
 	newValidatedStringConfig("binary_update_proxy", "", "二进制更新下载加速源（留空直连 GitHub Release）", "network", normalizeBinaryUpdateProxy),
 	newValidatedStringConfig(
 		"trusted_proxy_cidrs",

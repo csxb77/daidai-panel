@@ -11,7 +11,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { PanelUpdateStatus } from '@/api/system'
 import { useResponsive } from '@/composables/useResponsive'
 
-type UpdateVisualStatus = 'idle' | 'running' | 'restarting' | 'failed' | 'timeout'
+type UpdateVisualStatus = 'idle' | 'running' | 'restarting' | 'completed' | 'failed' | 'timeout'
 
 const props = defineProps<{
   visible: boolean
@@ -30,6 +30,15 @@ let elapsedTimer: ReturnType<typeof setInterval> | null = null
 
 const deploymentType = computed(() => props.updateStatus?.deployment_type || 'docker')
 const isBinaryUpdate = computed(() => deploymentType.value === 'binary')
+const isWatchtowerUpdate = computed(() => props.updateStatus?.update_manager === 'watchtower')
+
+const watchtowerSteps = [
+  {
+    key: 'trigger',
+    title: '提交更新检查',
+    hint: '由 Watchtower 接管镜像检查和容器更新',
+  },
+] as const
 
 const dockerSteps = [
   {
@@ -87,9 +96,12 @@ const binarySteps = [
   },
 ] as const
 
-const steps = computed(() => isBinaryUpdate.value ? binarySteps : dockerSteps)
+const steps = computed(() => isWatchtowerUpdate.value ? watchtowerSteps : isBinaryUpdate.value ? binarySteps : dockerSteps)
 const currentPhase = computed(() => props.updateStatus?.phase || 'preparing')
 const progressPercent = computed(() => {
+  if (props.status === 'completed') {
+    return 100
+  }
   if (props.status === 'timeout') {
     return 96
   }
@@ -128,6 +140,9 @@ const progressPercent = computed(() => {
 })
 
 const currentStepIndex = computed(() => {
+  if (isWatchtowerUpdate.value) {
+    return 0
+  }
   if (props.status === 'restarting' || props.status === 'timeout') {
     return 4
   }
@@ -167,6 +182,8 @@ const currentStepIndex = computed(() => {
 
 const dialogTitle = computed(() => {
   switch (props.status) {
+    case 'completed':
+      return isWatchtowerUpdate.value ? '已交给 Watchtower' : '更新请求已完成'
     case 'restarting':
       return '正在切换新版本'
     case 'failed':
@@ -179,6 +196,8 @@ const dialogTitle = computed(() => {
 
 const statusText = computed(() => {
   switch (props.status) {
+    case 'completed':
+      return isWatchtowerUpdate.value ? '已接管' : '已完成'
     case 'restarting':
       return '重启切换中'
     case 'failed':
@@ -192,6 +211,8 @@ const statusText = computed(() => {
 
 const themeClass = computed(() => {
   switch (props.status) {
+    case 'completed':
+      return 'is-completed'
     case 'failed':
     case 'timeout':
       return 'is-danger'
@@ -204,6 +225,8 @@ const themeClass = computed(() => {
 
 const heroIcon = computed(() => {
   switch (props.status) {
+    case 'completed':
+      return CircleCheckFilled
     case 'failed':
     case 'timeout':
       return WarningFilled
@@ -243,6 +266,9 @@ const elapsedLabel = computed(() => {
 })
 
 function stepState(index: number) {
+  if (props.status === 'completed') {
+    return 'is-done'
+  }
   if (props.status === 'failed') {
     if (index < currentStepIndex.value) {
       return 'is-done'
@@ -282,6 +308,8 @@ function phaseLabel(phase: string) {
     }
   }
   switch (phase) {
+    case 'watchtower-triggered':
+      return 'Watchtower 已接管'
     case 'preparing':
       return '环境校验'
     case 'pulling':
@@ -333,8 +361,8 @@ onBeforeUnmount(() => {
     :fullscreen="dialogFullscreen"
     append-to-body
     :close-on-click-modal="false"
-    :close-on-press-escape="status === 'failed' || status === 'timeout'"
-    :show-close="status === 'failed' || status === 'timeout'"
+    :close-on-press-escape="status === 'completed' || status === 'failed' || status === 'timeout'"
+    :show-close="status === 'completed' || status === 'failed' || status === 'timeout'"
     @close="onClose"
   >
     <div class="update-progress-shell" :class="themeClass">
@@ -442,7 +470,7 @@ onBeforeUnmount(() => {
           <el-button>查看发布说明</el-button>
         </a>
         <el-button
-          v-if="status === 'failed' || status === 'timeout'"
+          v-if="status === 'completed' || status === 'failed' || status === 'timeout'"
           @click="onClose"
         >
           关闭

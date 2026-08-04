@@ -2,7 +2,7 @@ import { onBeforeUnmount, ref } from 'vue'
 import { configApi, systemApi, type PanelUpdateStatus } from '@/api/system'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-type UpdateVisualStatus = 'idle' | 'running' | 'restarting' | 'failed' | 'timeout'
+type UpdateVisualStatus = 'idle' | 'running' | 'restarting' | 'completed' | 'failed' | 'timeout'
 
 export function useSettingsOverview() {
   const systemInfo = ref<any>({})
@@ -241,6 +241,13 @@ export function useSettingsOverview() {
       return
     }
 
+    if (updateStatus.value?.status === 'completed') {
+      updateProgressStatus.value = 'completed'
+      updateProgressError.value = ''
+      updatingPanel.value = false
+      return
+    }
+
     if (updateStatus.value?.status === 'restarting') {
       updateProgressStatus.value = 'restarting'
       updateProgressError.value = ''
@@ -278,6 +285,13 @@ export function useSettingsOverview() {
         applyUpdateSnapshot(res.data || {})
 
         if (updateStatus.value?.status === 'failed') {
+          return
+        }
+
+        if (updateStatus.value?.status === 'completed') {
+          stopUpdateStatusPolling()
+          updatingPanel.value = false
+          ElMessage.success(updateStatus.value.message || '更新请求已完成')
           return
         }
 

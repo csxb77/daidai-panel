@@ -13,7 +13,7 @@ defineProps<{
   savingAutoUpdate: boolean
   releaseNotesVisible: boolean
   updateProgressVisible: boolean
-  updateProgressStatus: 'idle' | 'running' | 'restarting' | 'failed' | 'timeout'
+  updateProgressStatus: 'idle' | 'running' | 'restarting' | 'completed' | 'failed' | 'timeout'
   updateProgressError: string
   onCheckUpdate: () => void | Promise<void>
   onStartUpdate: () => void | Promise<void>
@@ -96,8 +96,14 @@ defineProps<{
 
       <div v-if="updateStatus && updateStatus.status && updateStatus.status !== 'idle'" class="hero-alert">
         <el-alert
-          :type="updateStatus.status === 'failed' ? 'error' : (updateStatus.status === 'restarting' ? 'success' : 'warning')"
-          :title="updateStatus.status === 'failed' ? '更新失败' : (updateStatus.status === 'restarting' ? '正在切换到新版本' : '更新进行中')"
+          :type="updateStatus.status === 'failed' ? 'error' : (updateStatus.status === 'completed' || updateStatus.status === 'restarting' ? 'success' : 'warning')"
+          :title="updateStatus.status === 'failed'
+            ? '更新失败'
+            : updateStatus.status === 'completed'
+              ? (updateStatus.update_manager === 'watchtower' ? 'Watchtower 已接管更新检查' : '更新请求已完成')
+              : updateStatus.status === 'restarting'
+                ? '正在切换到新版本'
+                : '更新进行中'"
           :closable="false"
         >
           <p>{{ updateStatus.message }}</p>

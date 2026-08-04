@@ -12,6 +12,8 @@ import (
 
 	"daidai-panel/model"
 	"daidai-panel/testutil"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestResolveUpdateImageTargetUsesMirrorForDockerHubImage(t *testing.T) {
@@ -91,6 +93,110 @@ func TestNormalizePanelUpdateImageNameKeepsCustomRepo(t *testing.T) {
 	got := normalizePanelUpdateImageName("ghcr.io/acme/panel:1.0.0")
 	if got != "ghcr.io/acme/panel:1.0.0" {
 		t.Fatalf("expected custom repo to stay unchanged, got %q", got)
+	}
+}
+
+func TestNormalizePanelUpdateImageNamePreservesRuntimeVariants(t *testing.T) {
+	const repository = "linzixuanzz/daidai-panel:"
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		channel string
+	}{
+		// 十个正式滚动标签必须原样保留。
+		{"latest", repository + "latest", repository + "latest", "latest"},
+		{"debian", repository + "debian", repository + "debian", "debian"},
+		{"latest full", repository + "latest-full", repository + "latest-full", "latest"},
+		{"debian full", repository + "debian-full", repository + "debian-full", "debian"},
+		{"latest 3.10", repository + "latest-3.10", repository + "latest-3.10", "latest"},
+		{"latest 3.11", repository + "latest-3.11", repository + "latest-3.11", "latest"},
+		{"debian 3.10", repository + "debian-3.10", repository + "debian-3.10", "debian"},
+		{"debian 3.11", repository + "debian-3.11", repository + "debian-3.11", "debian"},
+		{"latest all", repository + "latest-all", repository + "latest-all", "latest"},
+		{"debian all", repository + "debian-all", repository + "debian-all", "debian"},
+
+		// 六个历史浮动标签继续更新，但统一转向新的连字符标签。
+		{"legacy latest 3.10", repository + "latest3.10", repository + "latest-3.10", "latest"},
+		{"legacy latest 3.11", repository + "latest3.11", repository + "latest-3.11", "latest"},
+		{"legacy latest all", repository + "latestall", repository + "latest-all", "latest"},
+		{"legacy debian 3.10", repository + "debian3.10", repository + "debian-3.10", "debian"},
+		{"legacy debian 3.11", repository + "debian3.11", repository + "debian-3.11", "debian"},
+		{"legacy debian all", repository + "debianall", repository + "debian-all", "debian"},
+
+		// 固定版本号标签更新时必须回到同一镜像族的滚动标签。
+		{"version latest", repository + "2.4.0", repository + "latest", "latest"},
+		{"version latest with v", repository + "v2.4.0", repository + "latest", "latest"},
+		{"version debian", repository + "2.4.0-debian", repository + "debian", "debian"},
+		{"version latest full", repository + "2.4.0-full", repository + "latest-full", "latest"},
+		{"version debian full", repository + "2.4.0-debian-full", repository + "debian-full", "debian"},
+		{"version latest 3.10", repository + "2.4.0-3.10", repository + "latest-3.10", "latest"},
+		{"version latest 3.11", repository + "2.4.0-3.11", repository + "latest-3.11", "latest"},
+		{"version latest all", repository + "2.4.0-all", repository + "latest-all", "latest"},
+		{"version debian 3.10", repository + "2.4.0-debian-3.10", repository + "debian-3.10", "debian"},
+		{"version debian 3.11", repository + "2.4.0-debian-3.11", repository + "debian-3.11", "debian"},
+		{"version debian all", repository + "2.4.0-debian-all", repository + "debian-all", "debian"},
+		{"legacy version debian 3.10", repository + "2.4.0-debian3.10", repository + "debian-3.10", "debian"},
+		{"legacy version debian 3.11", repository + "2.4.0-debian3.11", repository + "debian-3.11", "debian"},
+		{"legacy version debian all", repository + "2.4.0-debianall", repository + "debian-all", "debian"},
+
+		// 镜像加速域名属于地址前缀，不能被归一化过程删掉。
+		{"mirror latest", "docker.1ms.run/" + repository + "2.4.0-3.10", "docker.1ms.run/" + repository + "latest-3.10", "latest"},
+		{"mirror debian", "docker.1ms.run/" + repository + "2.4.0-debian-all", "docker.1ms.run/" + repository + "debian-all", "debian"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizePanelUpdateImageName(tc.input)
+			if got != tc.want {
+				t.Fatalf("expected normalized image %q, got %q", tc.want, got)
+			}
+			if channel := resolvePanelUpdateChannel(got); channel != tc.channel {
+				t.Fatalf("expected display channel %q, got %q", tc.channel, channel)
+			}
+		})
+	}
+}
+
+func TestNormalizePanelUpdateImageNameKeepsUnknownOfficialTag(t *testing.T) {
+	const imageName = "linzixuanzz/daidai-panel:preview-arm64"
+	if got := normalizePanelUpdateImageName(imageName); got != imageName {
+		t.Fatalf("expected unknown official tag to remain unchanged, got %q", got)
+	}
+}
+
+func TestNormalizePanelUpdateImageNameKeepsDigestPinned(t *testing.T) {
+	const imageName = "linzixuanzz/daidai-panel@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if got := normalizePanelUpdateImageName(imageName); got != imageName {
+		t.Fatalf("expected digest-pinned image to remain unchanged, got %q", got)
+	}
+}
+
+func TestSupportsDockerSocketPanelUpdateOnlyAllowsFullRollingTags(t *testing.T) {
+	cases := []struct {
+		name      string
+		imageName string
+		want      bool
+	}{
+		{"official latest full", "linzixuanzz/daidai-panel:latest-full", true},
+		{"official debian full", "linzixuanzz/daidai-panel:debian-full", true},
+		{"normalized fixed latest full", normalizePanelUpdateImageName("linzixuanzz/daidai-panel:2.4.0-full"), true},
+		{"normalized fixed debian full", normalizePanelUpdateImageName("linzixuanzz/daidai-panel:2.4.0-debian-full"), true},
+		{"official latest slim", "linzixuanzz/daidai-panel:latest", false},
+		{"official debian slim", "linzixuanzz/daidai-panel:debian", false},
+		{"official python variant", "linzixuanzz/daidai-panel:latest-3.12", false},
+		{"custom repository slim", "ghcr.io/acme/panel:latest", false},
+		{"custom repository full", "ghcr.io/acme/panel:latest-full", true},
+		{"custom fixed full", "ghcr.io/acme/panel:2.4.0-full", false},
+		{"untagged image", "linzixuanzz/daidai-panel", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := supportsDockerSocketPanelUpdate(tc.imageName); got != tc.want {
+				t.Fatalf("expected support=%v for %q, got %v", tc.want, tc.imageName, got)
+			}
+		})
 	}
 }
 
@@ -218,6 +324,7 @@ func TestBuildContainerRunArgsPreservesCustomDataDirEnvAndMount(t *testing.T) {
 				"TZ=Asia/Shanghai",
 				"DATA_DIR=/srv/custom-data",
 				"CONTAINER_NAME=daidai-panel",
+				"IMAGE_NAME=linzixuanzz/daidai-panel:2.3.5-debianall",
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			},
 		},
@@ -237,6 +344,12 @@ func TestBuildContainerRunArgsPreservesCustomDataDirEnvAndMount(t *testing.T) {
 	}
 	if slices.Contains(got, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin") {
 		t.Fatalf("expected runtime PATH env to be filtered out, got %v", got)
+	}
+	if slices.Contains(got, "IMAGE_NAME=linzixuanzz/daidai-panel:2.3.5-debianall") {
+		t.Fatalf("expected stale IMAGE_NAME env to be removed, got %v", got)
+	}
+	if !slices.Contains(got, "IMAGE_NAME=linzixuanzz/daidai-panel:latest") {
+		t.Fatalf("expected IMAGE_NAME env to match the actual target image, got %v", got)
 	}
 	if got[len(got)-1] != "linzixuanzz/daidai-panel:latest" {
 		t.Fatalf("expected image name to remain the final run arg, got %v", got)
@@ -383,9 +496,20 @@ func TestBuildPanelUpdateHelperScriptSkipsInvalidPreviousImageID(t *testing.T) {
 }
 
 func TestTriggerWatchtowerUpdateAllowsNoContentSuccess(t *testing.T) {
+	t.Setenv("CONTAINER_NAME", "panel.demo")
+	t.Setenv("IMAGE_NAME", "registry.example.com/team/panel:stable")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST request, got %s", r.Method)
+		}
+		if r.URL.Path != "/v1/update" || r.URL.Query().Get("async") != "true" {
+			t.Fatalf("expected asynchronous Watchtower update request, got %s", r.URL.String())
+		}
+		if got := r.URL.Query().Get("container"); got != `^panel\.demo$` {
+			t.Fatalf("expected request to target current container exactly, got %q", got)
+		}
+		if r.URL.Query().Has("image") {
+			t.Fatalf("expected request to rely only on the exact container filter, got %s", r.URL.String())
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer demo-token" {
 			t.Fatalf("expected bearer token header, got %q", got)
@@ -434,6 +558,27 @@ func TestTriggerWatchtowerUpdateAllowsEmpty200Body(t *testing.T) {
 	}
 }
 
+func TestTriggerWatchtowerUpdateAllowsAcceptedText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("Accepted"))
+	}))
+	defer server.Close()
+
+	result, err := triggerWatchtowerUpdate(watchtowerRuntimeConfig{
+		Managed:                true,
+		APIURL:                 server.URL,
+		APIToken:               "demo-token",
+		ManualTriggerSupported: true,
+	})
+	if err != nil {
+		t.Fatalf("expected 202 Accepted text to be treated as success, got %v", err)
+	}
+	if result["message"] != "Accepted" {
+		t.Fatalf("expected Accepted response message to be preserved, got %#v", result)
+	}
+}
+
 func TestTriggerWatchtowerUpdateReturnsErrorPayloadMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -451,6 +596,175 @@ func TestTriggerWatchtowerUpdateReturnsErrorPayloadMessage(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "watchtower upstream failed") {
 		t.Fatalf("expected error payload message to surface, got %v", err)
+	}
+}
+
+func TestCurrentWatchtowerRuntimeConfigRouting(t *testing.T) {
+	cases := []struct {
+		name          string
+		manager       string
+		apiURL        string
+		apiToken      string
+		managed       bool
+		manualTrigger bool
+	}{
+		{"not configured", "", "", "", false, false},
+		{"manager only", "watchtower", "", "", true, false},
+		{"api url only", "", "http://watchtower:8080", "", false, false},
+		{"complete", "watchtower", "http://watchtower:8080", "demo-token", true, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PANEL_UPDATE_MANAGER", tc.manager)
+			t.Setenv("WATCHTOWER_HTTP_API_URL", tc.apiURL)
+			t.Setenv("WATCHTOWER_HTTP_API_TOKEN", tc.apiToken)
+
+			cfg := currentWatchtowerRuntimeConfig()
+			if cfg.Managed != tc.managed {
+				t.Fatalf("expected managed=%v, got %v", tc.managed, cfg.Managed)
+			}
+			if cfg.ManualTriggerSupported != tc.manualTrigger {
+				t.Fatalf("expected manual trigger=%v, got %v", tc.manualTrigger, cfg.ManualTriggerSupported)
+			}
+		})
+	}
+}
+
+func TestBuildPanelUpdatePlanInfoPrefersWatchtowerAndKeepsDebianFamily(t *testing.T) {
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", "http://watchtower:8080")
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "demo-token")
+	t.Setenv("CONTAINER_NAME", "daidai-panel")
+	t.Setenv("IMAGE_NAME", "docker.1ms.run/linzixuanzz/daidai-panel:debian-all")
+
+	plan, err := BuildPanelUpdatePlanInfo()
+	if err != nil {
+		t.Fatalf("expected Watchtower plan, got %v", err)
+	}
+	if plan.UpdateManager != panelUpdateManagerWatchtower {
+		t.Fatalf("expected Watchtower update manager, got %#v", plan)
+	}
+	if !plan.WatchtowerManualTriggerSupported {
+		t.Fatalf("expected Watchtower manual trigger to be available, got %#v", plan)
+	}
+	if plan.ImageName != "docker.1ms.run/linzixuanzz/daidai-panel:debian-all" {
+		t.Fatalf("expected Watchtower target to keep the actual rolling image tag, got %#v", plan)
+	}
+	if plan.Channel != "debian" {
+		t.Fatalf("expected frontend display channel to remain debian, got %#v", plan)
+	}
+
+	// 静默更新会携带 release 调用同一个计划入口，也必须保持 Watchtower 分流。
+	autoPlan, err := buildPanelUpdatePlanForRelease(&panelReleaseInfo{TagName: "v2.4.0"})
+	if err != nil {
+		t.Fatalf("expected auto update to build Watchtower plan, got %v", err)
+	}
+	if autoPlan.UpdateManager != panelUpdateManagerWatchtower || autoPlan.ImageName != plan.ImageName {
+		t.Fatalf("expected auto update to keep Watchtower Debian target, got %#v", autoPlan)
+	}
+}
+
+func TestBuildPanelUpdatePlanInfoRejectsPinnedWatchtowerImage(t *testing.T) {
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", "http://watchtower:8080")
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "demo-token")
+	t.Setenv("IMAGE_NAME", "linzixuanzz/daidai-panel:2.4.0-debian-full")
+
+	_, err := BuildPanelUpdatePlanInfo()
+	if err == nil || !strings.Contains(err.Error(), "浮动标签") {
+		t.Fatalf("expected pinned Watchtower image to explain rolling-tag requirement, got %v", err)
+	}
+}
+
+func TestExecutePanelUpdateForCLIPrefersWatchtower(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", server.URL)
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "demo-token")
+	t.Setenv("IMAGE_NAME", "linzixuanzz/daidai-panel:latest-full")
+	panelUpdater = newPanelUpdateManager()
+	t.Cleanup(func() { panelUpdater = newPanelUpdateManager() })
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		status, err := ExecutePanelUpdateForCLI()
+		if err != nil {
+			t.Fatalf("expected CLI Watchtower trigger %d to succeed, got %v", attempt, err)
+		}
+		if status.Status != "completed" || status.UpdateManager != panelUpdateManagerWatchtower || status.Phase != "watchtower-triggered" {
+			t.Fatalf("expected terminal Watchtower CLI status, got %#v", status)
+		}
+		if status.PullImageName != "linzixuanzz/daidai-panel:latest-full" {
+			t.Fatalf("expected Watchtower to keep the actual rolling full image tag, got %#v", status)
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("expected completed status to allow a second Watchtower request, got %d requests", requests)
+	}
+}
+
+func TestUpdatePanelReturnsCompletedWatchtowerStatus(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("async") != "true" || r.URL.Query().Get("container") != "^daidai-panel$" {
+			t.Fatalf("expected targeted asynchronous request, got %s", r.URL.String())
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("Accepted"))
+	}))
+	defer server.Close()
+
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", server.URL)
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "demo-token")
+	t.Setenv("CONTAINER_NAME", "daidai-panel")
+	t.Setenv("IMAGE_NAME", "linzixuanzz/daidai-panel:debian-full")
+	panelUpdater = newPanelUpdateManager()
+	t.Cleanup(func() { panelUpdater = newPanelUpdateManager() })
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/system/update", (&SystemHandler{}).UpdatePanel)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/system/update", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var responseBody struct {
+		Data panelUpdateStatusSnapshot `json:"data"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &responseBody); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if responseBody.Data.Status != "completed" || responseBody.Data.UpdateManager != panelUpdateManagerWatchtower {
+		t.Fatalf("expected completed Watchtower response, got %#v", responseBody.Data)
+	}
+	if requests != 1 {
+		t.Fatalf("expected one Watchtower request, got %d", requests)
+	}
+}
+
+func TestExecutePanelUpdateForCLIExplainsIncompleteWatchtowerConfig(t *testing.T) {
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", "")
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "")
+	panelUpdater = newPanelUpdateManager()
+	t.Cleanup(func() { panelUpdater = newPanelUpdateManager() })
+
+	_, err := ExecutePanelUpdateForCLI()
+	if err == nil {
+		t.Fatal("expected incomplete Watchtower configuration to fail")
+	}
+	if !strings.Contains(err.Error(), "WATCHTOWER_HTTP_API_URL") || !strings.Contains(err.Error(), "WATCHTOWER_HTTP_API_TOKEN") {
+		t.Fatalf("expected clear missing Watchtower configuration message, got %v", err)
 	}
 }
 

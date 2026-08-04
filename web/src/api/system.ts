@@ -26,7 +26,7 @@ export interface RestoreProgressState {
 }
 
 export interface PanelUpdateStatus {
-  status?: 'idle' | 'running' | 'restarting' | 'failed'
+  status?: 'idle' | 'running' | 'restarting' | 'completed' | 'failed'
   phase?: string
   message?: string
   error?: string

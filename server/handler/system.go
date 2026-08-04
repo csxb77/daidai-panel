@@ -424,8 +424,12 @@ func (h *SystemHandler) CheckUpdate(c *gin.Context) {
 	watchtowerCfg := currentWatchtowerRuntimeConfig()
 
 	if watchtowerCfg.Managed {
-		autoUpdateSupported = watchtowerCfg.ManualTriggerSupported
-		if !watchtowerCfg.ManualTriggerSupported {
+		imageName := strings.TrimSpace(os.Getenv("IMAGE_NAME"))
+		pinnedImage := isPinnedPanelImageReference(imageName)
+		autoUpdateSupported = watchtowerCfg.ManualTriggerSupported && !pinnedImage
+		if pinnedImage {
+			updateDisabledReason = "当前容器使用固定版本标签或 digest，Watchtower 不会把它切换到后续版本；请先把 DAIDAI_PANEL_IMAGE 改为同系列浮动标签"
+		} else if !watchtowerCfg.ManualTriggerSupported {
 			updateDisabledReason = "当前由 Watchtower 托管自动更新；面板可展示更新状态，但未配置 Watchtower HTTP API 手动触发能力"
 		}
 		updateTarget = buildWatchtowerUpdateTarget(watchtowerCfg)
@@ -456,27 +460,6 @@ func (h *SystemHandler) CheckUpdate(c *gin.Context) {
 }
 
 func (h *SystemHandler) UpdatePanel(c *gin.Context) {
-	if watchtowerCfg := currentWatchtowerRuntimeConfig(); watchtowerCfg.Managed {
-		result, err := triggerWatchtowerUpdate(watchtowerCfg)
-		if err != nil {
-			response.BadRequest(c, err.Error())
-			return
-		}
-
-		response.Success(c, gin.H{
-			"message": "已触发 Watchtower 检查更新",
-			"data": gin.H{
-				"status":              "running",
-				"phase":               "watchtower-triggered",
-				"message":             "已请求 Watchtower 立即检查并执行容器更新",
-				"deployment_type":     "docker",
-				"update_manager":      panelUpdateManagerWatchtower,
-				"watchtower_response": result,
-			},
-		})
-		return
-	}
-
 	plan, err := buildPanelUpdatePlan()
 	if err != nil {
 		response.BadRequest(c, err.Error())
@@ -485,6 +468,22 @@ func (h *SystemHandler) UpdatePanel(c *gin.Context) {
 
 	if err := panelUpdater.begin(plan); err != nil {
 		respondUpdateConflict(c, err.Error())
+		return
+	}
+
+	if plan.UpdateManager == panelUpdateManagerWatchtower {
+		// Watchtower 的 async API 会立即返回接管结果；同步完成这一步后，
+		// 页面、自动更新和 ddp CLI 都能看到同一套 completed/failed 终态。
+		executePanelUpdate(plan)
+		snapshot := panelUpdater.snapshotCopy()
+		if snapshot.Status == "failed" {
+			response.BadRequest(c, snapshot.Error)
+			return
+		}
+		response.Success(c, gin.H{
+			"message": "已触发 Watchtower 检查更新",
+			"data":    snapshot,
+		})
 		return
 	}
 
