@@ -266,7 +266,16 @@ foreach ($compose in @(
     if ([regex]::Matches($composeText, [regex]::Escape('${DAIDAI_PANEL_IMAGE:-')).Count -ne 2) {
         Fail-Step "$($compose.Name) must use DAIDAI_PANEL_IMAGE for both image and IMAGE_NAME."
     }
-    if ([regex]::Matches($composeText, [regex]::Escape('WATCHTOWER_HTTP_API_URL')).Count -ne 1 `
+    # 这里数的是“赋值处”，不是变量名的出现次数，(?<!\$\{) 这个负向后顾不能删。
+    # 这个变量允许用户覆盖（见 .env.watchtower.prod.example），compose 里的写法是
+    #     WATCHTOWER_HTTP_API_URL=${WATCHTOWER_HTTP_API_URL:-http://watchtower:8080}
+    # 同一行变量名出现两次：一次是被赋值的键，一次是 ${...} 默认值表达式里的引用。
+    # 所以裸计数（[regex]::Escape 后直接数原始字符串）恒为 2，门禁必然假阳性 ——
+    # db34455 加入覆盖机制时没同步改这条早于它的检查，之后一直没发版才没被发现。
+    # 负向后顾把 ${...} 里的引用排除掉，只留赋值处：正常写法计 1；
+    # 谁要是又往 watchtower 服务的 environment 里补一份赋值，就会计 2 并照旧 Fail，
+    # 原意（该地址只暴露给 panel）不受影响。
+    if ([regex]::Matches($composeText, '(?<!\$\{)WATCHTOWER_HTTP_API_URL').Count -ne 1 `
         -or -not $composeText.Contains('http://watchtower:8080')) {
         Fail-Step "$($compose.Name) must expose the stable watchtower service URL only to the panel."
     }
