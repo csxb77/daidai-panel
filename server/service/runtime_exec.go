@@ -144,11 +144,26 @@ func init() {
 }
 `
 
+// BuildManagedRuntimeEnvMap 丢弃脚本凭据的 jti，见
+// BuildManagedRuntimeEnvMapForPythonVersion 上的警告。
 func BuildManagedRuntimeEnvMap(workDir, scriptsDir string, defaultChannelID *uint, ttl time.Duration) (map[string]string, error) {
 	return BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir, defaultChannelID, ttl, "")
 }
 
+// BuildManagedRuntimeEnvMapForPythonVersion 丢弃脚本凭据的 jti。
+//
+// 警告：丢掉 jti 就等于放弃吊销能力——那枚 operator 凭据会一直有效到 ttl 到期，谁也收不回来。
+// 目前**没有任何生产路径**该走这里，三条注入路径（任务执行、ddp python/shell、脚本调试运行）
+// 全部改用 BuildManagedRuntimeEnvMapWithScriptToken 并在用完后 RevokeScriptToken。
+// 保留这两个包装只是给不关心凭据回收的测试用；新增调用方前请先确认你真的不需要吊销。
 func BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir string, defaultChannelID *uint, ttl time.Duration, pythonVersion string) (map[string]string, error) {
+	envMap, _, err := BuildManagedRuntimeEnvMapWithScriptToken(workDir, scriptsDir, defaultChannelID, ttl, pythonVersion)
+	return envMap, err
+}
+
+// BuildManagedRuntimeEnvMapWithScriptToken 额外返回注入凭据的 jti / 到期时间，
+// 让调用方能在任务结束时调 RevokeScriptToken 立刻作废它。
+func BuildManagedRuntimeEnvMapWithScriptToken(workDir, scriptsDir string, defaultChannelID *uint, ttl time.Duration, pythonVersion string) (map[string]string, *ScriptTokenInfo, error) {
 	var envVarRecords []model.EnvVar
 	// 按稳定顺序读取：置顶 > 组内位置 > 创建时间 > id；避免无 ORDER BY 导致同名变量的相对顺序抖动
 	database.DB.Where("enabled = ?", true).
@@ -193,15 +208,17 @@ func BuildManagedRuntimeEnvMapForPythonVersion(workDir, scriptsDir string, defau
 	}
 	AppendScriptHelperPaths(envMap, scriptsDir)
 	var helperErr error
-	if helperEnv, err := BuildNotifyHelperEnv(scriptsDir, workDir, config.C.Server.Port, defaultChannelID, ttl); err == nil {
+	var scriptToken *ScriptTokenInfo
+	if helperEnv, tokenInfo, err := BuildNotifyHelperEnv(scriptsDir, workDir, config.C.Server.Port, defaultChannelID, ttl); err == nil {
 		for key, value := range helperEnv {
 			envMap[key] = value
 		}
+		scriptToken = tokenInfo
 	} else {
 		helperErr = err
 	}
 
-	return envMap, helperErr
+	return envMap, scriptToken, helperErr
 }
 
 func buildManagedPythonPath(existingPythonPath, workDir, scriptsDir, venvSitePackages string) string {

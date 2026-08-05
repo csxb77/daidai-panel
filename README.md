@@ -436,8 +436,9 @@ daidai-panel-windows-amd64/
 | 改端口、配 Nginx / 宝塔 / Caddy 反代、SSE 日志流断掉 | [端口与反向代理](#端口与反向代理) |
 | 升级到新版本 | [更新](#更新) |
 | 忘了密码 / 用户名，或 IP 白名单把自己锁在门外 | [容器命令 `ddp`](#容器命令-ddp) |
+| 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
-| 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考)，完整清单见 [系统配置与运维说明](./docs/system-config-operations.md) |
+| 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
 | 看这一版改了什么 | [v3.0.0 更新日志](./docs/release-notes/v3.0.0.md) |
 
 ## 端口与反向代理
@@ -735,7 +736,7 @@ Dumb-Panel/
 面板有两层配置：
 
 - **启动配置**：Docker 环境变量 + `config.yaml`。Docker 部署时由 `entrypoint.sh` 自动生成，一般不需要手动改。
-- **运行期配置**：进面板后「系统设置」里改，落到 SQLite 的 `system_configs` 表，重启不丢失。完整项目清单见 [系统配置与运维说明](./docs/system-config-operations.md)。
+- **运行期配置**：进面板后「系统设置」里改，落到 SQLite 的 `system_configs` 表，重启不丢失。
 
 ### Docker 环境变量
 

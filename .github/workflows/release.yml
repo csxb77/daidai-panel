@@ -73,7 +73,9 @@ jobs:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: amd64
-        run: go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-amd64 .
+        run: |
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-amd64 .
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o ddp-linux-amd64 ./cmd/ddp
 
       - name: Build Linux arm64
         working-directory: server
@@ -81,7 +83,9 @@ jobs:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: arm64
-        run: go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-arm64 .
+        run: |
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-arm64 .
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o ddp-linux-arm64 ./cmd/ddp
 
       - name: Build Linux 386
         working-directory: server
@@ -89,7 +93,9 @@ jobs:
           CGO_ENABLED: '0'
           GOOS: linux
           GOARCH: '386'
-        run: go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-386 .
+        run: |
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-386 .
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o ddp-linux-386 ./cmd/ddp
 
       - name: Build Linux armv7
         working-directory: server
@@ -98,7 +104,9 @@ jobs:
           GOOS: linux
           GOARCH: arm
           GOARM: '7'
-        run: go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-armv7 .
+        run: |
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o daidai-linux-armv7 .
+          go build -ldflags="-s -w -X daidai-panel/handler.Version=${{ steps.version.outputs.VERSION }}" -o ddp-linux-armv7 ./cmd/ddp
 
       - name: Build Windows amd64
         working-directory: server
@@ -116,20 +124,26 @@ jobs:
           cp server/config.yaml release/ 2>/dev/null || true
           cp -r web/dist release/web
 
+          # ddp CLI 在包内统一叫 ddp（不带架构后缀），解压后可直接放进 PATH，
+          # 与 Docker 镜像里的 /usr/local/bin/ddp、Windows zip 里的 ddp.exe 保持同名。
           cp server/daidai-linux-amd64 release/
-          cd release && tar -czvf ../daidai-linux-amd64.tar.gz daidai-linux-amd64 config.yaml web/
-          rm daidai-linux-amd64
+          cp server/ddp-linux-amd64 release/ddp
+          cd release && tar -czvf ../daidai-linux-amd64.tar.gz daidai-linux-amd64 ddp config.yaml web/
+          rm daidai-linux-amd64 ddp
 
           cp ../server/daidai-linux-arm64 .
-          tar -czvf ../daidai-linux-arm64.tar.gz daidai-linux-arm64 config.yaml web/
-          rm daidai-linux-arm64
+          cp ../server/ddp-linux-arm64 ./ddp
+          tar -czvf ../daidai-linux-arm64.tar.gz daidai-linux-arm64 ddp config.yaml web/
+          rm daidai-linux-arm64 ddp
 
           cp ../server/daidai-linux-386 .
-          tar -czvf ../daidai-linux-386.tar.gz daidai-linux-386 config.yaml web/
-          rm daidai-linux-386
+          cp ../server/ddp-linux-386 ./ddp
+          tar -czvf ../daidai-linux-386.tar.gz daidai-linux-386 ddp config.yaml web/
+          rm daidai-linux-386 ddp
 
           cp ../server/daidai-linux-armv7 .
-          tar -czvf ../daidai-linux-armv7.tar.gz daidai-linux-armv7 config.yaml web/
+          cp ../server/ddp-linux-armv7 ./ddp
+          tar -czvf ../daidai-linux-armv7.tar.gz daidai-linux-armv7 ddp config.yaml web/
           cd ..
 
           # Windows 单机版：二进制 + 独立 config.yaml + start.bat + README，

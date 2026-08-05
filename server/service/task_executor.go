@@ -19,6 +19,20 @@ import (
 	"gorm.io/gorm"
 )
 
+// UntimedTaskScriptTokenTTL 是 task.Timeout == 0（DB 默认值，绝大多数任务）时
+// 注入脚本的面板凭据有效期。这不是「预期存活时长」——正常路径下任务一结束就会被吊销——
+// 而是吊销来不及执行时的最坏窗口。
+//
+// 导出是因为 ddp python / ddp shell 也要用同一个窗口：交互式会话同样没有可推导的运行时长，
+// 与「未设超时的任务」是同一类场景。一个常量、一套说法，文档才讲得清。
+const UntimedTaskScriptTokenTTL = 7 * 24 * time.Hour
+
+// runCommandWithPlanFunc 是子进程执行入口的可替换钩子，仅供测试注入
+// （与 runtime_exec.go 里的 warmManagedPythonVenvForVersionFunc 同款做法）。
+// 生产路径永远是 RunCommandWithPlan；测试借它构造"执行中 / 执行崩溃"这类
+// 无法靠真实子进程稳定复现的场景。
+var runCommandWithPlanFunc = RunCommandWithPlan
+
 type TaskExecutor struct {
 	scriptsDir       string
 	logDir           string
@@ -301,9 +315,12 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	}
 	envTTL := time.Duration(timeout)*time.Second + time.Hour
 	if timeout == 0 {
-		envTTL = 365 * 24 * time.Hour
+		// 未设超时的任务没有可推导的运行时长，取一个固定兜底窗口。
+		// 主控手段是任务结束时的吊销（见下方 defer），TTL 只在「面板被 kill -9 / 宿主断电，
+		// 吊销压根没机会执行」时兜底。取值不能太短，否则长任务会跑到一半丢掉 API 权限。
+		envTTL = UntimedTaskScriptTokenTTL
 	}
-	envVars, envErr := BuildManagedRuntimeEnvMapForPythonVersion(taskWorkDir, e.scriptsDir, task.NotificationChannelID, envTTL, task.PythonVersion)
+	envVars, scriptToken, envErr := BuildManagedRuntimeEnvMapWithScriptToken(taskWorkDir, e.scriptsDir, task.NotificationChannelID, envTTL, task.PythonVersion)
 	if envErr != nil {
 		log.Printf("prepare task runtime env failed: %v", envErr)
 	}
@@ -317,6 +334,11 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			exitCode = 1
 			success = false
 		}
+
+		// 任务已经跑完（正常结束、失败、超时被杀、panic 都汇聚到这里），
+		// 注入脚本的那枚 operator 凭据立刻作废，不让它在任务之外继续游荡。
+		// 放在 recover 之后：先保证 panic 被接住，再做吊销。
+		RevokeScriptToken(scriptToken)
 
 		duration := time.Since(startTime).Seconds()
 
@@ -453,7 +475,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		if plan.TimeoutOverride != nil && *plan.TimeoutOverride > 0 {
 			effectiveTimeout = *plan.TimeoutOverride
 		}
-		result, _, err := RunCommandWithPlan(plan, effectiveTimeout, envVars, maxLogSize, onOutputWithCollect, onStart)
+		result, _, err := runCommandWithPlanFunc(plan, effectiveTimeout, envVars, maxLogSize, onOutputWithCollect, onStart)
 		if err != nil {
 			onOutput(fmt.Sprintf("[执行错误: %s]\n", err.Error()))
 			if strings.Contains(err.Error(), "illegal instruction") || strings.Contains(err.Error(), "core dumped") {

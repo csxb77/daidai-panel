@@ -15,9 +15,10 @@ var (
 	logCleanupStop chan struct{}
 )
 
-// StartLogCleanupWorker 启动日志自动清理后台 worker：
+// StartLogCleanupWorker 启动周期清理后台 worker：
 // 启动后延迟一小段时间先清一次，之后每 6 小时清理一次。
-// 同时清理「数据库 TaskLog 旧记录」与「磁盘旧 .log 文件」，按 log_retention_days 判定，无开关。
+// 清理「数据库 TaskLog 旧记录」与「磁盘旧 .log 文件」（按 log_retention_days 判定，无开关），
+// 以及「已过期的 token 黑名单行」。
 func StartLogCleanupWorker() {
 	logCleanupOnce.Do(func() {
 		logCleanupStop = make(chan struct{})
@@ -38,15 +39,34 @@ func logCleanupLoop() {
 
 	// 启动延迟，避免与启动迁移争抢
 	time.Sleep(60 * time.Second)
-	cleanupOldLogs()
+	runPeriodicCleanup()
 
 	for {
 		select {
 		case <-ticker.C:
-			cleanupOldLogs()
+			runPeriodicCleanup()
 		case <-logCleanupStop:
 			return
 		}
+	}
+}
+
+// runPeriodicCleanup 汇总挂在这个 6 小时 ticker 上的全部清理动作。
+// 新增周期性清理请加在这里，不要再另起一个 goroutine + ticker。
+func runPeriodicCleanup() {
+	cleanupOldLogs()
+	cleanupExpiredTokenBlocklist()
+}
+
+// cleanupExpiredTokenBlocklist 清掉已经过期、留着也不改变鉴权结果的 token 黑名单行。
+func cleanupExpiredTokenBlocklist() {
+	removed, err := CleanExpiredTokenBlocklist()
+	if err != nil {
+		log.Printf("token blocklist cleanup: delete expired rows failed: %v", err)
+		return
+	}
+	if removed > 0 {
+		log.Printf("token blocklist cleanup: removed %d expired rows", removed)
 	}
 }
 
