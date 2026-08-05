@@ -4,7 +4,7 @@
 #
 # 默认会清理：
 #   - 运行中的 daidai-server 进程
-#   - Alpine rootfs (/data/daidai 或 /data/local/daidai)
+#   - 容器 rootfs (/data/daidai 或 /data/local/daidai)，Alpine / Debian 路径相同
 #   - 持久化目录 /data/adb/daidai-panel
 #
 # 如需保留数据以便重装后继续用，卸载前先：

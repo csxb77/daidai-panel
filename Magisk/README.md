@@ -2,17 +2,46 @@
 
 通过 Magisk / KernelSU / APatch 在已 Root 的 Android 设备上运行呆呆面板。开机自启，浏览器访问 `http://127.0.0.1:5700` 即可使用；后端绑定 `0.0.0.0`，局域网 / 内网穿透也能直连。
 
-> 本模块无需 Docker、无需 Termux。安装阶段会下载一份 Alpine 3.18 minirootfs 到 `/data/daidai`，在容器里 `apk` 装好 Python / Node.js / git 等运行时后，把 `daidai-server` 放进容器启动。运行期等同于"用 root 起了一个极小号 Linux 容器跑面板"。
+> 本模块无需 Docker、无需 Termux。安装阶段会下载一份 rootfs 到 `/data/daidai`，在容器里用包管理器装好 Python / Node.js / git 等运行时后，把 `daidai-server` 放进容器启动。运行期等同于"用 root 起了一个极小号 Linux 容器跑面板"。
+
+---
+
+## 两个版本：Alpine 还是 Debian？
+
+从 v3.0.0 起每次发版会同时产出两个 ZIP，**装哪个由你决定，不能同时装**（两者是同一个模块 id，后装的会覆盖先装的，但用户数据照常保留）。
+
+| | `daidai-panel-magisk-vX.Y.Z.zip` | `daidai-panel-magisk-debian-vX.Y.Z.zip` |
+|---|---|---|
+| 容器基础系统 | Alpine 3.18（musl） | Debian 12 bookworm（glibc） |
+| rootfs 下载 | NJU 镜像站，约 3 MB | GitHub Release 资产，约 27 MB |
+| 包管理器 | `apk` | `apt-get` |
+| 装完占用 | 约 300–500 MB | **约 800 MB**（实测） |
+| 磁盘要求 | ≥ 1.5 GB | ≥ 2.5 GB |
+| Python / Node | 3.11 / 18.x | 3.11 / 18.x（**持平，不是升级**） |
+| 跑 glibc 预编译产物 | ❌ | ✅ |
+
+**默认选 Alpine**：体积小、装得快、下载量小，绝大多数定时任务脚本够用。
+
+**什么时候选 Debian**：需要跑 glibc 预编译产物的时候。最典型的就是面板「依赖管理」里的「**一键安装 Python / Node 运行时**」——它下发的是 `python-build-standalone` 的 `*-unknown-linux-gnu` 构建和 nodejs.org 官方 Linux 构建，两者都硬依赖 `/lib64/ld-linux-*.so`。实测在 Alpine(musl) 容器里 **0/2 可执行**（报 `not found`，其实是缺 glibc 动态链接器），只有在 Debian 容器里才真正可用。
+
+同理，只提供 manylinux wheel 的 Python 包、只提供 glibc 二进制的商用脚本，也都需要 Debian 版。
+
+> ⚠️ **已知限制：Debian 版没有模块卡片一键更新。**
+> `module.prop` 的 `updateJson` 里只能填一个 `zipUrl`，而两个 flavor 共用同一个模块 id，所以一键更新只会指向 **Alpine** 的 ZIP。
+> **Debian 用户请不要点模块卡片上的「更新」按钮**（点了会把你换成 Alpine 版），改为每次手动到 [Release 页](https://github.com/linzixuanzz/daidai-panel/releases) 下载 `daidai-panel-magisk-debian-vX.Y.Z.zip` 安装。数据同样会被保留。
+
+> ⚠️ **Debian 版尚未经过真机验证。** 它在 CI 上能打出包、脚本能通过静态检查，但项目里没有 Android 真机测试基建，Debian 容器在真实设备上能否起来、`apt-get` 在 chroot 里是否顺利，暂时无法证明。遇到问题请带上安装日志开 issue。
 
 ---
 
 ## 架构与目录（必读）
 
-和 Docker 版的 Nginx + Go 两层结构不同，Magisk 版只有一层：前端静态资源由 `daidai-server` 在单端口（默认 `5700`）上直接托管。整个运行时放进 Alpine 容器（通过仓库自带的 `rurima` 进入），数据 / 日志 / 脚本都落在容器内路径。
+和 Docker 版的 Nginx + Go 两层结构不同，Magisk 版只有一层：前端静态资源由 `daidai-server` 在单端口（默认 `5700`）上直接托管。整个运行时放进容器（通过仓库自带的 `rurima` 进入），数据 / 日志 / 脚本都落在容器内路径。
 
 ```
 /data/adb/modules/daidai-panel/        ← 模块本体（随模块卸载清除）
 ├── module.prop
+├── flavor                             ← 容器基础系统标记（alpine / debian）
 ├── customize.sh / service.sh / uninstall.sh / action.sh
 ├── scripts/check-runtimes.sh
 └── system/bin/
@@ -20,7 +49,7 @@
     ├── daidai-server                  ← 后端（每次开机同步进容器）
     └── ddp                            ← CLI（同上）
 
-/data/daidai/（或 /data/local/daidai/）← Alpine minirootfs 容器，占 300MB+
+/data/daidai/（或 /data/local/daidai/）← 容器 rootfs，Alpine 占 300MB+ / Debian 占 600MB+
 ├── usr/local/bin/daidai-server        ← 实际在跑的后端
 ├── usr/local/bin/ddp                  ← 容器内 CLI
 ├── app/web/                           ← 前端静态
@@ -44,14 +73,16 @@
   - APatch
 - Android 6.0 (API 23) 及以上。**建议 Android 8.0+**；Android 6.x / 7.x 属于「可以尝试」而不是「保证可用」——少数机型受 SELinux 策略 / 内核挂载限制起不了容器。安装过程中会**实际探测一次容器能否启动**，起不来会当场中止并说明原因，不会让你装完重启后才发现用不了
 - CPU 架构：**仅 `arm64`（aarch64）**。x86_64 设备会在安装时被明确拦下——模块自带的容器运行时 `rurima` 只有 aarch64 构建，在 x86_64 上无法执行
-- **剩余可用空间 ≥ 1.5 GB**（Alpine rootfs ~300 MB + 依赖 + 数据 / 日志）
-- **安装阶段需要联网**（下载 Alpine minirootfs + apk 联网装 python3 / nodejs / git 等）
+- 剩余可用空间：**Alpine 版 ≥ 1.5 GB**（rootfs ~300 MB + 依赖 + 数据 / 日志）；**Debian 版 ≥ 2.5 GB**（rootfs 解压 ~103 MB，装完 python / node / npm / git / 构建工具并清掉 apt 缓存后，根文件系统实测约 800 MB）
+- **安装阶段需要联网**（下载 rootfs + 联网装 python3 / nodejs / git 等；Alpine 侧累计约 50 MB，Debian 侧约 300 MB）
 
 ## 安装
 
-1. 下载 `daidai-panel-magisk-vX.Y.Z.zip`（或按[下面章节](#本地构建)自行构建）。
+1. 下载 ZIP（或按[下面章节](#本地构建)自行构建）：
+   - Alpine（默认，推荐）：`daidai-panel-magisk-vX.Y.Z.zip`
+   - Debian（需要 glibc 时）：`daidai-panel-magisk-debian-vX.Y.Z.zip`
 2. 打开 Magisk / KernelSU / APatch 管理器 →「模块」→「从本地安装」，选该 ZIP。
-3. 等几分钟，Alpine 下载 + 容器能力探测 + apk 装依赖 + 运行时验证全部通过后，才会出现 "安装完成！" 提示。中途任何一步失败都会当场中止并说明原因——**看到 "安装完成！" 就代表环境确实可用**。
+3. 等几分钟，rootfs 下载 + 容器能力探测 + 装依赖 + 运行时验证全部通过后，才会出现 "安装完成！" 提示。中途任何一步失败都会当场中止并说明原因——**看到 "安装完成！" 就代表环境确实可用**。安装日志开头会打印 `容器基础系统：...`，可以据此确认自己装的是哪个版本。
 4. 重启手机。
 5. 手机浏览器访问 `http://127.0.0.1:5700`，按提示初始化管理员账号。
 
@@ -67,14 +98,19 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 
 1. 每次仓库推送新的 `vX.Y.Z` tag，工作流会自动：
    - 编译 arm64 静态后端
-   - 打包 `daidai-panel-magisk-vX.Y.Z.zip`
+   - 打包 `daidai-panel-magisk-vX.Y.Z.zip`（Alpine）与 `daidai-panel-magisk-debian-vX.Y.Z.zip`（Debian）
+   - 导出并上传 `daidai-debian-rootfs-arm64.tar.gz`（Debian 版安装时下载的 rootfs）
    - 生成指向本次 Release 的 `update.json`（含版本号 / versionCode / zipUrl / changelog）
-   - 把这两个文件一起上传到 Release
+   - 把这些文件一起上传到 Release
 2. 已装旧版本的手机，打开管理器时自动拉取 `update.json`，比 `versionCode` 发现有新版 → 模块卡片出现「**更新**」按钮
 3. 点按钮 → 管理器自动下载 ZIP 并走安装流程（等同手动「从本地安装 ZIP」）
-4. 重启手机完成升级。升级流程内部：`customize.sh` 先把容器里的 `/app/Dumb-Panel/` 整个备份到 `/data/adb/daidai-panel/update-data-backup`，然后清掉旧 rootfs 重装 Alpine，装完再把备份复原回去——数据库、脚本、日志、依赖全部保留；如果下载或安装中途失败，下次重试会优先沿用这份备份恢复
+4. 重启手机完成升级。升级流程内部：`customize.sh` 先把容器里的 `/app/Dumb-Panel/` 整个备份到 `/data/adb/daidai-panel/update-data-backup`，然后清掉旧 rootfs 重装容器，装完再把备份复原回去——数据库、脚本、日志、依赖全部保留；如果下载或安装中途失败，下次重试会优先沿用这份备份恢复
 
-> 说明：需要管理器版本支持 `updateJson`（Magisk v24.0+、KernelSU、APatch 新版均支持）。如果你自己 fork 了本项目发版，请把 `module.prop` 里的 `linzixuanzz/daidai-panel` 替换成自己的仓库路径即可。
+> ⚠️ **一键更新只对 Alpine 版有效。** `updateJson` 里只能填一个 `zipUrl`，两个 flavor 又共用同一个模块 id，所以「更新」按钮永远指向 Alpine ZIP。**Debian 用户点了这个按钮会被静默换成 Alpine 版**（数据不丢，但 glibc 容器没了）。Debian 版请每次手动从 Release 页下载 `daidai-panel-magisk-debian-vX.Y.Z.zip` 安装。
+>
+> 真要修需要两份 `update.json` + 两个 module id，代价是模块列表里出现两个条目、且用户可能同时装上互相打架，本项目暂不做。
+
+> 说明：需要管理器版本支持 `updateJson`（Magisk v24.0+、KernelSU、APatch 新版均支持）。如果你自己 fork 了本项目发版，请把 `module.prop` 里的 `linzixuanzz/daidai-panel` 替换成自己的仓库路径即可；`customize.sh` 里 Debian rootfs 的下载地址同样写着这个仓库路径，也要一起改。
 
 ### 手动触发更新检查
 
@@ -89,16 +125,28 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 
 ## 脚本运行时
 
-`customize.sh` 会在安装阶段进容器执行一遍 `apk add`，装好定时任务通常需要的全套运行时：
+`customize.sh` 会在安装阶段进容器执行一遍包安装，两个 flavor 装的是同一套能力，只是包名不同：
 
-- **基础**：`bash`、`coreutils`、`build-base`（gcc / make / pkgconfig 等）
-- **脚本解释器**：`python3` + `python3-dev` + `py3-pip`、`nodejs` + `npm`（默认镜像源已切到 `npmmirror.com`）
-- **工具链**：`git`、`curl`、`wget`、`jq`、`openssh`、`openssl`、`tzdata`、`procps`、`netcat-openbsd`
-- 离线打包的 `linux-pam` / `shadow`，保证 `sshd` 和用户管理可用
+| 用途 | Alpine (`apk add`) | Debian (`apt-get install`) |
+|------|--------------------|----------------------------|
+| Shell | `bash` `bash-completion` | `bash` `bash-completion` |
+| 基础工具 | `coreutils` | `coreutils` |
+| 编译工具链 | `build-base` `libtool` | `build-essential` `libtool` |
+| Python | `python3` `python3-dev` `py3-pip` | `python3` `python3-dev` `python3-pip` **`python3-venv`** |
+| Node.js | `nodejs` `npm` | `nodejs` `npm` |
+| 网络工具 | `curl` `wget` `git` `jq` `netcat-openbsd` | `curl` `wget` `git` `jq` `netcat-openbsd` |
+| SSH / TLS | `openssh` `openssl` | `openssh-client` `openssh-server` `openssl` **`ca-certificates`** |
+| 用户 / 系统 | `shadow` `tzdata` `procps` + 离线 `linux-pam` | `passwd` `tzdata` `procps`（PAM 由 openssh-server 带入） |
+
+加粗的两个是 Debian 独有的补充项：bookworm 把 `ensurepip` 拆到了 `python3-venv`（没有它 `python3 -m venv` 直接失败，而面板每次开机都要建 venv）；`debian:bookworm-slim` 不带根证书，`ca-certificates` 不装的话 `pip` / `npm` / `git` 走 HTTPS 会全线报错。
+
+npm 默认镜像源两边都已切到 `npmmirror.com`；apk / apt 源都指向 `mirrors.nju.edu.cn`。
 
 面板「依赖管理」页的 `pip` / `npm` 直接可用；定时任务跑 Python / Node.js / Shell / Git 脚本无需额外配置，**不需要 Termux，也不需要自备静态二进制**。
 
-> 容器是 Alpine musl 基础。遇到只有 glibc 预编译包（例如某些商用脚本自带的 `.whl`）时，请改用源码安装或找 musl wheel。
+> **Alpine 版是 musl 基础**：遇到只有 glibc 预编译包（例如某些商用脚本自带的 `.whl`、面板自带的「一键安装运行时」）时，请改用源码安装、找 musl wheel，或直接换 Debian 版。
+>
+> **Debian 版是 glibc 基础**：manylinux wheel、官方 Node / Python 预构建都能直接跑。bookworm 同样遵循 PEP 668（系统 Python 被标记 externally-managed），但面板的依赖管理已经处理过这件事——它优先用 `deps/python/<小版本>` 下的托管 venv，落到系统 pip 时会自动补 `--break-system-packages --user`。只有你自己 `su` 进容器手敲 `pip install` 时才会撞上这个报错，那种情况请自己建 venv。
 
 ---
 
@@ -106,6 +154,7 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 
 模块内置 `action.sh`。在 **Magisk v26+ / KernelSU / APatch** 的模块列表里，呆呆面板条目右侧会出现「运行 / Action」按钮，点击会直接在管理器弹窗里打印：
 
+- 当前容器基础系统（`alpine` / `debian`）——忘了自己装的哪个版本时看这一行
 - 当前端口配置（`PANEL_PORT` / `SSH_PORT` / `EXTRA_CORS_ORIGINS`）
 - 面板进程状态 + 容器内 PID
 - 宿主侧 `PANEL_PORT` 的实际监听情况
@@ -121,11 +170,15 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 # 宿主侧 —— 启动日志
 su -c "tail -f /data/adb/daidai-panel/service.log"
 
-# 进入 Alpine 容器（获得完整 bash / apk / python / node / git / ddp）
+# 进入容器（获得完整 bash / apk 或 apt / python / node / git / ddp）
 MODDIR=/data/adb/modules/daidai-panel
 ROOTFS=/data/daidai                   # 少数设备在 /data/local/daidai
 su -c "$MODDIR/system/bin/rurima ruri -p -N -S -A $ROOTFS /bin/bash"
 ```
+
+> 这里用 `/bin/bash` 是**两个 flavor 通用**的（两边都装了 bash）。模块脚本内部用的是
+> `$MODDIR/flavor` 决定的 `/bin/ash`（Alpine）或 `/bin/bash`（Debian）——
+> **Debian 容器里没有 `/bin/ash`**，手敲命令时别照抄旧文档里的 `ash`。
 
 进到容器里之后，`ddp` 就是正常命令。所有运维 / 备份 / 账号操作都在容器里执行：
 
@@ -215,7 +268,7 @@ su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
 | `system.prop` / `sepolicy.rule` | ❌ | 不写系统属性、不加 SELinux 规则 |
 | 应用安装 / 广告 / 服务伪装 | ❌ | 不装 APK、不注册账户、不开后台伪装 |
 | 网络监听 | ⚠️ | 绑定 `0.0.0.0:PANEL_PORT`（默认 5700）+ 容器内 `sshd` 监听 `0.0.0.0:SSH_PORT`（默认 22），局域网任何人都能尝试连接 |
-| 写入位置 | ✅ | 三处：`/data/adb/modules/daidai-panel/`（模块本体）、`/data/daidai/` 或 `/data/local/daidai/`（Alpine 容器 + 所有用户数据，占大空间）、`/data/adb/daidai-panel/`（端口配置 + 启动日志） |
+| 写入位置 | ✅ | 三处：`/data/adb/modules/daidai-panel/`（模块本体）、`/data/daidai/` 或 `/data/local/daidai/`（容器 rootfs + 所有用户数据，占大空间）、`/data/adb/daidai-panel/`（端口配置 + 启动日志） |
 
 > **局域网可见性**：面板后端默认对局域网开放。家里 / 自己 WiFi 没问题；公共网络（咖啡馆、公司 Guest Wi-Fi）建议把 `SSH_PORT` 换掉或进容器 `rc-service sshd stop`，并在路由器 / 防火墙层面限制面板端口。
 
@@ -229,7 +282,7 @@ su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
 重启完成后 `uninstall.sh` 会自动做：
 
 - `TERM` + `KILL` 掉仍在运行的 `daidai-server` 进程
-- 删除 Alpine rootfs `/data/daidai` 和 `/data/local/daidai`（数百 MB，**面板所有数据都在这里**）
+- 删除容器 rootfs `/data/daidai` 和 `/data/local/daidai`（数百 MB ~ 1 GB，**面板所有数据都在这里**；两个 flavor 路径相同）
 - 删除宿主侧持久化目录 `/data/adb/daidai-panel/`（端口配置 + 启动日志）
 - 清掉历史版本可能留下的 `init.d` / `service.d` 脚本
 
@@ -268,7 +321,7 @@ ddp backup create --name before-uninstall
 在项目根目录执行：
 
 ```bash
-# 默认只打 arm64（CI 发布用的也是这个）
+# 默认只打 arm64 + alpine（CI 发布用的也是这个）
 bash Magisk/build.sh 3.0.0
 
 # 只打 amd64
@@ -276,11 +329,25 @@ bash Magisk/build.sh 3.0.0 amd64
 
 # 同时打 arm64 + amd64
 bash Magisk/build.sh 3.0.0 all
+
+# Debian flavor（第 3 个参数；不传就是 alpine）
+bash Magisk/build.sh 3.0.0 arm64 debian
 ```
 
 > `amd64` / `all` 保留的是**构建能力**，不代表模块支持 x86_64：容器运行时 `rurima` 只有 aarch64 构建，`customize.sh` 会在 x86_64 设备上直接拦截。这两个参数是为「将来拿到 x86_64 的 rurima」留的口子，日常发布请用默认的 `arm64`。
 
-构建产物：`dist/daidai-panel-magisk-v<版本>.zip`（`module.prop` 里的 `version` / `versionCode` 会自动按参数同步）。
+构建产物：
+
+| flavor | 产物 |
+|--------|------|
+| `alpine`（默认，不传第 3 个参数） | `dist/daidai-panel-magisk-v<版本>.zip` |
+| `debian` | `dist/daidai-panel-magisk-debian-v<版本>.zip` |
+
+`module.prop` 里的 `version` / `versionCode` 会自动按参数同步。两个 ZIP 唯一的结构差异是：Debian 包里的 `flavor` 文件内容是 `debian`，且**不含** `apk/` 目录（那两个离线包是 aarch64 Alpine 专用）。
+
+> **本地打 Debian 包能直接装**：`customize.sh` 里的 rootfs 地址是
+> `releases/latest/download/daidai-debian-rootfs-arm64.tar.gz` 这个固定跳转，
+> 只要仓库已经发过一次带该资产的 Release，本地构建的未发布版本也能正常下载 rootfs。
 
 前置依赖：
 
@@ -291,14 +358,21 @@ bash Magisk/build.sh 3.0.0 all
 
 ## FAQ
 
-**Q: 安装时卡在"正在联网下载 Alpine rootfs" / "正在联网安装面板运行依赖"**
+**Q: 安装时卡在"正在联网下载 ... rootfs" / "正在联网安装面板运行依赖"**
 
-这两步强依赖网络：Alpine rootfs ~3 MB、apk 装依赖累计约 50 MB。`customize.sh` 默认用 NJU 镜像 `mirrors.nju.edu.cn`。公司 / 学校网络被墙的话挂 VPN 重装即可。
+这两步强依赖网络：
+
+| | rootfs 下载 | 装依赖 |
+|---|---|---|
+| Alpine | ~3 MB，NJU 镜像站 | 约 50 MB，`apk` 走 `mirrors.nju.edu.cn` |
+| Debian | ~27 MB，GitHub Release | 约 300 MB，`apt-get` 走 `mirrors.nju.edu.cn` |
+
+公司 / 学校网络被墙的话挂 VPN 重装即可。Debian 版还多一层：rootfs 放在 GitHub Release 上，国内直连 GitHub 不稳定的话这一步更容易失败。
 
 两步都有失败保护，但机制不同：
 
 - **下载 / 解压 rootfs**：失败直接 abort。
-- **装依赖**：`apk add` 可能「部分成功」，光看退出码不可靠，所以装完后会再进一次容器逐个验证 `python3` / `node` / `npm` / `git` / `bash` 能否执行并报出版本。任一缺失就 abort，并列出**具体缺了哪些**。
+- **装依赖**：`apk add` / `apt-get install` 都可能「部分成功」，光看退出码不可靠，所以装完后会再进一次容器逐个验证 `python3` / `node` / `npm` / `git` / `bash` 能否执行并报出版本。任一缺失就 abort，并列出**具体缺了哪些**。这条验证对两个 flavor 用的是同一份清单。
 
 两种情况都不会损坏已有数据：升级安装时用户数据在清 rootfs 之前就已经备份到 `/data/adb/daidai-panel/update-data-backup/`，abort 后备份原样保留，下次安装会自动恢复。
 
@@ -319,7 +393,18 @@ su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
 
 **Q: 升级后旧数据会丢吗？**
 
-不会。升级流程：`customize.sh` → 备份 `<rootfs>/app/Dumb-Panel/` 到 `/data/adb/daidai-panel/update-data-backup/` → 清旧 rootfs → 重装 Alpine + 重装依赖 → 把备份复原回去。若安装中途失败，保留下来的 `update-data-backup` 会在下次安装时优先恢复。`ports.conf` 在宿主侧的 `/data/adb/daidai-panel/` 不受影响。
+不会。升级流程：`customize.sh` → 备份 `<rootfs>/app/Dumb-Panel/` 到 `/data/adb/daidai-panel/update-data-backup/` → 清旧 rootfs → 重装 rootfs + 重装依赖 → 把备份复原回去。若安装中途失败，保留下来的 `update-data-backup` 会在下次安装时优先恢复。`ports.conf` 在宿主侧的 `/data/adb/daidai-panel/` 不受影响。
+
+**Q: 能从 Alpine 版直接换成 Debian 版吗？**
+
+可以，直接装另一个 ZIP 即可，走的是和升级完全一样的流程：旧数据先备份到 `/data/adb/daidai-panel/update-data-backup/`，旧 rootfs 整个删掉，装完新 rootfs 再把数据复原回去。数据库、脚本、备份都保留。
+
+**但有两样东西不会跟过去**：
+
+1. `deps/` 里已经装好的 pip / npm 依赖 —— musl 和 glibc 编译出来的扩展互不兼容，换过去之后需要在面板「依赖管理」里重新安装一遍
+2. 你手动在容器里 `apk add` / `apt install` 装过的东西 —— rootfs 是整个重建的
+
+换完记得点模块卡片的「运行」按钮，确认 `容器基础系统` 那一行已经变了。
 
 **Q: 禁用模块之后面板还在跑？**
 

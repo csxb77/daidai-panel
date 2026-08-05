@@ -2,8 +2,8 @@
 ##########################################################################
 # 呆呆面板 Magisk 模块 - late_start service
 #
-# 进入 Alpine 容器启动 daidai-server（端口可通过 ports.conf 配置）。
-# 前端静态资源由 daidai-server 直接托管，不再依赖 nginx。
+# 进入容器（Alpine 或 Debian，取决于 $MODDIR/flavor）启动 daidai-server，
+# 端口可通过 ports.conf 配置。前端静态资源由 daidai-server 直接托管，不依赖 nginx。
 ##########################################################################
 
 export PATH=/data/adb/ap/bin:/data/adb/ksu/bin:/data/adb/magisk:$PATH
@@ -20,6 +20,20 @@ MODDIR=${MODDIR:-/data/adb/modules/daidai-panel}
 [ ! -d "$MODDIR" ] && MODDIR=/sbin/.magisk/modules/daidai-panel
 [ ! -d "$MODDIR" ] && MODDIR=$(dirname "$0")
 RURIMA=$MODDIR/system/bin/rurima
+
+# ---- flavor（容器基础系统）----------------------------------------------
+# 与 customize.sh 同一套规则：读 $MODDIR/flavor，读不到 / 不认识就回落 alpine。
+# Debian 容器里没有 /bin/ash，下面所有进容器的调用都必须用 $CTR_SHELL。
+FLAVOR=alpine
+if [ -f "$MODDIR/flavor" ]; then
+  read -r flavor_raw < "$MODDIR/flavor" 2>/dev/null || true
+  case "$flavor_raw" in
+    debian*) FLAVOR=debian ;;
+    *) FLAVOR=alpine ;;
+  esac
+fi
+CTR_SHELL=/bin/ash
+[ "$FLAVOR" = "debian" ] && CTR_SHELL=/bin/bash
 
 PERSIST_DIR=/data/adb/daidai-panel
 LOG_FILE="$PERSIST_DIR/service.log"
@@ -74,7 +88,7 @@ if ! validate_port "$SSH_PORT"; then
 fi
 
 log "========================================="
-log "呆呆面板模块启动 (MODDIR=$MODDIR, rootfs=$rootfs)"
+log "呆呆面板模块启动 (MODDIR=$MODDIR, rootfs=$rootfs, flavor=$FLAVOR, shell=$CTR_SHELL)"
 log "端口: PANEL_PORT=$PANEL_PORT (绑定 0.0.0.0), SSH_PORT=$SSH_PORT (来源: $PORTS_CONF)"
 log "SSH 凭据: 用户=$SSH_USER"
 if [ -n "$EXTRA_CORS_ORIGINS" ]; then
@@ -139,8 +153,10 @@ cp -f "$PORTS_CONF" "$rootfs/tmp/ports.conf" 2>/dev/null
 # ---- 生成容器启动脚本（全字面 heredoc，变量由容器内 . /tmp/ports.conf 注入） ----
 STARTUP=$rootfs/tmp/daidai-startup.sh
 
-cat > "$STARTUP" << 'CONTAINER_EOF'
-#!/bin/ash
+# shebang 单独写：容器 shell 随 flavor 变（Alpine=/bin/ash，Debian=/bin/bash），
+# 不能烤死在 heredoc 里。脚本正文对两个 flavor 完全一致，只用 POSIX 语法。
+printf '#!%s\n' "$CTR_SHELL" > "$STARTUP"
+cat >> "$STARTUP" << 'CONTAINER_EOF'
 # 默认值 + 用户 ports.conf 覆盖（同文件已由宿主 service.sh 校验过合法性）
 PANEL_PORT=5700
 SSH_PORT=22
@@ -221,7 +237,13 @@ fi
 # 每次启动都同步密码，确保 ports.conf 改了密码后重启即生效
 if [ -n "${SSH_USER}" ] && [ -n "${SSH_PASSWORD}" ]; then
   if [ "${SSH_USER}" != "root" ]; then
-    id "${SSH_USER}" >/dev/null 2>&1 || adduser -D -s /bin/bash "${SSH_USER}" 2>/dev/null
+    # busybox(Alpine) 的 adduser 和 Debian 的 adduser 参数完全不兼容，
+    # 前者不认 --disabled-password，后者不认 -D。依次尝试，最后用 useradd 兜底。
+    if ! id "${SSH_USER}" >/dev/null 2>&1; then
+      adduser -D -s /bin/bash "${SSH_USER}" 2>/dev/null || \
+        adduser --disabled-password --gecos "" --shell /bin/bash "${SSH_USER}" 2>/dev/null || \
+        useradd -m -s /bin/bash "${SSH_USER}" 2>/dev/null || true
+    fi
   fi
   echo "${SSH_USER}:${SSH_PASSWORD}" | chpasswd 2>/dev/null
 fi
@@ -252,14 +274,14 @@ exit 0
 CONTAINER_EOF
 chmod +x "$STARTUP" 2>/dev/null
 
-log "进入 Alpine 容器启动 daidai-server (panel=$PANEL_PORT, ssh=$SSH_PORT)..."
+log "进入容器启动 daidai-server (flavor=$FLAVOR, panel=$PANEL_PORT, ssh=$SSH_PORT)..."
 
-"$RURIMA" ruri -p -N -S -A $rootfs /bin/ash /tmp/daidai-startup.sh
+"$RURIMA" ruri -p -N -S -A $rootfs "$CTR_SHELL" /tmp/daidai-startup.sh
 
 sleep 2
 
 # 容器内启动后简单验证
-if "$RURIMA" ruri -p -N -S -A $rootfs /bin/ash -c "pgrep -f /usr/local/bin/daidai-server >/dev/null 2>&1"; then
+if "$RURIMA" ruri -p -N -S -A $rootfs "$CTR_SHELL" -c "pgrep -f /usr/local/bin/daidai-server >/dev/null 2>&1"; then
   log "面板启动成功，访问 http://127.0.0.1:${PANEL_PORT}"
 else
   log "!! 面板启动失败，查看 $rootfs/app/Dumb-Panel/daidai.log"

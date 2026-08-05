@@ -41,17 +41,26 @@ func TestMagiskServiceScriptExportsAndroidRuntimeEnv(t *testing.T) {
 	}
 }
 
-// 下面这几个针对 customize.sh 的断言都是纯静态字符串检查。
+// 下面这几个针对 Magisk 脚本的断言都是纯静态字符串检查。
 // 它们只能防止相应改动被整段删掉 / 改回旧写法，**防不住逻辑写错**，
-// 也不构成"Magisk 模块有测试覆盖"。真正的验证只能靠真机安装。
-func readMagiskCustomizeScript(t *testing.T) string {
+// 也不构成"Magisk 模块有测试覆盖"。真正的验证只能靠真机安装 ——
+// Debian flavor 更是连一次真机安装都还没做过。
+
+// readMagiskScript 统一去掉 CR：Windows 检出可能是 CRLF，
+// 否则按行 / 按 heredoc 结束标记做的断言会在 Windows 上莫名其妙地失败。
+func readMagiskScript(t *testing.T, name string) string {
 	t.Helper()
-	scriptPath := filepath.Join("..", "..", "Magisk", "customize.sh")
+	scriptPath := filepath.Join("..", "..", "Magisk", name)
 	data, err := os.ReadFile(scriptPath)
 	if err != nil {
-		t.Fatalf("read Magisk customize.sh: %v", err)
+		t.Fatalf("read Magisk %s: %v", name, err)
 	}
-	return string(data)
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
+}
+
+func readMagiskCustomizeScript(t *testing.T) string {
+	t.Helper()
+	return readMagiskScript(t, "customize.sh")
 }
 
 // 安装期失败必须真的失败：rurima 前置检查 / 依赖装完再验证 / 成功提示有条件。
@@ -99,23 +108,219 @@ func TestMagiskCustomizeScriptFailsLoudlyOnInstallErrors(t *testing.T) {
 	}
 }
 
-// 装依赖那段 heredoc 内不得使用 set -e：
-// 其中的离线包 `apk add --no-network` 本来就允许失败（后面有联网兜底），
-// 加了 set -e 会让整个安装在这一句直接中断。
+// heredocBlock 取出 `<< 'MARKER'` 与行首 `MARKER` 之间的正文。
+// 找不到起始 / 结束标记时直接 Fatal —— 标记被改名说明装依赖那段被重写过，
+// 必须回来同步断言，而不是让测试静默变成空跑。
+func heredocBlock(t *testing.T, text, marker string) string {
+	t.Helper()
+	start := strings.Index(text, "<< '"+marker+"'")
+	if start < 0 {
+		t.Fatalf("customize.sh 找不到 heredoc 起始标记 %q", marker)
+	}
+	rest := text[start:]
+	end := strings.Index(rest, "\n"+marker+"\n")
+	if end < 0 {
+		t.Fatalf("customize.sh 找不到 heredoc %q 的结束标记", marker)
+	}
+	return rest[:end]
+}
+
+// 装依赖那几段 heredoc 内都不得使用 set -e：
+// Alpine 那句离线包 `apk add --no-network` 本来就允许失败（后面有联网兜底），
+// Debian 侧 apt-get 也可能局部失败但仍要走完后面的账号 / SSH 配置。
+// 加了 set -e 会让整个安装在中途直接断掉，真正的判据是装完之后的运行时验证。
 func TestMagiskCustomizeScriptDependencyHeredocHasNoSetE(t *testing.T) {
 	text := readMagiskCustomizeScript(t)
 
-	start := strings.Index(text, "/bin/ash << 'EOF'")
-	if start < 0 {
-		t.Fatal("customize.sh 找不到装依赖的 heredoc 起始标记")
+	for _, marker := range []string{
+		"DEPS_PKG_ALPINE_EOF",
+		"DEPS_PKG_DEBIAN_EOF",
+		"DEPS_COMMON_EOF",
+	} {
+		// 只看真正会被执行的行 —— 脚本里有注释专门解释"为什么不能加 set -e"，
+		// 那行本身包含 set -e，不能被当成违规。
+		for i, line := range strings.Split(heredocBlock(t, text, marker), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, "set -e") {
+				t.Fatalf("装依赖 heredoc %s 第 %d 行不得使用 set -e（包管理器允许局部失败，set -e 会直接中断安装）: %s",
+					marker, i+1, trimmed)
+			}
+		}
 	}
-	rest := text[start:]
-	end := strings.Index(rest, "\nEOF")
-	if end < 0 {
-		t.Fatal("customize.sh 找不到装依赖 heredoc 的结束标记")
+}
+
+// ---- flavor（alpine / debian）相关断言 ----------------------------------
+//
+// 这一组是本次改动里最有价值的静态断言。Debian 容器里没有 /bin/ash，
+// 只要「容器能力探测」或「依赖装完验证」里残留了写死的 /bin/ash，
+// Debian 版就会 100% 探测失败，而报错完全指不到真正的原因。
+
+// customize.sh 必须读 flavor 标记文件，且缺失 / 非法时回落 alpine。
+func TestMagiskCustomizeScriptReadsFlavorWithAlpineDefault(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		// 缺省值必须在读文件之前先落成 alpine
+		"FLAVOR=alpine",
+		`if [ -f "$MODPATH/flavor" ]; then`,
+		`read -r flavor_raw < "$MODPATH/flavor"`,
+		// 只认 debian，其余一律回落 alpine —— 默认值就是安全值
+		"debian*) FLAVOR=debian ;;",
+		"*) FLAVOR=alpine ;;",
+		`if [ "$FLAVOR" = "debian" ]; then`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected customize.sh to contain flavor snippet %q", snippet)
+		}
 	}
-	if block := rest[:end]; strings.Contains(block, "set -e") {
-		t.Fatal("装依赖的 heredoc 内不得使用 set -e：离线包 apk add --no-network 允许失败，set -e 会直接中断安装")
+}
+
+// assertNoHardcodedAsh 检查脚本里出现的 /bin/ash 只允许在注释或 CTR_SHELL 赋值里，
+// 任何实际调用（尤其是 rurima ruri ... /bin/ash）都必须走 flavor 变量。
+func assertNoHardcodedAsh(t *testing.T, name, text string) {
+	t.Helper()
+	for i, line := range strings.Split(text, "\n") {
+		if !strings.Contains(line, "/bin/ash") {
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		// 注释（含 heredoc 里的 #!/bin/ash shebang）与 CTR_SHELL 赋值是仅有的两种合法出现
+		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "CTR_SHELL=") {
+			continue
+		}
+		t.Fatalf("%s:%d 出现写死的 /bin/ash，必须改用 $CTR_SHELL（Debian 容器里没有 ash）: %s",
+			name, i+1, trimmed)
+	}
+}
+
+// 能力探测与依赖验证必须使用 flavor 变量而非写死 /bin/ash。
+func TestMagiskCustomizeScriptProbeAndVerifyUseFlavorShell(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		// 两个 flavor 的容器 shell 都要定义
+		"CTR_SHELL=/bin/ash",
+		"CTR_SHELL=/bin/bash",
+		// 容器能力探测
+		`probe_out=$("$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" -c `,
+		// 依赖装完验证：连着后面那行一起匹配，避免和上面的探测命令撞车
+		"\"$RURIMA\" ruri -p -N -S -A \"$rootfs\" \"$CTR_SHELL\" -c '\n" +
+			"  for c in python3 node npm git bash; do",
+		// 装依赖脚本本身也要按 flavor 选 shell
+		`"$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" /tmp/daidai-install-deps.sh`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected customize.sh to contain flavor-aware snippet %q", snippet)
+		}
+	}
+
+	assertNoHardcodedAsh(t, "customize.sh", text)
+}
+
+// Debian 分支里不得残留任何 Alpine 专有的命令 / 参数 / 镜像源。
+func TestMagiskCustomizeScriptDebianBranchHasNoAlpineisms(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+	block := heredocBlock(t, text, "DEPS_PKG_DEBIAN_EOF")
+
+	for _, forbidden := range []string{
+		"apk ",
+		"--no-cache",
+		"dl-cdn.alpinelinux.org",
+		"/bin/ash",
+		"/etc/apk/",
+	} {
+		// 注释里为了写清映射关系会提到 apk / Alpine，所以逐行判断并跳过注释行
+		for i, line := range strings.Split(block, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if strings.Contains(line, forbidden) {
+				t.Fatalf("customize.sh Debian 分支第 %d 行出现 Alpine 专有内容 %q: %s", i+1, forbidden, line)
+			}
+		}
+	}
+
+	for _, required := range []string{
+		"apt-get install -y --no-install-recommends",
+		// bookworm 是 deb822 格式，只改老的 sources.list 会静默走原始源
+		"/etc/apt/sources.list.d/debian.sources",
+		"mirrors.nju.edu.cn",
+		// 没有 python3-venv，service.sh 每次开机建的 deps/python venv 会直接失败
+		"python3-venv",
+		"ca-certificates",
+		// openssh 在 Debian 拆成了 client + server 两个包
+		"openssh-client openssh-server",
+	} {
+		if !strings.Contains(block, required) {
+			t.Fatalf("expected customize.sh Debian 分支 to contain %q", required)
+		}
+	}
+}
+
+// bashrc 路径必须按 flavor 走：Alpine 是 /etc/bash/bashrc，Debian 是 /etc/bash.bashrc。
+// 写错位置不会报错，只是环境变量静默不生效。
+func TestMagiskCustomizeScriptUsesFlavorBashrcPath(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		`CTR_BASHRC="/etc/bash.bashrc"`,
+		`CTR_BASHRC="/etc/bash/bashrc"`,
+		`cat > "$rootfs$CTR_BASHRC"`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected customize.sh to contain bashrc snippet %q", snippet)
+		}
+	}
+	if strings.Contains(text, "cat > $rootfs/etc/bash/bashrc") {
+		t.Fatal("customize.sh 不应再写死 Alpine 的 /etc/bash/bashrc 路径")
+	}
+}
+
+// 运行期脚本同样要按 flavor 取容器 shell —— 装得上但起不来同样是坏的。
+func TestMagiskRuntimeScriptsUseFlavorShell(t *testing.T) {
+	for _, name := range []string{"service.sh", "action.sh"} {
+		text := readMagiskScript(t, name)
+
+		for _, snippet := range []string{
+			`if [ -f "$MODDIR/flavor" ]; then`,
+			"FLAVOR=alpine",
+			`read -r flavor_raw < "$MODDIR/flavor"`,
+			"debian*) FLAVOR=debian ;;",
+			"*) FLAVOR=alpine ;;",
+			"CTR_SHELL=/bin/ash",
+			`[ "$FLAVOR" = "debian" ] && CTR_SHELL=/bin/bash`,
+		} {
+			if !strings.Contains(text, snippet) {
+				t.Fatalf("expected %s to contain flavor snippet %q", name, snippet)
+			}
+		}
+
+		assertNoHardcodedAsh(t, name, text)
+	}
+}
+
+// build.sh 必须写出 flavor 标记文件，且默认（不传第三个参数）行为与产物名不变。
+func TestMagiskBuildScriptWritesFlavorFile(t *testing.T) {
+	text := readMagiskScript(t, "build.sh")
+
+	for _, snippet := range []string{
+		// 不传时默认 alpine
+		`FLAVOR="${3:-alpine}"`,
+		// alpine 用空后缀，保证默认产物名与历史逐字节一致
+		`  alpine) FLAVOR_SUFFIX="" ;;`,
+		`  debian) FLAVOR_SUFFIX="-debian" ;;`,
+		`OUTZIP="$DIST/daidai-panel-magisk${FLAVOR_SUFFIX}-v${VERSION}.zip"`,
+		// flavor 标记文件必须真的写进 staging
+		`printf '%s\n' "$FLAVOR" > "$STAGING/flavor"`,
+		// 离线 apk 只进 alpine 包
+		`if [ "$FLAVOR" = "alpine" ] && [ -d "$MODDIR/apk" ]; then`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected build.sh to contain %q", snippet)
+		}
 	}
 }
 

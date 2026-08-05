@@ -413,12 +413,21 @@ daidai-panel-windows-amd64/
 
 ### Android Magisk 模块（Root 手机）
 
-在已 Root 的 Android 设备上直接跑面板，无需 Docker、无需 Termux。模块会在安装阶段下载一份 Alpine 3.18 minirootfs 到 `/data/daidai`，在容器里 `apk` 装好 Python / Node.js / Git 等运行时，然后通过 `rurima` 进入容器启动后端，开机自启。
+在已 Root 的 Android 设备上直接跑面板，无需 Docker、无需 Termux。模块会在安装阶段下载一份 rootfs 到 `/data/daidai`，在容器里装好 Python / Node.js / Git 等运行时，然后通过 `rurima` 进入容器启动后端，开机自启。
 
 - **支持**：Magisk v24.0+ / KernelSU / APatch；Android 6.0+（建议 8.0+）；**仅 `arm64`**（容器运行时只有 aarch64 构建，x86_64 设备安装时会被明确拦截）
 - **默认访问**：`http://127.0.0.1:5700`，后端绑定 `0.0.0.0`，局域网 / 内网穿透可直连
-- **一键更新**：模块 `updateJson` 自动推送新版 ZIP，升级保留数据
-- **下载**：[GitHub Release](https://github.com/linzixuanzz/daidai-panel/releases) 里的 `daidai-panel-magisk-vX.Y.Z.zip`
+- **一键更新**：模块 `updateJson` 自动推送新版 ZIP，升级保留数据（**仅 Alpine 版**，见下）
+- **下载**：[GitHub Release](https://github.com/linzixuanzz/daidai-panel/releases)
+
+两个可选版本，**装哪个都行，但只能装一个**：
+
+| ZIP | 容器 | 什么时候选 |
+|-----|------|-----------|
+| `daidai-panel-magisk-vX.Y.Z.zip` | Alpine 3.18（musl） | **默认选它**。体积小、装得快，磁盘 ≥1.5 GB |
+| `daidai-panel-magisk-debian-vX.Y.Z.zip` | Debian 12（glibc） | 需要跑 glibc 预编译产物时。最典型的是面板「依赖管理」里的**一键安装 Python / Node 运行时**——它下发的是 `*-unknown-linux-gnu` 与 nodejs.org 官方构建，**在 Alpine(musl) 容器里根本无法执行**（实测 0/2）。磁盘 ≥2.5 GB |
+
+> ⚠️ Debian 版**没有模块卡片一键更新**（`updateJson` 只能填一个 zipUrl，两个 flavor 又共用同一个模块 id），需要手动下载 Debian ZIP 升级；并且**尚未经过真机验证**。详见 `Magisk/README.md`。
 
 > 📱 **完整的安装 / 升级 / 卸载 / 端口配置 / 排障文档请看 → [`Magisk/README.md`](./Magisk/README.md)**
 

@@ -11,6 +11,19 @@ SERVICE_LOG="$PERSIST_DIR/service.log"
 PORTS_CONF="$PERSIST_DIR/ports.conf"
 RURIMA=$MODDIR/system/bin/rurima
 
+# flavor（容器基础系统）：与 customize.sh / service.sh 同一套规则，
+# 读不到 / 不认识就回落 alpine。Debian 容器里没有 /bin/ash。
+FLAVOR=alpine
+if [ -f "$MODDIR/flavor" ]; then
+  read -r flavor_raw < "$MODDIR/flavor" 2>/dev/null || true
+  case "$flavor_raw" in
+    debian*) FLAVOR=debian ;;
+    *) FLAVOR=alpine ;;
+  esac
+fi
+CTR_SHELL=/bin/ash
+[ "$FLAVOR" = "debian" ] && CTR_SHELL=/bin/bash
+
 rootfs=/data/daidai
 [ ! -d "$rootfs" ] && rootfs=/data/local/daidai
 
@@ -33,6 +46,7 @@ fi
 ui_print "========================================="
 ui_print " 呆呆面板 - 运行状态"
 ui_print "========================================="
+ui_print "- 容器基础系统: ${FLAVOR}"
 ui_print "- 端口配置: PANEL=${PANEL_PORT} (绑定 0.0.0.0)  SSH=${SSH_PORT}"
 ui_print "- SSH 凭据: 用户=${SSH_USER}  密码=${SSH_PASSWORD}"
 ui_print "           ($PORTS_CONF)"
@@ -43,7 +57,7 @@ fi
 # ---- 进程状态（容器内） -------------------------------------------------
 PID=""
 if [ -x "$RURIMA" ] && [ -d "$rootfs" ]; then
-  PID=$("$RURIMA" ruri -p -N -S -A "$rootfs" /bin/ash -c "pgrep -f /usr/local/bin/daidai-server | head -n1" 2>/dev/null)
+  PID=$("$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" -c "pgrep -f /usr/local/bin/daidai-server | head -n1" 2>/dev/null)
 fi
 
 if [ -n "$PID" ]; then
@@ -72,7 +86,7 @@ ui_print "- 数据目录: $rootfs/app/Dumb-Panel"
 if [ -x "$RURIMA" ] && [ -d "$rootfs" ]; then
   ui_print " "
   ui_print "--- 容器运行时 ---"
-  "$RURIMA" ruri -p -N -S -A "$rootfs" /bin/ash -c '
+  "$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" -c '
     export DAIDAI_MAGISK_MODULE=1
     export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
     export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app

@@ -3,28 +3,41 @@
 # 呆呆面板 Magisk 模块打包脚本 (容器方案 v2.0.6+)
 #
 # 用法:
-#   bash Magisk/build.sh            # 默认打包 arm64
-#   bash Magisk/build.sh 3.0.0     # 指定版本号
-#   bash Magisk/build.sh 3.0.0 all # 同时打包 arm64 + amd64
+#   bash Magisk/build.sh                      # 默认打包 arm64 + alpine
+#   bash Magisk/build.sh 3.0.0                # 指定版本号
+#   bash Magisk/build.sh 3.0.0 all            # 同时打包 arm64 + amd64
+#   bash Magisk/build.sh 3.0.0 arm64 debian   # Debian(glibc) flavor
 #
-# 产物: dist/daidai-panel-magisk-v<版本>.zip
+# 产物:
+#   alpine（默认）: dist/daidai-panel-magisk-v<版本>.zip
+#   debian        : dist/daidai-panel-magisk-debian-v<版本>.zip
 #
-# 模块内部不再内置 Python/Node；改为在 customize.sh 里用 rurima + Alpine
-# minirootfs 构建一个 musl 容器，apk add 出 python3 / nodejs / npm / git 等。
+# 模块内部不再内置 Python/Node；改为在 customize.sh 里用 rurima + rootfs 构建一个
+# 容器，再用 apk / apt-get 装出 python3 / nodejs / npm / git 等：
+#   alpine —— Alpine 3.18 minirootfs（musl，体积小）
+#   debian —— CI 自建的 Debian bookworm 精简 rootfs（glibc，能跑官方预编译产物）
 ##########################################################################
 
 set -euo pipefail
 
 VERSION="${1:-3.0.0}"
 TARGETS="${2:-arm64}"     # arm64 / amd64 / all
+FLAVOR="${3:-alpine}"     # alpine / debian —— 不传时行为与产物名与历史完全一致
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 
+# alpine 走空后缀，保证默认产物名 / staging 目录名与历史版本逐字节一致
+case "$FLAVOR" in
+  alpine) FLAVOR_SUFFIX="" ;;
+  debian) FLAVOR_SUFFIX="-debian" ;;
+  *) printf "\033[1;31m[ERR ]\033[0m 未知 flavor: %s （支持: alpine / debian）\n" "$FLAVOR" >&2; exit 1 ;;
+esac
+
 MODDIR="$ROOT/Magisk"
 DIST="$ROOT/dist"
-STAGING="$DIST/magisk-staging"
-OUTZIP="$DIST/daidai-panel-magisk-v${VERSION}.zip"
+STAGING="$DIST/magisk-staging${FLAVOR_SUFFIX}"
+OUTZIP="$DIST/daidai-panel-magisk${FLAVOR_SUFFIX}-v${VERSION}.zip"
 
 info()  { printf "\033[1;32m[INFO]\033[0m %s\n" "$*" >&2; }
 warn()  { printf "\033[1;33m[WARN]\033[0m %s\n" "$*" >&2; }
@@ -91,7 +104,7 @@ case "$TARGETS" in
 esac
 
 # 3. 拷贝模块文件（Git Bash 上 *.sh 可能带 CRLF，BusyBox sh 解析不了，统一过 tr 一遍）
-info "打包模块文件..."
+info "打包模块文件... (flavor=$FLAVOR)"
 copy_sh() {
   tr -d '\r' < "$1" > "$2"
   chmod +x "$2" 2>/dev/null || true
@@ -104,6 +117,11 @@ copy_sh "$MODDIR/action.sh"                          "$STAGING/action.sh"
 cp -f   "$MODDIR/module.prop"                        "$STAGING/module.prop"
 [ -f "$MODDIR/README.md" ] && cp -f "$MODDIR/README.md" "$STAGING/README.md"
 
+# flavor 标记文件：customize.sh / service.sh / action.sh 都读它来决定容器 rootfs
+# 来源、容器内 shell、包管理器。刻意不用 sed 把 flavor 烤进脚本 —— 那样 ZIP 里的
+# 脚本和仓库里的源码就不是同一份，排障时看到的和实际跑的对不上。
+printf '%s\n' "$FLAVOR" > "$STAGING/flavor"
+
 # 容器二进制（rurima）—— 从 Magisk/system/bin/ 拷到 staging/system/bin/
 if [ -f "$MODDIR/system/bin/rurima" ]; then
   cp -f "$MODDIR/system/bin/rurima" "$STAGING/system/bin/rurima"
@@ -113,8 +131,10 @@ else
   exit 1
 fi
 
-# 离线 apk（linux-pam / shadow）
-if [ -d "$MODDIR/apk" ]; then
+# 离线 apk（linux-pam / shadow）—— 只有 alpine flavor 需要。
+# 这两个包是 aarch64 Alpine 专用，Debian 侧同等能力由 apt 的 passwd / libpam 提供，
+# 塞进 Debian ZIP 只会白白撑大体积、并让 customize.sh 里多一条永远走不到的分支。
+if [ "$FLAVOR" = "alpine" ] && [ -d "$MODDIR/apk" ]; then
   mkdir -p "$STAGING/apk"
   cp -f "$MODDIR/apk/"*.apk "$STAGING/apk/" 2>/dev/null || true
 fi
@@ -177,5 +197,5 @@ print(f"wrote {out}")
 PY
 fi
 
-info "完成: $OUTZIP"
+info "完成: $OUTZIP (flavor=$FLAVOR)"
 info "用法: 在 Magisk / KernelSU / APatch 管理器中选择此 ZIP 安装即可。"

@@ -234,6 +234,46 @@ jobs:
           CODE=$(( MAJ * 10000 + MIN * 100 + PATCH ))
           echo "VERSIONCODE=${CODE}" >> "$GITHUB_OUTPUT"
 
+      - name: Export Debian arm64 rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 关键假设（如果 CI 在这一步炸了，先看这段注释再动手）：
+          #   docker create 只创建容器、【不执行镜像里的任何指令】；
+          #   docker export 只是把镜像层摊平成 tar，同样不执行任何 arm64 代码。
+          # 所以在 amd64 runner 上导出 arm64 rootfs 【不需要】 QEMU/binfmt。
+          # 万一将来 docker create --platform linux/arm64 报错要求 binfmt，
+          # 正确的修法是在这一步之前加一步 docker/setup-qemu-action，
+          # 【不要】改用 LXC 镜像站等其它导出方式 —— Debian 的 LXC 镜像只有
+          # .tar.xz、带轮转日期戳、且只保留 3 个快照，硬编码 URL 几天内必然 404。
+          docker pull --platform linux/arm64 debian:bookworm-slim
+
+          cid="$(docker create --platform linux/arm64 debian:bookworm-slim)"
+          docker export "$cid" | gzip -9 > daidai-debian-rootfs-arm64.tar.gz
+          docker rm "$cid"
+
+          # 实测体积：未压缩 103 MB -> gzip 后约 27 MB。
+          # 这里只做量级自检，偏差太大说明基础镜像或导出方式变了，值得当场发现。
+          ls -lh daidai-debian-rootfs-arm64.tar.gz
+          size=$(stat -c%s daidai-debian-rootfs-arm64.tar.gz)
+          if [ "$size" -lt 10000000 ] || [ "$size" -gt 80000000 ]; then
+            echo "::error::Debian rootfs 体积异常: ${size} 字节（预期 27MB 量级）"
+            exit 1
+          fi
+
+          # rootfs 里必须有 apt-get 与 bash：前者是装依赖的唯一途径，
+          # 后者是 customize.sh 在 debian flavor 下进容器用的 shell（$CTR_SHELL）。
+          # 先把清单落到文件再 grep —— 直接 `tar | grep -q` 会因为 grep 命中即退出
+          # 让 tar 吃到 SIGPIPE，在 set -o pipefail 下把整步判成失败。
+          # bookworm 已 usr-merge（/bin -> /usr/bin），所以按后缀匹配而不是全路径。
+          tar -tzf daidai-debian-rootfs-arm64.tar.gz > rootfs-listing.txt
+          grep -q 'bin/apt-get$' rootfs-listing.txt || {
+            echo "::error::导出的 rootfs 里找不到 apt-get，customize.sh 装依赖必然失败"; exit 1; }
+          grep -q 'bin/bash$' rootfs-listing.txt || {
+            echo "::error::导出的 rootfs 里找不到 bash，customize.sh 的容器能力探测必然失败"; exit 1; }
+          rm -f rootfs-listing.txt
+
       - name: Build Magisk Module (arm64)
         shell: bash
         run: |
@@ -241,7 +281,7 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
 
           # 直接复用 Magisk/build.sh —— 保证本地打包与 CI 产物结构一致
-          # 该脚本会编译后端、拷贝 system/bin/rurima、apk/、
+          # 该脚本会编译后端、拷贝 system/bin/rurima、apk/、写 flavor 标记文件、
           # 同步 version 与 versionCode、打包 ZIP 到 dist/ 目录。
           #
           # 只打 arm64：容器运行时 Magisk/system/bin/rurima 是 AArch64 静态二进制，
@@ -249,13 +289,19 @@ jobs:
           # 已经明确拦截 x64）。再塞一个永远用不上的 amd64 后端只是让手机端多下
           # 几十 MB。build.sh 的 amd64 / all 能力保留着，将来真有了 x86_64 的
           # rurima，把这里改回 all 即可。
+          #
+          # 两个 flavor 各跑一次：不传第三个参数 = alpine，产物名与历史完全一致。
           bash Magisk/build.sh "$VERSION" arm64
+          bash Magisk/build.sh "$VERSION" arm64 debian
 
           OUT="daidai-panel-magisk-v${VERSION}.zip"
+          OUT_DEBIAN="daidai-panel-magisk-debian-v${VERSION}.zip"
           cp -f "dist/${OUT}" "${OUT}"
+          cp -f "dist/${OUT_DEBIAN}" "${OUT_DEBIAN}"
 
-          ls -lh "${OUT}"
+          ls -lh "${OUT}" "${OUT_DEBIAN}"
           echo "ZIPFILE=${OUT}" >> "$GITHUB_ENV"
+          echo "ZIPFILE_DEBIAN=${OUT_DEBIAN}" >> "$GITHUB_ENV"
 
       - name: Sync update.json
         shell: bash
@@ -271,6 +317,11 @@ jobs:
             CHANGELOG_URL="https://github.com/${REPO}/releases/tag/v${VERSION}"
           fi
 
+          # 已知限制：updateJson 只能填一个 zipUrl，而两个 flavor 共用同一个
+          # module id（daidai-panel），所以模块卡片的一键更新只会指向 Alpine ZIP。
+          # Debian 用户必须手动下载 daidai-panel-magisk-debian-*.zip 升级，
+          # 这条已写进 Magisk/README.md。真要解决需要两份 update.json + 两个
+          # module id，超出本次范围。
           cat > Magisk/update.json <<EOF
           {
             "version": "v${VERSION}",
@@ -287,11 +338,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          # daidai-debian-rootfs-arm64.tar.gz 的下载地址在 customize.sh 里是硬编码的
+          # releases/latest/download/ 固定跳转 —— rootfs 只是一份 Debian 基础系统，
+          # 与面板版本没有耦合，所以每次发版都用同名资产覆盖上传即可。
           gh release upload "${GITHUB_REF_NAME}" \
             "${ZIPFILE}" \
+            "${ZIPFILE_DEBIAN}" \
+            daidai-debian-rootfs-arm64.tar.gz \
             Magisk/update.json \
             --clobber
-          echo "Magisk 模块与 update.json 已上传到 Release ${GITHUB_REF_NAME}"
+          echo "Magisk 模块（alpine + debian）、Debian rootfs 与 update.json 已上传到 Release ${GITHUB_REF_NAME}"
 
   docker-alpine:
     runs-on: ubuntu-latest
