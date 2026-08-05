@@ -158,7 +158,8 @@ database.DB.
 - 延迟计算：`func (e *TaskExecutor) ResolveExecutionDelay(req *ExecutionRequest) time.Duration`（只算时长，**不得 sleep**）
 - 延迟等待：`func (s *SchedulerV2) EnqueueDelayed(delay time.Duration, reqFunc func() *ExecutionRequest)`
 - 关停两段：`func (s *SchedulerV2) SignalStop()` / `func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool`
-- 配置键：`max_concurrent_tasks` -> `SchedulerConfig.WorkerCount`
+- 并发数热生效：`func (s *SchedulerV2) SetWorkerCount(n int) (previous int, applied int)` / `func (s *SchedulerV2) GetWorkerCount() int` / `func ApplySchedulerWorkerCount()`
+- 配置键：`max_concurrent_tasks` -> `SchedulerConfig.WorkerCount`（启动时）-> `SetWorkerCount()`（保存后热生效）
 - 请求字段：`ExecutionRequest.DelayResolved bool`、包内 `taskLog *model.TaskLog` / `tinyLog *TinyLog`
 
 ### 3. Contracts
@@ -172,6 +173,10 @@ database.DB.
 - **关停顺序固定**：`SignalStop()` → `StopAllRunningTasks()` → `WaitWorkers()` → `executor.Wait()`。先等 worker 再杀进程会让每次关机都白等满超时。
 - 队列容量与并发数解耦。`Enqueue` 保持非阻塞 + 满时返回错误的语义，**不得**改成阻塞入队（会卡死 cron 线程）。
 - 任何入队失败路径都必须保证任务状态不停留在 `queued` 假象上——包括 `EnqueueDelayed` 到期后重新入队失败这条新路径。
+- **并发数改动必须热生效**：保存 `max_concurrent_tasks` 后立刻走 `reloadRuntimeConfigKeys` -> `ApplySchedulerWorkerCount()`，不得要求用户重启面板（重启会中断所有正在运行的任务）。
+- **调小只能在两次任务之间收 worker**：退休判断必须放在 worker 取下一个请求**之前**，绝不能打断正在执行的任务。因此调小是最终一致的，测试必须轮询断言，不能用固定 sleep。
+- **「超编就退休」必须在同一把锁内判断 + 减计数**：`desiredWorkers` / `liveWorkers` 刻意用普通 int + `workerLock`，不用 atomic。atomic 会让这个 check-then-act 出现多个 worker 同时判定自己该退出，最终退得比该退的多。
+- **调小必须唤醒空闲 worker**：空闲 worker 阻塞在 `taskQueue` 上，不通过 `resizeCh` 叫醒就发现不了自己已经超编；队列长期空闲时调小会完全不生效。唤醒信号必须非阻塞发送，且 worker 回到循环顶部要重新判断（不能信任信号本身），这样并发数被连续改动时也能自愈。
 
 ### 4. Validation & Error Matrix
 
@@ -190,7 +195,8 @@ database.DB.
 - Base：并发数设为 5（默认），6 个任务同时触发时 5 个执行、1 个排队，无任务丢失。
 - Bad：`OnTaskExecuting` 里 `go runTask(...)` 后立即返回——闸门只覆盖派发窗口，`max_concurrent_tasks` 与「不允许多实例」双双失效，且**静默无报错**。
 - Bad：把随机延迟的 `time.Sleep` 留在 worker 线程上——延迟直接吃掉并发名额。
-- Bad：`WorkerCount` 只在 `InitSchedulerV2()` 读一次，改配置后不重启面板不生效（现状如此，改动时注意不要在文档里承诺热生效）。
+- Bad：`WorkerCount` 只在 `InitSchedulerV2()` 读一次，改配置后必须重启面板才生效。用户升级后把并发数改成 1、保存成功却毫无效果，只会得出「还是没修好」的结论，而重启面板又会中断所有正在运行的任务。
+- Bad：调小并发数时直接 kill 掉多余 worker，或让 worker 在执行任务途中退出——正在跑的任务会被无声打断。
 
 ### 6. Tests Required
 
@@ -206,6 +212,11 @@ database.DB.
 - 准备失败 / 准备阶段 panic -> 槽位都必须归还，且后续任务仍能被同一个 worker 执行。
 - 延迟重新入队失败 -> 任务状态从 `queued` 回落。
 - `ShutdownSchedulerV2` 在有任务运行时耗时远小于等待超时，且中断发生在等待 worker 之前。
+- `SetWorkerCount` 调大 -> 排队中的任务立刻被新 worker 接走，峰值达到新上限。
+- `SetWorkerCount` 调小 -> 收缩完成后峰值不超过新上限。
+- `SetWorkerCount` 调小时队列全程空闲 -> `GetWorkerCount()` 仍必须降到目标值（这条专门防「空闲 worker 卡在 `<-taskQueue` 上永远发现不了自己该退休」）。
+- `SetWorkerCount` 调小时有任务在执行 -> 该任务必须正常跑完。
+- `SetWorkerCount(0)` / 负数 -> 钳到 1，调度器仍能执行任务。
 - 修改后至少运行：
 
 ```bash

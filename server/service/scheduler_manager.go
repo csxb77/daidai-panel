@@ -11,16 +11,44 @@ import (
 var globalScheduler *SchedulerV2
 var globalExecutor *TaskExecutor
 
+// maxConcurrentTasksConfigKey 是「定时任务最大并发数」的配置键，
+// 初始化与热生效两条路径共用，避免字面量拼写漂移。
+const maxConcurrentTasksConfigKey = "max_concurrent_tasks"
+
+// defaultSchedulerWorkerCount 是配置缺失或非法时的兜底并发数。
+const defaultSchedulerWorkerCount = 4
+
+// resolveSchedulerWorkerCount 读取配置里的并发数，非法值回落到兜底值。
+func resolveSchedulerWorkerCount() int {
+	workerCount := model.GetRegisteredConfigInt(maxConcurrentTasksConfigKey)
+	if workerCount < 1 {
+		return defaultSchedulerWorkerCount
+	}
+	return workerCount
+}
+
+// ApplySchedulerWorkerCount 让「定时任务最大并发数」在保存后立刻生效，不必重启面板。
+// 调大立刻补 worker；调小时多余的 worker 只在两次任务之间退出，不会打断正在执行的任务。
+func ApplySchedulerWorkerCount() {
+	scheduler := globalScheduler
+	if scheduler == nil {
+		return
+	}
+
+	previous, applied := scheduler.SetWorkerCount(resolveSchedulerWorkerCount())
+	if previous == applied {
+		return
+	}
+	log.Printf("scheduler v2 concurrency limit updated: %d -> %d worker(s)", previous, applied)
+}
+
 func InitSchedulerV2() {
 	globalExecutor = NewTaskExecutor()
 	if count := RecoverAbandonedActiveTasks("面板上次异常退出，运行中的任务已标记为中断"); count > 0 {
 		log.Printf("recovered %d abandoned active task(s)", count)
 	}
 
-	workerCount := model.GetRegisteredConfigInt("max_concurrent_tasks")
-	if workerCount < 1 {
-		workerCount = 4
-	}
+	workerCount := resolveSchedulerWorkerCount()
 
 	cfg := SchedulerConfig{
 		WorkerCount: workerCount,

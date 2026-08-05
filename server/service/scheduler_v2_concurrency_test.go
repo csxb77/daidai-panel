@@ -189,6 +189,21 @@ func newTestScheduler(t *testing.T, workerCount int, handler SchedulerEventHandl
 	return scheduler
 }
 
+// waitForWorkerCount 轮询等待存活 worker 数收敛到 want。
+// worker 只在两次任务之间退休，因此调小并发数是最终一致的，不能用固定 sleep 断言。
+func waitForWorkerCount(t *testing.T, scheduler *SchedulerV2, want int, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if scheduler.GetWorkerCount() == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for worker count %d, got %d", want, scheduler.GetWorkerCount())
+}
+
 func newTestRequest(taskID uint, allowMultiple bool) *ExecutionRequest {
 	task := &model.Task{
 		ID:                     taskID,
@@ -578,6 +593,221 @@ func TestSchedulerV2ReleasesSlotWhenPreparationFails(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("expected the concurrency slot to be released, running count is %d", scheduler.GetRunningCount())
+}
+
+// R6：并发数调大必须立刻生效，不需要重启面板。
+func TestSchedulerV2SetWorkerCountScalesUpImmediately(t *testing.T) {
+	handler := newFakeSchedulerHandler(0)
+	release := make(chan struct{})
+	handler.runFunc = func(req *ExecutionRequest) {
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+	}
+
+	scheduler := newTestScheduler(t, 1, handler)
+	scheduler.Start()
+
+	for _, taskID := range []uint{1, 2, 3} {
+		if err := scheduler.Enqueue(newTestRequest(taskID, false)); err != nil {
+			t.Fatalf("enqueue task %d: %v", taskID, err)
+		}
+	}
+
+	// 并发数为 1：三个任务里只有一个能进入执行，另外两个必须在队列里等着。
+	handler.waitForStarts(t, 1, 5*time.Second)
+	time.Sleep(100 * time.Millisecond)
+	if got := handler.startedCount(); got != 1 {
+		t.Fatalf("expected exactly 1 task to run while the worker count is 1, got %d", got)
+	}
+
+	previous, applied := scheduler.SetWorkerCount(3)
+	if previous != 1 || applied != 3 {
+		t.Fatalf("expected the worker count to go 1 -> 3, got %d -> %d", previous, applied)
+	}
+
+	// 排队中的两个任务必须被新补的 worker 立刻接走。
+	handler.waitForStarts(t, 3, 5*time.Second)
+	if got := handler.peak(); got != 3 {
+		t.Fatalf("expected peak concurrency 3 after scaling up, got %d", got)
+	}
+
+	close(release)
+	handler.waitForFinishes(t, 3, 5*time.Second)
+}
+
+// R6：并发数调小必须立刻生效——收缩之后的执行峰值不得超过新的上限。
+func TestSchedulerV2SetWorkerCountScalesDownAndCapsConcurrency(t *testing.T) {
+	handler := newFakeSchedulerHandler(40 * time.Millisecond)
+	scheduler := newTestScheduler(t, 3, handler)
+	scheduler.Start()
+
+	if _, applied := scheduler.SetWorkerCount(1); applied != 1 {
+		t.Fatalf("expected the worker count to be lowered to 1, got %d", applied)
+	}
+	waitForWorkerCount(t, scheduler, 1, 5*time.Second)
+
+	for _, taskID := range []uint{1, 2, 3, 4} {
+		if err := scheduler.Enqueue(newTestRequest(taskID, false)); err != nil {
+			t.Fatalf("enqueue task %d: %v", taskID, err)
+		}
+	}
+
+	runs := handler.waitForFinishes(t, 4, 10*time.Second)
+	if len(runs) != 4 {
+		t.Fatalf("expected exactly 4 runs, got %d", len(runs))
+	}
+	if got := handler.peak(); got != 1 {
+		t.Fatalf("expected peak concurrency 1 after lowering the worker count, got %d", got)
+	}
+	for i := 1; i < len(runs); i++ {
+		if runs[i].Start.Before(runs[i-1].End) {
+			t.Fatalf("run %d started at %s before run %d ended at %s: the lowered limit did not hold",
+				i, runs[i].Start, i-1, runs[i-1].End)
+		}
+	}
+}
+
+// R6：队列空闲时调小也必须真的生效。
+//
+// 空闲 worker 一直阻塞在 taskQueue 上，如果没有唤醒信号，它永远发现不了自己已经超编——
+// 用户改小并发数后要等到下一个任务进来才部分生效，队列长期空闲时则完全不生效。
+//
+// 【为什么必须先把 worker 逼进 select，不要把这条用例简化回「Start 完立刻 SetWorkerCount」】
+// worker 的退休判断在循环顶部、select 之前：
+//
+//	for { if stopped {...}; if retireWorkerIfSurplus() { return }; select { ...taskQueue... } }
+//
+// 停在循环顶部的 worker 压根不需要任何唤醒信号，下一次判断就会自己退休；
+// 只有已经阻塞在 select 上的 worker 才必须靠 resizeCh 叫醒。
+// 而 Start() 刚返回时，4 个 worker goroutine 很可能还没跑到 select——
+// liveWorkers 是在 spawnWorkersLocked 里 spawn 之前就自增的，
+// 所以 GetWorkerCount() == 4 只代表名额已登记，不代表 goroutine 已经开始跑。
+// 于是「Start 完立刻 SetWorkerCount(1)」走的是循环顶部那条路，
+// 把 resizeCh 唤醒分支整个删掉用例照样会绿，等于什么都没测到。
+//
+// 因此这里先让 4 个 worker 各跑一个任务（进入过 RunTask 就证明它们已越过循环顶部），
+// 跑完后重新阻塞回 select，再调小并发数：此时唤醒路径是用例唯一可能通过的方式。
+func TestSchedulerV2SetWorkerCountShrinksWhileQueueIsIdle(t *testing.T) {
+	handler := newFakeSchedulerHandler(0)
+	release := make(chan struct{})
+	// runFunc 必须在 Start() 之前设置：worker 起来之后 RunTask 会持 h.mu 读这个字段，
+	// 测试中途裸写就是一次无同步的并发读写（-race 下直接报 data race）。
+	// Start() 之前还没有任何 worker goroutine，goroutine 创建本身就构成 happens-before。
+	handler.runFunc = func(req *ExecutionRequest) {
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+	}
+
+	scheduler := newTestScheduler(t, 4, handler)
+	scheduler.Start()
+
+	if got := scheduler.GetWorkerCount(); got != 4 {
+		t.Fatalf("expected 4 workers after start, got %d", got)
+	}
+
+	// 预热：4 个任务同时卡在 RunTask 里 —— 一个 worker 一次只能跑一个任务，
+	// 所以「4 个 RunTask 同时在执行」等价于「4 个 worker 全部离开了循环顶部」。
+	for _, taskID := range []uint{21, 22, 23, 24} {
+		if err := scheduler.Enqueue(newTestRequest(taskID, false)); err != nil {
+			t.Fatalf("enqueue warm-up task %d: %v", taskID, err)
+		}
+	}
+	handler.waitForStarts(t, 4, 5*time.Second)
+	if got := handler.peak(); got != 4 {
+		t.Fatalf("expected all 4 workers to be inside RunTask before resizing, peak concurrency = %d", got)
+	}
+
+	// 放行预热任务，让 4 个 worker 跑完回到 select 上阻塞。
+	close(release)
+	handler.waitForFinishes(t, 4, 5*time.Second)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for scheduler.GetRunningCount() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := scheduler.GetRunningCount(); got != 0 {
+		t.Fatalf("expected every warm-up task to be settled before resizing, running count = %d", got)
+	}
+
+	// 全用例唯一一处 sleep，且它是「等待稳定」而不是「代替断言」：
+	// GetRunningCount() 归零只说明 executeTask 的 defer 已经跑完、马上要返回，
+	// worker 还要再走「循环顶部判断 -> 进入 select」这几步才算真正空闲阻塞。
+	// 「goroutine 已经停在 select 上」没有任何可观测状态能断言（这恰恰是本用例要构造的前提），
+	// 只能给一段远超实际需要的稳定期；真正的断言仍然是下面 waitForWorkerCount 的轮询。
+	time.Sleep(100 * time.Millisecond)
+
+	// 此刻队列已空、4 个 worker 全部阻塞在 select 上：不叫醒就永远发现不了自己超编。
+	scheduler.SetWorkerCount(1)
+
+	// 之后不再投任何任务，多余的 worker 只能靠唤醒信号回到循环顶部自行退休。
+	waitForWorkerCount(t, scheduler, 1, 5*time.Second)
+	if got := handler.startedCount(); got != 4 {
+		t.Fatalf("expected exactly the 4 warm-up tasks to have run, got %d", got)
+	}
+}
+
+// R6：调小并发数只能在两次任务之间收 worker，绝不能打断正在执行的任务。
+func TestSchedulerV2SetWorkerCountDoesNotInterruptRunningTask(t *testing.T) {
+	handler := newFakeSchedulerHandler(0)
+	release := make(chan struct{})
+	handler.runFunc = func(req *ExecutionRequest) {
+		select {
+		case <-release:
+		case <-time.After(5 * time.Second):
+		}
+	}
+
+	scheduler := newTestScheduler(t, 3, handler)
+	scheduler.Start()
+
+	if err := scheduler.Enqueue(newTestRequest(11, false)); err != nil {
+		t.Fatalf("enqueue task: %v", err)
+	}
+	handler.waitForStarts(t, 1, 5*time.Second)
+
+	scheduler.SetWorkerCount(1)
+	// 两个空闲 worker 退休后，正在执行任务的那个必须留下来把任务跑完。
+	waitForWorkerCount(t, scheduler, 1, 5*time.Second)
+	if got := scheduler.GetRunningCount(); got != 1 {
+		t.Fatalf("expected the in-flight task to survive the resize, running count = %d", got)
+	}
+
+	close(release)
+	runs := handler.waitForFinishes(t, 1, 5*time.Second)
+	if len(runs) != 1 || runs[0].TaskID != 11 || runs[0].End.IsZero() {
+		t.Fatalf("expected task 11 to finish normally after the resize, got %#v", runs)
+	}
+}
+
+// R6：并发数被填成 0 或负数时钳到 1，调度器仍然要能正常执行任务。
+func TestSchedulerV2SetWorkerCountClampsToAtLeastOne(t *testing.T) {
+	handler := newFakeSchedulerHandler(10 * time.Millisecond)
+	scheduler := newTestScheduler(t, 2, handler)
+	scheduler.Start()
+
+	if _, applied := scheduler.SetWorkerCount(0); applied != 1 {
+		t.Fatalf("expected 0 to be clamped to 1, got %d", applied)
+	}
+	if _, applied := scheduler.SetWorkerCount(-5); applied != 1 {
+		t.Fatalf("expected a negative worker count to be clamped to 1, got %d", applied)
+	}
+
+	waitForWorkerCount(t, scheduler, 1, 5*time.Second)
+	if got := scheduler.GetWorkerCount(); got < 1 {
+		t.Fatalf("expected at least one worker to survive the clamp, got %d", got)
+	}
+
+	if err := scheduler.Enqueue(newTestRequest(12, false)); err != nil {
+		t.Fatalf("enqueue task: %v", err)
+	}
+	runs := handler.waitForFinishes(t, 1, 5*time.Second)
+	if len(runs) != 1 || runs[0].TaskID != 12 {
+		t.Fatalf("expected the scheduler to keep working after the clamp, got %#v", runs)
+	}
 }
 
 // A9：存在运行中任务时关机，必须先中断执行、再等待 worker，整体耗时远小于原来的 5s 超时。

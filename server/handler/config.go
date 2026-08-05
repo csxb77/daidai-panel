@@ -27,6 +27,10 @@ func reloadRuntimeConfigKeys(keys ...string) {
 			}
 		case "trusted_proxy_cidrs":
 			_ = middleware.ConfigureTrustedProxyCIDRs(model.GetRegisteredConfig(key))
+		case "max_concurrent_tasks":
+			// 并发数只在启动时读一次的话，用户改完必须重启面板才生效，
+			// 而重启会中断所有正在运行的任务。这里让它立刻生效。
+			service.ApplySchedulerWorkerCount()
 		case "backup_schedule_enabled",
 			"backup_schedule_frequency",
 			"backup_schedule_time",

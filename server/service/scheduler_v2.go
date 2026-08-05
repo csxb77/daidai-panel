@@ -65,6 +65,11 @@ type SchedulerEventHandler interface {
 	OnTaskFailed(req *ExecutionRequest, err error)
 }
 
+// workerResizeSignalBuffer 是「并发数被调小」唤醒信号的缓冲长度。
+// 信号只是让空闲 worker 回到循环顶部重新判断一次，多发少发都不影响正确性，
+// 缓冲满了直接丢弃即可，绝不能阻塞调用方。
+const workerResizeSignalBuffer = 128
+
 type SchedulerV2 struct {
 	config       SchedulerConfig
 	cron         *cron.Cron
@@ -80,6 +85,19 @@ type SchedulerV2 struct {
 	runningLock  sync.RWMutex
 	stopOnce     sync.Once
 	stopped      atomic.Bool
+
+	// worker 数量可以在运行期调整，用于让「定时任务最大并发数」保存后立刻生效。
+	// desiredWorkers / liveWorkers 用普通 int 加一把小锁保护，刻意不用 atomic：
+	// 「超编就退休」是典型的 check-then-act，用 atomic 会让两个超编 worker 同时
+	// 判定自己该退出，最终退得比该退的多。这里的操作频率极低，锁开销可以忽略。
+	workerLock         sync.Mutex
+	desiredWorkers     int
+	liveWorkers        int
+	workerSeq          int
+	workersInitialized bool
+	// resizeCh 负责把「并发数被调小」的消息推给空闲 worker——
+	// 它们本来一直阻塞在 taskQueue 上，不叫醒就发现不了自己已经超编。
+	resizeCh chan struct{}
 }
 
 func NewSchedulerV2(config SchedulerConfig, handler SchedulerEventHandler) *SchedulerV2 {
@@ -103,19 +121,108 @@ func NewSchedulerV2(config SchedulerConfig, handler SchedulerEventHandler) *Sche
 		stopCh:       make(chan struct{}),
 		handler:      handler,
 		runningTasks: make(map[uint][]int64),
+		resizeCh:     make(chan struct{}, workerResizeSignalBuffer),
 	}
 
 	return s
 }
 
 func (s *SchedulerV2) Start() {
-	for i := 0; i < s.config.WorkerCount; i++ {
-		s.wg.Add(1)
-		go s.worker(i)
+	s.workerLock.Lock()
+	// 只在从未设置过时才用构造参数播种，这样「Start 之前就调过 SetWorkerCount」不会被覆盖。
+	if !s.workersInitialized {
+		s.workersInitialized = true
+		s.desiredWorkers = s.config.WorkerCount
 	}
+	desired := s.desiredWorkers
+	s.spawnWorkersLocked()
+	s.workerLock.Unlock()
 
 	s.cron.Start()
-	log.Printf("scheduler v2 started: %d workers, queue size %d", s.config.WorkerCount, s.config.QueueSize)
+	log.Printf("scheduler v2 started: %d workers, queue size %d", desired, s.config.QueueSize)
+}
+
+// SetWorkerCount 在运行期调整并发上限（即 worker 数量），返回调整前后的目标值。
+// 调大立刻补齐 worker；调小只是把多余的 worker 标记为超编，它们会在两次任务之间自行退出，
+// 绝不会打断正在执行的任务。n < 1 会被钳到 1。
+func (s *SchedulerV2) SetWorkerCount(n int) (previous int, applied int) {
+	if s == nil {
+		return 0, 0
+	}
+	if n < 1 {
+		n = 1
+	}
+
+	s.workerLock.Lock()
+	previous = s.desiredWorkers
+	s.workersInitialized = true
+	s.desiredWorkers = n
+	s.spawnWorkersLocked()
+	surplus := s.liveWorkers - s.desiredWorkers
+	s.workerLock.Unlock()
+
+	// 空闲 worker 阻塞在 taskQueue 上，不叫醒它们就得等到下一个任务进来才会发现自己该退休；
+	// 队列长期空闲时，调小并发数会一直不生效。非阻塞发送：channel 满了也无所谓，
+	// worker 回到循环顶部本来就会重新判断一次。
+	for i := 0; i < surplus; i++ {
+		select {
+		case s.resizeCh <- struct{}{}:
+		default:
+		}
+	}
+
+	return previous, n
+}
+
+// GetWorkerCount 返回当前存活的 worker 数量，也就是真实生效的并发上限。
+// 调小并发数之后，它会随着多余 worker 陆续收工逐步降到目标值。
+func (s *SchedulerV2) GetWorkerCount() int {
+	if s == nil {
+		return 0
+	}
+
+	s.workerLock.Lock()
+	defer s.workerLock.Unlock()
+	return s.liveWorkers
+}
+
+// spawnWorkersLocked 把存活 worker 补到 desiredWorkers，必须在持有 workerLock 时调用。
+func (s *SchedulerV2) spawnWorkersLocked() {
+	if s.stopped.Load() {
+		// 已经在关停流程里就不要再补 worker，否则可能和 WaitWorkers 里的 wg.Wait 撞车。
+		return
+	}
+
+	for s.liveWorkers < s.desiredWorkers {
+		s.liveWorkers++
+		id := s.workerSeq
+		s.workerSeq++
+		s.wg.Add(1)
+		go s.worker(id)
+	}
+}
+
+// retireWorkerIfSurplus 在同一把锁内完成「判断自己是否超编 + 注销自己」。
+// 这两步必须原子：先判断后减计数的话，多个超编 worker 会同时判定该退出，退得比该退的多。
+func (s *SchedulerV2) retireWorkerIfSurplus() bool {
+	s.workerLock.Lock()
+	defer s.workerLock.Unlock()
+
+	if s.liveWorkers <= s.desiredWorkers {
+		return false
+	}
+	s.liveWorkers--
+	return true
+}
+
+// releaseWorkerSlot 用于「退休」之外的退出路径（调度器关停、goroutine 异常退出）。
+func (s *SchedulerV2) releaseWorkerSlot() {
+	s.workerLock.Lock()
+	defer s.workerLock.Unlock()
+
+	if s.liveWorkers > 0 {
+		s.liveWorkers--
+	}
 }
 
 // Stop 保留为“不再接新活 + 等待 worker 收工”的组合，方便一次性关停。
@@ -178,16 +285,33 @@ func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool {
 }
 
 func (s *SchedulerV2) worker(id int) {
-	defer s.wg.Done()
+	// 退休路径会在锁内自己把计数减掉，其余任何退出路径（含 panic 逃逸）都由这里兜底归还名额，
+	// 保证 liveWorkers 始终等于真实存活的 worker 数。
+	retired := false
+	defer func() {
+		if !retired {
+			s.releaseWorkerSlot()
+		}
+		s.wg.Done()
+	}()
 
 	for {
 		if s.stopped.Load() {
+			return
+		}
+		// 退休判断只发生在「取下一个任务之前」，因此调小并发数不会打断正在执行的任务。
+		if s.retireWorkerIfSurplus() {
+			retired = true
+			log.Printf("scheduler v2 worker %d retired: concurrency limit was lowered", id)
 			return
 		}
 
 		select {
 		case <-s.stopCh:
 			return
+		case <-s.resizeCh:
+			// 并发数刚被调小：回到循环顶部重新判断自己是否超编。
+			continue
 		case req := <-s.taskQueue:
 			if s.stopped.Load() {
 				return
