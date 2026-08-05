@@ -39,7 +39,7 @@
 - **系统监控** — 实时 CPU / 内存 / 磁盘监控，任务执行趋势统计
 
 <details>
-<summary><b>点击展开查看详细功能</b></summary>
+<summary><b>展开：逐模块的完整能力清单（订阅的白名单 / 黑名单 / 依赖规则匹配细节在这里）</b></summary>
 
 ### 定时任务管理
 - 标准 Cron 表达式调度
@@ -99,7 +99,7 @@
 ## 效果图
 
 <details>
-<summary><b>点击展开查看界面截图</b></summary>
+<summary><b>展开：12 张界面截图（仪表盘 / 定时任务 / 执行日志 / 脚本 / 订阅 / 系统设置…）</b></summary>
 
 | 功能 | 截图 |
 |------|------|
@@ -173,6 +173,9 @@ docker compose up -d
 
 首次访问 `http://localhost:5700` 会进入管理员初始化。
 
+<details>
+<summary><b>展开：这份 compose 每一条在做什么 · Docker Hub 太慢怎么换镜像源 · 不想自动更新怎么删掉 Watchtower · docker run 等价写法</b></summary>
+
 如果 Docker Hub 访问慢，可以设置一次 `DAIDAI_PANEL_IMAGE`，让 `image` 和 `IMAGE_NAME` 同时使用你信任的镜像加速地址；README 默认不再内置固定第三方镜像源。也可以到 [容器镜像监控](https://status.anye.xyz/) 查看更多 Docker Hub 镜像加速源状态，再选择可用地址填写。
 
 这份 compose 已经是推荐的可直接上线版本：
@@ -230,6 +233,11 @@ docker run -d \
   --interval 3600
 ```
 
+</details>
+
+<details>
+<summary><b>展开：该选哪个镜像标签 —— 要跑 Go 任务 / 装需要现场编译的依赖 / 换 Debian 运行时 / 指定 Python 3.10、3.11 / 查 CPU 架构支持 / 本地源码构建</b></summary>
+
 ### 支持的 CPU 架构
 
 镜像是 multi-arch manifest list，`docker pull` 时按你机器自动选对应平台：
@@ -250,24 +258,24 @@ docker run -d \
 | 精简版 | 目标 Python 与 pip/venv、Node.js/npm、`apk` 或 `apt`、Git/SSH、bash、curl、Nginx 和基础运行库 | 不含 Go、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config |
 | 完整版 | 精简版的全部内容 | 额外包含 Go/gofmt、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config |
 
-从首个包含本次镜像拆分的版本开始，**Go 任务必须使用 `latest-full` 或 `debian-full`。** 安装需要现场编译原生扩展的 pip/npm 依赖时，也建议使用完整版。普通 Python、JavaScript、TypeScript 和 Shell 任务优先使用体积更小的精简版。
+自 `v3.0.0` 起，**Go 任务必须使用 `latest-full` 或 `debian-full`。** 安装需要现场编译原生扩展的 pip/npm 依赖时，也建议使用完整版。普通 Python、JavaScript、TypeScript 和 Shell 任务优先使用体积更小的精简版。
 
-下一版本计划发布下面 10 个浮动标签，其中包含 `debian-full`。当前最新稳定版 `v2.3.9` 尚未发布 full 和新连字符标签，请等包含本改动的新版本发布后再切换。表里的 `<版本>` 表示届时实际发布的版本号；在 Watchtower 或 Compose 部署中，浮动标签会持续收到新版，固定版本标签用于锁定环境。
+自 `v3.0.0` 起提供下面 10 个正式浮动标签，其中包含 `debian-full`。在 Watchtower 或 Compose 部署中，浮动标签会持续收到新版，固定版本标签用于锁定环境。
 
 | 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
 |--------------|------------------|----------|--------|----------|----------|
-| `latest` | `<版本>` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-full` | `<版本>-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-3.10` | `<版本>-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
-| `latest-3.11` | `<版本>-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
-| `latest-all` | `<版本>-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `<版本>-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `<版本>-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `<版本>-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `<版本>-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `<版本>-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `latest` | `3.0.0` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `3.0.0-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `3.0.0-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `3.0.0-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `3.0.0-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `3.0.0-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `3.0.0-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `3.0.0-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `3.0.0-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `3.0.0-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
 
-正式发布时只替换 `<版本>`，后缀保持不变。
+后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
 #### Python 去重与 32 位例外
 
@@ -278,7 +286,7 @@ docker run -d \
 
 #### 新标签与旧别名迁移
 
-下一版本发布后，新的连字符标签会成为正式名称。下面 6 个旧浮动标签会继续由同一次构建推送，现有 Watchtower 部署不会因为改名而断更：
+自 `v3.0.0` 起，新的连字符标签是正式名称。下面 6 个旧浮动标签仍由同一次构建推送，现有 Watchtower 部署不会因为改名而断更：
 
 | 旧兼容别名 | 新正式标签 |
 |------------|------------|
@@ -289,9 +297,11 @@ docker run -d \
 | `debian3.11` | `debian-3.11` |
 | `debianall` | `debian-all` |
 
-Debian 的旧固定版本格式也会保留兼容别名：`<版本>-debian3.10`、`<版本>-debian3.11`、`<版本>-debianall` 分别对应新的 `<版本>-debian-3.10`、`<版本>-debian-3.11`、`<版本>-debian-all`。新部署请直接使用新名称。
+Debian 的旧固定版本格式也保留兼容别名：`3.0.0-debian3.10`、`3.0.0-debian3.11`、`3.0.0-debianall` 分别对应新的 `3.0.0-debian-3.10`、`3.0.0-debian-3.11`、`3.0.0-debian-all`。新部署请直接使用新名称。
 
-相关新版本发布后，仓库里的两份基础 Compose 都只需要设置一次镜像变量。例如切换到 Alpine 完整版：
+#### 切换标签与本地构建
+
+仓库里的两份基础 Compose 都只需要设置一次镜像变量。例如切换到 Alpine 完整版：
 
 ```bash
 DAIDAI_PANEL_IMAGE=linzixuanzz/daidai-panel:latest-full docker compose up -d
@@ -361,6 +371,11 @@ docker build -f Dockerfile.debian \
   -t daidai-panel:debian-all-local .
 ```
 
+</details>
+
+<details>
+<summary><b>展开：Windows 单机版 —— 不装 Docker，下载 zip 解压双击 start.bat 就能跑</b></summary>
+
 ### Windows 单机版（不走 Docker）
 
 **v2.1.0 新增**：Windows 用户可以直接下载编译好的 zip 解压运行，面板内置 Go 后端同时托管前端（无需 Nginx / Docker）。
@@ -391,6 +406,11 @@ daidai-panel-windows-amd64/
 
 **升级**：优先在面板后台进入「系统设置」→「概览」→「检查系统更新」→「立即更新」。二进制后台更新会自动下载对应平台的 Release 包，替换程序与前端文件，并保留现有 `config.yaml`、`Dumb-Panel\`、`data\`、`logs\`、`backups\` 等本地配置和数据目录。只有在程序目录没有写入权限、网络无法访问 GitHub Release，或后台更新失败时，才需要手动下载新版 zip 后迁移数据。
 
+</details>
+
+<details>
+<summary><b>展开：Android Magisk 模块 —— 已 Root 的手机上直接跑，不需要 Docker、不需要 Termux</b></summary>
+
 ### Android Magisk 模块（Root 手机）
 
 在已 Root 的 Android 设备上直接跑面板，无需 Docker、无需 Termux。模块会在安装阶段下载一份 Alpine 3.18 minirootfs 到 `/data/daidai`，在容器里 `apk` 装好 Python / Node.js / Git 等运行时，然后通过 `rurima` 进入容器启动后端，开机自启。
@@ -402,7 +422,28 @@ daidai-panel-windows-amd64/
 
 > 📱 **完整的安装 / 升级 / 卸载 / 端口配置 / 排障文档请看 → [`Magisk/README.md`](./Magisk/README.md)**
 
+</details>
+
+## 文档导航
+
+上面就是最小可用的部署路径。剩下的内容默认收起，按需展开：
+
+| 我想… | 看哪里 |
+|-------|--------|
+| 跑 Go 任务、装需要现场编译的依赖、换 Debian 运行时、指定 Python 3.10 / 3.11 | [快速部署](#快速部署) → 「该选哪个镜像标签」 |
+| 不用 Docker，在 Windows 上直接跑 | [快速部署](#快速部署) → 「Windows 单机版」 |
+| 在已 Root 的安卓手机上跑 | [快速部署](#快速部署) → 「Android Magisk 模块」，完整文档见 [`Magisk/README.md`](./Magisk/README.md) |
+| 改端口、配 Nginx / 宝塔 / Caddy 反代、SSE 日志流断掉 | [端口与反向代理](#端口与反向代理) |
+| 升级到新版本 | [更新](#更新) |
+| 忘了密码 / 用户名，或 IP 白名单把自己锁在门外 | [容器命令 `ddp`](#容器命令-ddp) |
+| 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
+| 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考)，完整清单见 [系统配置与运维说明](./docs/system-config-operations.md) |
+| 看这一版改了什么 | [v3.0.0 更新日志](./docs/release-notes/v3.0.0.md) |
+
 ## 端口与反向代理
+
+<details>
+<summary><b>展开：3 个端口分别归谁管 · 只改宿主机端口怎么写 · Magisk 模块改端口 · Nginx 反代模板（SSE 必须关 proxy_buffering）</b></summary>
 
 ### 端口三兄弟
 
@@ -489,8 +530,7 @@ su -c "sh /data/adb/modules/daidai-panel/service.sh"
 
 最常见是 **宿主机 Nginx → Docker 已发布端口**。面板暴露在宿主机 `5700`，反代就指向那里：
 
-<details>
-<summary><b>宿主机 Nginx 示例（HTTPS，含 SSE 支持）</b></summary>
+#### 宿主机 Nginx 示例（HTTPS，含 SSE 支持）
 
 ```nginx
 map $http_upgrade $connection_upgrade {
@@ -523,8 +563,6 @@ server {
 }
 ```
 
-</details>
-
 如果反代本身也跑在同一 Docker 网络里，可以直接代理到 `http://daidai-panel:5700`（依然是容器内 Nginx 端口）。
 
 **别做的事**：
@@ -533,14 +571,19 @@ server {
 - 把 SSE / 下载 / 鉴权接口单独绕出去
 - 让 `-p` 右侧容器端口和 `PANEL_PORT` 不一致
 
+</details>
+
 ## 更新
+
+<details>
+<summary><b>展开：面板内一键更新分别走哪条链路（Watchtower / Docker CLI / 二进制）· Compose 手动 pull 重建怎么写</b></summary>
 
 ### 面板内一键更新（推荐）
 
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
-- **Docker 精简版**：从首个包含本次镜像拆分的版本开始，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
-- **Docker 完整版**：新版本发布后同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用固定标签 `<版本>-full` 或 `<版本>-debian-full` 触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
+- **Docker 精简版**：自 `v3.0.0` 起，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
+- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.0-full`、`3.0.0-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 
 ### 手动更新
@@ -563,7 +606,7 @@ docker compose -f docker-compose.debian.yml pull daidai-panel
 docker compose -f docker-compose.debian.yml up -d daidai-panel
 ```
 
-包含本次镜像拆分的新版本发布后，可以把 `.env` 中的 `DAIDAI_PANEL_IMAGE` 改成对应正式标签，例如 `latest-full`、`latest-3.10`、`latest-3.11`、`latest-all`、`debian-full`、`debian-3.10`、`debian-3.11` 或 `debian-all`。
+也可以把 `.env` 中的 `DAIDAI_PANEL_IMAGE` 改成对应正式标签，例如 `latest-full`、`latest-3.10`、`latest-3.11`、`latest-all`、`debian-full`、`debian-3.10`、`debian-3.11` 或 `debian-all`。
 
 本地基于源码自己构建的镜像，重新 build 即可：
 
@@ -571,7 +614,12 @@ docker compose -f docker-compose.debian.yml up -d daidai-panel
 docker build --build-arg VERSION=dev -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
+</details>
+
 ## 容器命令 `ddp`
+
+<details>
+<summary><b>展开：忘了密码 / 用户名、IP 白名单把自己锁在门外、备份与恢复、脚本 / 变量 / 任务 / 订阅的命令行操作</b></summary>
 
 容器里预置了 `ddp` CLI，覆盖运维、脚本 / 变量 / 任务 / 订阅管理、账号恢复等场景。统一入口：
 
@@ -657,7 +705,12 @@ docker run --rm \
   ddp version
 ```
 
+</details>
+
 ## 数据目录
+
+<details>
+<summary><b>展开：Dumb-Panel 目录里都有什么 —— 备份、迁移带走这一个目录就够了</b></summary>
 
 默认挂在 `./Dumb-Panel`，保留这一个目录 = 保留整个面板状态：
 
@@ -672,7 +725,12 @@ Dumb-Panel/
 └── backups/           # 数据备份
 ```
 
+</details>
+
 ## 配置参考
+
+<details>
+<summary><b>展开：Docker 环境变量完整清单 · 启动配置与运行期配置的区别（改哪个、重启会不会丢）</b></summary>
 
 面板有两层配置：
 
@@ -696,7 +754,12 @@ Dumb-Panel/
 
 `DAIDAI_PANEL_IMAGE` 是宿主机上的 Compose 变量，不是容器内变量。两份基础 Compose 都用它同时设置 `image` 和 `IMAGE_NAME`。
 
+</details>
+
 ## 技术栈
+
+<details>
+<summary><b>展开：前端 / 后端 / 部署分别用了什么</b></summary>
 
 | 层 | 技术 |
 |----|------|
@@ -704,7 +767,12 @@ Dumb-Panel/
 | 后端 | Go 1.25 + Gin + GORM + SQLite（`glebarez/sqlite` 纯 Go port，`CGO_ENABLED=0`） |
 | 部署 | Nginx + Go Binary，Docker 多架构镜像：`linux/amd64` / `linux/arm64` / `linux/386` / `linux/arm/v7` |
 
+</details>
+
 ## 致谢
+
+<details>
+<summary><b>展开：本项目参考与借鉴的开源项目</b></summary>
 
 本项目的开发离不开以下优秀的开源项目：
 
@@ -712,6 +780,8 @@ Dumb-Panel/
 - **[青龙面板 (Qinglong)](https://github.com/whyour/qinglong)** — 功能设计参考，定时任务管理、环境变量、订阅管理等核心功能借鉴自青龙面板
 
 感谢以上项目作者的贡献！
+
+</details>
 
 ## LICENSE
 
