@@ -103,6 +103,17 @@ func TestManagedPythonVenvDirUsesFlatVersionedPaths(t *testing.T) {
 func TestWarmManagedPythonVenvWarmsAllSupportedVersions(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
+	// WarmManagedPythonVenv 第一个预热的是 DefaultPythonVersion()，它会走版本回退探测。
+	// 把 PATH 收敛到只有测试自己造的 3.10 / 3.11 / 3.12 三个假解释器：
+	//   - 请求版本 3.11 探测得到 → 不回退 → 预热顺序以 3.11 打头；
+	//   - 若有人破坏"请求版本已安装就绝不回退"的不变量（例如无条件回退到默认 3.12），
+	//     顺序会退化成 [3.12, 3.10]，本用例立刻红。
+	// 三个版本全造齐，是为了让"不回退"这条断言真的有回退候选可选，而不是靠宿主机恰好没装 3.12。
+	fakePythonDir := isolatePythonProbePath(t)
+	for _, version := range []string{"3.10", "3.11", "3.12"} {
+		writeFakePythonInterpreter(t, fakePythonDir, "python"+version, version+".4")
+	}
+
 	var warmed []string
 	original := warmManagedPythonVenvForVersionFunc
 	originalCleanup := cleanupBrokenManagedPythonVenvsFunc
@@ -404,6 +415,44 @@ func writeFakeExecutable(t *testing.T, dir, name string, lines []string) string 
 	}
 	return path
 }
+
+// isolatePythonProbePath 把进程 PATH 整体替换成一个空的临时目录，并返回这个目录。
+//
+// Python 版本回退探测(discoverSystemPythonForVersion)会真的 exec `python3.X --version`，
+// 所以只要系统 PATH 还可见，探测结果就跟着宿主机走：
+// GitHub ubuntu runner 自带 python3.12，纯净构建容器里一个 python 都没有，
+// 同一个用例在两边会得到完全相反的结论。
+// 这里必须"整体替换"而不是"前置"——前置只是把假解释器排在前面，
+// 系统自带的 python3.12 依旧能被 `python3.12 --version` 命中。
+//
+// 替换之后，PATH 上有哪些 Python 完全由调用方用 writeFakePythonInterpreter 写死，
+// 用例在"宿主机装了 python3.12"和"宿主机一个 python 都没有"两种环境下结果一致。
+func isolatePythonProbePath(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	pathValue := dir
+	if runtime.GOOS == "windows" {
+		// Windows 上假解释器是 .cmd，CreateProcess 需要能找到 cmd.exe 才能拉起它。
+		// System32 里没有任何 python / python3 / py（py.exe 装在 %SystemRoot% 根目录，
+		// 真实 python.exe 在 %LocalAppData%\Programs\Python 或 WindowsApps），
+		// 因此补上 System32 不会让宿主机解释器重新可见。
+		if systemRoot := strings.TrimSpace(os.Getenv("SystemRoot")); systemRoot != "" {
+			pathValue += string(os.PathListSeparator) + filepath.Join(systemRoot, "System32")
+		}
+	}
+	t.Setenv("PATH", pathValue)
+	return dir
+}
+
+// writeFakePythonInterpreter 写一个假 Python 解释器。
+// discoverSystemPythonForVersion 靠 `<binary> --version` 的输出判定版本，
+// 所以必须按真实格式打印 "Python X.Y.Z"。
+func writeFakePythonInterpreter(t *testing.T, dir, binary, version string) {
+	t.Helper()
+	writeFakeExecutable(t, dir, binary, []string{"echo Python " + version})
+}
+
 func TestResolveManagedBinaryPrefersRealWindowsPythonInstallOverWindowsAppsProxy(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("windows-only resolution behavior")
@@ -467,12 +516,14 @@ func TestDefaultPythonVersionFallsBackToActiveSystemPythonOnMagiskRuntime(t *tes
 	testutil.SetupTestEnv(t)
 
 	t.Setenv("DAIDAI_MAGISK_MODULE", "1")
-	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	fakeDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
-	// 新版回退探测走 `<binary> --version`（discoverSystemPythonForVersion），
+	// 模块版的真实形态是"系统上只有一个活跃 python3"，所以 PATH 上只能有这一个解释器。
+	// 旧写法是把临时目录前置到系统 PATH 前面，宿主机自带的 python3.12 依旧可见，
+	// 探测直接命中 3.12、根本走不到回退分支——用例只在"宿主机没装 3.12"时才碰巧通过。
+	fakeDir := isolatePythonProbePath(t)
+	// 回退探测走 `<binary> --version`（discoverSystemPythonForVersion），
 	// 假 python3 需按真实 `--version` 输出格式（"Python 3.11.4"）响应才能被识别。
-	writeFakeExecutable(t, fakeDir, "python3", []string{"echo Python 3.11.4"})
+	writeFakePythonInterpreter(t, fakeDir, "python3", "3.11.4")
 
 	if got := DefaultPythonVersion(); got != "3.11" {
 		t.Fatalf("expected Magisk runtime default python version to follow active python3=3.11, got %q", got)
@@ -483,11 +534,12 @@ func TestResolvePythonVersionFromEnvFallsBackToActiveSystemPythonOnMagiskRuntime
 	testutil.SetupTestEnv(t)
 
 	t.Setenv("DAIDAI_MAGISK_MODULE", "1")
-	t.Setenv("PATH", t.TempDir()+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	fakeDir := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
-	// 同上：假 python3 按真实 `--version` 输出格式响应，供新版探测识别。
-	writeFakeExecutable(t, fakeDir, "python3", []string{"echo Python 3.11.4"})
+	// 同上：PATH 整体替换成只含假 python3 的目录，
+	// 否则宿主机的 python3.12 会让 probe("3.12") 命中、请求版本被原样返回。
+	fakeDir := isolatePythonProbePath(t)
+	// 假 python3 按真实 `--version` 输出格式响应，供探测识别。
+	writeFakePythonInterpreter(t, fakeDir, "python3", "3.11.4")
 
 	envMap := map[string]string{
 		"DAIDAI_PYTHON_VERSION": "3.12",
