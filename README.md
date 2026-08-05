@@ -415,7 +415,7 @@ daidai-panel-windows-amd64/
 
 在已 Root 的 Android 设备上直接跑面板，无需 Docker、无需 Termux。模块会在安装阶段下载一份 Alpine 3.18 minirootfs 到 `/data/daidai`，在容器里 `apk` 装好 Python / Node.js / Git 等运行时，然后通过 `rurima` 进入容器启动后端，开机自启。
 
-- **支持**：Magisk v24.0+ / KernelSU / APatch；Android 8.0+；`arm64` 或 `x86_64`
+- **支持**：Magisk v24.0+ / KernelSU / APatch；Android 6.0+（建议 8.0+）；**仅 `arm64`**（容器运行时只有 aarch64 构建，x86_64 设备安装时会被明确拦截）
 - **默认访问**：`http://127.0.0.1:5700`，后端绑定 `0.0.0.0`，局域网 / 内网穿透可直连
 - **一键更新**：模块 `updateJson` 自动推送新版 ZIP，升级保留数据
 - **下载**：[GitHub Release](https://github.com/linzixuanzz/daidai-panel/releases) 里的 `daidai-panel-magisk-vX.Y.Z.zip`

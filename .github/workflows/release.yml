@@ -234,16 +234,22 @@ jobs:
           CODE=$(( MAJ * 10000 + MIN * 100 + PATCH ))
           echo "VERSIONCODE=${CODE}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Magisk Module (universal arm64 + amd64)
+      - name: Build Magisk Module (arm64)
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.VERSION }}"
 
           # 直接复用 Magisk/build.sh —— 保证本地打包与 CI 产物结构一致
-          # 该脚本会同时编译 arm64 / amd64 后端、拷贝 system/bin/rurima、apk/、
+          # 该脚本会编译后端、拷贝 system/bin/rurima、apk/、
           # 同步 version 与 versionCode、打包 ZIP 到 dist/ 目录。
-          bash Magisk/build.sh "$VERSION" all
+          #
+          # 只打 arm64：容器运行时 Magisk/system/bin/rurima 是 AArch64 静态二进制，
+          # 随包的离线 apk 也都是 aarch64，x86_64 设备根本跑不起来（customize.sh
+          # 已经明确拦截 x64）。再塞一个永远用不上的 amd64 后端只是让手机端多下
+          # 几十 MB。build.sh 的 amd64 / all 能力保留着，将来真有了 x86_64 的
+          # rurima，把这里改回 all 即可。
+          bash Magisk/build.sh "$VERSION" arm64
 
           OUT="daidai-panel-magisk-v${VERSION}.zip"
           cp -f "dist/${OUT}" "${OUT}"

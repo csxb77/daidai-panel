@@ -42,8 +42,8 @@
   - Magisk **v20.4+**（v20–v23 可装但缺少模块卡片一键更新；推荐 v24+）
   - KernelSU
   - APatch
-- Android 7.0 (API 24) 及以上（Android 7.x 为基础兼容，少数机型受 SELinux / 命名空间限制可能无法启动；建议 Android 8.0+）
-- CPU 架构：`arm64`（aarch64）或 `x86_64`，CI 两种架构都会发布
+- Android 6.0 (API 23) 及以上。**建议 Android 8.0+**；Android 6.x / 7.x 属于「可以尝试」而不是「保证可用」——少数机型受 SELinux 策略 / 内核挂载限制起不了容器。安装过程中会**实际探测一次容器能否启动**，起不来会当场中止并说明原因，不会让你装完重启后才发现用不了
+- CPU 架构：**仅 `arm64`（aarch64）**。x86_64 设备会在安装时被明确拦下——模块自带的容器运行时 `rurima` 只有 aarch64 构建，在 x86_64 上无法执行
 - **剩余可用空间 ≥ 1.5 GB**（Alpine rootfs ~300 MB + 依赖 + 数据 / 日志）
 - **安装阶段需要联网**（下载 Alpine minirootfs + apk 联网装 python3 / nodejs / git 等）
 
@@ -51,7 +51,7 @@
 
 1. 下载 `daidai-panel-magisk-vX.Y.Z.zip`（或按[下面章节](#本地构建)自行构建）。
 2. 打开 Magisk / KernelSU / APatch 管理器 →「模块」→「从本地安装」，选该 ZIP。
-3. 等几分钟，Alpine 下载 + apk 装依赖完成后会出现 "安装完成！" 提示。
+3. 等几分钟，Alpine 下载 + 容器能力探测 + apk 装依赖 + 运行时验证全部通过后，才会出现 "安装完成！" 提示。中途任何一步失败都会当场中止并说明原因——**看到 "安装完成！" 就代表环境确实可用**。
 4. 重启手机。
 5. 手机浏览器访问 `http://127.0.0.1:5700`，按提示初始化管理员账号。
 
@@ -66,7 +66,7 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 这是 **GitHub Release 的稳定跳转地址**，会自动指向"当前最新一次 Release"里随附的 `update.json`。因此：
 
 1. 每次仓库推送新的 `vX.Y.Z` tag，工作流会自动：
-   - 编译 arm64 + amd64 静态后端
+   - 编译 arm64 静态后端
    - 打包 `daidai-panel-magisk-vX.Y.Z.zip`
    - 生成指向本次 Release 的 `update.json`（含版本号 / versionCode / zipUrl / changelog）
    - 把这两个文件一起上传到 Release
@@ -268,7 +268,7 @@ ddp backup create --name before-uninstall
 在项目根目录执行：
 
 ```bash
-# 默认只打 arm64
+# 默认只打 arm64（CI 发布用的也是这个）
 bash Magisk/build.sh 3.0.0
 
 # 只打 amd64
@@ -277,6 +277,8 @@ bash Magisk/build.sh 3.0.0 amd64
 # 同时打 arm64 + amd64
 bash Magisk/build.sh 3.0.0 all
 ```
+
+> `amd64` / `all` 保留的是**构建能力**，不代表模块支持 x86_64：容器运行时 `rurima` 只有 aarch64 构建，`customize.sh` 会在 x86_64 设备上直接拦截。这两个参数是为「将来拿到 x86_64 的 rurima」留的口子，日常发布请用默认的 `arm64`。
 
 构建产物：`dist/daidai-panel-magisk-v<版本>.zip`（`module.prop` 里的 `version` / `versionCode` 会自动按参数同步）。
 
@@ -291,7 +293,14 @@ bash Magisk/build.sh 3.0.0 all
 
 **Q: 安装时卡在"正在联网下载 Alpine rootfs" / "正在联网安装面板运行依赖"**
 
-这两步强依赖网络：Alpine rootfs ~3 MB、apk 装依赖累计约 50 MB。`customize.sh` 默认用 NJU 镜像 `mirrors.nju.edu.cn`。公司 / 学校网络被墙的话挂 VPN 重装即可。超时失败模块会自动 abort，不会损坏已有数据。
+这两步强依赖网络：Alpine rootfs ~3 MB、apk 装依赖累计约 50 MB。`customize.sh` 默认用 NJU 镜像 `mirrors.nju.edu.cn`。公司 / 学校网络被墙的话挂 VPN 重装即可。
+
+两步都有失败保护，但机制不同：
+
+- **下载 / 解压 rootfs**：失败直接 abort。
+- **装依赖**：`apk add` 可能「部分成功」，光看退出码不可靠，所以装完后会再进一次容器逐个验证 `python3` / `node` / `npm` / `git` / `bash` 能否执行并报出版本。任一缺失就 abort，并列出**具体缺了哪些**。
+
+两种情况都不会损坏已有数据：升级安装时用户数据在清 rootfs 之前就已经备份到 `/data/adb/daidai-panel/update-data-backup/`，abort 后备份原样保留，下次安装会自动恢复。
 
 **Q: 浏览器打不开 `http://127.0.0.1:5700`**
 
