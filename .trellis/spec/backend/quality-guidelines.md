@@ -141,6 +141,143 @@ database.DB.
 
 ---
 
+## 场景：任务并发闸门与执行槽位
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/scheduler_v2.go` 的 worker 循环 / `executeTask()` / 槽位管理、`server/service/task_executor.go` 的 `OnTaskExecuting()` / `RunTask()`、`server/service/scheduler_manager.go` 的调度器初始化与关停，或改动随机延迟链路时必须看本节。
+- 原因：`max_concurrent_tasks`（UI 文案「定时任务最大并发数」）与「不允许多实例」曾长期**完全失效**——worker 在 `OnTaskExecuting` 里 `go runTask(...)` 后立即返回，`defer removeRunningTask` 随即触发，闸门只覆盖了几乎瞬时的「派发」窗口。用户把并发数设为 1 也不起作用，且这个失效是静默的：没有任何日志或报错，只能靠读代码发现。
+
+### 2. Signatures
+
+- 并发闸门：`func (s *SchedulerV2) executeTask(req *ExecutionRequest)`（**必须阻塞到任务真正结束**）
+- 槽位获取：`func (s *SchedulerV2) acquireRunningSlot(req *ExecutionRequest) (int64, bool)`
+- 槽位释放：`func (s *SchedulerV2) removeRunningTask(taskID uint, goid int64)`
+- 执行入口：`func (e *TaskExecutor) RunTask(req *ExecutionRequest)`（同步，含全部重试）
+- 准备入口：`func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error`（只准备，**不得阻塞到任务结束**）
+- 延迟计算：`func (e *TaskExecutor) ResolveExecutionDelay(req *ExecutionRequest) time.Duration`（只算时长，**不得 sleep**）
+- 延迟等待：`func (s *SchedulerV2) EnqueueDelayed(delay time.Duration, reqFunc func() *ExecutionRequest)`
+- 关停两段：`func (s *SchedulerV2) SignalStop()` / `func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool`
+- 配置键：`max_concurrent_tasks` -> `SchedulerConfig.WorkerCount`
+- 请求字段：`ExecutionRequest.DelayResolved bool`、包内 `taskLog *model.TaskLog` / `tinyLog *TinyLog`
+
+### 3. Contracts
+
+- **worker 即并发名额**：`WorkerCount = N` 必须等价于「任意时刻最多 N 个任务处于执行中」。`executeTask` 从取得槽位到返回，必须完整覆盖任务执行全过程（含 `MaxRetries` 重试与 `RetryInterval` 等待）。
+- `SchedulerEventHandler` 的职责分离不可合并：`OnTaskExecuting` 只做依赖检查、解析命令、建立日志记录；真正执行必须在 `RunTask` 中同步完成。合并会让 `OnTaskStarted` 在任务结束后才被调用，语义倒置。
+- **随机延迟不得占用槽位**：延迟必须在 worker 取得槽位**之前**完成，实现方式是 `EnqueueDelayed` 重新入队。若在槽位内 sleep，`max_concurrent_tasks=1` + 全局延迟会让串行总耗时被延迟放大数倍。
+- `DelayResolved` 必须在调用 `ResolveExecutionDelay` **之前**无条件置为 true，保证一次请求只判定一次延迟，否则重新入队会无限循环。
+- 「多实例检查 + 登记运行中」必须在**同一把写锁**内完成。分成 RLock 检查 + Lock 登记两段会产生 TOCTOU：两个 worker 可同时通过检查，把 `AllowMultipleInstances=false` 的任务跑成两份。
+- **准备阶段必须有 `recover`**：`executeTask` 内 `OnTaskScheduled` / `OnTaskExecuting` / `OnTaskStarted` 的 panic 会打穿 worker goroutine，那个并发名额将永久消失。`runTask` 内部自带 recover，但覆盖不到它之外的阶段。
+- **关停顺序固定**：`SignalStop()` → `StopAllRunningTasks()` → `WaitWorkers()` → `executor.Wait()`。先等 worker 再杀进程会让每次关机都白等满超时。
+- 队列容量与并发数解耦。`Enqueue` 保持非阻塞 + 满时返回错误的语义，**不得**改成阻塞入队（会卡死 cron 线程）。
+- 任何入队失败路径都必须保证任务状态不停留在 `queued` 假象上——包括 `EnqueueDelayed` 到期后重新入队失败这条新路径。
+
+### 4. Validation & Error Matrix
+
+- 同一任务已在执行 + `AllowMultipleInstances == false` -> `acquireRunningSlot` 返回 false，本次触发被丢弃，日志必须说明是**单实例规则**而非并发上限（并发上限只排队不丢弃，写错会误导用户排查方向）。
+- `AllowMultipleInstances == true` -> 不受单实例限制，但仍受 `WorkerCount` 约束。
+- `ResolveExecutionDelay > 0` 且 `DelayResolved == false` -> 交给 `EnqueueDelayed`，worker `continue` 取下一个请求，**不占槽位**。
+- `DelayResolved == true` -> 直接执行，不再二次延迟。
+- 延迟等待期间调度器关停 -> `EnqueueDelayed` 走 `stopCh` 分支直接放弃，由 `MarkActiveTasksInterrupted` 兜底结算。
+- 延迟到期重新入队失败（队列满）-> 打日志 + 把仍停在 `queued` 的任务状态放回 `ResolveTaskInactiveStatus(task)`。
+- 准备阶段 panic -> `recover` 后按 `OnTaskFailed` 结算，槽位由 `defer removeRunningTask` 正常归还。
+- `handler == nil`（测试场景）-> `deferForExecutionDelay` 与 `executeTask` 都必须有判空保护，不得空指针。
+
+### 5. Good/Base/Bad Cases
+
+- Good：并发数设为 1 时开机任务严格串行，用户把前置任务排到 `sort_order` 第一位即可完成编排，不必把前置脚本复制进每个任务。
+- Base：并发数设为 5（默认），6 个任务同时触发时 5 个执行、1 个排队，无任务丢失。
+- Bad：`OnTaskExecuting` 里 `go runTask(...)` 后立即返回——闸门只覆盖派发窗口，`max_concurrent_tasks` 与「不允许多实例」双双失效，且**静默无报错**。
+- Bad：把随机延迟的 `time.Sleep` 留在 worker 线程上——延迟直接吃掉并发名额。
+- Bad：`WorkerCount` 只在 `InitSchedulerV2()` 读一次，改配置后不重启面板不生效（现状如此，改动时注意不要在文档里承诺热生效）。
+
+### 6. Tests Required
+
+见 `server/service/scheduler_v2_concurrency_test.go`，用假 handler 实现完整接口，不落库、不跑真实脚本：
+
+- 并发数 1 -> 后一个任务的 `Start` 不早于前一个任务的 `End`，且峰值并发 == 1。
+- 并发数 2 + 4 个任务 -> 峰值并发 `<= 2`，同时断言峰值**确实达到** 2（否则用例可能在空转）。
+- `AllowMultipleInstances=false` 执行中重复触发 -> 第二次被拒绝，`startedCount == 1`。
+- `AllowMultipleInstances=true` -> 可并行，峰值 == 2。
+- 开机任务在并发数 1 下按 `sort_order` 升序执行，且区间不重叠。
+- 执行中 `GetRunningCount() == 1`，结束后 == 0。
+- 有延迟时 worker 不占槽位（延迟期间其他任务可正常执行）。
+- 准备失败 / 准备阶段 panic -> 槽位都必须归还，且后续任务仍能被同一个 worker 执行。
+- 延迟重新入队失败 -> 任务状态从 `queued` 回落。
+- `ShutdownSchedulerV2` 在有任务运行时耗时远小于等待超时，且中断发生在等待 worker 之前。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestSchedulerV2|TestShutdownSchedulerV2|TestTaskExecutorResolveExecutionDelay|TestShouldApplyRandomDelayForTrigger" -count=3
+go test ./...
+```
+
+> **突变验证**：这类闸门用例极易写成「永远为真」。把 `s.handler.RunTask(req)` 临时改成 `go s.handler.RunTask(req)`（等价于回到 bug 前的非阻塞行为），串行、并发上限、单实例、开机顺序、运行计数五条用例必须**确定性变红**；若不红，说明用例没有真正在检测闸门。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：派发完就返回，defer 立刻释放槽位。
+// max_concurrent_tasks 和 AllowMultipleInstances 双双失效，且没有任何报错。
+func (s *SchedulerV2) executeTask(req *ExecutionRequest) {
+	s.addRunningTask(req.TaskID, goid)
+	defer s.removeRunningTask(req.TaskID, goid)   // ← 任务还在跑就被摘掉
+	s.handler.OnTaskExecuting(req)                 // ← 内部 go runTask(...) 后立即返回
+}
+```
+
+```go
+// 错误：随机延迟在 worker 线程上 sleep，直接空占一个并发名额。
+if shouldApplyRandomDelayForTrigger(req.TriggerType) {
+	time.Sleep(time.Duration(rand.Intn(randomDelay)+1) * time.Second)
+}
+```
+
+```go
+// 错误：两段锁之间存在 TOCTOU，两个 worker 可同时通过单实例检查。
+if !s.checkConcurrency(req) { return }   // RLock
+s.addRunningTask(req.TaskID, goid)       // Lock
+```
+
+#### Correct
+
+```go
+// 正确：槽位持有到任务真正结束；准备与执行分离；准备阶段 panic 不吃掉名额。
+func (s *SchedulerV2) executeTask(req *ExecutionRequest) {
+	goid, ok := s.acquireRunningSlot(req)   // 检查 + 登记在同一把写锁内
+	if !ok {
+		return
+	}
+	defer s.removeRunningTask(req.TaskID, goid)
+	defer func() {
+		if r := recover(); r != nil {
+			s.handler.OnTaskFailed(req, fmt.Errorf("任务调度阶段异常: %v", r))
+		}
+	}()
+
+	if err := s.handler.OnTaskExecuting(req); err != nil {   // 只准备
+		s.handler.OnTaskFailed(req, err)
+		return
+	}
+	s.handler.OnTaskStarted(req)
+	s.handler.RunTask(req)                                    // 阻塞到结束
+}
+```
+
+```go
+// 正确：延迟在取槽位之前完成，worker 立刻去处理下一个请求。
+if s.deferForExecutionDelay(req) {
+	continue
+}
+s.executeTask(req)
+```
+
+---
+
 ## 场景：主动停止任务的 Aborted 独立状态
 
 ### 1. Scope / Trigger

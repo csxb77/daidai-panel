@@ -39,6 +39,36 @@ func (e *TaskExecutor) OnTaskScheduled(req *ExecutionRequest) {
 	log.Printf("task %d scheduled: %s", req.TaskID, req.Task.Name)
 }
 
+// ResolveExecutionDelay 计算本次执行需要等待的随机延迟。
+// 调度器会在占用并发槽位之前完成这段等待，因此这里只负责算时长、不负责 sleep。
+func (e *TaskExecutor) ResolveExecutionDelay(req *ExecutionRequest) time.Duration {
+	if e == nil || req == nil || req.Task == nil {
+		return 0
+	}
+	// 随机延迟对定时与开机任务生效；手动执行立即运行，避免用户手点后还要等待。
+	if !shouldApplyRandomDelayForTrigger(req.TriggerType) {
+		return 0
+	}
+
+	plan := req.CommandPlan
+	if plan == nil {
+		parsed, err := ParseCommandExecutionPlan(req.Task.Command, e.scriptsDir)
+		if err != nil {
+			// 解析失败交给 OnTaskExecuting 统一报错，这里只表示“不需要延迟”。
+			return 0
+		}
+		plan = parsed
+	}
+
+	randomDelay := resolveTaskRandomDelaySeconds(req.Task, plan)
+	if randomDelay <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Intn(randomDelay)+1) * time.Second
+}
+
+// OnTaskExecuting 只做执行前准备：依赖检查、解析命令、建立日志记录。
+// 真正的执行在 RunTask 中同步完成，调度器据此实现并发上限。
 func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 	task := req.Task
 
@@ -57,14 +87,7 @@ func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 	}
 	req.CommandPlan = plan
 
-	// 随机延迟只对定时(cron)任务生效；手动执行与开机自启立即运行，避免用户手点后还要等待。
-	if shouldApplyRandomDelayForTrigger(req.TriggerType) {
-		randomDelay := resolveTaskRandomDelaySeconds(task, plan)
-		if randomDelay > 0 {
-			delay := rand.Intn(randomDelay) + 1
-			time.Sleep(time.Duration(delay) * time.Second)
-		}
-	}
+	// 随机延迟已经在 ResolveExecutionDelay + 调度器重新入队阶段完成，这里不再 sleep，避免双重延迟。
 
 	now := time.Now()
 	database.DB.Model(task).Updates(map[string]interface{}{
@@ -93,18 +116,43 @@ func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 	database.DB.Create(taskLog)
 
 	req.TaskLogID = taskLog.ID
-
-	e.runWG.Add(1)
-	go func() {
-		defer e.runWG.Done()
-		e.runTask(req, taskLog, tinyLog)
-	}()
+	req.taskLog = taskLog
+	req.tinyLog = tinyLog
 
 	return nil
 }
 
 func (e *TaskExecutor) OnTaskStarted(req *ExecutionRequest) {
 	log.Printf("task %d started: %s", req.TaskID, req.Task.Name)
+}
+
+// RunTask 同步执行任务直到结束（含全部重试与重试等待），调用方（worker）在此期间一直占用并发槽位。
+func (e *TaskExecutor) RunTask(req *ExecutionRequest) {
+	if e == nil || req == nil {
+		return
+	}
+
+	taskLog := req.taskLog
+	tinyLog := req.tinyLog
+	// 用完即清，避免同一请求对象被重新入队时复用上一次的日志记录。
+	req.taskLog = nil
+	req.tinyLog = nil
+
+	if taskLog == nil {
+		// 正常链路里 OnTaskExecuting 成功后一定有 taskLog，这里只是兜底。
+		// 兜底也必须把已经建好的实时日志收口，否则 TinyLog 会永远留在管理器里泄漏。
+		if tinyLog != nil {
+			tinyLog.Close()
+			GetTinyLogManager().Remove(tinyLog.LogID)
+		}
+		log.Printf("task %d: missing prepared task log, skip execution", req.TaskID)
+		return
+	}
+
+	e.runWG.Add(1)
+	defer e.runWG.Done()
+
+	e.runTask(req, taskLog, tinyLog)
 }
 
 func (e *TaskExecutor) OnTaskCompleted(req *ExecutionRequest, result *ExecutionResult) {

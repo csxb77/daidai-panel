@@ -378,7 +378,7 @@ docker build -f Dockerfile.debian \
 
 ### Windows 单机版（不走 Docker）
 
-**v2.1.0 新增**：Windows 用户可以直接下载编译好的 zip 解压运行，面板内置 Go 后端同时托管前端（无需 Nginx / Docker）。
+Windows 用户可以直接下载编译好的 zip 解压运行，面板内置 Go 后端同时托管前端（无需 Nginx / Docker）。
 
 1. 去 [GitHub Release](https://github.com/linzixuanzz/daidai-panel/releases) 下载 `daidai-windows-amd64.zip` 解压到任意目录（建议路径无空格、无中文，例如 `D:\daidai-panel`）。
 2. 双击 `start.bat` 启动服务。

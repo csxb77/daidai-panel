@@ -35,6 +35,13 @@ type ExecutionRequest struct {
 	LogID       string
 	TaskLogID   uint
 	CommandPlan *CommandExecutionPlan
+	// DelayResolved 标记本次请求已经完成过随机延迟判定。
+	// 延迟等待通过“重新入队”实现，这个标记用于防止重新入队后再次延迟。
+	DelayResolved bool
+
+	// taskLog / tinyLog 由 OnTaskExecuting 准备、交给 RunTask 使用，只在包内流转。
+	taskLog *model.TaskLog
+	tinyLog *TinyLog
 }
 
 type ExecutionResult struct {
@@ -47,8 +54,13 @@ type ExecutionResult struct {
 
 type SchedulerEventHandler interface {
 	OnTaskScheduled(req *ExecutionRequest)
+	// ResolveExecutionDelay 返回本次执行在占用并发槽位之前需要等待的时长（0 表示无需等待）。
+	ResolveExecutionDelay(req *ExecutionRequest) time.Duration
+	// OnTaskExecuting 只做执行前准备（依赖检查、解析命令、建立日志记录），不得阻塞到任务结束。
 	OnTaskExecuting(req *ExecutionRequest) error
 	OnTaskStarted(req *ExecutionRequest)
+	// RunTask 同步执行任务直到结束（含全部重试），worker 以此实现真正的并发上限。
+	RunTask(req *ExecutionRequest)
 	OnTaskCompleted(req *ExecutionRequest, result *ExecutionResult)
 	OnTaskFailed(req *ExecutionRequest, err error)
 }
@@ -106,7 +118,22 @@ func (s *SchedulerV2) Start() {
 	log.Printf("scheduler v2 started: %d workers, queue size %d", s.config.WorkerCount, s.config.QueueSize)
 }
 
+// Stop 保留为“不再接新活 + 等待 worker 收工”的组合，方便一次性关停。
+// 关机流程需要在两步之间插入“中断执行中的进程”，请改用 SignalStop + WaitWorkers。
 func (s *SchedulerV2) Stop() {
+	if s == nil {
+		return
+	}
+
+	s.SignalStop()
+	if !s.WaitWorkers(5 * time.Second) {
+		log.Println("scheduler v2 stop timed out; continuing shutdown")
+	}
+	log.Println("scheduler v2 stopped")
+}
+
+// SignalStop 停掉 cron、关闭 stopCh 并拒绝新的入队，但不等待正在执行的任务。
+func (s *SchedulerV2) SignalStop() {
 	if s == nil {
 		return
 	}
@@ -122,21 +149,32 @@ func (s *SchedulerV2) Stop() {
 		if s.stopCh != nil {
 			close(s.stopCh)
 		}
-
-		done := make(chan struct{})
-		go func() {
-			s.wg.Wait()
-			close(done)
-		}()
-
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			log.Println("scheduler v2 stop timed out; continuing shutdown")
-		}
-
-		log.Println("scheduler v2 stopped")
 	})
+}
+
+// WaitWorkers 等待所有 worker 退出，返回是否在超时前完成。timeout <= 0 表示一直等。
+func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool {
+	if s == nil {
+		return true
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	if timeout <= 0 {
+		<-done
+		return true
+	}
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func (s *SchedulerV2) worker(id int) {
@@ -162,58 +200,95 @@ func (s *SchedulerV2) worker(id int) {
 			if s.stopped.Load() {
 				return
 			}
+			// 随机延迟必须在占用并发槽位之前完成，否则 max_concurrent_tasks 会被空等吃满。
+			if s.deferForExecutionDelay(req) {
+				continue
+			}
 			s.executeTask(req)
 		}
 	}
 }
 
+// deferForExecutionDelay 处理执行前的随机延迟：
+// 需要等待时把请求交给 EnqueueDelayed 稍后重新入队，worker 立刻返回去取下一个请求，不占用并发槽位。
+// 返回 true 表示本次请求已被推迟，调用方不应继续执行它。
+func (s *SchedulerV2) deferForExecutionDelay(req *ExecutionRequest) bool {
+	if req == nil || req.DelayResolved || s.handler == nil {
+		return false
+	}
+
+	// 无论是否真的需要等待，都只判定一次，避免重新入队后反复延迟。
+	req.DelayResolved = true
+
+	delay := s.handler.ResolveExecutionDelay(req)
+	if delay <= 0 {
+		return false
+	}
+
+	log.Printf("task %d: delaying execution by %s before taking a concurrency slot", req.TaskID, delay)
+	s.EnqueueDelayed(delay, func() *ExecutionRequest { return req })
+	return true
+}
+
+// executeTask 阻塞到任务真正结束（含全部重试）才返回，worker 因此成为真实的并发闸门。
 func (s *SchedulerV2) executeTask(req *ExecutionRequest) {
-	if !s.checkConcurrency(req) {
-		log.Printf("task %d: concurrency limit reached, skipping", req.TaskID)
+	if req == nil || req.Task == nil {
 		return
 	}
 
-	goid := getGoroutineID()
-	s.addRunningTask(req.TaskID, goid)
+	goid, ok := s.acquireRunningSlot(req)
+	if !ok {
+		// 最大并发数现在靠 worker 阻塞实现，只会让请求排队、不会丢弃；
+		// 走到这里的唯一原因是「不允许多实例」。日志必须说清是哪条规则，
+		// 否则用户会误以为是并发数把任务吃掉了。
+		log.Printf("task %d: previous run still in progress and multiple instances are disabled, skipping this trigger", req.TaskID)
+		return
+	}
 	defer s.removeRunningTask(req.TaskID, goid)
 
-	if s.handler != nil {
-		s.handler.OnTaskScheduled(req)
-	}
-
-	err := s.handler.OnTaskExecuting(req)
-	if err != nil {
-		if s.handler != nil {
-			s.handler.OnTaskFailed(req, err)
+	// worker 阻塞化之后，它不再只是“派发线程”，而是一个并发名额。
+	// 准备阶段（OnTaskScheduled / OnTaskExecuting / OnTaskStarted，内含多次 DB 调用与命令解析）
+	// 一旦 panic 就会打穿 worker goroutine，那个名额将永久消失且无法恢复；
+	// max_concurrent_tasks=1 时等于整个调度器直接停摆，只能重启面板。
+	// runTask 内部已有自己的 recover，这里兜的是它之外的所有阶段。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("task %d: scheduler stage panicked, worker recovered: %v", req.TaskID, r)
+			if s.handler != nil {
+				s.handler.OnTaskFailed(req, fmt.Errorf("任务调度阶段异常: %v", r))
+			}
 		}
+	}()
+
+	if s.handler == nil {
 		return
 	}
 
-	if s.handler != nil {
-		s.handler.OnTaskStarted(req)
-	}
-}
+	s.handler.OnTaskScheduled(req)
 
-func (s *SchedulerV2) checkConcurrency(req *ExecutionRequest) bool {
-	if req.Task.AllowMultipleInstances {
-		return true
+	if err := s.handler.OnTaskExecuting(req); err != nil {
+		s.handler.OnTaskFailed(req, err)
+		return
 	}
 
-	s.runningLock.RLock()
-	defer s.runningLock.RUnlock()
-
-	goids, exists := s.runningTasks[req.TaskID]
-	return !exists || len(goids) == 0
+	s.handler.OnTaskStarted(req)
+	s.handler.RunTask(req)
 }
 
-func (s *SchedulerV2) addRunningTask(taskID uint, goid int64) {
+// acquireRunningSlot 在同一把写锁内完成“多实例检查 + 登记运行中”。
+// 两步必须原子，否则两个 worker 可能同时通过检查、把不允许多实例的任务跑成两份。
+// 返回的标识用于任务结束时精确移除自己的登记。
+func (s *SchedulerV2) acquireRunningSlot(req *ExecutionRequest) (int64, bool) {
 	s.runningLock.Lock()
 	defer s.runningLock.Unlock()
 
-	if s.runningTasks[taskID] == nil {
-		s.runningTasks[taskID] = []int64{}
+	if !req.Task.AllowMultipleInstances && len(s.runningTasks[req.TaskID]) > 0 {
+		return 0, false
 	}
-	s.runningTasks[taskID] = append(s.runningTasks[taskID], goid)
+
+	goid := getGoroutineID()
+	s.runningTasks[req.TaskID] = append(s.runningTasks[req.TaskID], goid)
+	return goid, true
 }
 
 func (s *SchedulerV2) removeRunningTask(taskID uint, goid int64) {
@@ -246,14 +321,48 @@ func (s *SchedulerV2) Enqueue(req *ExecutionRequest) error {
 	}
 }
 
+// EnqueueDelayed 等待 delay 后重新入队；等待期间调度器被关停则直接放弃。
 func (s *SchedulerV2) EnqueueDelayed(delay time.Duration, reqFunc func() *ExecutionRequest) {
+	if s == nil || reqFunc == nil {
+		return
+	}
+
 	go func() {
-		time.Sleep(delay)
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+
+		select {
+		case <-s.stopCh:
+			return
+		case <-timer.C:
+		}
+
 		req := reqFunc()
-		if req != nil {
-			s.Enqueue(req)
+		if req == nil {
+			return
+		}
+		if err := s.Enqueue(req); err != nil {
+			log.Printf("task %d delayed enqueue failed: %v", req.TaskID, err)
+			// 生产端在首次入队成功时已经把任务置为「排队中」。
+			// 延迟到期后重新入队失败意味着这次触发不会再被执行，
+			// 必须把状态放回去，否则任务会一直停在 queued 假象上。
+			releaseQueuedTaskStatus(req)
 		}
 	}()
+}
+
+// releaseQueuedTaskStatus 把「不会再被执行的排队请求」对应的任务状态从 queued 放回空闲状态。
+// 只更新仍然停在 queued 的行，避免覆盖任务已经被其它触发跑起来后的真实状态。
+func releaseQueuedTaskStatus(req *ExecutionRequest) {
+	if req == nil || req.TaskID == 0 || database.DB == nil {
+		return
+	}
+
+	if err := database.DB.Model(&model.Task{}).
+		Where("id = ? AND status = ?", req.TaskID, model.TaskStatusQueued).
+		Update("status", ResolveTaskInactiveStatus(req.Task)).Error; err != nil {
+		log.Printf("task %d reset queued status failed: %v", req.TaskID, err)
+	}
 }
 
 func (s *SchedulerV2) AddJob(task *model.Task) error {
