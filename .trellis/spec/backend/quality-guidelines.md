@@ -1100,7 +1100,8 @@ Watchtower -> /v1/update?async=true&container=^daidai-panel$
 ### 2. Signatures
 
 - 前端读取：`configApi.get('auto_update_last_checked_at')`
-- 后端注册：`newTrimmedStringConfig("auto_update_last_checked_at", "", "...", "network")`
+- 后端注册：`newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "...", "network")`
+  （参数顺序：`key, label, defaultValue, description, group`）
 
 ### 3. Contracts
 
@@ -1128,15 +1129,15 @@ Watchtower -> /v1/update?async=true&container=^daidai-panel$
 #### Wrong
 
 ```go
-newBoolConfig("auto_update_enabled", "false", "...", "network")
+newBoolConfig("auto_update_enabled", "静默更新", "false", "...", "network")
 // 忘记注册 auto_update_last_checked_at
 ```
 
 #### Correct
 
 ```go
-newBoolConfig("auto_update_enabled", "false", "...", "network")
-newTrimmedStringConfig("auto_update_last_checked_at", "", "上次自动检查更新时间", "network")
+newBoolConfig("auto_update_enabled", "静默更新", "false", "...", "network")
+newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "上次自动检查更新时间", "network")
 ```
 
 ---
@@ -1561,4 +1562,119 @@ if closeAt := findClosingQuote(value[1:], quote); closeAt < 0 {
     pendingQuote = quote
     pendingValue.WriteString(value[1:])
 }
+```
+
+---
+
+## 场景：系统配置注册表默认值与渲染 schema
+
+### 1. Scope / Trigger
+
+- 触发：改动 `server/model/system_config_registry.go` 的 `SystemConfigDefinition`、任意 `newXxxConfig` 构造函数、任意一项配置的默认值或 normalize 函数，以及 `server/handler/config.go` 的 `buildConfigResponseItem` 时必须看本节。
+- 原因：`GET /api/configs` 下发的是完整 schema，Web 和 APP 都据此渲染系统设置页。注册表既是服务端的取值来源，也是客户端唯一的界面描述来源，一旦分叉两边都会静默错。
+
+### 2. Signatures
+
+- 声明结构：`model.SystemConfigDefinition`（含 `Label` / `GroupLabel` / `Order` / `Secret` / `Min` / `Max`）
+- 构造函数统一参数顺序：`(key, label, defaultValue, description, group, ...)`
+  - `newTrimmedStringConfig(key, label, defaultValue, description, group)`
+  - `newSecretStringConfig(key, label, defaultValue, description, group)`
+  - `newValidatedStringConfig(key, label, defaultValue, description, group, normalize)`
+  - `newBoolConfig(key, label, defaultValue, description, group)`
+  - `newIntConfig(key, label, defaultValue, description, group, minValue, maxValue)`
+  - `newEnumConfig(key, label, defaultValue, description, group, options)`
+- 顺序与分组名补齐：`finalizeSystemConfigSpecs(specs []systemConfigSpec) []systemConfigSpec`
+- 分组中文名：`systemConfigGroupLabels`
+- 按 key 取归一化函数：`model.NormalizeSystemConfigValue(key, value string) (string, error)`
+
+### 3. Contracts
+
+- **声明的默认值必须等于实际生效的默认值**：对每一项配置，`NormalizeSystemConfigValue(key, "")` 必须与 `def.DefaultValue` 完全相等。
+  `newValidatedStringConfig` 把 `DefaultValue` 原样存进 definition、注册时不过 normalize，所以这两处一旦各写一份字面量就会静默错开。有共用默认值时应抽成常量（例如 `defaultBackupScheduleSelection`），不要在两处各写一遍。
+- 默认值本身必须是合法且已归一化的值：`NormalizeSystemConfigValue(key, def.DefaultValue)` 必须无错且原样返回。
+- `Label` 是输入框标题用的短词，必须非空；`Description` 是长句说明，只能当 hint，不得当标题。
+- 新增分组 slug 必须同步在 `systemConfigGroupLabels` 补中文名，`GroupLabel` 不允许退化成英文 slug。
+- `Order` 由 `finalizeSystemConfigSpecs` 按注册下标写入，必须在 `registeredSystemConfigSpecs` 的初始化表达式里调用，**不能挪到 `init()`**：`registeredSystemConfigMap` 按值拷贝存 spec，`init()` 里再改切片会让 map 拿到旧数据。
+- 整数配置必须下发 `Min` / `Max`，且与 normalize 闭包里的校验边界一致；`Min` / `Max` 用局部拷贝取地址，不要直接 `&minValue`，避免调用方改 `*def.Min` 反过来改掉校验行为。
+- 凭据类配置必须标 `Secret`，并同步更新 `TestRegisteredSecretConfigsAreMarked` 的名单。
+  `Secret` 目前**只是渲染提示**，服务端仍明文回传 `value`。要改成服务端打码，必须同时定义「未修改」的写入哨兵值并同步改 Web/APP，否则保存整组配置时会把掩码写回数据库、覆盖真实密钥。
+- `/api/configs` 的响应字段只允许新增，不允许改名或改类型：老客户端拿到多出来的键必须无感。
+
+### 4. Validation & Error Matrix
+
+- 注册表默认值与 `normalize("")` 不一致 → `TestEveryRegisteredConfigDefaultMatchesNormalizedEmpty` 失败
+- 默认值本身非法（枚举不在 options / 整数越界）→ `TestEveryRegisteredConfigDefaultIsCanonical` 失败
+- 新增分组忘配中文名 → `TestEveryRegisteredConfigGroupHasLabel` 失败
+- 整数配置漏下发 min/max，或与校验边界不一致 → `TestRegisteredIntConfigsExposeMinMax` / `TestRegisteredIntConfigMinMaxMatchesValidation` 失败
+- 库里没有记录 / 值为空串 → `GET /configs` 与 `GetRegisteredConfig()` 都返回 `def.DefaultValue`
+- 库里已存在旧值 → `InitDefaultConfigs()` 只在值为空或校验不过时重写，**不会**把已有值升级成新默认值
+
+### 5. Good/Base/Bad Cases
+
+- Good：`backup_schedule_selection` 的默认值与 `normalizeBackupScheduleSelectionValue` 共用同一个常量，新装实例的定时备份默认包含任务视图。
+- Base：新增一项配置时同时写好 key/label/默认值/说明/分组，客户端无需发版即可显示。
+- Bad：注册表写 7 项、normalize 写 8 项。`/api/configs` 报出去的 `default_value`、`InitDefaultConfigs()` 首次建行写入的值、`GetRegisteredConfig()` 的回退值全都用缺项的那份，表现为「从未保存过备份设置的实例，定时备份不含任务视图」，且 Web 上那个勾选框默认没勾。
+- Bad：把长句 `Description` 直接当输入框标题，`panel_runtime_mode` 那种三行说明会把表单撑烂。
+
+### 6. Tests Required
+
+见 `server/model/system_config_registry_test.go` 与 `server/handler/config_regression_test.go`：
+
+- `TestEveryRegisteredConfigDefaultMatchesNormalizedEmpty`（**最重要的一条**，锁死声明默认值 == 生效默认值）
+- `TestEveryRegisteredConfigDefaultIsCanonical`
+- `TestBackupScheduleSelectionDefaultIncludesTaskViews`
+- `TestEveryRegisteredConfigHasRenderMetadata` / `TestEveryRegisteredConfigGroupHasLabel`
+- `TestRegisteredIntConfigsExposeMinMax` / `TestRegisteredIntConfigMinMaxMatchesValidation`
+- `TestRegisteredSecretConfigsAreMarked` / `TestRegisteredEnumConfigsHaveOptions`
+- `TestConfigListExposesRenderSchema` / `TestConfigListReportsCompleteBackupScheduleSelectionDefault`
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./model ./handler -run "TestEveryRegisteredConfig|TestRegistered|TestBackupScheduleSelectionDefault|TestConfigList" -count=1
+go test ./...
+```
+
+> **突变验证**：把 `backup_schedule_selection` 的默认值改回 7 项（去掉 `task_views`），`TestEveryRegisteredConfigDefaultMatchesNormalizedEmpty`、`TestBackupScheduleSelectionDefaultIncludesTaskViews`、`TestConfigListReportsCompleteBackupScheduleSelectionDefault` 必须确定性变红；若不红说明用例没有真正在检测这条不变量。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：默认值在注册表和 normalize 里各写一份字面量，改一处不会有任何报错。
+newValidatedStringConfig(
+    "backup_schedule_selection", "备份内容",
+    "configs,tasks,subscriptions,env_vars,logs,scripts,dependencies",
+    "...", "backup", normalizeBackupScheduleSelectionValue,
+)
+
+func normalizeBackupScheduleSelectionValue(value string) (string, error) {
+    defaultValue := "configs,tasks,subscriptions,env_vars,logs,scripts,dependencies,task_views"
+    // ...
+}
+```
+
+```go
+// 错误：取值区间只被闭包捕获，客户端拿不到，只能等用户填了越界值再被服务端 400 打回。
+def: SystemConfigDefinition{Key: key, ValueType: SystemConfigTypeInt},
+normalize: func(value string) (string, error) {
+    if parsed < minValue || parsed > maxValue { /* ... */ }
+},
+```
+
+#### Correct
+
+```go
+// 正确：默认值收成一个常量，注册表和 normalize 共用同一份。
+const defaultBackupScheduleSelection = "configs,tasks,subscriptions,env_vars,logs,scripts,dependencies,task_views"
+```
+
+```go
+// 正确：取值区间拷一份挂到 def 上，客户端可以做前端校验，服务端仍然独立校验一次。
+minBound, maxBound := minValue, maxValue
+def: SystemConfigDefinition{
+    Key: key, ValueType: SystemConfigTypeInt,
+    Min: &minBound, Max: &maxBound,
+},
 ```

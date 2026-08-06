@@ -65,6 +65,25 @@ func buildConfigResponseItem(cfg *model.SystemConfig, def *model.SystemConfigDef
 		item["value_type"] = def.ValueType
 		item["group"] = def.Group
 		item["description"] = def.Description
+		// 以下几项是给「按 schema 动态渲染设置页」的客户端用的，纯新增字段：
+		// label 当输入框标题（description 是长句说明，只能当 hint）；
+		// group_label 是分组中文名；order 是注册顺序（本接口返回 map，本身没有顺序）；
+		// secret 提示客户端用密码框渲染；min/max 供数字项做前端校验。
+		// 老客户端读不到这些键也不受影响。
+		item["label"] = def.Label
+		item["group_label"] = def.GroupLabel
+		item["order"] = def.Order
+		// secret 目前只是渲染提示，服务端仍然明文回传 value。
+		// 这是有意的：本接口是 JWTAuth + RequireAdmin，且 Web 的验证码/备份密码表单要靠回填的明文
+		// 才能在保存整组配置时不把真实值覆盖掉。要改成服务端打码，必须同时定义
+		// 「未修改」的写入哨兵值并同步改 Web/APP，不能只在这里单方面遮蔽。
+		item["secret"] = def.Secret
+		if def.Min != nil {
+			item["min"] = *def.Min
+		}
+		if def.Max != nil {
+			item["max"] = *def.Max
+		}
 		if cfg == nil || cfg.Value == "" {
 			item["value"] = def.DefaultValue
 		}
