@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { notificationApi } from '@/api/notification'
+import { notificationApi, type NotifyChannelDefinition, type NotifyFieldDefinition } from '@/api/notification'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Bell, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
@@ -9,7 +9,8 @@ const { isMobile, dialogFullscreen } = useResponsive()
 
 const channels = ref<any[]>([])
 const channelLoading = ref(false)
-const channelTypes = ref<{ type: string; name: string }[]>([])
+// 渠道类型 + 字段 schema 都来自 GET /notifications/types，Web 不再持有本地副本。
+const channelTypes = ref<NotifyChannelDefinition[]>([])
 
 const showChannelDialog = ref(false)
 const isCreateChannel = ref(true)
@@ -92,233 +93,41 @@ function getTypeBadgeType(type: string): string {
   return typeColorMap[type]?.badge || ''
 }
 
-const configFields = computed(() => {
-  const t = channelForm.value.type
-  const wecomMsgType = (configData.value.msg_type || 'text').trim() || 'text'
-  const wecomAppMsgType = (configData.value.msg_type || 'text').trim() || 'text'
-  switch (t) {
-    case 'webhook': return [
-      { key: 'url', label: 'Webhook URL', type: 'input', placeholder: 'https://example.com/webhook' },
-    ]
-    case 'email': return [
-      { key: 'smtp_host', label: 'SMTP 主机', type: 'input', placeholder: 'smtp.qq.com' },
-      { key: 'smtp_port', label: 'SMTP 端口', type: 'input', placeholder: '465' },
-      { key: 'smtp_ssl', label: 'SSL 连接', type: 'select', placeholder: '自动：465 端口启用', options: [
-        { label: '自动 (465 启用)', value: 'auto' },
-        { label: '启用 SSL', value: 'true' },
-        { label: '关闭 SSL', value: 'false' },
-      ]},
-      { key: 'smtp_user', label: '邮箱账号', type: 'input', placeholder: 'user@example.com' },
-      { key: 'smtp_pass', label: '邮箱密码/授权码', type: 'password', placeholder: 'SMTP 授权码' },
-      { key: 'to', label: '收件人', type: 'input', placeholder: '多个收件人用逗号分隔' },
-      { key: 'from', label: '发件人 (可选)', type: 'input', placeholder: '留空则使用邮箱账号' },
-    ]
-    case 'telegram': return [
-      { key: 'token', label: 'Bot Token', type: 'input', placeholder: '从 @BotFather 获取' },
-      { key: 'chat_id', label: 'Chat ID', type: 'input', placeholder: '聊天/群组 ID' },
-      { key: 'message_thread_id', label: 'Topic ID (可选)', type: 'input', placeholder: '群组话题 ID，留空则发到默认话题' },
-      { key: 'api_host', label: 'API 地址 (可选)', type: 'input', placeholder: '自定义 API 地址，留空使用官方' },
-      { key: 'proxy', label: '代理地址 (可选)', type: 'input', placeholder: 'http/socks5 代理地址' },
-    ]
-    case 'dingtalk': return [
-      { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://oapi.dingtalk.com/robot/send?access_token=xxx' },
-      { key: 'secret', label: '加签秘钥 (可选)', type: 'input', placeholder: '安全设置中的 SEC 开头的秘钥' },
-      { key: 'msg_type', label: '消息类型', type: 'select', placeholder: '选择钉钉机器人消息类型', options: [
-        { label: '文本', value: 'text' },
-        { label: 'Markdown', value: 'markdown' },
-      ]},
-    ]
-    case 'wecom': return [
-      { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx' },
-      { key: 'msg_type', label: '消息类型', type: 'select', placeholder: '选择企业微信机器人消息类型', options: [
-        { label: '文本', value: 'text' },
-        { label: 'Markdown', value: 'markdown' },
-        { label: 'Markdown V2', value: 'markdown_v2' },
-        { label: '图片', value: 'image' },
-        { label: '图文', value: 'news' },
-        { label: '模版卡片', value: 'template_card' },
-      ]},
-      ...(wecomMsgType === 'text' ? [
-        { key: 'content_template', label: '文本模板', type: 'textarea', placeholder: '支持 {{title}} 和 {{content}}，留空默认 {{title}}\\n{{content}}' },
-        { key: 'mentioned_list', label: '提醒成员 (可选)', type: 'textarea', placeholder: '多个成员用逗号、分号或换行分隔，可填 @all' },
-        { key: 'mentioned_mobile_list', label: '提醒手机号 (可选)', type: 'textarea', placeholder: '多个手机号用逗号、分号或换行分隔，可填 @all' },
-      ] : []),
-      ...((wecomMsgType === 'markdown' || wecomMsgType === 'markdown_v2') ? [
-        { key: 'content_template', label: '内容模板', type: 'textarea', placeholder: '支持 {{title}} 和 {{content}} 占位符' },
-      ] : []),
-      ...(wecomMsgType === 'image' ? [
-        { key: 'image_base64', label: '图片 Base64', type: 'textarea', placeholder: '填写图片的 Base64 内容' },
-        { key: 'image_md5', label: '图片 MD5', type: 'input', placeholder: '填写图片内容对应的 MD5 值' },
-      ] : []),
-      ...(wecomMsgType === 'news' ? [
-        { key: 'news_articles', label: '图文 Articles(JSON)', type: 'textarea', placeholder: '[{\"title\":\"{{title}}\",\"description\":\"{{content}}\",\"url\":\"https://example.com\",\"picurl\":\"https://example.com/demo.png\"}]' },
-      ] : []),
-      ...(wecomMsgType === 'template_card' ? [
-        { key: 'template_card_payload', label: '卡片配置(JSON)', type: 'textarea', placeholder: '{\"card_type\":\"text_notice\",\"main_title\":{\"title\":\"{{title}}\",\"desc\":\"{{content}}\"}}' },
-      ] : []),
-    ]
-    case 'wecom_app': return [
-      { key: 'corp_id', label: '企业 ID', type: 'input', placeholder: '企业微信 CorpID' },
-      { key: 'secret', label: '应用 Secret', type: 'password', placeholder: '应用 Secret' },
-      { key: 'agent_id', label: 'Agent ID', type: 'input', placeholder: '应用 AgentId' },
-      { key: 'base_url', label: '反代基础地址 (可选)', type: 'input', placeholder: '留空使用 https://qyapi.weixin.qq.com，也可填你的 Nginx 反代地址' },
-      { key: 'to_user', label: '成员账号 (可选)', type: 'input', placeholder: '多个成员用 | 分隔，留空默认 @all' },
-      { key: 'to_party', label: '部门 ID (可选)', type: 'input', placeholder: '多个部门用 | 分隔' },
-      { key: 'to_tag', label: '标签 ID (可选)', type: 'input', placeholder: '多个标签用 | 分隔' },
-      { key: 'msg_type', label: '消息类型', type: 'select', placeholder: '选择企业微信应用消息类型', options: [
-        { label: '文本', value: 'text' },
-        { label: 'Markdown', value: 'markdown' },
-        { label: '图片', value: 'image' },
-        { label: '文件', value: 'file' },
-        { label: '视频', value: 'video' },
-        { label: '图文', value: 'news' },
-        { label: '图文消息 (mpnews)', value: 'mpnews' },
-        { label: '模版卡片', value: 'template_card' },
-      ]},
-      ...((wecomAppMsgType === 'text' || wecomAppMsgType === 'markdown') ? [
-        { key: 'content_template', label: '内容模板', type: 'textarea', placeholder: '支持 {{title}} 和 {{content}} 占位符' },
-      ] : []),
-      ...((wecomAppMsgType === 'image' || wecomAppMsgType === 'file' || wecomAppMsgType === 'video') ? [
-        { key: 'media_id', label: 'Media ID', type: 'input', placeholder: '调用上传临时素材接口后得到的 media_id' },
-      ] : []),
-      ...(wecomAppMsgType === 'news' ? [
-        { key: 'news_articles', label: '图文 Articles(JSON)', type: 'textarea', placeholder: '[{\"title\":\"{{title}}\",\"description\":\"{{content}}\",\"url\":\"https://example.com\",\"picurl\":\"https://example.com/demo.png\"}]' },
-      ] : []),
-      ...(wecomAppMsgType === 'mpnews' ? [
-        { key: 'mpnews_articles', label: '图文消息 Articles(JSON)', type: 'textarea', placeholder: '[{\"title\":\"{{title}}\",\"thumb_media_id\":\"MEDIA_ID\",\"author\":\"Author\",\"content_source_url\":\"https://example.com\",\"content\":\"<p>{{content}}</p>\",\"digest\":\"Digest description\"}]' },
-      ] : []),
-      ...(wecomAppMsgType === 'template_card' ? [
-        { key: 'template_card_payload', label: '卡片配置(JSON)', type: 'textarea', placeholder: '{\"card_type\":\"text_notice\",\"main_title\":{\"title\":\"{{title}}\",\"desc\":\"{{content}}\"}}' },
-      ] : []),
-      { key: 'safe', label: '保密消息', type: 'select', placeholder: '默认 0', options: [
-        { label: '否 (0)', value: '0' },
-        { label: '是 (1)', value: '1' },
-        ...(wecomAppMsgType === 'mpnews' ? [{ label: '仅企业内分享 (2)', value: '2' }] : []),
-      ]},
-      { key: 'enable_id_trans', label: 'ID 转译', type: 'select', placeholder: '默认 0', options: [
-        { label: '关闭 (0)', value: '0' },
-        { label: '开启 (1)', value: '1' },
-      ]},
-      { key: 'enable_duplicate_check', label: '重复检查', type: 'select', placeholder: '默认 0', options: [
-        { label: '关闭 (0)', value: '0' },
-        { label: '开启 (1)', value: '1' },
-      ]},
-      { key: 'duplicate_check_interval', label: '去重间隔(秒)', type: 'input', placeholder: '默认 1800，最大 14400' },
-    ]
-    case 'bark': return [
-      { key: 'key', label: 'Device Key', type: 'input', placeholder: '打开 Bark App 复制推送地址中的 Key，如 https://api.day.app/xxxxxx 中的 xxxxxx' },
-      { key: 'server', label: '服务器 (可选)', type: 'input', placeholder: '默认 https://api.day.app' },
-      { key: 'sound', label: '推送声音 (可选)', type: 'input', placeholder: '如 birdsong，留空使用默认' },
-      { key: 'group', label: '推送分组 (可选)', type: 'input', placeholder: '消息分组名称' },
-      { key: 'icon', label: '图标 URL (可选)', type: 'input', placeholder: 'https://example.com/icon.png' },
-      { key: 'level', label: '时效性 (可选)', type: 'select', placeholder: '推送优先级', options: [
-        { label: '默认 (active)', value: 'active' },
-        { label: '时效性 (timeSensitive)', value: 'timeSensitive' },
-        { label: '被动 (passive)', value: 'passive' },
-      ]},
-      { key: 'url', label: '跳转 URL (可选)', type: 'input', placeholder: '点击通知后跳转的链接' },
-    ]
-    case 'pushplus': return [
-      { key: 'token', label: 'Token', type: 'input', placeholder: 'PushPlus 用户 Token' },
-      { key: 'topic', label: '群组编码 (可选)', type: 'input', placeholder: '一对多推送时的群组编码' },
-      { key: 'template', label: '模板 (可选)', type: 'select', placeholder: '消息模板', options: [
-        { label: '默认 (html)', value: 'html' },
-        { label: 'JSON', value: 'json' },
-        { label: '纯文本', value: 'txt' },
-        { label: 'Markdown', value: 'markdown' },
-      ]},
-    ]
-    case 'serverchan': return [
-      { key: 'key', label: 'SendKey', type: 'input', placeholder: 'Server酱的 SendKey (SCT...)' },
-    ]
-    case 'feishu': return [
-      { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' },
-      { key: 'secret', label: '加签秘钥 (可选)', type: 'input', placeholder: '安全设置中的签名校验秘钥' },
-    ]
-    case 'gotify': return [
-      { key: 'server', label: '服务器地址', type: 'input', placeholder: 'https://gotify.example.com' },
-      { key: 'token', label: 'App Token', type: 'input', placeholder: 'Gotify 应用 Token' },
-      { key: 'priority', label: '优先级 (可选)', type: 'input', placeholder: '0-10，默认 5' },
-    ]
-    case 'pushdeer': return [
-      { key: 'key', label: 'PushKey', type: 'input', placeholder: 'PushDeer 的 PushKey' },
-      { key: 'server', label: '服务器 (可选)', type: 'input', placeholder: '默认 https://api2.pushdeer.com' },
-    ]
-    case 'pushme': return [
-      { key: 'key', label: 'PushMe Key', type: 'input', placeholder: 'PushMe 的 push_key' },
-      { key: 'server', label: '接口地址 (可选)', type: 'input', placeholder: '默认 https://push.i-i.me' },
-      { key: 'message_type', label: '消息类型 (可选)', type: 'input', placeholder: '按 PushMe 支持的 type 值填写' },
-    ]
-    case 'chanify': return [
-      { key: 'token', label: 'Token', type: 'input', placeholder: 'Chanify 设备 Token' },
-      { key: 'server', label: '服务器 (可选)', type: 'input', placeholder: '默认 https://api.chanify.net' },
-    ]
-    case 'igot': return [
-      { key: 'key', label: 'Key', type: 'input', placeholder: 'iGot 推送 Key' },
-    ]
-    case 'qmsg': return [
-      { key: 'key', label: 'Qmsg Key', type: 'input', placeholder: 'Qmsg 酱的 Key' },
-      { key: 'mode', label: '发送模式', type: 'select', placeholder: '选择 send 或 group', options: [
-        { label: '私聊/默认 (send)', value: 'send' },
-        { label: '群发 (group)', value: 'group' },
-      ]},
-      { key: 'qq', label: 'QQ 号/群号 (可选)', type: 'input', placeholder: '留空则按 Qmsg 端默认配置发送' },
-    ]
-    case 'pushover': return [
-      { key: 'token', label: 'API Token', type: 'input', placeholder: '应用 API Token' },
-      { key: 'user', label: 'User Key', type: 'input', placeholder: '用户 Key' },
-    ]
-    case 'discord': return [
-      { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://discord.com/api/webhooks/...' },
-    ]
-    case 'slack': return [
-      { key: 'webhook', label: 'Webhook URL', type: 'input', placeholder: 'https://hooks.slack.com/services/...' },
-    ]
-    case 'ntfy': return [
-      { key: 'topic', label: 'Topic', type: 'input', placeholder: '订阅主题名称' },
-      { key: 'server', label: '服务器 (可选)', type: 'input', placeholder: '默认 https://ntfy.sh' },
-      { key: 'token', label: 'Token (可选)', type: 'input', placeholder: '访问令牌，用于私有主题' },
-      { key: 'priority', label: '优先级 (可选)', type: 'select', placeholder: '消息优先级', options: [
-        { label: '最低 (1)', value: '1' },
-        { label: '低 (2)', value: '2' },
-        { label: '默认 (3)', value: '3' },
-        { label: '高 (4)', value: '4' },
-        { label: '紧急 (5)', value: '5' },
-      ]},
-    ]
-    case 'wxpusher': return [
-      { key: 'app_token', label: 'App Token', type: 'input', placeholder: 'WxPusher 的 appToken' },
-      { key: 'uids', label: 'UID 列表 (可选)', type: 'textarea', placeholder: '多个 UID 可用分号、逗号或换行分隔' },
-      { key: 'topic_ids', label: 'Topic ID 列表 (可选)', type: 'textarea', placeholder: '多个 Topic ID 可用分号、逗号或换行分隔' },
-      { key: 'content_type', label: '内容类型 (可选)', type: 'select', placeholder: '默认文本消息', options: [
-        { label: '文本 (1)', value: '1' },
-        { label: 'HTML (2)', value: '2' },
-        { label: 'Markdown (3)', value: '3' },
-      ]},
-      { key: 'url', label: '原文链接 (可选)', type: 'input', placeholder: '消息详情页跳转地址' },
-      { key: 'verify_pay_type', label: '付费校验 (可选)', type: 'select', placeholder: '默认不校验', options: [
-        { label: '不校验 (0)', value: '0' },
-        { label: '仅付费用户 (1)', value: '1' },
-        { label: '仅未订阅/已过期 (2)', value: '2' },
-      ]},
-      { key: 'server', label: '接口地址 (可选)', type: 'input', placeholder: '默认 https://wxpusher.zjiecode.com/api/send/message' },
-    ]
-    case 'custom': return [
-      { key: 'url', label: 'URL', type: 'input', placeholder: 'https://example.com/api/notify' },
-      { key: 'method', label: 'Method', type: 'select', placeholder: '请求方法', options: [
-        { label: 'POST', value: 'POST' },
-        { label: 'GET', value: 'GET' },
-        { label: 'PUT', value: 'PUT' },
-      ]},
-      { key: 'content_type', label: 'Content-Type', type: 'input', placeholder: '默认 application/json' },
-      { key: 'headers', label: 'Headers (JSON)', type: 'textarea', placeholder: '{"Authorization": "Bearer xxx"}' },
-      { key: 'body', label: 'Body 模板', type: 'textarea', placeholder: '使用 {{title}} 和 {{content}} 作为占位符' },
-    ]
-    default: return [{ key: 'url', label: 'URL', type: 'input', placeholder: '' }]
-  }
-})
-
+// 渠道 config 的扁平键值视图，与 channelForm.config 的 JSON 文本互相同步。
 const configData = ref<Record<string, string>>({})
+
+// 当前渠道的字段 schema，来自服务端 GET /notifications/types。
+//
+// 这里以前是 225 行硬编码的 configFields（22 个 case / 90 个字段槽），与服务端
+// notifier.go 实际读取的 config 键靠人手同步。现在唯一真源在
+// server/model/notify_channel_registry.go，并由 Go 测试与 notifier.go 双向绑死，
+// Web 只负责渲染。
+//
+// 刻意不做「服务端没下发 fields」的降级：Web 与服务端永远同版本发布，
+// 不存在「新 Web + 老服务端」的组合，拿不到 schema 就是空表单。
+const currentChannelFields = computed<NotifyFieldDefinition[]>(
+  () => channelTypes.value.find(t => t.type === channelForm.value.type)?.fields ?? []
+)
+
+// 求 show_when 依赖字段的当前取值：用户没填过时按 schema 声明的 default 判定，
+// 与服务端「留空走默认值」的行为保持一致（wecom / wecom_app 的 msg_type 留空即 text，
+// 这也是改造前那两行 `(configData.value.msg_type || 'text')` 的等价写法）。
+function resolveShowWhenValue(fields: NotifyFieldDefinition[], key: string): string {
+  const filled = (configData.value[key] ?? '').toString().trim()
+  if (filled) return filled
+  return (fields.find(f => f.key === key)?.default ?? '').trim()
+}
+
+// show_when 语义固定为「单键等值命中」：依赖字段的当前值命中 values 之一才显示本字段。
+// 服务端刻意不支持表达式，这里也不要扩展成联动 DSL。
+const configFields = computed<NotifyFieldDefinition[]>(() => {
+  const fields = currentChannelFields.value
+  return fields.filter(field => {
+    const condition = field.show_when
+    if (!condition) return true
+    return condition.values.includes(resolveShowWhenValue(fields, condition.key))
+  })
+})
 
 function syncConfigToForm() {
   channelForm.value.config = JSON.stringify(configData.value)
@@ -395,21 +204,22 @@ const JSON_CONFIG_KEYS = new Set([
 const NUMERIC_CONFIG_KEYS = new Set(['smtp_port', 'port'])
 
 function validateConfigFields(): string | null {
+  // 只校验当前可见的字段：被 show_when 过滤掉的字段不会随表单提交语义生效。
   for (const field of configFields.value) {
-    const key = (field as any).key
+    const key = field.key
     const val = (configData.value[key] ?? '').toString().trim()
     if (!val) continue
     if (JSON_CONFIG_KEYS.has(key)) {
       try {
         JSON.parse(val)
       } catch (e: any) {
-        return `字段「${(field as any).label || key}」不是合法 JSON：${e?.message || ''}`
+        return `字段「${field.label || key}」不是合法 JSON：${e?.message || ''}`
       }
     }
     if (NUMERIC_CONFIG_KEYS.has(key)) {
       const n = Number(val)
       if (!Number.isInteger(n) || n <= 0 || n > 65535) {
-        return `字段「${(field as any).label || key}」应为 1-65535 的端口号`
+        return `字段「${field.label || key}」应为 1-65535 的端口号`
       }
     }
   }
@@ -792,18 +602,22 @@ function getChannelConfigSummary(row: any): string[] {
           </el-select>
         </el-form-item>
         <el-divider content-position="left">配置</el-divider>
+        <!--
+          通用渲染器：字段来自服务端 schema，widget 只有 input / password / textarea / select 四种。
+          最后的 v-else 是兜底分支，遇到不认识的 widget 一律按普通输入框渲染，绝不隐藏字段。
+        -->
         <el-form-item v-for="field in configFields" :key="field.key" :label="field.label">
           <el-select
-            v-if="field.type === 'select'"
+            v-if="field.widget === 'select'"
             v-model="configData[field.key]"
             :placeholder="field.placeholder || field.label"
             clearable
             style="width: 100%"
           >
-            <el-option v-for="opt in field.options" :key="opt.value" :label="opt.label" :value="opt.value" />
+            <el-option v-for="opt in field.options || []" :key="opt.value" :label="opt.label" :value="opt.value" />
           </el-select>
           <el-input
-            v-else-if="field.type === 'textarea'"
+            v-else-if="field.widget === 'textarea'"
             v-model="configData[field.key]"
             type="textarea"
             :rows="3"
@@ -812,8 +626,8 @@ function getChannelConfigSummary(row: any): string[] {
           <el-input
             v-else
             v-model="configData[field.key]"
-            :type="field.type === 'password' ? 'password' : 'text'"
-            :show-password="field.type === 'password'"
+            :type="field.widget === 'password' ? 'password' : 'text'"
+            :show-password="field.widget === 'password'"
             :placeholder="field.placeholder || field.label"
           />
         </el-form-item>
