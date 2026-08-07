@@ -140,6 +140,38 @@ func TestNotifyChannelDuplicateKeysAreMutuallyExclusive(t *testing.T) {
 					seenValues[value] = true
 				}
 			}
+
+			// 互斥只保证「同一时刻只渲染一个输入框」，保证不了「客户端按哪一条取默认值」。
+			//
+			// 客户端的表单状态是按 **key** 存的，不是按声明下标：APP 的
+			// buildNotifyFieldSeeds 用 `{for field in fields: field.key: ... ?? field.defaultValue}`
+			// 这种 map 推导式，重复 key 后写覆盖先写，于是种子值恒等于**最后一条**声明的
+			// Default，与此刻显示的是哪一条无关。Web 端 configData[key] 同理。
+			//
+			// 现在两条 content_template 的 Default 都是空串，所以看不出问题。
+			// 一旦有人只给其中一条加 withDefault，用户在另一个分支下就会看到一个
+			// 不属于该分支的预填值 —— 不报错、不崩、只是填错。
+			// 同理 Required / Widget 也必须一致：客户端的必填校验和控件分派虽然读的是
+			// 当前可见的那条，但一旦两条不一致，两个分支的行为就会不对称到没人预期得到。
+			//
+			// 要表达「不同分支不同默认值」，正确做法是拆成两个不同的 key。
+			first := fields[0]
+			for _, field := range fields[1:] {
+				if field.Default != first.Default {
+					t.Errorf("渠道 %s 的字段 %s 多次声明给了不同的 Default（%q / %q）。\n"+
+						"客户端按 key 存表单状态，重复 key 的默认值会互相覆盖，取到哪一条与当前分支无关。\n"+
+						"要按分支给不同默认值，请拆成两个不同的 key。",
+						channel.Type, key, first.Default, field.Default)
+				}
+				if field.Required != first.Required {
+					t.Errorf("渠道 %s 的字段 %s 多次声明的 Required 不一致（%v / %v），两个分支的校验行为会不对称",
+						channel.Type, key, first.Required, field.Required)
+				}
+				if field.Widget != first.Widget {
+					t.Errorf("渠道 %s 的字段 %s 多次声明用了不同的 widget（%s / %s），切分支时控件会换一种，已填内容的去向没有定义",
+						channel.Type, key, first.Widget, field.Widget)
+				}
+			}
 		}
 	}
 }
@@ -291,6 +323,41 @@ func TestNotifyChannelDefinitionsSerializeWithStableJSONKeys(t *testing.T) {
 		byKey[field["key"].(string)] = field
 	}
 
+	// label / placeholder 的键名同样要钉死。
+	// 上面 TestNotifyChannelRegistryHasNoStructuralDefects 断言的是 Go 结构体字段
+	// （field.Label != ""），改 json tag 它一条都不会红；而客户端读的是 JSON 键名
+	// （Dart 侧 json['label'] / json['placeholder']），改名后表单会静默退化成
+	// 「标题变成 key、hint 消失」，没有任何报错。
+	//
+	// 按**下标**配对而不是按 key 查表：wecom 的 content_template 声明了两次
+	// （text 分支和 markdown 分支文案不同），按 key 查表只能拿到后声明的那条。
+	// 比对的是 Go 值本身而不是写死的中文，所以改文案不会误报，只有改键名才会红。
+	if len(fields) != len(channel.Fields) {
+		t.Fatalf("序列化后的字段数与注册表不一致：JSON %d 条，注册表 %d 条",
+			len(fields), len(channel.Fields))
+	}
+	for i, field := range channel.Fields {
+		encoded, ok := fields[i].(map[string]interface{})
+		if !ok {
+			t.Fatalf("第 %d 个字段应当是对象，实际: %#v", i, fields[i])
+		}
+		if got, _ := encoded["key"].(string); got != field.Key {
+			t.Fatalf("第 %d 个字段的 key 键名或取值不对\n  期望: %q\n  实际: %#v",
+				i, field.Key, encoded["key"])
+		}
+		if got, _ := encoded["label"].(string); got != field.Label {
+			t.Errorf("字段 %s 的 label 键名或取值不对\n  期望: %q\n  实际: %#v",
+				field.Key, field.Label, encoded["label"])
+		}
+		if field.Placeholder == "" {
+			continue
+		}
+		if got, _ := encoded["placeholder"].(string); got != field.Placeholder {
+			t.Errorf("字段 %s 的 placeholder 键名或取值不对\n  期望: %q\n  实际: %#v",
+				field.Key, field.Placeholder, encoded["placeholder"])
+		}
+	}
+
 	msgType := byKey["msg_type"]
 	if msgType["widget"] != "select" {
 		t.Errorf("msg_type 的 widget 应为 select，实际 %#v", msgType["widget"])
@@ -298,8 +365,22 @@ func TestNotifyChannelDefinitionsSerializeWithStableJSONKeys(t *testing.T) {
 	if msgType["default"] != "text" {
 		t.Errorf("msg_type 的 default 应为 text，实际 %#v", msgType["default"])
 	}
-	if _, ok := msgType["options"].([]interface{}); !ok {
-		t.Errorf("msg_type 应当带 options，实际 %#v", msgType["options"])
+	options, ok := msgType["options"].([]interface{})
+	if !ok || len(options) == 0 {
+		t.Fatalf("msg_type 应当带非空 options，实际 %#v", msgType["options"])
+	}
+	// 选项元素的键名也要钉死：客户端读的是 item['value'] / item['label']，
+	// 读不到 value 的选项会被整条丢弃，下拉退化成空、再退化成普通输入框。
+	// 这两个键来自 SystemConfigOption，系统配置的 enum 下拉共用同一个结构。
+	firstOption, ok := options[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("options 元素应当是对象，实际 %#v", options[0])
+	}
+	if got, _ := firstOption["value"].(string); got != "text" {
+		t.Errorf("options 元素的 value 键名或取值不对，实际 %#v", firstOption["value"])
+	}
+	if got, _ := firstOption["label"].(string); got == "" {
+		t.Errorf("options 元素的 label 键名不对或为空，实际 %#v", firstOption["label"])
 	}
 
 	imageBase64 := byKey["image_base64"]
@@ -312,6 +393,11 @@ func TestNotifyChannelDefinitionsSerializeWithStableJSONKeys(t *testing.T) {
 	}
 	if showWhen["key"] != "msg_type" {
 		t.Errorf("show_when.key 应为 msg_type，实际 %#v", showWhen["key"])
+	}
+	// show_when.values 是数组：客户端按「当前值落在这个数组里」判显隐，
+	// 键名或类型变了会让条件字段永远显示不出来。
+	if values, ok := showWhen["values"].([]interface{}); !ok || len(values) == 0 {
+		t.Errorf("show_when.values 应当是非空数组，实际 %#v", showWhen["values"])
 	}
 
 	// url 这类普通字段不应该带 required / show_when / default 这些空值键，

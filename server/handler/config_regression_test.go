@@ -146,6 +146,32 @@ func TestConfigListExposesRenderSchema(t *testing.T) {
 		} else if _, hasMin := item["min"]; hasMin {
 			t.Fatalf("expected non-int config %s to omit min", def.Key)
 		}
+
+		// options 及其元素的 value / label 键名同样要钉死。
+		// 客户端（Web 的下拉、APP 的选择器）读的就是这三个字符串，改 json tag
+		// 不会让任何 Go 侧断言变红，但枚举项会静默退化成一个自由输入的文本框。
+		if len(def.Options) == 0 {
+			if _, hasOptions := item["options"]; hasOptions {
+				t.Fatalf("expected %s without registry options to omit options", def.Key)
+			}
+			continue
+		}
+		rawOptions, ok := item["options"].([]interface{})
+		if !ok || len(rawOptions) != len(def.Options) {
+			t.Fatalf("expected %s to carry %d options, got %#v", def.Key, len(def.Options), item["options"])
+		}
+		for i, want := range def.Options {
+			option, ok := rawOptions[i].(map[string]interface{})
+			if !ok {
+				t.Fatalf("expected %s option %d to be an object, got %#v", def.Key, i, rawOptions[i])
+			}
+			if got, _ := option["value"].(string); got != want.Value {
+				t.Fatalf("expected %s option %d value %q, got %#v", def.Key, i, want.Value, option["value"])
+			}
+			if got, _ := option["label"].(string); got != want.Label {
+				t.Fatalf("expected %s option %d label %q, got %#v", def.Key, i, want.Label, option["label"])
+			}
+		}
 	}
 
 	// 凭据类配置必须带 secret 标记，客户端据此用密码框渲染。
