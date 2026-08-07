@@ -210,3 +210,77 @@ const LOCAL_MONACO_REQUIRED_FILES = [
   'language/css/monaco.contribution.js',
 ]
 ```
+
+---
+
+## Scenario: 通知渠道表单 / 系统配置表单的字段定义
+
+### 1. Scope / Trigger
+
+改动涉及「某个渠道有哪些配置字段」或「系统设置页显示哪些配置项」时触发。
+这两类知识的**真源在服务端**，Web 不得再持有副本。
+
+### 2. Signatures
+
+- `GET /api/notifications/types` -> `[{type, name, fields: NotifyFieldDefinition[]}]`
+  真源：`server/model/notify_channel_registry.go`（22 渠道 / 90 字段槽 / 56 唯一键）
+- `GET /api/configs` -> `{data: {key: {...}}}`
+  真源：`server/model/system_config_registry.go`（47 项）
+
+### 3. Contracts
+
+`NotifyFieldDefinition`：`key` / `label` / `widget` / `placeholder` /
+`required` / `default` / `options[{value,label}]` / `show_when{key,values}`
+
+- `widget` **只有四种**：`input` / `password` / `textarea` / `select`
+- `show_when` **只支持单键等值命中**，不支持 OR / 表达式
+- 渲染器读的是 `field.widget`，**不是 `field.type`**
+
+`SystemConfigDefinition` 额外下发 `label` / `group_label` / `order` /
+`secret` / `min` / `max`。注意 `order` 的第一项是 0，
+服务端**绝不能给它加 `omitempty`**。
+
+### 4. Validation & Error Matrix
+
+- 通知渠道 config 的值必须**全是字符串** -> 非字符串的可逆类型服务端会转换，
+  对象/数组返回 400 并点名键
+- `notifier.go` 读了但 registry 没声明 -> `go test ./service` 红
+- registry 声明了但 `notifier.go` 不读 -> 同上，**反方向也红**
+
+### 5. Good/Base/Bad Cases
+
+- **Good**：加渠道字段只改 `notify_channel_registry.go`，Web 与 APP 自动跟上
+- **Base**：schema 缺表达力（如条件 options）时，先扩 schema 再让两端消费
+- **Bad**：在 `index.vue` 里加一张字段表 / 在 computed 里做 `widget -> type`
+  映射保住旧模板 —— 都是把漂移源搬回来
+
+### 6. Tests Required
+
+`server/service/notifier_schema_binding_test.go` 用 `go/ast` 扫
+`notifier.go` 的 `cfg["..."]`，与 registry **双向**断言相等。
+已做双向突变验证：两个方向各改一处，测试都会红。**不要绕过它。**
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```ts
+// web/src/views/notifications/index.vue —— 曾经的 225 行
+const configFields = computed(() => {
+  switch (form.type) {
+    case 'telegram': return [{ key: 'token', label: 'Bot Token', type: 'input' }, ...]
+```
+
+#### Correct
+```ts
+const currentChannelFields = computed(() =>
+  channelTypes.value.find(t => t.type === form.type)?.fields ?? [])
+```
+
+> 历史：这份知识曾在 `notifier.go` / `index.vue` / APP / `apiData.ts`
+> 四处各存一份，并且已经漂移过 —— `apiData.ts` 的 wecom_app 消息类型漏了
+> `mpnews`，而另外两处都有。
+
+> **系统配置侧尚未收敛**：`web/src/views/settings/useSettingsConfig.ts` 仍硬编码
+> 41 个键，实测导致 47 项里有 3 项（`panel_runtime_mode` /
+> `panel_service_manager` / `panel_service_name`）在 Web 端完全没有 UI。
+> APP 已改为 schema 驱动。新增配置项时不要再往那份硬编码里加。
