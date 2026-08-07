@@ -1678,3 +1678,118 @@ def: SystemConfigDefinition{
     Min: &minBound, Max: &maxBound,
 },
 ```
+
+---
+
+## 场景：通知渠道字段注册表与 config 值类型
+
+### 1. Scope / Trigger
+
+- 触发：改动 `server/service/notifier.go` 里任意 `sendXxx` 读取的 `cfg["..."]` 键、`sendToChannel` 的渠道分支、`server/model/notify_channel_registry.go`、`server/model/notify_channel_config.go`，或 `server/handler/notification.go` 的 `Create` / `Update` / `Types` 时必须看本节。
+- 原因：「每个通知渠道有哪些配置字段」这份知识长期只活在 `notifier.go` 的函数体里，服务端从未声明式地持有过。客户端只能各抄一份，抄漏就表现为「面板支持这个配置，但用户没有任何输入框可填」。APP 曾因此缺 31 个键；`web/src/views/api-docs/apiData.ts` 的 wecom_app 消息类型漏 `mpnews` 也是同一种漂移。
+
+### 2. Signatures
+
+- 渠道声明：`model.NotifyChannelDefinition` / `model.NotifyFieldDefinition` / `model.NotifyFieldCondition`
+- 控件枚举：`model.NotifyWidgetInput` / `NotifyWidgetPassword` / `NotifyWidgetTextarea` / `NotifyWidgetSelect`
+- 读取入口：`model.NotifyChannelDefinitions()` / `model.GetNotifyChannelDefinition(type)` / `model.NotifyChannelConfigKeys()`
+- 值归一：`model.NormalizeNotifyChannelConfig(raw string) (string, error)`
+- 下发接口：`GET /api/notifications/types`（`handler.NotificationHandler.Types`，直接吐注册表）
+- 写入口：`POST /api/notifications`、`PUT /api/notifications/:id`、`service.restoreNotifyChannels`
+
+### 3. Contracts
+
+- **`notifier.go` 是权威，注册表向它对齐，不是反过来。** 要加字段先在 `notifier.go` 里真的读它，再回注册表声明。
+- 注册表声明的键集合与 `notifier.go` 实际读取的 `cfg["..."]` 键集合**双向相等**，白名单只允许放行「服务端确实读了、但不是通过字面量读的」这一种情况（目前只有 `smtp_ssl` 一族的 SSL 别名）。
+- 注册表声明的渠道类型集合与 `sendToChannel` 的 switch 分支**双向相等**。`/notifications/types` 不得再手写渠道列表。
+- `ShowWhen` 的语义固定为「单键等值命中」，**不要扩成表达式引擎**。同一渠道内同键多次声明是允许的，但各条的 `ShowWhen` 必须互斥。
+- **不支持条件 options**。像 wecom_app 的 `safe` 那种「选项集合随另一个字段变」的情况，一律把选项常驻，并在就近注释里写清为什么可以常驻（服务端是否透传、错值由谁报错）。
+- `Required` 的口径必须严格：**当且仅当 `notifier.go` 对该字段单独判空并直接返回错误**。二选一约束（email 的 `smtp_user`/`from`、wxpusher 的 `uids`/`topic_ids`）和 `notifier.go` 不校验的 8 个渠道（serverchan / pushdeer / chanify / igot / pushover / discord / slack / custom）一律不标。要让它们必填，先去 `notifier.go` 补判空。
+- `Default` 只记录 `notifier.go` 在该字段为空时**实际使用的回退值**。「留空 = 完全不发这个参数」的字段不写 `Default`。
+- **落库的 config 必须是「顶层对象 + 值全是字符串」**。`sendToChannel` 是 `json.Unmarshal` 到 `map[string]string`，出现任何非字符串值都会让该渠道所有通知（含测试按钮）全挂。
+- 归一规则：字符串原样；布尔 / 数字 / null 转成字符串（**安全可逆**，同时让老客户端写坏的记录一编辑就自愈）；对象 / 数组直接 400 并指出是哪个键（**不可逆**，`fmt.Sprint` 出来是 Go 语法垃圾）。
+- 数字必须用 `json.Decoder` + `UseNumber()` 解析。默认的 `interface{}` 反序列化得到 `float64`，`fmt.Sprint(float64(1000000))` 是 `"1e+06"`，会直接毁掉用户填的整数。
+- `/notifications/types` 的响应只允许新增键，不允许改名或改类型；`type` / `name` / 顺序是老客户端的契约，改动必须同步更新 `TestNotifyChannelTypesRemainBackwardCompatible` 的基线。
+
+### 4. Validation & Error Matrix
+
+- `notifier.go` 新增 `cfg["x"]` 但注册表没声明 → `TestNotifySchemaCoversAllConfigKeysReadByNotifier` 失败（服务端读得到但用户填不了）
+- 注册表声明了 `notifier.go` 不读的键 → 同一条用例失败（假字段）
+- 渠道类型两边不一致 → `TestNotifySchemaCoversAllChannelTypesHandledByNotifier` 失败
+- SSL 别名被删但白名单还在 → `TestNotifierSmtpSSLAliasLoopStillExists` 失败
+- `sendXxx` 被拆到别的文件 → `TestNotifierSourceHoldsEverySenderCalledBySendToChannel` 失败
+- config 值是布尔 / 数字 / null → 归一成字符串，**不报错**
+- config 值是对象 / 数组 → `400`，错误信息必须指出是哪个键
+- config 顶层不是对象、JSON 非法、结尾有多余内容 → `400`，中文提示，不得把 Go 原始错误透给用户
+- config 为空串 → 归一成 `"{}"`
+- `PUT` 的 `config` 字段不是 JSON 字符串 → `400`，且不得改动已有 config
+- 备份里带着坏 config → 恢复时尽力归一；归一不了就保留原文继续恢复，**不得让整批恢复失败**
+
+### 5. Good/Base/Bad Cases
+
+- Good：面板给某渠道加一个新 config 键，改完 `notifier.go` 跑测试立刻变红，提示去注册表补声明；补完 Web 和 APP 不发版就能渲染出这个输入框。
+- Base：22 个渠道 / 90 个字段槽原样下发，老客户端只读 `type` 和 `name`，对多出来的 `icon` / `fields` 无感。
+- Bad：客户端把 `smtp_ssl` 写成 JSON 布尔 `false`。服务端 `Unmarshal` 到 `map[string]string` 直接失败，该渠道所有通知全挂，报的还是一句用户看不懂的 `cannot unmarshal bool into Go value of type string`。
+- Bad：为了「严格」把非字符串值一律 400。库里已经存在的坏记录会因为「原有的坏值」而永远存不进去，用户只能去改数据库。
+- Bad：把嵌套对象 `fmt.Sprint` 成 `map[Authorization:Bearer xxx]` 存下去。把「发不出去」换成了「发出去的是垃圾」，更难排查。
+- Bad：`/notifications/types` 继续手写渠道列表。加渠道漏改一处，用户就会在下拉里看到一个打开没有任何输入框的渠道。
+
+### 6. Tests Required
+
+见 `server/service/notifier_schema_binding_test.go`、`server/model/notify_channel_registry_test.go`、`server/model/notify_channel_config_test.go`、`server/handler/notification_schema_test.go`：
+
+- `TestNotifySchemaCoversAllConfigKeysReadByNotifier`（**最重要的一条**，双向绑死 schema 与 notifier）
+- `TestNotifySchemaCoversAllChannelTypesHandledByNotifier`
+- `TestNotifierSmtpSSLAliasLoopStillExists` / `TestNotifierSourceHoldsEverySenderCalledBySendToChannel`（防白名单和扫描范围腐化）
+- `TestNotifyChannelRegistryHasNoStructuralDefects` / `TestNotifyChannelDuplicateKeysAreMutuallyExclusive`
+- `TestNotifyChannelTypesRemainBackwardCompatible` / `TestNotifyChannelDefinitionsReturnsDeepCopy`
+- `TestNormalizeNotifyChannelConfigCoercesScalarValues` / `TestNormalizeNotifyChannelConfigRejectsUnrecoverableValues` / `TestNormalizeNotifyChannelConfigIsIdempotent`
+- `TestCreateNotificationChannelCoercesNonStringConfigValues` / `TestUpdateNotificationChannelHealsLegacyBrokenConfig`
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./model ./service ./handler -run "TestNotify|TestNormalizeNotifyChannelConfig|TestNotifier|TestCreateNotificationChannel|TestUpdateNotificationChannel" -count=1
+go test ./...
+```
+
+> **突变验证**：往 `notifier.go` 任意 `sendXxx` 里加一句 `_ = cfg["__mutation_test__"]`，`TestNotifySchemaCoversAllConfigKeysReadByNotifier` 必须确定性变红并在错误信息里点名这个键；随后从注册表里删掉任意一个字段声明，同一条用例必须从另一个方向再红一次。两个方向都红才说明绑定是真的双向的。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：渠道列表手写一份，和字段注册表各活各的。加渠道漏改一处就静默不一致。
+func (h *NotificationHandler) Types(c *gin.Context) {
+    types := []map[string]string{
+        {"type": "webhook", "name": "Webhook"},
+        // ... 22 条硬编码
+    }
+    response.Success(c, gin.H{"data": types})
+}
+```
+
+```go
+// 错误：默认 interface{} 反序列化 + fmt.Sprint，整数会被写成 "1e+06"。
+var object map[string]interface{}
+_ = json.Unmarshal([]byte(raw), &object)
+for key, value := range object {
+    normalized[key] = fmt.Sprint(value)   // 30 -> "30"，但 1000000 -> "1e+06"
+}
+```
+
+#### Correct
+
+```go
+// 正确：渠道列表和字段定义同一个源，结构上不可能分叉。
+func (h *NotificationHandler) Types(c *gin.Context) {
+    response.Success(c, gin.H{"data": model.NotifyChannelDefinitions()})
+}
+```
+
+```go
+// 正确：UseNumber 保住整数原文；可逆的转，不可逆的报错并点名是哪个键。
+decoder := json.NewDecoder(strings.NewReader(trimmed))
+decoder.UseNumber()
+```

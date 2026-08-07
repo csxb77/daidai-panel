@@ -908,10 +908,21 @@ func restoreUsers(tx *gorm.DB, users []BackupUser) (map[uint]uint, error) {
 func restoreNotifyChannels(tx *gorm.DB, channels []BackupNotifyChannel) (map[uint]uint, error) {
 	idMap := make(map[uint]uint, len(channels))
 	for _, item := range channels {
+		// 老备份里可能带着被客户端写坏的 config（例如 smtp_ssl 是 JSON 布尔），
+		// 那种渠道恢复回来会直接发不出任何通知。这里顺手归一一次，让它恢复即可用。
+		//
+		// 归一失败（值是嵌套对象/数组这类修不了的）时保留原文继续恢复：
+		// 恢复流程的首要职责是把数据完整搬回来，不能因为一个渠道配置有问题就整批失败。
+		// 用户后续在通知页编辑保存时会拿到明确的中文报错。
+		config := item.Config
+		if normalized, err := model.NormalizeNotifyChannelConfig(config); err == nil {
+			config = normalized
+		}
+
 		channel := model.NotifyChannel{
 			Name:      item.Name,
 			Type:      item.Type,
-			Config:    item.Config,
+			Config:    config,
 			Enabled:   item.Enabled,
 			CreatedAt: item.CreatedAt,
 			UpdatedAt: item.UpdatedAt,

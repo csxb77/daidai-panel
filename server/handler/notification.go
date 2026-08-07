@@ -60,14 +60,18 @@ func (h *NotificationHandler) Create(c *gin.Context) {
 		return
 	}
 
-	if req.Config == "" {
-		req.Config = "{}"
+	// config 的值必须全是字符串，否则 service.sendToChannel 反序列化直接失败，
+	// 该渠道所有通知（含测试按钮）都会挂掉。详见 model.NormalizeNotifyChannelConfig。
+	normalizedConfig, err := model.NormalizeNotifyChannelConfig(req.Config)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
 	}
 
 	ch := model.NotifyChannel{
 		Name:    req.Name,
 		Type:    req.Type,
-		Config:  req.Config,
+		Config:  normalizedConfig,
 		Enabled: true,
 	}
 
@@ -97,9 +101,26 @@ func (h *NotificationHandler) Update(c *gin.Context) {
 	allowed := map[string]bool{"name": true, "type": true, "config": true}
 	updates := make(map[string]interface{})
 	for k, v := range req {
-		if allowed[k] {
-			updates[k] = v
+		if !allowed[k] {
+			continue
 		}
+		if k == "config" {
+			// 与 Create 走同一套归一：老客户端写坏的记录（例如 smtp_ssl 被写成 JSON 布尔）
+			// 只要用户在任意端点一次「编辑 + 保存」就会自动被修好，不需要单独做数据迁移。
+			rawConfig, ok := v.(string)
+			if !ok {
+				response.BadRequest(c, "通知渠道配置必须是 JSON 字符串")
+				return
+			}
+			normalizedConfig, err := model.NormalizeNotifyChannelConfig(rawConfig)
+			if err != nil {
+				response.BadRequest(c, err.Error())
+				return
+			}
+			updates[k] = normalizedConfig
+			continue
+		}
+		updates[k] = v
 	}
 
 	if len(updates) > 0 {
@@ -217,32 +238,16 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 	})
 }
 
+// Types 下发全部通知渠道及其字段定义。
+//
+// 这里以前是一份硬编码的 {type,name} 列表，与 model 里的字段注册表是两处分开维护的，
+// 加渠道时漏改一处就会出现「类型下拉里有，但打开没有任何输入框」。现在统一从注册表取，
+// 结构上不可能再分叉。
+//
+// 响应保持纯可加：老客户端只读 type / name 两个键，多出来的 icon / fields 对它们无感；
+// 老面板不返回 fields 时，新客户端判断 fields 为空即回落本地冻结快照。
 func (h *NotificationHandler) Types(c *gin.Context) {
-	types := []map[string]string{
-		{"type": "webhook", "name": "Webhook"},
-		{"type": "email", "name": "邮件"},
-		{"type": "telegram", "name": "Telegram"},
-		{"type": "dingtalk", "name": "钉钉"},
-		{"type": "wecom", "name": "企业微信机器人"},
-		{"type": "wecom_app", "name": "企业微信应用"},
-		{"type": "bark", "name": "Bark"},
-		{"type": "pushplus", "name": "PushPlus"},
-		{"type": "serverchan", "name": "Server酱"},
-		{"type": "feishu", "name": "飞书"},
-		{"type": "gotify", "name": "Gotify"},
-		{"type": "pushdeer", "name": "PushDeer"},
-		{"type": "pushme", "name": "PushMe"},
-		{"type": "chanify", "name": "Chanify"},
-		{"type": "igot", "name": "iGot"},
-		{"type": "qmsg", "name": "Qmsg"},
-		{"type": "pushover", "name": "Pushover"},
-		{"type": "discord", "name": "Discord"},
-		{"type": "slack", "name": "Slack"},
-		{"type": "ntfy", "name": "ntfy"},
-		{"type": "wxpusher", "name": "WxPusher / ClawBot(iLink)"},
-		{"type": "custom", "name": "自定义"},
-	}
-	response.Success(c, gin.H{"data": types})
+	response.Success(c, gin.H{"data": model.NotifyChannelDefinitions()})
 }
 
 func (h *NotificationHandler) RegisterRoutes(r *gin.RouterGroup) {
