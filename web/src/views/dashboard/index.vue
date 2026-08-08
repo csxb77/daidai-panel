@@ -36,6 +36,7 @@ import {
 } from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
 import { canAdminister, hasRequiredRole } from "@/utils/roles";
+import { formatDuration } from "@/utils/duration";
 
 const ExecutionTrendChart = defineAsyncComponent(
   () => import("./components/ExecutionTrendChart.vue"),
@@ -454,13 +455,17 @@ const taskStats = computed(() => {
   };
 });
 
-const avgDuration = computed(() => {
+// 平均执行时长（秒）。没有可用样本时返回 null，交给 formatDuration 显示 "-"，
+// 避免把「没数据」渲染成 0，让人误以为任务是瞬间跑完的。
+// 这里刻意不做预先四舍五入：提前把 59.96 修成 60.0 会让格式化结果跳成 "1m"，
+// 精度统一交给 formatDuration 处理。
+const avgDuration = computed<number | null>(() => {
   const list = recentLogs.value;
-  if (!list.length) return 0;
+  if (!list.length) return null;
   const valid = list.filter((l: any) => l.duration != null);
-  if (!valid.length) return 0;
+  if (!valid.length) return null;
   const sum = valid.reduce((s: number, l: any) => s + (l.duration || 0), 0);
-  return Math.round((sum / valid.length) * 10) / 10;
+  return sum / valid.length;
 });
 
 const loadDashboard = async () => {
@@ -850,7 +855,9 @@ function rerunLog(log: any) {
         </div>
         <div class="task-stats-footer">
           <span class="task-stats-footer__label">平均执行时长</span>
-          <span class="task-stats-footer__value">{{ avgDuration }}s</span>
+          <span class="task-stats-footer__value">{{
+            formatDuration(avgDuration)
+          }}</span>
         </div>
       </div>
     </section>
@@ -909,7 +916,7 @@ function rerunLog(log: any) {
             <div class="log-mobile-card__meta">
               <span>{{ formatTime(log.created_at) }}</span>
               <span v-if="log.duration != null"
-                >耗时 {{ log.duration.toFixed(1) }}s</span
+                >耗时 {{ formatDuration(log.duration) }}</span
               >
             </div>
           </div>
@@ -960,7 +967,7 @@ function rerunLog(log: any) {
               </td>
               <td class="col-center">
                 <span class="log-cell-duration">{{
-                  log.duration != null ? log.duration.toFixed(1) + "s" : "-"
+                  formatDuration(log.duration)
                 }}</span>
               </td>
               <td class="col-center">

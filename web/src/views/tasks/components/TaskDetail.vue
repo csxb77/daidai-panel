@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { getDisplayTaskLabels } from '../taskLabels'
 import { useResponsive } from '@/composables/useResponsive'
+import { formatDuration } from '@/utils/duration'
 import TaskCronList from './TaskCronList.vue'
 
 const props = defineProps<{
@@ -112,7 +113,7 @@ function handleClose() {
         <el-tag v-else type="danger" size="small">失败</el-tag>
       </el-descriptions-item>
       <el-descriptions-item label="上次运行耗时">
-        <span v-if="task.last_running_time != null">{{ task.last_running_time.toFixed(2) }}s</span>
+        <span v-if="task.last_running_time != null">{{ formatDuration(task.last_running_time) }}</span>
         <span v-else style="color: var(--el-text-color-placeholder)">-</span>
       </el-descriptions-item>
       <el-descriptions-item label="上次运行时间" :span="2">

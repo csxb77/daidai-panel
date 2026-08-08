@@ -10,6 +10,7 @@ import {
 } from "@/utils/sse";
 import { useResponsive } from "@/composables/useResponsive";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
+import { formatDuration } from "@/utils/duration";
 
 const subList = ref<any[]>([]);
 const loading = ref(false);
@@ -1508,11 +1509,7 @@ function viewLogDetail(log: any) {
           class-name="log-content-cell"
         />
         <el-table-column prop="duration" label="耗时" width="100">
-          <template #default="{ row }">{{
-            typeof row.duration === "number"
-              ? row.duration.toFixed(1) + "s"
-              : "-"
-          }}</template>
+          <template #default="{ row }">{{ formatDuration(row.duration) }}</template>
         </el-table-column>
         <el-table-column prop="created_at" label="时间" width="170">
           <template #default="{ row }">{{

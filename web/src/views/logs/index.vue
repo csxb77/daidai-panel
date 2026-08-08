@@ -10,6 +10,7 @@ import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
+import { formatDuration } from '@/utils/duration'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE, type TerminalLineBuffer } from '@/utils/ansi'
 import { downloadTextAsFile, foldedLogDownloadName, startRawLogDownload } from '@/utils/rawLogDownload'
 
@@ -247,12 +248,6 @@ function getStatusText(status: number | null) {
   if (status === 0) return '成功'
   if (status === 1) return '失败'
   return '未知'
-}
-
-function formatDuration(d: number | null) {
-  if (d == null) return '-'
-  if (d < 60) return `${d.toFixed(1)}s`
-  return `${Math.floor(d / 60)}m ${(d % 60).toFixed(0)}s`
 }
 
 function formatTime(t: string | null) {

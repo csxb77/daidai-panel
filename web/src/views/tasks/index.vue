@@ -17,6 +17,7 @@ import { splitTaskCommandDisplay } from './taskCommand'
 import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
 import { canOperate } from '@/utils/roles'
+import { formatDuration } from '@/utils/duration'
 import type { TaskViewFilter, TaskViewSortRule } from '@/api/taskView'
 
 const route = useRoute()
@@ -822,7 +823,7 @@ async function handleImport(event: Event) {
             </div>
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">耗时</span>
-              <span class="dd-mobile-card__value">{{ row.last_running_time != null ? `${row.last_running_time.toFixed(1)}s` : '-' }}</span>
+              <span class="dd-mobile-card__value">{{ formatDuration(row.last_running_time) }}</span>
             </div>
           </div>
 
@@ -954,7 +955,7 @@ async function handleImport(event: Event) {
         </el-table-column>
         <el-table-column label="耗时" width="90" align="center">
           <template #default="{ row }">
-            <span v-if="row.last_running_time != null" class="time-text">{{ row.last_running_time.toFixed(1) }}s</span>
+            <span v-if="row.last_running_time != null" class="time-text">{{ formatDuration(row.last_running_time) }}</span>
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
