@@ -82,6 +82,47 @@ Vue 单文件组件通常按下面顺序组织：
 - 没有中文注释，导致状态切换或边界逻辑难理解。
 - 同一类弹窗、卡片、表单在不同地方写出完全不同的交互风格。
 
+---
+
+## 已知缺陷：移动端「全屏」弹窗实际只有 92vw
+
+> 记录日期 2026-08-08，基线 v3.0.1，**未修复**。
+> 本条写在这里而不是 Trellis task 里，是因为 `.git/info/exclude` 把 `/.trellis/`
+> 整个排除了，task 目录只存在于本机；而这条缺陷需要跨机器、跨接手人保留。
+
+**现象**：`≤768px` 下所有 `:fullscreen="dialogFullscreen"` 的弹窗，高度是满的，
+左右各短 4vw，露出两条遮罩边。看起来像「全屏没做好」，实际是被样式覆盖了。
+
+**根因是 CSS 层叠，不是写错**：
+
+```scss
+// Element Plus 自己的实现
+.el-dialog            { width: var(--el-dialog-width, 50%); }   // 无 !important
+.el-dialog.is-fullscreen { --el-dialog-width: 100%; height: 100%; }
+
+// global.scss:1673-1675，在 @media screen and (max-width: 768px) 里
+.el-dialog {
+  --el-dialog-width: 92vw !important;
+  width: 92vw !important;      // ← 带 !important，直接盖掉上面那条 width
+}
+```
+
+EP 是**通过改变量**实现全屏的，而这里是**直接写 width 且带 `!important`**。
+带 `!important` 的声明胜过不带的，与特异性无关，所以 `.is-fullscreen` 那条
+`--el-dialog-width: 100%` 根本没机会参与计算。`global.scss:341-350` 的
+`&.is-fullscreen` 块只处理了 `max-height` 与 margin，**没有 width**，补不上这个洞。
+
+**影响面**：全站 40+ 个调用点（`useResponsive` 的 `dialogFullscreen` 几乎每个页面都在用）。
+
+**已经有两处在局部绕它**，改的时候不要以为它们是历史遗留：
+- `ScriptExecutionDialogs.vue:316-319`——注释明写「用双 class 提高特异性」
+- `LogViewer.vue:1085-1088`——自己重新声明了一遍 `&.is-fullscreen`
+
+**为什么不能直接把那两行删掉**：`92vw` 是给**非全屏**弹窗用的移动端宽度。
+桌面端很多弹窗写死了 `width="600px"` / `"1100px"`，在窄屏上会溢出，这条兜底就是防它。
+正确修法是让全屏态不受这条约束，例如在同一个 media 块里补
+`.el-dialog.is-fullscreen { width: 100% !important; }`，而不是移除兜底。
+
 ## Scenario: 日志查看器中的 `\r` 单行覆盖刷新
 
 ### 1. Scope / Trigger
