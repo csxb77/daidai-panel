@@ -280,7 +280,14 @@ const currentChannelFields = computed(() =>
 > 四处各存一份，并且已经漂移过 —— `apiData.ts` 的 wecom_app 消息类型漏了
 > `mpnews`，而另外两处都有。
 
-> **系统配置侧尚未收敛**：`web/src/views/settings/useSettingsConfig.ts` 仍硬编码
-> 41 个键，实测导致 47 项里有 3 项（`panel_runtime_mode` /
-> `panel_service_manager` / `panel_service_name`）在 Web 端完全没有 UI。
-> APP 已改为 schema 驱动。新增配置项时不要再往那份硬编码里加。
+> **系统配置侧走的是「专属表单 + schema 兜底」两层**：
+> `useSettingsConfig.ts` 的 `configForm` 保留 41 个键的硬编码，因为它们绑着
+> SVG 上传、取色器实时预览、图片压缩、镜像源弹窗、备份内容 CSV ↔ 复选框等定制控件；
+> 其余项由 `settings/systemConfigSchema.ts` + `components/ExtraConfigCard.vue`
+> 按服务端 schema 兜底渲染。**谁进兜底区是拿 `configForm` 的键去减算出来的**，
+> 所以服务端加配置项时 Web 不用改，它会自己冒出来。
+>
+> 三项只读见 `READ_ONLY_CONFIG_KEYS`（巡检写入的机器状态 + `ddp service install`
+> 写入的安装事实）：渲染成只读行，不隐藏、不回写。
+> 保存统一走 `submitConfigs`，**只提交改动过的键** —— 服务端 `BatchSet` 逐键写入、
+> 中途 400 时前面的键已经落库，全量回写会造成半保存状态。

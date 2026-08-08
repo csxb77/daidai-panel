@@ -1,8 +1,16 @@
-import { ref } from 'vue'
-import { configApi } from '@/api/system'
+import { computed, ref } from 'vue'
+import { configApi, type SystemConfigMap } from '@/api/system'
 import { ElMessage } from 'element-plus'
 import { applyPanelAppearance } from '@/utils/panelAppearance'
 import type { SettingsConfigForm } from './types'
+import {
+  buildConfigDraftWrites,
+  CONFIG_KEYS_RENDERED_ELSEWHERE,
+  groupSystemConfigItems,
+  parseConfigBool,
+  parseSystemConfigItems,
+  validateConfigDraft
+} from './systemConfigSchema'
 
 const logBackgroundImageMaxBytes = 10 * 1024 * 1024
 const logBackgroundImageTargetDataUrlBytes = 1600 * 1024
@@ -129,6 +137,31 @@ export function useSettingsConfig() {
     max_app_sessions: 1
   })
 
+  // 服务端下发的原始 schema + 当前值。两个用途：
+  // 1) 兜底区（ExtraConfigCard）按 schema 渲染本页没有专属表单的配置项；
+  // 2) 所有保存按钮拿它当基准，只回写真正改动过的键。
+  const rawConfigs = ref<SystemConfigMap>({})
+
+  // 兜底区的表单草稿：key -> 原始字符串。
+  // 控件全部按字符串读写，因为服务端 PUT /configs/batch 绑定的是 map[string]string，
+  // 连 bool 的值也是字符串 "true"/"false" 而不是 JSON 布尔。
+  const extraConfigDraft = ref<Record<string, string>>({})
+
+  // 兜底区要渲染的项 = 服务端注册项 − 本页硬编码表单已覆盖的键 − 已在别的页面渲染的键。
+  //
+  // 「已覆盖」直接取 configForm 的键而不是另写一张名单：
+  // 往 configForm 里加键就自动从兜底区消失，往服务端注册表里加项而 Web 忘了加表单，
+  // 就会自动出现在兜底区。这样两边都不需要人手同步。
+  const extraConfigItems = computed(() => {
+    const covered = new Set<string>([
+      ...Object.keys(configForm.value),
+      ...Object.keys(CONFIG_KEYS_RENDERED_ELSEWHERE)
+    ])
+    return parseSystemConfigItems(rawConfigs.value, covered)
+  })
+
+  const extraConfigGroups = computed(() => groupSystemConfigItems(extraConfigItems.value))
+
   function readConfigString(cfgs: Record<string, any>, key: string, fallback = ''): string {
     const entry = cfgs[key]
     const raw = entry?.value ?? entry?.default_value ?? fallback
@@ -153,7 +186,8 @@ export function useSettingsConfig() {
     configsLoading.value = true
     try {
       const res = await configApi.list()
-      const cfgs = res.data || {}
+      const cfgs: SystemConfigMap = res.data || {}
+      rawConfigs.value = cfgs
 
       configForm.value = {
         max_concurrent_tasks: readConfigNumber(cfgs, 'max_concurrent_tasks', 5),
@@ -198,6 +232,20 @@ export function useSettingsConfig() {
         max_web_sessions: readConfigNumber(cfgs, 'max_web_sessions', 1),
         max_app_sessions: readConfigNumber(cfgs, 'max_app_sessions', 1)
       }
+
+      // 兜底区草稿整体重建，以服务端当前值为准（丢弃上一次未保存的编辑）。
+      // 与本页其它表单「重新加载即回到服务端状态」的行为一致。
+      //
+      // bool 收敛成 "true"/"false" 两个字面量：开关控件按这两个字符串绑值，
+      // 服务端 strconv.FormatBool 出来的也正是这两个，历史脏值（"1"/"on"）在这里被拉平。
+      const draft: Record<string, string> = {}
+      for (const item of extraConfigItems.value) {
+        draft[item.key] = item.valueType === 'bool'
+          ? (parseConfigBool(item.value) ? 'true' : 'false')
+          : item.value
+      }
+      extraConfigDraft.value = draft
+
       applyPanelAppearance(configForm.value)
     } catch (err: any) {
       ElMessage.error(err?.response?.data?.error || '加载配置失败')
@@ -206,23 +254,55 @@ export function useSettingsConfig() {
     }
   }
 
-  async function saveConfigKeys(keys: string[]) {
+  // 本页所有保存按钮的共同出口：只回写「与服务端当前值不同」的键。
+  //
+  // 服务端 BatchSet 是逐键 SetConfig、中途失败直接 400 返回而前面的键已经落库，
+  // 全量回写会把「这一组里有一项填错」放大成「一半保存了一半没保存」。
+  // 只发改动项能把出错范围缩到用户真正动过的那几个键上。
+  async function submitConfigs(next: Record<string, string>): Promise<boolean> {
+    const changed: Record<string, string> = {}
+    for (const [key, value] of Object.entries(next)) {
+      if (rawConfigs.value[key]?.value === value) continue
+      changed[key] = value
+    }
+
+    if (Object.keys(changed).length === 0) {
+      // 一个改动都没有时不发请求：服务端的 configs 是 binding:"required"，空对象会直接 400
+      ElMessage.info('配置没有变化')
+      return false
+    }
+
     configsSaving.value = true
     try {
-      const configs: Record<string, string> = {}
-      for (const key of keys) {
-        const val = (configForm.value as any)[key]
-        configs[key] = typeof val === 'boolean' ? (val ? 'true' : 'false') : String(val ?? '')
+      await configApi.batchSet(changed)
+      // 更新比较基准，避免同一份改动下次保存时被重复写一遍。
+      // 服务端 normalize 可能把值改写（例如二进制加速源会补上尾部斜杠），这里只记我们发出去的值：
+      // 真有差异时下次保存会再写一次，写入是幂等的，没有副作用。
+      for (const [key, value] of Object.entries(changed)) {
+        const entry = rawConfigs.value[key]
+        if (entry) entry.value = value
+        else rawConfigs.value[key] = { value }
       }
-      await configApi.batchSet(configs)
-      applyPanelAppearance(configForm.value)
       ElMessage.success('配置已保存')
+      return true
     } catch (err: any) {
       ElMessage.error(err?.response?.data?.error || '保存失败')
       // 保存失败后从后端重新拉取该组的真实值，避免陈旧本地状态被下一次保存再次带出
       void loadSystemConfigs()
+      return false
     } finally {
       configsSaving.value = false
+    }
+  }
+
+  async function saveConfigKeys(keys: string[]) {
+    const next: Record<string, string> = {}
+    for (const key of keys) {
+      const val = (configForm.value as any)[key]
+      next[key] = typeof val === 'boolean' ? (val ? 'true' : 'false') : String(val ?? '')
+    }
+    if (await submitConfigs(next)) {
+      applyPanelAppearance(configForm.value)
     }
   }
 
@@ -318,11 +398,26 @@ export function useSettingsConfig() {
     ])
   }
 
+  // 兜底区保存：先做前端能确定的整数校验，再把草稿交给统一出口做差集回写
+  async function handleSaveExtraConfigs() {
+    for (const item of extraConfigItems.value) {
+      const message = validateConfigDraft(item, extraConfigDraft.value[item.key] ?? '')
+      if (message) {
+        ElMessage.warning(message)
+        return
+      }
+    }
+    await submitConfigs(buildConfigDraftWrites(extraConfigItems.value, extraConfigDraft.value))
+  }
+
   return {
     captchaFeatureImplemented,
     configsLoading,
     configsSaving,
     configForm,
+    extraConfigGroups,
+    extraConfigDraft,
+    handleSaveExtraConfigs,
     loadSystemConfigs,
     handleSaveSystemConfig,
     handleSaveAlertConfig,

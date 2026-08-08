@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import AlertConfigCard from './components/AlertConfigCard.vue'
 import BackupManagementCard from './components/BackupManagementCard.vue'
 import CaptchaConfigCard from './components/CaptchaConfigCard.vue'
+import ExtraConfigCard from './components/ExtraConfigCard.vue'
 import IPWhitelistCard from './components/IPWhitelistCard.vue'
 import LoginLogsCard from './components/LoginLogsCard.vue'
 import OverviewHeroCard from './components/OverviewHeroCard.vue'
@@ -70,6 +71,9 @@ const {
   configsLoading,
   configsSaving,
   configForm,
+  extraConfigGroups,
+  extraConfigDraft,
+  handleSaveExtraConfigs,
   loadSystemConfigs,
   handleSaveSystemConfig,
   handleSaveAlertConfig,
@@ -311,6 +315,21 @@ watch(
           :on-log-background-upload="handleLogBackgroundUpload"
           :on-appearance-preview="previewPanelAppearance"
         />
+
+        <!--
+          兜底卡片：渲染面板注册了、但本页没有专属表单的配置项（当前是运行时日志输出、
+          守护方式、systemd 服务名三项，都属于「面板与运行时」分组，所以挂在这个标签页）。
+          没有这类配置项时整卡不渲染，页面与改造前完全一致。
+        -->
+        <ExtraConfigCard
+          v-if="extraConfigGroups.length"
+          class="extra-config-card"
+          :configs-loading="configsLoading"
+          :configs-saving="configsSaving"
+          :groups="extraConfigGroups"
+          :draft="extraConfigDraft"
+          :on-save="handleSaveExtraConfigs"
+        />
       </el-tab-pane>
 
       <el-tab-pane v-if="isAdmin" label="任务运行" name="task-exec">
@@ -525,6 +544,11 @@ watch(
   align-items: center;
   gap: 4px;
   font-weight: 500;
+}
+
+// 兜底配置卡跟在「面板外观」卡后面，间距与概览网格保持一致
+.extra-config-card {
+  margin-top: 16px;
 }
 
 // 概览主网格：入场淡入上移，幅度小、走切页动效令牌（reduced-motion 由 global.scss 统一降级）

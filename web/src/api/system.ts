@@ -109,8 +109,56 @@ export const configScriptApi = {
   save: (content: string) => request.put('/system/config-script', { content }) as Promise<{ message: string }>,
 }
 
+// ============================================================================
+// 系统配置 schema
+//
+// 下面这几个类型与服务端 server/handler/config.go 的 buildConfigResponseItem
+// 一一对应，是 GET /api/configs 的真实响应形状；字段真源在
+// server/model/system_config_registry.go（47 项）。
+//
+// 这份 schema 由服务端持有唯一真源，Web 只负责渲染。
+// 不做版本兼容降级：Web 与服务端永远同版本发布 —— release 产物里 web/ 目录和
+// 二进制来自同一次构建，Docker 镜像同理，面板自更新脚本也是整个 web/ 目录替换。
+// 不存在「新 Web + 老服务端」的组合。
+// ============================================================================
+
+/** 服务端 SystemConfigValueType 的四个取值 */
+export type SystemConfigValueType = 'string' | 'int' | 'bool' | 'enum'
+
+export interface SystemConfigOption {
+  value: string
+  label: string
+}
+
+export interface SystemConfigItemResponse {
+  /** 当前值。服务端在库里没记录或记录为空串时已经替换成 default_value */
+  value?: string
+  /** 长句说明（个别项有三行），只能当 hint，不能当输入框标题 */
+  description?: string
+  updated_at?: string | null
+  /** false 表示这是面板运行时自己写的临时状态，没有 schema，不要渲染也不要回写 */
+  registered?: boolean
+  default_value?: string
+  value_type?: SystemConfigValueType
+  group?: string
+  /** group 这个英文 slug 对应的中文分组名 */
+  group_label?: string
+  /** 输入框标题用的短词 */
+  label?: string
+  /** 注册顺序。本接口返回的是 map 本身没有顺序，客户端要按声明顺序渲染只能靠它 */
+  order?: number
+  /** 凭据类配置，渲染时应当用密码框（服务端仍然明文下发） */
+  secret?: boolean
+  /** 只有 int 类型有值，供前端做范围校验（服务端仍会独立校验一次） */
+  min?: number
+  max?: number
+  options?: SystemConfigOption[]
+}
+
+export type SystemConfigMap = Record<string, SystemConfigItemResponse>
+
 export const configApi = {
-  list: () => request.get('/configs'),
+  list: () => request.get('/configs') as Promise<{ data: SystemConfigMap }>,
   get: (key: string) => request.get(`/configs/${key}`),
   set: (data: { key: string; value: string; description?: string }) => request.post('/configs', data),
   batchSet: (configs: Record<string, string>) => request.put('/configs/batch', { configs }),
