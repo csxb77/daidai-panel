@@ -20,8 +20,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.0.0` · [更新日志](./docs/release-notes/v3.0.0.md)<br>
-> 本次重点：TODO（v3.0.0 大版本重点，随版本内容一并补充）。<br>
+> 最新稳定版：`v3.0.1` · [更新日志](./docs/release-notes/v3.0.1.md)<br>
+> 本次重点：修复通知渠道配置被写坏后无法自愈、定时备份漏「任务视图」，耗时改用时分秒。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 功能特性
@@ -448,7 +448,7 @@ daidai-panel-windows-amd64/
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.0.0 更新日志](./docs/release-notes/v3.0.0.md) |
+| 看这一版改了什么 | [v3.0.1 更新日志](./docs/release-notes/v3.0.1.md) |
 
 ## 端口与反向代理
 
