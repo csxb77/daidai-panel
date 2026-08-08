@@ -4,8 +4,48 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// resetRuntimeEnvWarningDedup 清空进程内的告警去重表。
+// 去重表是包级状态，用例之间必须互不干扰，否则后跑的用例会被前一个用例静音。
+func resetRuntimeEnvWarningDedup(t *testing.T) {
+	t.Helper()
+	runtimeEnvWarningsSeen.mu.Lock()
+	defer runtimeEnvWarningsSeen.mu.Unlock()
+	runtimeEnvWarningsSeen.seen = nil
+}
+
+// requireRuntimeEnvWarningEmit 跳过 Windows：那里 emit 直接返回，去重行为无从观察。
+func requireRuntimeEnvWarningEmit(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("windows 没有 MAX_ARG_STRLEN / ARG_MAX 限制，emit 本身就不输出")
+	}
+}
+
+// taskEnvWith 造一个贴近真实的任务环境：真实环境永远不止一条变量，
+// 「变量还在不在」这个判断必须建立在完整环境上。
+// sizes 指定某些变量按 execve 口径要占多少字节。
+func taskEnvWith(sizes map[string]int) map[string]string {
+	env := map[string]string{
+		"PATH": "/usr/local/bin:/usr/bin",
+		"TZ":   "Asia/Shanghai",
+	}
+	for name, entryBytes := range sizes {
+		env[name] = envValueForEntryBytes(name, entryBytes)
+	}
+	return env
+}
+
+func emitWarningsForTest(env map[string]string, interpreter string) []string {
+	var lines []string
+	emitRuntimeEnvLimitWarnings(env, interpreter, func(line string) {
+		lines = append(lines, line)
+	})
+	return lines
+}
 
 // buildEnvWithTotalBytes 造一个「按 execve 口径合计正好 total 字节」的环境，
 // 用来卡总量阈值的边界。count 要足够大，保证每条都不会自己撞上 MAX_ARG_STRLEN。
@@ -251,14 +291,13 @@ func TestPlanShellEnvExportStopsAtBudget(t *testing.T) {
 }
 
 func TestEmitRuntimeEnvLimitWarningsFollowsPlatform(t *testing.T) {
+	resetRuntimeEnvWarningDedup(t)
+
 	env := map[string]string{
 		"JD_COOKIE": envValueForEntryBytes("JD_COOKIE", linuxMaxArgStrLenBytes+1),
 	}
 
-	var lines []string
-	emitRuntimeEnvLimitWarnings(env, "python3", func(line string) {
-		lines = append(lines, line)
-	})
+	lines := emitWarningsForTest(env, "python3")
 
 	if runtime.GOOS == "windows" {
 		// Windows 没有 MAX_ARG_STRLEN / ARG_MAX 这套限制，提示只会是噪音。
@@ -274,4 +313,233 @@ func TestEmitRuntimeEnvLimitWarningsFollowsPlatform(t *testing.T) {
 
 func TestEmitRuntimeEnvLimitWarningsToleratesNilSink(t *testing.T) {
 	emitRuntimeEnvLimitWarnings(map[string]string{"A": "b"}, "python3", nil)
+}
+
+func TestEmitRuntimeEnvLimitWarningsReportsEachSituationOnlyOnce(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	env := taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes + 1})
+
+	first := emitWarningsForTest(env, "python3")
+	if len(first) == 0 {
+		t.Fatal("expected the first run to report")
+	}
+
+	// 用户已经知道这回事了，再报就是噪音：第二次必须**完全**静默，
+	// 连「详见首次告警」这种一行简报都不能留。
+	if second := emitWarningsForTest(env, "python3"); len(second) != 0 {
+		t.Fatalf("expected total silence on the second run, got:\n%s", joinWarnings(second))
+	}
+}
+
+func TestEmitRuntimeEnvLimitWarningsStaysSilentWhileTheSameVariableKeepsGrowing(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	if len(emitWarningsForTest(taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes + 1}), "python3")) == 0 {
+		t.Fatal("expected the first run to report")
+	}
+
+	// 198 KB 涨到 297.6 KB 是「同一个问题在恶化」，不是新情况。
+	grown := taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes * 4})
+	if lines := emitWarningsForTest(grown, "python3"); len(lines) != 0 {
+		t.Fatalf("a bigger value is the same problem, expected silence, got:\n%s", joinWarnings(lines))
+	}
+}
+
+func TestEmitRuntimeEnvLimitWarningsReportsAgainWhenAnotherVariableGoesOversized(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	if len(emitWarningsForTest(taskEnvWith(map[string]int{"elmck1": linuxMaxArgStrLenBytes + 1}), "python3")) == 0 {
+		t.Fatal("expected the first run to report")
+	}
+
+	// 多出一条超限变量是新情况，必须重新告警。
+	// 顺带盯住指纹别把 elmck1 / elmck2 当成同一条（数字不能被抹掉）。
+	both := taskEnvWith(map[string]int{
+		"elmck1": linuxMaxArgStrLenBytes + 1,
+		"elmck2": linuxMaxArgStrLenBytes + 1,
+	})
+	lines := emitWarningsForTest(both, "python3")
+	if len(lines) == 0 {
+		t.Fatal("expected a fresh warning after a new variable went oversized")
+	}
+	if text := joinWarnings(lines); !strings.Contains(text, "elmck2") {
+		t.Fatalf("expected the new variable to be named, got:\n%s", text)
+	}
+}
+
+func TestEmitRuntimeEnvLimitWarningsReportsAgainAfterTheVariableWasRemovedAndCameBack(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	broken := taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes + 1})
+	if len(emitWarningsForTest(broken, "python3")) == 0 {
+		t.Fatal("expected the first run to report")
+	}
+
+	// 用户在环境变量页把它删了 / 停用了：本来就没什么可报的。
+	if lines := emitWarningsForTest(taskEnvWith(nil), "python3"); len(lines) != 0 {
+		t.Fatalf("expected silence once the variable is gone, got:\n%s", joinWarnings(lines))
+	}
+
+	// 又加回来并且又超限了：用户以为这事已经过去了，所以这是新情况，得重新报。
+	if lines := emitWarningsForTest(broken, "python3"); len(lines) == 0 {
+		t.Fatal("expected a fresh warning after the variable came back oversized")
+	}
+}
+
+func TestEmitRuntimeEnvLimitWarningsKeepsSilenceWhenOneTaskNarrowsTheVariable(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	broken := taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes + 1})
+	if len(emitWarningsForTest(broken, "python3")) == 0 {
+		t.Fatal("expected the first run to report")
+	}
+
+	// `task 脚本 desi elmck 1-2` 会把变量收窄成几个账号：键还在，值变小了。
+	// 这不代表用户修好了，绝不能当成痊愈信号 —— 否则下面那个普通任务又会报一遍，
+	// 两种任务交替跑就等于告警从来没被静音过。
+	narrowed := taskEnvWith(map[string]int{"elmck": 1024})
+	if lines := emitWarningsForTest(narrowed, "python3"); len(lines) != 0 {
+		t.Fatalf("a narrowed run has nothing to warn about, got:\n%s", joinWarnings(lines))
+	}
+	if lines := emitWarningsForTest(broken, "python3"); len(lines) != 0 {
+		t.Fatalf("a narrowed run must not lift the mute, got:\n%s", joinWarnings(lines))
+	}
+}
+
+func TestEmitRuntimeEnvLimitWarningsSeparatesShellFromOtherInterpreters(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	env := taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes + 1})
+
+	// 同一组变量，两种解释器的后果和文案完全不同，各自都值得报一次。
+	shell := joinWarnings(emitWarningsForTest(env, "bash"))
+	if !strings.Contains(shell, "export") {
+		t.Fatalf("expected the shell wording first, got:\n%s", shell)
+	}
+	if lines := emitWarningsForTest(env, "bash"); len(lines) != 0 {
+		t.Fatalf("expected the second bash run to stay silent, got:\n%s", joinWarnings(lines))
+	}
+
+	other := joinWarnings(emitWarningsForTest(env, "python3"))
+	if !strings.Contains(other, "Argument list too long") {
+		t.Fatalf("expected the non-shell wording to still be reported once, got:\n%s", other)
+	}
+	if lines := emitWarningsForTest(env, "python3"); len(lines) != 0 {
+		t.Fatalf("expected the second python run to stay silent, got:\n%s", joinWarnings(lines))
+	}
+}
+
+func TestEmitRuntimeEnvLimitWarningsReportsOnceUnderConcurrentTaskStarts(t *testing.T) {
+	requireRuntimeEnvWarningEmit(t)
+	resetRuntimeEnvWarningDedup(t)
+
+	env := taskEnvWith(map[string]int{"elmck": linuxMaxArgStrLenBytes + 1})
+	wantLines := len(buildRuntimeEnvLimitWarnings(env, "python3"))
+	if wantLines == 0 {
+		t.Fatal("test fixture wrong: expected this env to produce warnings")
+	}
+
+	const runners = 16
+	var mu sync.Mutex
+	counted := make([]int, runners)
+
+	var waitGroup sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < runners; i++ {
+		i := i
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			<-start
+			emitRuntimeEnvLimitWarnings(env, "python3", func(string) {
+				mu.Lock()
+				counted[i]++
+				mu.Unlock()
+			})
+		}()
+	}
+	close(start)
+	waitGroup.Wait()
+
+	reporters, total := 0, 0
+	for _, lines := range counted {
+		total += lines
+		if lines > 0 {
+			reporters++
+		}
+	}
+	if reporters != 1 {
+		t.Fatalf("expected exactly one task to report, got %d tasks / %d lines", reporters, total)
+	}
+	// 报出来的那一份必须是完整的，不能被别的 goroutine 抢成半截。
+	if total != wantLines {
+		t.Fatalf("expected the single report to carry all %d lines, got %d", wantLines, total)
+	}
+}
+
+func TestRuntimeEnvWarningFingerprintIgnoresSizeButNotNames(t *testing.T) {
+	factsFor := func(sizes map[string]int, interpreter string) runtimeEnvWarningFacts {
+		return collectRuntimeEnvWarningFacts(taskEnvWith(sizes), interpreter)
+	}
+	keyOf := func(facts runtimeEnvWarningFacts) string {
+		fingerprint, _ := runtimeEnvWarningFingerprint(facts)
+		return fingerprint
+	}
+
+	small := keyOf(factsFor(map[string]int{"elmck1": linuxMaxArgStrLenBytes + 1}, "python3"))
+	grown := keyOf(factsFor(map[string]int{"elmck1": linuxMaxArgStrLenBytes * 4}, "python3"))
+	if small != grown {
+		t.Fatal("the same variable getting bigger must keep the same fingerprint")
+	}
+
+	// 变量名里的数字必须原样参与指纹，否则 elmck1 / elmck2 会被当成同一条。
+	renamed := keyOf(factsFor(map[string]int{"elmck2": linuxMaxArgStrLenBytes + 1}, "python3"))
+	if renamed == small {
+		t.Fatal("elmck1 and elmck2 must not share a fingerprint")
+	}
+
+	added := keyOf(factsFor(map[string]int{
+		"elmck1": linuxMaxArgStrLenBytes + 1,
+		"elmck2": linuxMaxArgStrLenBytes + 1,
+	}, "python3"))
+	if added == small {
+		t.Fatal("one more oversized variable is a new situation")
+	}
+
+	if shell := keyOf(factsFor(map[string]int{"elmck1": linuxMaxArgStrLenBytes + 1}, "bash")); shell == small {
+		t.Fatal("bash and non-bash warnings must not share a fingerprint")
+	}
+
+	_, subjects := runtimeEnvWarningFingerprint(factsFor(map[string]int{"elmck1": linuxMaxArgStrLenBytes + 1}, "python3"))
+	if len(subjects) != 1 || subjects[0] != "elmck1" {
+		t.Fatalf("expected the offending variable to be tracked, got %#v", subjects)
+	}
+}
+
+func TestRuntimeEnvWarningDedupTableStaysBounded(t *testing.T) {
+	// 环境变量名不变，所以没有任何指纹会因为「变量消失了」被回收，
+	// 表只可能靠上限收住。
+	deduper := &runtimeEnvWarningDeduper{}
+	env := map[string]string{"KEEP": "1"}
+
+	for i := 0; i < runtimeEnvWarningDedupCap*2+5; i++ {
+		fingerprint := fmt.Sprintf("fake-%d", i)
+		if !deduper.shouldReport(env, fingerprint, []string{"KEEP"}) {
+			t.Fatalf("expected fingerprint %q to be reported once", fingerprint)
+		}
+	}
+
+	deduper.mu.Lock()
+	size := len(deduper.seen)
+	deduper.mu.Unlock()
+	if size > runtimeEnvWarningDedupCap {
+		t.Fatalf("dedup table grew to %d entries, over the cap %d", size, runtimeEnvWarningDedupCap)
+	}
 }
