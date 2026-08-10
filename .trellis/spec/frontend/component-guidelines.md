@@ -84,23 +84,21 @@ Vue 单文件组件通常按下面顺序组织：
 
 ---
 
-## 已知缺陷：移动端「全屏」弹窗实际只有 92vw
+## 移动端全屏弹窗：为什么 media 块里要单独写一遍 `.is-fullscreen`
 
-> 记录日期 2026-08-08，基线 v3.0.1，**未修复**。
-> 本条写在这里而不是 Trellis task 里，是因为 `.git/info/exclude` 把 `/.trellis/`
-> 整个排除了，task 目录只存在于本机；而这条缺陷需要跨机器、跨接手人保留。
+> 记录日期 2026-08-08（基线 v3.0.1 发现），**v3.0.2 已修复**。
+> 保留本节是为了防止有人「顺手清理冗余」把修复删掉。
 
-**现象**：`≤768px` 下所有 `:fullscreen="dialogFullscreen"` 的弹窗，高度是满的，
-左右各短 4vw，露出两条遮罩边。看起来像「全屏没做好」，实际是被样式覆盖了。
+**曾经的现象**：`≤768px` 下所有全屏弹窗高度是满的，左右各短 4vw，露出两条遮罩边。
 
 **根因是 CSS 层叠，不是写错**：
 
 ```scss
-// Element Plus 自己的实现
-.el-dialog            { width: var(--el-dialog-width, 50%); }   // 无 !important
-.el-dialog.is-fullscreen { --el-dialog-width: 100%; height: 100%; }
+// Element Plus 自己的实现（node_modules/element-plus/theme-chalk/el-dialog.css）
+.el-dialog               { width: var(--el-dialog-width, 50%); }   // 无 !important
+.el-dialog.is-fullscreen { --el-dialog-width: 100%; height: 100%; }  // 也无 !important，且不写 width
 
-// global.scss:1673-1675，在 @media screen and (max-width: 768px) 里
+// global.scss，在 @media screen and (max-width: 768px) 里
 .el-dialog {
   --el-dialog-width: 92vw !important;
   width: 92vw !important;      // ← 带 !important，直接盖掉上面那条 width
@@ -108,20 +106,40 @@ Vue 单文件组件通常按下面顺序组织：
 ```
 
 EP 是**通过改变量**实现全屏的，而这里是**直接写 width 且带 `!important`**。
-带 `!important` 的声明胜过不带的，与特异性无关，所以 `.is-fullscreen` 那条
-`--el-dialog-width: 100%` 根本没机会参与计算。`global.scss:341-350` 的
-`&.is-fullscreen` 块只处理了 `max-height` 与 margin，**没有 width**，补不上这个洞。
+带 `!important` 的声明无条件胜过不带的（与特异性、源码顺序都无关），
+所以 `.is-fullscreen` 那条 `--el-dialog-width: 100%` 根本没机会参与计算。
 
-**影响面**：全站 40+ 个调用点（`useResponsive` 的 `dialogFullscreen` 几乎每个页面都在用）。
+**修法**：在**同一个 media 块内**补 `&.is-fullscreen`，`--el-dialog-width` 与 `width` **两条都要写**。
+只补 `width` 渲染结果就已经对了，但变量会停在 92vw，留下「变量值与实际宽度不一致」的状态。
 
-**已经有两处在局部绕它**，改的时候不要以为它们是历史遗留：
-- `ScriptExecutionDialogs.vue:316-319`——注释明写「用双 class 提高特异性」
-- `LogViewer.vue:1085-1088`——自己重新声明了一遍 `&.is-fullscreen`
+不能改成 `.el-dialog:not(.is-fullscreen)` 来规避：那样非全屏弹窗会回落到组件自己的
+`width` prop（`600px` / `1100px` 这类写死值），在窄屏上溢出——92vw 这条兜底正是防它的。
+也不能指望改 `global.scss:341-350` 那个非 media 的 `&.is-fullscreen` 块：它在 media 生效时
+压不过 `92vw !important`；给它加 `!important` 又会让桌面端也被强制 100%。
 
-**为什么不能直接把那两行删掉**：`92vw` 是给**非全屏**弹窗用的移动端宽度。
-桌面端很多弹窗写死了 `width="600px"` / `"1100px"`，在窄屏上会溢出，这条兜底就是防它。
-正确修法是让全屏态不受这条约束，例如在同一个 media 块里补
-`.el-dialog.is-fullscreen { width: 100% !important; }`，而不是移除兜底。
+`margin` / `max-height` / `border-radius` **不需要跟着改**，三者已各自就位
+（`:348` 把 `--el-dialog-margin-top` 置 0 使 margin 解析成 `0 auto`；`:347` 的 `max-height: 100dvh`；
+`:278` 全站圆角归零）。往 media 块里再塞 `margin: 0 !important` 只会掩盖 `:348` 的作用。
+
+**影响面**：`:fullscreen=` 绑定 **46 处 / 26 个文件**，另有 **2 处静态 `fullscreen`**
+（`ScriptExecutionDialogs.vue:47` 与 `:110`，桌面端也全屏），合计 **48 个全屏弹窗 / 27 个文件**。
+改 `global.scss` 一处即可覆盖全部，**调用点一个都不用动**。
+
+**⚠️ 下面两处曾被误记为「局部绕过宽度」，实际都不是**（2026-08-10 逐行核实推翻）：
+
+- `ScriptExecutionDialogs.vue:316-322`——注释里的「用双 class 提高特异性」讲的是
+  **覆盖全局进场动画**，块体只有 `animation` 与 `transform-origin`，**没有 width**。
+  别去「清理」它：`:324-328` 的注释解释了为何刻意不加 `both/forwards`——残留 transform
+  会成为 Monaco `position:fixed` 补全浮层的包含块，导致弹层错位。
+- `LogViewer.vue:1088-1094`——确实重声明了 `&.is-fullscreen`，但**五条全部没有 `!important`**，
+  所以其中的 `width: 100%` 一直是死代码，压不过 global 那条。它真正生效的是
+  `height` / `max-height` / `border-radius`（用来压住本组件自己的桌面端尺寸）。
+
+全库 `is-fullscreen` 仅 5 处命中，已确认**没有第三、第四处绕过点**，不必再全站找一遍。
+
+**为什么必须走「特异性 + !important」而不是靠后写覆盖**：`vite.config.ts` 用的是
+`ElementPlusResolver({ importStyle: 'css' })`，EP 组件样式随各 `.vue` 按需导入注入，
+相对 `global.scss` 的位置不确定，dev 与 build 还可能不同。任何依赖源码顺序的写法都不可靠。
 
 ## Scenario: 日志查看器中的 `\r` 单行覆盖刷新
 

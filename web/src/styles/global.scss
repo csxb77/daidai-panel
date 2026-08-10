@@ -1679,6 +1679,19 @@ html.dark {
     // 另外全屏态下 .is-fullscreen 已把该变量置 0，这里跟着解析成 0，不会把全屏顶下来。
     margin: var(--el-dialog-margin-top) auto !important;
 
+    // 全屏态必须在这里显式抢回 100%，否则上面那条 92vw 会把它压住。
+    // EP 实现全屏靠的是 .el-dialog.is-fullscreen { --el-dialog-width: 100% }（不带 !important），
+    // 而上面两行带了 !important —— 层叠里 important 声明无条件胜过普通声明，与特异性、
+    // 源码顺序都无关，所以 EP 那条根本没机会参与计算，移动端「全屏」实际只有 92vw。
+    // 两条都要写：只补 width 的话渲染宽度对了，但 --el-dialog-width 仍是 92vw，
+    // 留下「变量值与实际宽度不一致」的状态，将来谁按变量去算尺寸就会算错。
+    // 不能改成 .el-dialog:not(.is-fullscreen) 来规避：那样非全屏弹窗会回落到组件自己的
+    // width prop（600px / 1100px 这类写死值），在窄屏上溢出——92vw 这条兜底正是防它的。
+    &.is-fullscreen {
+      --el-dialog-width: 100% !important;
+      width: 100% !important;
+    }
+
     .el-dialog__body {
       padding: 16px;
     }
