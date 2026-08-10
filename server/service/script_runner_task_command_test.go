@@ -268,6 +268,13 @@ func TestRunCommandSupportsManagedDependencyCommand(t *testing.T) {
 func requireUsableBash(t *testing.T) {
 	t.Helper()
 
+	// 同 handler/script_runtime_test.go 的那份：Windows 上的 Git Bash 会把
+	// 路径里的反斜杠当转义符吃掉，脚本里的相对重定向落不了盘，用例必失败。
+	// 这些用例验的是 POSIX shell 行为，只在 Linux 上有意义。
+	if runtime.GOOS == "windows" {
+		t.Skip("windows 下的 bash 不提供等价的 POSIX 路径语义，该用例只在 Linux 有意义")
+	}
+
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
 		t.Skipf("bash unavailable: %v", err)
