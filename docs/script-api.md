@@ -38,12 +38,55 @@
 | `DAIDAI_NOTIFY_PY` | 内置 Python 通知 helper `notify.py` 的绝对路径 |
 | `DAIDAI_SEND_NOTIFY_JS` | 内置 Node 通知 helper `sendNotify.js` 的绝对路径 |
 | `DAIDAI_PYTHON_VERSION` | 当前任务实际使用的 Python 小版本，如 `3.12`。任务表单里选的版本若在本机不可用，这里是回退后的**真实**版本 |
+| `DAIDAI_SILENT_EXIT_DETECT` | **由你按需设置**（不是面板注入的）。填 `0` / `off` / `false` 可为该任务单独关掉「半路静默结束」检测，见下方小节 |
 
 三点补充：
 
 1. **这些名字是保留名。** 注入发生在面板环境变量之后，如果你在「环境变量」页面建了一条同名的 `DAIDAI_NOTIFY_URL`，任务运行时会被上面的值覆盖掉。
 2. **脚本调试运行、`ddp python` / `ddp shell` 也有。** 这两条路径同样会注入这批变量（但没有 `DAIDAI_NOTIFY_CHANNEL_ID`，因为它们不挂在任何任务上），令牌也同样在运行 / 会话结束后立即作废，详见[第 6 节](#6-安全说明)。
 3. **子进程会继承。** 脚本里 `subprocess` / `child_process` 起的子命令自动继承这些变量，所以在 Python 里调 `ddp`、在 Node 里调 `curl` 都不用手动传。
+
+### Node 任务：半路静默结束的检测与豁免
+
+Node 有一个别的语言没有的失败模式：某个 `Promise` 永远不 resolve 也不 reject，`await` 它的调用永久卡住，事件循环随后排空，**node 以退出码 0 干净退出**。从面板外面看和「跑完了」一模一样，任务会被记成成功、不发失败通知。
+
+典型触发写法是「请求在响应中途断开」——只在请求对象上挂了 `error` 监听，而 Node 在响应已经开始之后是把错误发给响应对象的：
+
+```js
+// ❌ 响应中途断流时，这个 Promise 永远不会 settle
+new Promise((resolve, reject) => {
+  const req = http.request(opts, (res) => {
+    const chunks = [];
+    res.on('data', (c) => chunks.push(c));
+    res.on('end', () => resolve(Buffer.concat(chunks)));
+    // 缺了 res 上的 'aborted' / 'error'
+  });
+  req.on('error', reject);
+  req.end();
+});
+```
+
+面板默认会检测这种情况（系统设置 → 任务 → **检测脚本半路静默结束**）。命中时日志里出现 `[任务疑似半路结束]`，退出码被置为 `75`，任务判失败并正常发通知。
+
+**这个检测有无法消除的误报**：「被抛弃的 Promise」和「被卡住的 Promise」在结构上完全一样，探针分不出来，只有脚本自己知道工作做没做完。所以下面这类写法会被误判——它们的共同点是留下了一个**背后没有定时器/socket 等句柄**的未完成 Promise：
+
+```js
+// 被抛弃的一方没有句柄时会误报（有 setTimeout 的版本不会，进程会老实等它）
+await Promise.race([new Promise(() => {}), timeout(20)]);
+report().catch(() => {});      // fire-and-forget 挂防御性 catch
+```
+
+**三条豁免通道，按精确度从高到低**：
+
+| 方式 | 作用范围 | 怎么用 |
+|------|----------|--------|
+| `globalThis.daidaiDone?.()` | 单个脚本 | 主流程末尾加一行，声明「我跑完了」，之后一律判 CLEAN |
+| `DAIDAI_SILENT_EXIT_DETECT=0` | 单个任务 | 在该任务的环境变量里加这条，只关它一个 |
+| 系统设置里关掉 | 全部任务 | 影响面最大，非必要不用 |
+
+推荐第一种：写 `?.()` 而不是 `()`，这样脚本在面板之外（本地、青龙）跑时不会因为没有这个函数而报错。
+
+> 只有 `.js` / `.mjs` / `.ts` 任务有这套检测。Python 和 Shell **没有这个失败模式**——Python 里 `await` 一个永不完成的 future，asyncio 事件循环不会退出，进程会一直挂着，最终落到面板的任务超时路径。
 
 ### 发通知优先用内置 helper
 

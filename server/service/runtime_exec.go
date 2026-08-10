@@ -853,7 +853,7 @@ func createManagedNodeCommand(scriptPath string, scriptArgs []string, workDir st
 	}
 	nodeModulesCleanup := ensureManagedNodeModulesAccess(workDir, runtimePaths.NodeModules)
 
-	preloadFile, preloadErr := writeNodePreloadScript(filepath.Dir(envFile), envFile, envVars)
+	preloadFile, preloadErr := writeNodePreloadScript(filepath.Dir(envFile), envFile, envVars, model.GetRegisteredConfigBool("detect_silent_exit"))
 	if preloadErr != nil {
 		cleanup()
 		nodeModulesCleanup()
@@ -877,7 +877,7 @@ func createManagedTSNodeCommand(scriptPath string, scriptArgs []string, workDir 
 	}
 	nodeModulesCleanup := ensureManagedNodeModulesAccess(workDir, runtimePaths.NodeModules)
 
-	preloadFile, preloadErr := writeNodePreloadScript(filepath.Dir(envFile), envFile, envVars)
+	preloadFile, preloadErr := writeNodePreloadScript(filepath.Dir(envFile), envFile, envVars, model.GetRegisteredConfigBool("detect_silent_exit"))
 	if preloadErr != nil {
 		cleanup()
 		nodeModulesCleanup()
@@ -1313,7 +1313,85 @@ func cleanManagedProcessArgs(args []string) []string {
 	return cleaned
 }
 
-func writeNodePreloadScript(tempDir, envFile string, envVars map[string]string) (string, error) {
+// silentExitProbeJS 检测「事件循环排空了，但还有 Promise 从未 settle」的半路静默死亡。
+//
+// 触发这种情况的典型写法：一个 Promise 只在 req 上挂了 error 监听，而连接是在响应
+// 开始之后断的（Node 此时只在 res 上出声），于是它永远不 resolve 也不 reject。
+// 等它的 await 就永久卡住，事件循环随后排空，node **以退出码 0 正常退出** ——
+// 从面板外面看和「跑完了」完全一样，任务会被记成成功、不发失败通知。
+//
+// 判据是 beforeExit 时仍有未 settle 的 Promise。实测（Node 26）正常结束与「正常但慢」
+// 两种对照都是 0 个，挂起场景稳定为非 0，信号是干净分离的。
+//
+// 只统计探针启用之后创建的 Promise：preload 自身、helper 的加载过程都在这之前，
+// 不会被算进来。
+const silentExitProbeJS = `
+try {
+  // ---- 三道闸，任一不满足就连 async_hooks 都不 require ----
+  // 1) --require 会被 child_process.fork 继承（实测：子进程 execArgv 与父进程相同），
+  //    不打戳的话每个子进程都会再武装一次，各自往同一条 stdout 刷重复告警。
+  const armedAlready = process.env.DAIDAI_SILENT_EXIT_ARMED === '1';
+  process.env.DAIDAI_SILENT_EXIT_ARMED = '1';
+  // 2) 任务级开关：给某个噪音脚本单独配一条同名环境变量填 0 / off / false 即可关掉，
+  //    不必为了它把全局配置也关掉、连累其余任务。
+  const perTaskSwitch = String(process.env.DAIDAI_SILENT_EXIT_DETECT || '').toLowerCase();
+  const disabledPerTask = perTaskSwitch === '0' || perTaskSwitch === 'off' || perTaskSwitch === 'false';
+  // 3) worker 线程各自有独立事件循环，退出与主线程无关，判定没有意义。
+  let isMainThread = true;
+  try { isMainThread = require('worker_threads').isMainThread; } catch (_) {}
+
+  if (!armedAlready && !disabledPerTask && isMainThread) {
+    const asyncHooks = require('async_hooks');
+    const pendingPromises = new Set();
+    let probing = true;
+    let declaredDone = false;
+
+    // 脚本主流程末尾调一次 globalThis.daidaiDone() 即永久判定为「跑完了」。
+    // 这是唯一能做到零误报的手段：探针分不清「被抛弃的 promise」和「被卡住的 promise」
+    // ——两者在依赖图上完全同构——只有脚本自己知道工作做没做完。
+    // configurable 必须为 true：否则脚本里出现同名变量赋值会抛 TypeError 打断用户脚本。
+    try {
+      Object.defineProperty(globalThis, 'daidaiDone', {
+        value: function daidaiDone() { declaredDone = true; },
+        writable: false, enumerable: false, configurable: true,
+      });
+    } catch (_) {}
+
+    const probe = asyncHooks.createHook({
+      init(asyncId, type) {
+        if (probing && type === 'PROMISE') pendingPromises.add(asyncId);
+      },
+      promiseResolve(asyncId) { pendingPromises.delete(asyncId); },
+      destroy(asyncId) { pendingPromises.delete(asyncId); },
+    });
+    probe.enable();
+
+    process.on('beforeExit', () => {
+      // beforeExit 可能触发多次（回调里又排入了异步工作），只在第一次判定。
+      if (!probing) return;
+      probing = false;
+      probe.disable();
+      if (declaredDone) return;
+      const stuck = pendingPromises.size;
+      if (stuck <= 0) return;
+      process.stdout.write(
+        '\n[任务疑似半路结束] 脚本没跑完就退出了：还有 ' + stuck +
+        ' 个异步操作永远不会完成，常见于请求在响应中途断开、而代码只监听了请求对象的错误。\n' +
+        '[任务疑似半路结束] 已判定为失败。若该脚本本来就会留下未完成的异步操作（属于误报），' +
+        '有三种关法：脚本末尾加一行 globalThis.daidaiDone?.()；' +
+        '给该任务加环境变量 DAIDAI_SILENT_EXIT_DETECT=0；' +
+        '或在「系统设置 - 任务」里关闭「检测脚本半路静默结束」。\n'
+      );
+      // 不覆盖脚本自己设过的退出码：它已经表达了失败，保留它更有信息量。
+      if (!process.exitCode) process.exitCode = 75;
+    });
+  }
+} catch (err) {
+  // 探针本身出任何问题都安静跳过，绝不能因为它让任务跑不起来。
+}
+`
+
+func writeNodePreloadScript(tempDir, envFile string, envVars map[string]string, detectSilentExit bool) (string, error) {
 	helperPath := filepath.ToSlash(strings.TrimSpace(envVars["DAIDAI_SEND_NOTIFY_JS"]))
 	nodePathList := strings.Split(strings.TrimSpace(envVars["NODE_PATH"]), string(os.PathListSeparator))
 	filteredNodePaths := make([]string, 0, len(nodePathList))
@@ -1331,6 +1409,13 @@ func writeNodePreloadScript(tempDir, envFile string, envVars map[string]string) 
 	nodePathsJSON, err := json.Marshal(filteredNodePaths)
 	if err != nil {
 		return "", err
+	}
+
+	// 探针放在 preload 末尾注入：它只统计自己启用之后创建的 Promise，
+	// 放前面会把 helper 加载过程中的异步操作一起算进去，形成误报。
+	probeJS := ""
+	if detectSilentExit {
+		probeJS = silentExitProbeJS
 	}
 
 	script := fmt.Sprintf(`const fs = require('fs');
@@ -1426,7 +1511,7 @@ const helperPath = %s;
 if (helperPath) {
   require(helperPath);
 }
-`, filepath.ToSlash(envFile), string(nodePathsJSON), string(helperJSON))
+%s`, filepath.ToSlash(envFile), string(nodePathsJSON), string(helperJSON), probeJS)
 
 	preloadFile := filepath.Join(tempDir, "node-preload.js")
 	if err := os.WriteFile(preloadFile, []byte(script), 0o600); err != nil {

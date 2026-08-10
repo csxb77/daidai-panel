@@ -113,6 +113,7 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newIntConfig("random_delay", "随机延迟最大秒数", "0", "任务执行前随机延迟最大秒数", "tasks", 0, 86400),
 	newTrimmedStringConfig("random_delay_extensions", "延迟文件后缀", "", "随机延迟仅对指定脚本后缀生效", "tasks"),
 	newBoolConfig("auto_install_deps", "自动安装缺失依赖", "true", "脚本缺依赖时自动尝试安装", "tasks"),
+	newBoolConfig("detect_silent_exit", "检测脚本半路静默结束", "true", "Node 任务因 Promise 永不完成而提前退出时判定为失败，而不是记成成功", "tasks"),
 	newEnumConfig(
 		"python_default_version",
 		"默认 Python 版本",
