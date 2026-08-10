@@ -534,6 +534,10 @@ const apiPageSize = 10;
 
 const form = ref({ name: "", scopesList: [] as string[], rate_limit: 0 });
 
+// 这七加一项必须与服务端 middleware.OpenAPIAccess("...") 实际强制的 8 个 scope 一致。
+// 少一项的后果不是报错，而是「这个权限永远勾不上」——建出来的应用调该类接口一律 403，
+// 且界面上看不出少了什么。改这里之前先跑一遍：
+//   grep -rho 'OpenAPIAccess("[a-z]*")' server --include=*.go | sort -u
 const scopeOptions = [
   { label: "任务管理", value: "tasks" },
   { label: "脚本管理", value: "scripts" },
@@ -541,6 +545,7 @@ const scopeOptions = [
   { label: "订阅管理", value: "subscriptions" },
   { label: "日志查看", value: "logs" },
   { label: "系统信息", value: "system" },
+  { label: "通知渠道", value: "notifications" },
   { label: "系统备份", value: "backup" },
 ];
 
