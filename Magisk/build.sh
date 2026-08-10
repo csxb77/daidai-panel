@@ -2,11 +2,10 @@
 ##########################################################################
 # 呆呆面板 Magisk 模块打包脚本 (容器方案 v2.0.6+)
 #
-# 用法:
-#   bash Magisk/build.sh                      # 默认打包 arm64 + alpine
-#   bash Magisk/build.sh 3.0.0                # 指定版本号
-#   bash Magisk/build.sh 3.0.0 all            # 同时打包 arm64 + amd64
-#   bash Magisk/build.sh 3.0.0 arm64 debian   # Debian(glibc) flavor
+# 用法（版本号必填）:
+#   bash Magisk/build.sh 3.0.2                # arm64 + alpine
+#   bash Magisk/build.sh 3.0.2 all            # 同时打包 arm64 + amd64
+#   bash Magisk/build.sh 3.0.2 arm64 debian   # Debian(glibc) flavor
 #
 # 产物:
 #   alpine（默认）: dist/daidai-panel-magisk-v<版本>.zip
@@ -20,7 +19,10 @@
 
 set -euo pipefail
 
-VERSION="${1:-3.0.0}"
+# 版本号必填。原来这里有个默认值，但它每次发版都会漏更新（v3.0.1 就漏了），
+# 结果本地不传参会打出一个标着旧版本号的包 —— 那种包看不出错，装上才发现不对。
+# CI 一直是显式传参的（release.yml 的 magisk-module job），所以改成必填不影响它。
+VERSION="${1:?用法: bash Magisk/build.sh <版本号> [arm64|amd64|all] [alpine|debian]}"
 TARGETS="${2:-arm64}"     # arm64 / amd64 / all
 FLAVOR="${3:-alpine}"     # alpine / debian —— 不传时行为与产物名与历史完全一致
 

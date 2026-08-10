@@ -20,8 +20,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.0.1` · [更新日志](./docs/release-notes/v3.0.1.md)<br>
-> 本次重点：修复通知渠道配置被写坏后无法自愈、定时备份漏「任务视图」，耗时改用时分秒。<br>
+> 最新稳定版：`v3.0.2` · [更新日志](./docs/release-notes/v3.0.2.md)<br>
+> 本次重点：任务半路静默死亡不再被记成成功，修复移动端全屏弹窗少 8vw 与 Open API 少一个权限。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 功能特性
@@ -264,16 +264,16 @@ docker run -d \
 
 | 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
 |--------------|------------------|----------|--------|----------|----------|
-| `latest` | `3.0.0` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-full` | `3.0.0-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-3.10` | `3.0.0-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
-| `latest-3.11` | `3.0.0-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
-| `latest-all` | `3.0.0-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `3.0.0-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `3.0.0-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `3.0.0-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `3.0.0-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `3.0.0-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `latest` | `3.0.2` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `3.0.2-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `3.0.2-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `3.0.2-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `3.0.2-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `3.0.2-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `3.0.2-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `3.0.2-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `3.0.2-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `3.0.2-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
 
 后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
@@ -297,7 +297,7 @@ docker run -d \
 | `debian3.11` | `debian-3.11` |
 | `debianall` | `debian-all` |
 
-Debian 的旧固定版本格式也保留兼容别名：`3.0.0-debian3.10`、`3.0.0-debian3.11`、`3.0.0-debianall` 分别对应新的 `3.0.0-debian-3.10`、`3.0.0-debian-3.11`、`3.0.0-debian-all`。新部署请直接使用新名称。
+Debian 的旧固定版本格式也保留兼容别名：`3.0.2-debian3.10`、`3.0.2-debian3.11`、`3.0.2-debianall` 分别对应新的 `3.0.2-debian-3.10`、`3.0.2-debian-3.11`、`3.0.2-debian-all`。新部署请直接使用新名称。
 
 #### 切换标签与本地构建
 
@@ -448,7 +448,7 @@ daidai-panel-windows-amd64/
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.0.1 更新日志](./docs/release-notes/v3.0.1.md) |
+| 看这一版改了什么 | [v3.0.2 更新日志](./docs/release-notes/v3.0.2.md) |
 
 ## 端口与反向代理
 
@@ -593,7 +593,7 @@ server {
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
 - **Docker 精简版**：自 `v3.0.0` 起，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
-- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.0-full`、`3.0.0-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
+- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.2-full`、`3.0.2-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 
 ### 手动更新
