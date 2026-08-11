@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,7 @@ const (
 	defaultDockerHubRegistryHost = "registry-1.docker.io"
 	panelUpdateDeploymentDocker  = "docker"
 	panelUpdateDeploymentBinary  = "binary"
+	panelUpdateDeploymentMagisk  = "magisk"
 	panelUpdateManagerPanel      = "panel"
 	panelUpdateManagerWatchtower = "watchtower"
 )
@@ -73,7 +75,12 @@ type panelUpdatePlan struct {
 	InstallDir      string
 	BinaryName      string
 	ExecutablePath  string
-	CurrentPID      int
+	// 下面三个只在 Magisk 模块版用到：面板数据目录（新进程的工作目录）、
+	// 前端静态目录、模块本体目录。见 system_update_magisk.go 顶部的路径说明。
+	DataDir    string
+	WebDir     string
+	ModuleDir  string
+	CurrentPID int
 	ServerPID       int
 	ServerPIDFile   string
 	Watchtower      watchtowerRuntimeConfig
@@ -370,6 +377,20 @@ func buildPanelUpdatePlanForRelease(release *panelReleaseInfo) (*panelUpdatePlan
 		}, nil
 	}
 
+	// Magisk 模块版必须排在 Docker 探测之前。
+	// 模块版跑在 Android 的 chroot 容器里，既没有 Docker CLI 也没有 docker.sock，
+	// 走到下面就只会拿到一句「未提供 Docker CLI，请配置 Watchtower」——
+	// 对着手机用户提示 docker compose 是纯粹的误导。
+	magiskPlan, magiskErr := buildMagiskPanelUpdatePlan(release)
+	if magiskErr == nil {
+		return magiskPlan, nil
+	}
+	// 只有「不是模块版」这一种情况才继续往下走；模块版自身的失败（例如外壳版本过旧）
+	// 必须原样抛给用户，否则又会被 Docker 的报错盖掉。
+	if !errors.Is(magiskErr, errMagiskRuntimeNotDetected) {
+		return nil, magiskErr
+	}
+
 	dockerPlan, dockerErr := buildDockerPanelUpdatePlan()
 	if dockerErr == nil {
 		return dockerPlan, nil
@@ -451,6 +472,21 @@ func buildDockerPanelUpdatePlan() (*panelUpdatePlan, error) {
 		RegistryURL:     registryURL,
 		RunArgs:         buildContainerRunArgs(containerName, imageName, info),
 	}, nil
+}
+
+// detectPanelDeploymentTypeHint 在无法构建更新方案时，给前端一个「当前部署形态」的判断依据。
+// 只用于展示层挑选正确的手动更新指引，不参与任何真正的更新决策。
+func detectPanelDeploymentTypeHint() string {
+	if isMagiskPanelUpdateRuntime() {
+		return panelUpdateDeploymentMagisk
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return panelUpdateDeploymentDocker
+	}
+	if _, err := os.Stat(dockerSocketPath); err == nil {
+		return panelUpdateDeploymentDocker
+	}
+	return panelUpdateDeploymentBinary
 }
 
 func shouldRequireDockerPanelUpdate() bool {
@@ -739,6 +775,10 @@ func executePanelUpdateWithOptions(plan *panelUpdatePlan, options panelUpdateExe
 		return
 	}
 
+	if plan.DeploymentType == panelUpdateDeploymentMagisk {
+		executeMagiskPanelUpdateWithOptions(plan, options)
+		return
+	}
 	if plan.DeploymentType == panelUpdateDeploymentBinary {
 		executeBinaryPanelUpdateWithOptions(plan, options)
 		return
@@ -835,6 +875,12 @@ func buildPanelUpdateBeginMessage(plan *panelUpdatePlan) string {
 	if plan.UpdateManager == panelUpdateManagerWatchtower {
 		return "更新环境校验通过，准备触发 Watchtower 检查"
 	}
+	if plan.DeploymentType == panelUpdateDeploymentMagisk {
+		if strings.TrimSpace(plan.AssetName) != "" {
+			return fmt.Sprintf("更新环境校验通过，准备下载更新包 %s（只更新面板程序与前端）", plan.AssetName)
+		}
+		return "更新环境校验通过，准备下载更新包（只更新面板程序与前端）"
+	}
 	if plan.DeploymentType == panelUpdateDeploymentBinary {
 		if strings.TrimSpace(plan.AssetName) != "" {
 			return fmt.Sprintf("更新环境校验通过，准备下载二进制更新包 %s", plan.AssetName)
@@ -852,6 +898,16 @@ func buildPanelUpdateTarget(plan *panelUpdatePlan) gin.H {
 	target := gin.H{
 		"deployment_type": plan.DeploymentType,
 		"update_manager":  updateManager,
+	}
+
+	if plan.DeploymentType == panelUpdateDeploymentMagisk {
+		target["release_version"] = plan.ReleaseVersion
+		target["asset_name"] = plan.AssetName
+		target["asset_url"] = plan.AssetURL
+		target["web_dir"] = plan.WebDir
+		target["module_dir"] = plan.ModuleDir
+		target["binary_name"] = plan.BinaryName
+		return target
 	}
 
 	if plan.DeploymentType == panelUpdateDeploymentBinary {

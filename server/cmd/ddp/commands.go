@@ -223,6 +223,10 @@ func runCheck(rt *cliRuntime) error {
 		} else {
 			add("更新托管", "WARN", "已声明使用 Watchtower；如需使用 ddp update，请配置 WATCHTOWER_HTTP_API_URL 与 WATCHTOWER_HTTP_API_TOKEN", false)
 		}
+	} else if planErr == nil && plan.DeploymentType == "magisk" {
+		// 模块版跑在 Android 的 chroot 容器里，本来就不该有 docker.sock，
+		// 这里报 Docker 相关警告只会误导手机用户。
+		add("更新托管", "OK", "Magisk 模块版，可使用 ddp update 在线升级面板程序与前端", false)
 	} else if _, err := os.Stat("/var/run/docker.sock"); err == nil {
 		add("Docker Socket", "OK", "已挂载 /var/run/docker.sock，可使用 ddp update", false)
 	} else {
@@ -230,7 +234,9 @@ func runCheck(rt *cliRuntime) error {
 	}
 
 	if planErr == nil {
-		if plan.DeploymentType == "binary" {
+		if plan.DeploymentType == "magisk" {
+			add("更新目标", "OK", fmt.Sprintf("模块版在线升级 %s（只更新面板程序与前端）", plan.AssetName), false)
+		} else if plan.DeploymentType == "binary" {
 			add("更新目标", "OK", fmt.Sprintf("二进制包 %s -> %s", plan.AssetName, plan.InstallDir), false)
 		} else if plan.UpdateManager == "watchtower" {
 			target := plan.PullImageName
@@ -360,6 +366,9 @@ func runUpdate(rt *cliRuntime) error {
 		if status.PullImageName != "" {
 			fmt.Printf("目标镜像: %s\n", status.PullImageName)
 		}
+	} else if status.DeploymentType == "magisk" {
+		fmt.Printf("更新方式: Magisk 模块版在线升级（只更新面板程序与前端，容器与已装依赖不动）\n")
+		fmt.Printf("更新包: %s\n", status.AssetName)
 	} else if status.DeploymentType == "binary" {
 		fmt.Printf("更新方式: 二进制后台更新\n")
 		fmt.Printf("更新包: %s\n", status.AssetName)

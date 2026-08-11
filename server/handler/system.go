@@ -438,6 +438,10 @@ func (h *SystemHandler) CheckUpdate(c *gin.Context) {
 		if planErr != nil {
 			autoUpdateSupported = false
 			updateDisabledReason = planErr.Error()
+			// 构建方案失败时也要把「当前是什么部署形态」告诉前端。
+			// 否则前端只能看到一个空对象，就会退回到「请在宿主机执行 docker compose pull」
+			// 这种兜底文案——对 Android 模块版和裸机二进制部署都是纯粹的误导。
+			updateTarget = gin.H{"deployment_type": detectPanelDeploymentTypeHint()}
 		} else {
 			updateTarget = buildPanelUpdateTarget(plan)
 		}

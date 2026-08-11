@@ -32,7 +32,7 @@ export interface PanelUpdateStatus {
   error?: string
   started_at?: string
   updated_at?: string
-  deployment_type?: 'docker' | 'binary'
+  deployment_type?: 'docker' | 'binary' | 'magisk'
   container_name?: string
   image_name?: string
   pull_image_name?: string

@@ -150,11 +150,14 @@ export function useSettingsOverview() {
     try {
       const updateTarget = updateInfo.value?.update_target || {}
       const isBinaryUpdate = updateTarget.deployment_type === 'binary'
+      const isMagiskUpdate = updateTarget.deployment_type === 'magisk'
       const isWatchtowerManaged = updateTarget.update_manager === 'watchtower' || updateTarget.watchtower_managed === true
       const mirrorHost = updateTarget.mirror_host
       const pullImageName = updateTarget.pull_image_name
       const confirmMessage = isWatchtowerManaged
         ? buildWatchtowerUpdateConfirmMessage(updateTarget)
+        : isMagiskUpdate
+        ? buildMagiskUpdateConfirmMessage(updateTarget)
         : isBinaryUpdate
         ? buildBinaryUpdateConfirmMessage(updateTarget)
         : buildDockerUpdateConfirmMessage(mirrorHost, pullImageName)
@@ -216,6 +219,11 @@ export function useSettingsOverview() {
     const assetText = updateTarget.asset_name ? `\n更新包：${updateTarget.asset_name}` : ''
     const installDirText = updateTarget.install_dir ? `\n安装目录：${updateTarget.install_dir}` : ''
     return `确认开始更新面板吗？系统会在后台下载当前平台的二进制更新包，替换程序与前端文件，并自动重启面板。\n后台更新会保留 config.yaml、Dumb-Panel、data、logs、backups 等本地配置与数据目录。${assetText}${installDirText}`
+  }
+
+  function buildMagiskUpdateConfirmMessage(updateTarget: any) {
+    const assetText = updateTarget.asset_name ? `\n更新包：${updateTarget.asset_name}` : ''
+    return `确认开始在线升级吗？系统只会替换面板程序与前端文件，然后重启面板进程。\n容器 rootfs、已安装的 Python / Node 依赖、config.yaml 和 ports.conf 都不会被动到，也不需要重启手机。${assetText}`
   }
 
   function openUpdateProgress(snapshot?: PanelUpdateStatus | null) {

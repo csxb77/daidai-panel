@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { PanelUpdateStatus } from '@/api/system'
 import UpdateProgressDialog from './UpdateProgressDialog.vue'
 
-defineProps<{
+const props = defineProps<{
   isAdmin: boolean
   currentVersion: string
   updateInfo: any
@@ -24,6 +25,14 @@ defineProps<{
   onOpenGitHub: () => void
   onCloseUpdateProgress: () => void | Promise<void>
 }>()
+
+// 只有明确是容器部署时才展示镜像源、渠道和 docker compose 相关文案。
+// 后端即使在构建更新方案失败时也会回填 deployment_type（见 handler 的
+// detectPanelDeploymentTypeHint），所以这里不会退化成「什么都不知道 = 当成 Docker」。
+const isDockerUpdateTarget = computed(() => {
+  const deploymentType = props.updateInfo?.update_target?.deployment_type
+  return deploymentType !== 'binary' && deploymentType !== 'magisk'
+})
 </script>
 
 <template>
@@ -70,18 +79,22 @@ defineProps<{
         >
           <div v-if="updateInfo.has_update">
             <p>发布时间: {{ new Date(updateInfo.published_at).toLocaleString() }}</p>
+            <p v-if="updateInfo.update_target?.deployment_type === 'magisk'" class="hero-meta">更新方式：Magisk 模块版在线升级（只更新面板程序与前端，容器与已装依赖不动）</p>
             <p v-if="updateInfo.update_target?.deployment_type === 'binary'" class="hero-meta">更新方式：二进制后台更新</p>
             <p v-if="updateInfo.update_target?.update_manager === 'watchtower' || updateInfo.update_target?.watchtower_managed" class="hero-meta">更新方式：Watchtower 托管更新</p>
             <p v-if="updateInfo.update_target?.asset_name" class="hero-meta">更新包：{{ updateInfo.update_target.asset_name }}</p>
             <p v-if="updateInfo.update_target?.install_dir" class="hero-meta">安装目录：{{ updateInfo.update_target.install_dir }}</p>
-            <p v-if="updateInfo.update_target?.deployment_type !== 'binary' && updateInfo.update_target?.mirror_host" class="hero-meta">镜像源：{{ updateInfo.update_target.mirror_host }}</p>
-            <p v-if="updateInfo.update_target?.deployment_type !== 'binary' && updateInfo.update_target?.channel" class="hero-meta">渠道：{{ updateInfo.update_target.channel === 'debian' ? 'Debian' : 'Latest (Alpine)' }}</p>
+            <p v-if="isDockerUpdateTarget && updateInfo.update_target?.mirror_host" class="hero-meta">镜像源：{{ updateInfo.update_target.mirror_host }}</p>
+            <p v-if="isDockerUpdateTarget && updateInfo.update_target?.channel" class="hero-meta">渠道：{{ updateInfo.update_target.channel === 'debian' ? 'Debian' : 'Latest (Alpine)' }}</p>
             <p v-if="updateInfo.update_target?.watchtower_schedule" class="hero-meta">Watchtower 调度：{{ updateInfo.update_target.watchtower_schedule }}</p>
             <p v-if="updateInfo.update_target?.update_manager === 'watchtower' || updateInfo.update_target?.watchtower_managed" class="hero-meta">
               当前部署由 Watchtower 负责自动更新；如已配置 HTTP API，可在这里手动触发一次检查。
             </p>
             <p v-if="!updateInfo.auto_update_supported" class="hero-meta">{{ updateInfo.update_disabled_reason || '当前部署暂不支持一键更新' }}</p>
-            <p v-if="!updateInfo.auto_update_supported && updateInfo.update_target?.deployment_type !== 'binary'" class="hero-meta">
+            <!-- 这句 docker compose 兜底只对真·Docker 部署有意义。
+                 二进制部署和 Magisk 模块版都不该看到它：模块版跑在 Android 上，
+                 提示用户去宿主机敲 docker compose 是纯粹的误导。 -->
+            <p v-if="!updateInfo.auto_update_supported && isDockerUpdateTarget" class="hero-meta">
               推荐使用 Watchtower 托管自动更新；需要立即手动更新时，在宿主机执行 docker compose pull && docker compose up -d。
             </p>
             <div class="hero-alert-actions">
