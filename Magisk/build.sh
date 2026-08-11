@@ -3,9 +3,9 @@
 # 呆呆面板 Magisk 模块打包脚本 (容器方案 v2.0.6+)
 #
 # 用法（版本号必填）:
-#   bash Magisk/build.sh 3.0.2                # arm64 + alpine
-#   bash Magisk/build.sh 3.0.2 all            # 同时打包 arm64 + amd64
-#   bash Magisk/build.sh 3.0.2 arm64 debian   # Debian(glibc) flavor
+#   bash Magisk/build.sh 3.0.3                # arm64 + alpine
+#   bash Magisk/build.sh 3.0.3 all            # 同时打包 arm64 + amd64
+#   bash Magisk/build.sh 3.0.3 arm64 debian   # Debian(glibc) flavor
 #
 # 产物:
 #   alpine（默认）: dist/daidai-panel-magisk-v<版本>.zip
@@ -174,6 +174,24 @@ sed -i.bak \
   -e "s|^versionCode=.*|versionCode=${VERSIONCODE}|" \
   "$STAGING/module.prop"
 rm -f "$STAGING/module.prop.bak"
+
+# updateJson 按 flavor 分开。
+# 两个 flavor 共用同一个 module id（daidai-panel），而 updateJson 只能填一个 zipUrl，
+# 所以以前 Debian 用户在管理器里点「更新」会被静默刷成 Alpine 版 —— 容器基础系统
+# 直接从 glibc 换成 musl，装好的依赖全部失效。这里让 Debian ZIP 指向自己的
+# update-debian.json，两条更新线彻底分开。
+# 只把文件名从 update.json 换成 update-debian.json，仓库地址原样保留 ——
+# fork 的用户会把 module.prop 里的 updateJson 改成自己的仓库，写死上游地址会把它覆盖掉。
+if [ "$FLAVOR" = "debian" ]; then
+  sed -i.bak \
+    -e "s|^updateJson=\(.*\)/update\.json$|updateJson=\1/update-debian.json|" \
+    "$STAGING/module.prop"
+  rm -f "$STAGING/module.prop.bak"
+  if ! grep -q '^updateJson=.*/update-debian\.json$' "$STAGING/module.prop"; then
+    error "Debian flavor 的 updateJson 改写失败，请检查 Magisk/module.prop 里 updateJson 的写法"
+    exit 1
+  fi
+fi
 
 # 前端静态资源
 cp -rf "$ROOT/web/dist/"* "$STAGING/web/"

@@ -102,6 +102,15 @@ if (($updateJson -notmatch [regex]::Escape('"version": "' + $tagVersion + '"')) 
     -or ($updateJson -notmatch [regex]::Escape("/docs/release-notes/$tagVersion.md"))) {
     Fail-Step "Magisk update.json version block not synced."
 }
+# Debian flavor 从 v3.0.3 起有独立的 update json。漏改这份，Debian 用户在管理器里
+# 点更新会拿到旧版本号或错误的 zipUrl，静默退回 Alpine 版。
+$updateJsonDebian = Get-Content -Path (Join-Path $repoRoot "Magisk\update-debian.json") -Raw -Encoding UTF8
+if (($updateJsonDebian -notmatch [regex]::Escape('"version": "' + $tagVersion + '"')) `
+    -or ($updateJsonDebian -notmatch [regex]::Escape('"versionCode": ' + $versionCode)) `
+    -or ($updateJsonDebian -notmatch [regex]::Escape("/releases/download/$tagVersion/daidai-panel-magisk-debian-$tagVersion.zip")) `
+    -or ($updateJsonDebian -notmatch [regex]::Escape("/docs/release-notes/$tagVersion.md"))) {
+    Fail-Step "Magisk update-debian.json version block not synced."
+}
 
 Write-Step "Check Windows start.bat line endings"
 $startBatPath = Join-Path $repoRoot "packaging\windows\start.bat"

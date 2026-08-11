@@ -317,11 +317,11 @@ jobs:
             CHANGELOG_URL="https://github.com/${REPO}/releases/tag/v${VERSION}"
           fi
 
-          # 已知限制：updateJson 只能填一个 zipUrl，而两个 flavor 共用同一个
-          # module id（daidai-panel），所以模块卡片的一键更新只会指向 Alpine ZIP。
-          # Debian 用户必须手动下载 daidai-panel-magisk-debian-*.zip 升级，
-          # 这条已写进 Magisk/README.md。真要解决需要两份 update.json + 两个
-          # module id，超出本次范围。
+          # 两个 flavor 共用同一个 module id（daidai-panel），而 updateJson 只能填一个
+          # zipUrl，所以必须发两份 json：Alpine ZIP 里的 module.prop 指向 update.json，
+          # Debian ZIP 里的指向 update-debian.json（由 Magisk/build.sh 改写）。
+          # 否则 Debian 用户在管理器里点「更新」会被静默刷成 Alpine 版，
+          # 容器基础系统从 glibc 换成 musl，已装依赖全部失效。
           cat > Magisk/update.json <<EOF
           {
             "version": "v${VERSION}",
@@ -330,8 +330,18 @@ jobs:
             "changelog": "${CHANGELOG_URL}"
           }
           EOF
+          cat > Magisk/update-debian.json <<EOF
+          {
+            "version": "v${VERSION}",
+            "versionCode": ${VERSIONCODE},
+            "zipUrl": "https://github.com/${REPO}/releases/download/v${VERSION}/daidai-panel-magisk-debian-v${VERSION}.zip",
+            "changelog": "${CHANGELOG_URL}"
+          }
+          EOF
           echo "-- update.json --"
           cat Magisk/update.json
+          echo "-- update-debian.json --"
+          cat Magisk/update-debian.json
 
       - name: Upload Magisk Module to Release
         env:
@@ -346,8 +356,9 @@ jobs:
             "${ZIPFILE_DEBIAN}" \
             daidai-debian-rootfs-arm64.tar.gz \
             Magisk/update.json \
+            Magisk/update-debian.json \
             --clobber
-          echo "Magisk 模块（alpine + debian）、Debian rootfs 与 update.json 已上传到 Release ${GITHUB_REF_NAME}"
+          echo "Magisk 模块（alpine + debian）、Debian rootfs 与两份 update json 已上传到 Release ${GITHUB_REF_NAME}"
 
   docker-alpine:
     runs-on: ubuntu-latest

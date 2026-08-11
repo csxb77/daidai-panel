@@ -100,15 +100,32 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
    - 编译 arm64 静态后端
    - 打包 `daidai-panel-magisk-vX.Y.Z.zip`（Alpine）与 `daidai-panel-magisk-debian-vX.Y.Z.zip`（Debian）
    - 导出并上传 `daidai-debian-rootfs-arm64.tar.gz`（Debian 版安装时下载的 rootfs）
-   - 生成指向本次 Release 的 `update.json`（含版本号 / versionCode / zipUrl / changelog）
+   - 生成指向本次 Release 的 `update.json` 与 `update-debian.json`（含版本号 / versionCode / zipUrl / changelog）
    - 把这些文件一起上传到 Release
-2. 已装旧版本的手机，打开管理器时自动拉取 `update.json`，比 `versionCode` 发现有新版 → 模块卡片出现「**更新**」按钮
+2. 已装旧版本的手机，打开管理器时自动拉取对应的 update json，比 `versionCode` 发现有新版 → 模块卡片出现「**更新**」按钮
 3. 点按钮 → 管理器自动下载 ZIP 并走安装流程（等同手动「从本地安装 ZIP」）
 4. 重启手机完成升级。升级流程内部：`customize.sh` 先把容器里的 `/app/Dumb-Panel/` 整个备份到 `/data/adb/daidai-panel/update-data-backup`，然后清掉旧 rootfs 重装容器，装完再把备份复原回去——数据库、脚本、日志、依赖全部保留；如果下载或安装中途失败，下次重试会优先沿用这份备份恢复
 
-> ⚠️ **一键更新只对 Alpine 版有效。** `updateJson` 里只能填一个 `zipUrl`，两个 flavor 又共用同一个模块 id，所以「更新」按钮永远指向 Alpine ZIP。**Debian 用户点了这个按钮会被静默换成 Alpine 版**（数据不丢，但 glibc 容器没了）。Debian 版请每次手动从 Release 页下载 `daidai-panel-magisk-debian-vX.Y.Z.zip` 安装。
+> 自 `v3.0.3` 起，两个 flavor 各有各的更新地址：Alpine ZIP 里的 `module.prop` 指向 `update.json`，Debian ZIP 指向 `update-debian.json`（由 `Magisk/build.sh` 在打包时改写）。**Debian 用户在管理器里点「更新」不会再被静默换成 Alpine 版。**
 >
-> 真要修需要两份 `update.json` + 两个 module id，代价是模块列表里出现两个条目、且用户可能同时装上互相打架，本项目暂不做。
+> 历史行为（v3.0.2 及更早）：`updateJson` 只能填一个 `zipUrl`，两个 flavor 又共用同一个模块 id，「更新」按钮永远指向 Alpine ZIP，Debian 用户点了会被换成 Alpine 版（数据不丢，但 glibc 容器没了）。从 v3.0.2 升上来的 Debian 用户，需要先手动刷一次 v3.0.3 的 Debian ZIP，之后管理器才会走对地址。
+
+### 面板内在线升级（v3.0.3+）
+
+刷模块 ZIP 会清掉整个 rootfs 重装容器，还要重启手机、重新下载约 300MB 依赖。日常升级不必这么重：
+
+进入面板「系统设置 → 概览 → 检查系统更新」，模块版会显示「Magisk 模块版在线升级」，点「立即更新」即可。它只做三件事：
+
+- 替换容器内的 `/usr/local/bin/daidai-server`、`/usr/local/bin/ddp`
+- 替换前端目录 `/app/web`
+- 同时把这几样写回模块目录并同步 `module.prop` 的版本号，保证重启后不回滚
+
+容器 rootfs、apt/apk 装的系统包、Python venv 与已装依赖、`config.yaml`、`ports.conf` 一概不动，**不需要重启手机**。
+
+两个例外仍然需要重刷模块 ZIP：
+
+1. 某个版本改动了模块外壳（`service.sh` / `customize.sh` / rootfs 结构）。面板会自己检测到并明确提示，不会硬装上去。
+2. 从 v3.0.2 或更早版本升级——在线升级能力本身要先随 v3.0.3 装上，所以这一跳必须刷 ZIP。
 
 > 说明：需要管理器版本支持 `updateJson`（Magisk v24.0+、KernelSU、APatch 新版均支持）。如果你自己 fork 了本项目发版，请把 `module.prop` 里的 `linzixuanzz/daidai-panel` 替换成自己的仓库路径即可；`customize.sh` 里 Debian rootfs 的下载地址同样写着这个仓库路径，也要一起改。
 
@@ -322,16 +339,16 @@ ddp backup create --name before-uninstall
 
 ```bash
 # 默认只打 arm64 + alpine（CI 发布用的也是这个）
-bash Magisk/build.sh 3.0.2
+bash Magisk/build.sh 3.0.3
 
 # 只打 amd64
-bash Magisk/build.sh 3.0.2 amd64
+bash Magisk/build.sh 3.0.3 amd64
 
 # 同时打 arm64 + amd64
-bash Magisk/build.sh 3.0.2 all
+bash Magisk/build.sh 3.0.3 all
 
 # Debian flavor（第 3 个参数；不传就是 alpine）
-bash Magisk/build.sh 3.0.2 arm64 debian
+bash Magisk/build.sh 3.0.3 arm64 debian
 ```
 
 > `amd64` / `all` 保留的是**构建能力**，不代表模块支持 x86_64：容器运行时 `rurima` 只有 aarch64 构建，`customize.sh` 会在 x86_64 设备上直接拦截。这两个参数是为「将来拿到 x86_64 的 rurima」留的口子，日常发布请用默认的 `arm64`。
