@@ -133,6 +133,10 @@ async function consumeEventStream(
 function dispatchEventSegment(segment: string, handlers: EventStreamHandlers) {
   let eventName = 'message'
   const dataLines: string[] = []
+  // 服务端会周期性发送以 : 开头的心跳注释行来保活长连接（例如依赖安装日志流）。
+  // 这类分段里没有任何 event/data 字段，必须整段丢弃：
+  // 否则会被当成一条 data 为空的 message 派发出去，在日志里每隔 30 秒插入一个空行。
+  let hasField = false
 
   for (const rawLine of segment.split('\n')) {
     // 注意：这里不能对 data 行直接 trimEnd()。
@@ -154,10 +158,16 @@ function dispatchEventSegment(segment: string, handlers: EventStreamHandlers) {
     }
 
     if (field === 'event') {
+      hasField = true
       eventName = value || 'message'
     } else if (field === 'data') {
+      hasField = true
       dataLines.push(value)
     }
+  }
+
+  if (!hasField) {
+    return
   }
 
   const event = {

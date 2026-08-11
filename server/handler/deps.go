@@ -35,7 +35,20 @@ var (
 	dependencyExportTextFunc = buildDependencyExportText
 )
 
-const dependencyOperationTimeout = 20 * time.Minute
+// defaultDependencyOperationTimeout 是 dependency_install_timeout_minutes 读不出来时的兜底值，
+// 与该配置项的注册默认值保持一致。真正生效的阈值一律走 resolveDependencyOperationTimeout()。
+const defaultDependencyOperationTimeout = 20 * time.Minute
+
+// resolveDependencyOperationTimeout 读取用户配置的依赖操作超时。
+// 配置项注册在 model 层并带 5-720 分钟的区间校验，这里只对「数据库里存着历史越界值」
+// 这一种情况再兜一次底，避免非法值把超时变成 0（等于立刻杀进程）。
+func resolveDependencyOperationTimeout() time.Duration {
+	minutes := model.GetRegisteredConfigInt("dependency_install_timeout_minutes")
+	if minutes < 5 || minutes > 720 {
+		return defaultDependencyOperationTimeout
+	}
+	return time.Duration(minutes) * time.Minute
+}
 
 func getOrCreateBroadcaster(id uint) *depLogBroadcaster {
 	depLogStreamsMu.Lock()
@@ -346,6 +359,17 @@ func (h *DepsHandler) LogStream(c *gin.Context) {
 	sub := b.subscribe()
 	defer b.unsubscribe(sub)
 
+	// pip 现场编译 wheel（例如 opencv）时可以几十分钟一行输出都没有，
+	// 原来的「静默 5 分钟就发 done」会让前端以为任务结束了，而进程其实还在跑。
+	// 改成周期性心跳注释行（SSE 规范里以 : 开头的行会被客户端忽略），只用来保活连接；
+	// 真正的结束仍然只由 \x00DONE 或订阅通道关闭来决定。
+	heartbeat := time.NewTicker(30 * time.Second)
+	defer heartbeat.Stop()
+
+	// 硬上限只是防止 broadcaster 泄漏导致连接永不释放，正常路径不会走到。
+	// 必须比依赖任务本身的超时更长，否则又会退化成「任务还在跑就断流」。
+	hardDeadline := time.After(resolveDependencyOperationTimeout() + 5*time.Minute)
+
 	ctx := c.Request.Context()
 	for {
 		select {
@@ -366,7 +390,10 @@ func (h *DepsHandler) LogStream(c *gin.Context) {
 			c.Writer.Flush()
 		case <-ctx.Done():
 			return
-		case <-time.After(5 * time.Minute):
+		case <-heartbeat.C:
+			fmt.Fprintf(c.Writer, ": ping\n\n")
+			c.Writer.Flush()
+		case <-hardDeadline:
 			fmt.Fprintf(c.Writer, "event: done\ndata: timeout\n\n")
 			c.Writer.Flush()
 			return
@@ -681,7 +708,11 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 	}
 	cmd.Stderr = cmd.Stdout
 
-	ctx, cancel := context.WithTimeout(context.Background(), dependencyOperationTimeout)
+	// 阈值只在任务启动时读一次并存下来，保证下面日志里写的数字就是本次实际生效的数字；
+	// 中途用户改配置不影响已经跑起来的任务。
+	operationTimeout := resolveDependencyOperationTimeout()
+
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	registerDepOperation(id, cancel)
 	defer func() {
 		cancel()
@@ -734,7 +765,7 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 		logDirty = false
 	}
 
-	appendLine(fmt.Sprintf("[依赖任务已启动，超时阈值：%s]", dependencyOperationTimeout.Truncate(time.Second)), true)
+	appendLine(fmt.Sprintf("[依赖任务已启动，超时阈值：%s，可在「系统设置 - 依赖安装超时(分钟)」调整]", operationTimeout.Truncate(time.Second)), true)
 
 	scanDone := make(chan struct{})
 	go func() {
@@ -766,10 +797,15 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 			service.KillProcessGroup(cmd.Process)
 		}
 		waitErr = <-waitCh
-		if ctx.Err() == context.DeadlineExceeded {
+		switch {
+		case waitErr == nil:
+			// 临界情况：进程恰好在超时/取消的同一瞬间正常退出，杀进程没杀到活的。
+			// 命令本身是成功的，不能因为抢跑了 ctx.Done() 就把成功记成失败。
+			appendLine("[依赖任务在超时/取消触发的同时已正常结束，按成功处理]", true)
+		case ctx.Err() == context.DeadlineExceeded:
 			appendLine("[依赖任务已超时，进程已终止]", true)
 			status = model.DepStatusFailed
-		} else {
+		default:
 			appendLine("[依赖任务已取消]", true)
 			status = model.DepStatusCancelled
 		}
@@ -1008,7 +1044,32 @@ func forceUninstallDependency(depType, name, pythonVersion string) {
 	default:
 		return
 	}
-	cmd.CombinedOutput()
+
+	// 强制卸载时依赖行已经被删掉了，没有 id 可以注册取消函数，前端也没有入口去点取消。
+	// 但它照样持有 apt / npm 的包锁（上面的 linuxPackageOperationMu、LockNodePackageOperation），
+	// 卡死就会把后续所有依赖任务一起堵住，所以这里必须有超时兜底。
+	service.SetPgid(cmd)
+
+	ctx, cancel := context.WithTimeout(context.Background(), resolveDependencyOperationTimeout())
+	defer cancel()
+
+	if err := cmd.Start(); err != nil {
+		return
+	}
+
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
+	select {
+	case <-waitCh:
+	case <-ctx.Done():
+		if cmd.Process != nil {
+			service.KillProcessGroup(cmd.Process)
+		}
+		<-waitCh
+	}
 }
 
 func (h *DepsHandler) RegisterRoutes(r *gin.RouterGroup) {

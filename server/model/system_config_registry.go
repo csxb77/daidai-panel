@@ -108,6 +108,9 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newIntConfig("max_concurrent_tasks", "定时任务并发数", "5", "定时任务最大并发数", "tasks", 1, 128),
 	newIntConfig("log_retention_days", "日志保留天数", "7", "日志保留天数", "tasks", 1, 3650),
 	newIntConfig("max_log_content_size", "日志内容上限", "102400000", "任务日志内容最大保留字节数", "tasks", 1024, 524288000),
+	// 下限刻意不给到 1 分钟：填 1 会让几乎所有安装都秒失败，看起来像面板坏了。
+	// 上限 720 分钟（12 小时）足够覆盖 ARM 设备上现场编译 opencv 这类极端情况。
+	newIntConfig("dependency_install_timeout_minutes", "依赖安装超时(分钟)", "20", "单个依赖安装/卸载的最长执行时间。安装 opencv 等需要现场编译的大包时可调大", "tasks", 5, 720),
 	newBoolConfig("auto_update_enabled", "静默更新", "false", "静默更新开关（每 24 小时自动检查并在有新版本时尝试更新）", "network"),
 	newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "上次自动检查更新时间", "network"),
 	newIntConfig("random_delay", "随机延迟最大秒数", "0", "任务执行前随机延迟最大秒数", "tasks", 0, 86400),

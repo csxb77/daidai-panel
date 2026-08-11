@@ -599,9 +599,15 @@
       :fullscreen="dialogFullscreen"
     >
       <div class="log-dialog-toolbar">
-        <div>
+        <div class="log-dialog-status">
+          <!-- 这个标签必须读依赖行的真实 status，不能读「日志流是否结束」。
+               以前用 logDone 判定，导致日志流断开（例如长时间无输出）时明明还在装，
+               却显示成绿色的「已完成」。 -->
+          <el-tag v-if="logRowRemoved" type="success" size="small"
+            >已卸载</el-tag
+          >
           <el-tag
-            v-if="!logDone"
+            v-else-if="currentLogRow && isProcessing(currentLogRow.status)"
             type="warning"
             size="small"
             class="running-tag"
@@ -612,18 +618,27 @@
               tone="warning"
               :stacked="false"
             />
-            <span>执行中</span>
+            <span>{{ statusLabel(currentLogRow.status) }}</span>
           </el-tag>
           <el-tag
-            v-else-if="currentLogRow?.status === 'cancelled'"
-            type="info"
+            v-else-if="currentLogRow"
+            :type="statusType(currentLogRow.status)"
             size="small"
-            >已取消</el-tag
+            >{{ statusLabel(currentLogRow.status) }}</el-tag
           >
-          <el-tag v-else type="success" size="small">已完成</el-tag>
+          <el-tag v-if="logStreamNotice" type="info" size="small">{{
+            logStreamNotice
+          }}</el-tag>
         </div>
+        <!-- 只有 installing / removing 能取消：服务端的 Cancel 接口对 queued 直接返回 400
+             「当前依赖任务未在处理中」，把按钮显示出来只会让用户点了报错。 -->
         <el-button
-          v-if="currentLogRow && !logDone"
+          v-if="
+            currentLogRow &&
+            !logRowRemoved &&
+            (currentLogRow.status === 'installing' ||
+              currentLogRow.status === 'removing')
+          "
           type="warning"
           plain
           size="small"
@@ -954,7 +969,13 @@ const logContent = ref("");
 const logContentHtml = computed(() =>
   ansiToHtml(normalizeAnsi(logContent.value || "暂无日志")),
 );
+// logDone 的语义是「日志流已结束」，不等于「任务已完成」。
+// 任务是否完成一律看 currentLogRow.status。
 const logDone = ref(true);
+// 日志流意外断开（服务端硬超时、网络中断）时给用户的提示，避免用户以为任务停了。
+const logStreamNotice = ref("");
+// 依赖已被后端删除（卸载成功）。此时 currentLogRow 只是个查不到对应行的旧快照。
+const logRowRemoved = ref(false);
 const currentLogRow = ref<any | null>(null);
 let eventSource: EventStreamConnection | null = null;
 const logContainerRef = ref<HTMLElement>();
@@ -1181,6 +1202,7 @@ async function loadData() {
     selectedIds.value = selectedIds.value.filter((id) =>
       depsList.value.some((dep) => dep.id === id),
     );
+    syncCurrentLogRow();
     syncPendingRefresh();
   } catch {
     if (!refreshTimer) {
@@ -1486,9 +1508,32 @@ async function handleCancel(row: any) {
   }
 }
 
+// currentLogRow 原本只是打开弹窗那一刻的快照，列表刷新后不会跟着变，
+// 于是后端把状态改成 failed 时弹窗里还停在旧状态。这里在每次拉列表后回填。
+function syncCurrentLogRow() {
+  const current = currentLogRow.value;
+  if (!current) {
+    return;
+  }
+  const fresh = depsList.value.find((dep) => dep.id === current.id);
+  if (fresh) {
+    currentLogRow.value = fresh;
+    return;
+  }
+  // 卸载成功后后端会直接删掉这一行（deleteOnSuccess），列表里再也找不到它。
+  // 不识别这种情况的话，弹窗会一直停在快照里的「卸载中」，
+  // 「取消当前任务」按钮也会常亮，点下去必然 404。
+  // 只在日志流已经结束后才认定为已删除，避免切换 tab 造成的误判。
+  if (logDone.value) {
+    logRowRemoved.value = true;
+  }
+}
+
 function viewLog(row: any) {
   currentLogRow.value = row;
   logContent.value = "";
+  logStreamNotice.value = "";
+  logRowRemoved.value = false;
   logDone.value = !(row.status === "installing" || row.status === "removing");
   showLogDialog.value = true;
 
@@ -1523,15 +1568,22 @@ function viewLog(row: any) {
       }
     },
     onEvent(event) {
-      if (event.event === "done") {
-        logDone.value = true;
-        closeSSE();
-        loadData();
+      if (event.event !== "done") {
+        return;
       }
+      logDone.value = true;
+      closeSSE();
+      // data 携带的是结束原因：真实终态（installed/failed/...）表示任务确实结束了；
+      // timeout 只代表服务端把这条日志流收了，任务本身可能还在跑，不能当成结束。
+      if ((event.data || "").trim() === "timeout") {
+        logStreamNotice.value = "日志流已断开，任务可能仍在进行";
+      }
+      loadData();
     },
     onError() {
       logDone.value = true;
       closeSSE();
+      logStreamNotice.value = "日志流已断开，任务可能仍在进行";
       loadData();
     },
   });
@@ -1548,6 +1600,8 @@ watch(showLogDialog, (val) => {
   if (!val) {
     closeSSE();
     currentLogRow.value = null;
+    logStreamNotice.value = "";
+    logRowRemoved.value = false;
   }
 });
 
@@ -1955,6 +2009,14 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+}
+
+.log-dialog-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
 }
 
 .mirror-hint {
