@@ -3,9 +3,42 @@ package handler
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// TestMagiskServiceScriptGuardsOnlineUpgrade 锁住模块版在线升级依赖的两条 shell 侧行为。
+// 同样只是静态字符串断言，真正的验证必须靠真机跑
+// 「装 -> 重启 -> 面板内升级 -> 再重启不回滚 -> 杀进程看是否自动拉起」整条回路。
+func TestMagiskServiceScriptGuardsOnlineUpgrade(t *testing.T) {
+	text := readMagiskScript(t, "service.sh")
+
+	// 1. 防回滚：模块目录写不进去时（KernelSU 只读 /data），容器内的新版本
+	//    不能在下次开机被模块里的旧版本无条件覆盖掉。
+	if !strings.Contains(text, "file_needs_sync()") {
+		t.Fatal("service.sh 必须保留 file_needs_sync：无条件 cp 会把面板内在线升级的结果回滚掉")
+	}
+	for _, snippet := range []string{
+		`file_needs_sync "$MODDIR/system/bin/daidai-server" "$rootfs/usr/local/bin/daidai-server"`,
+		`file_needs_sync "$MODDIR/web/index.html" "$rootfs/app/web/index.html"`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("service.sh 缺少条件同步判断: %q", snippet)
+		}
+	}
+
+	// 2. 存活守护：模块版没有 supervisor，面板崩了或新版本起不来就只能重启手机。
+	if !strings.Contains(text, "panel_is_running()") {
+		t.Fatal("service.sh 必须保留 panel_is_running 存活探测")
+	}
+	if !strings.Contains(text, "UPDATING_FLAG") {
+		t.Fatal("service.sh 的存活守护必须避让在线升级哨兵，否则会在替换窗口里拉起旧进程")
+	}
+	if !strings.Contains(text, magiskUpdatingSentinelName) {
+		t.Fatalf("service.sh 里的升级哨兵文件名必须与 Go 侧的 %q 一致", magiskUpdatingSentinelName)
+	}
+}
 
 func TestMagiskServiceScriptExportsAndroidRuntimeEnv(t *testing.T) {
 	scriptPath := filepath.Join("..", "..", "Magisk", "service.sh")
@@ -21,6 +54,11 @@ func TestMagiskServiceScriptExportsAndroidRuntimeEnv(t *testing.T) {
 		"/data/adb/daidai-panel/bin/python/bin",
 		"/data/adb/daidai-panel/bin/node/bin",
 	}
+	// 外壳版本号必须与 Go 侧的 requiredMagiskShellVersion 对齐，
+	// 否则模块版一升级就会被自己的外壳版本校验挡下来。
+	requiredSnippets = append(requiredSnippets,
+		"export DAIDAI_MAGISK_SHELL_VERSION="+strconv.Itoa(requiredMagiskShellVersion),
+	)
 	for _, snippet := range requiredSnippets {
 		if !strings.Contains(text, snippet) {
 			t.Fatalf("expected service.sh to contain %q", snippet)

@@ -125,10 +125,46 @@ if [ -d "/data/adb/ksu" ]; then
   mount -o remount,rw /data 2>/dev/null
 fi
 
-# 把最新的前端和 daidai-server 同步进容器
+# ---- 把模块里的前端和 daidai-server 同步进容器 ---------------------------
+# 这里【不能】无条件覆盖。面板支持在面板内在线升级（只换 daidai-server / ddp / web），
+# 升级时会同时写模块目录和容器内路径；但 KernelSU 等场景下 /data 可能只读，
+# 模块目录写不进去，此时容器内是新版、模块里还是旧版 —— 无条件 cp 会在下一次开机
+# 把用户刚升上去的版本悄悄回滚掉。
+#
+# 规则：只有模块里的文件确实比容器里的新（或容器里根本没有）才同步。
+# 真正刷入新模块 zip 时 Magisk 会重写这些文件，mtime 变新，同步照常发生。
+file_needs_sync() {
+  # 目标不存在：必须同步。
+  [ -e "$2" ] || return 0
+  [ "$1" -nt "$2" ] 2>/dev/null
+  case "$?" in
+    0) return 0 ;;  # 模块里的确实更新
+    1) return 1 ;;  # 容器里的更新或同龄，保留容器里的
+    *) return 0 ;;  # 当前 shell 不支持 -nt：回落成无条件同步。
+                    # 宁可丢掉一次在线升级，也不能让刷入新模块后同步不进容器。
+  esac
+}
+
 mkdir -p $rootfs/app/web $rootfs/app/Dumb-Panel $rootfs/usr/local/bin
-cp -rf $MODDIR/web/* $rootfs/app/web/ 2>/dev/null
-cp -f  $MODDIR/system/bin/daidai-server $rootfs/usr/local/bin/daidai-server 2>/dev/null
+
+# 清理残留的在线升级哨兵。开机意味着上一次升级窗口一定已经结束；
+# 若升级途中掉电或重启，哨兵会永久留在盘上，让下面的存活守护再也不敢接管。
+rm -f "$rootfs/app/Dumb-Panel/.updating" 2>/dev/null
+
+# web 是整个目录，用 index.html 当哨兵判断新旧
+if file_needs_sync "$MODDIR/web/index.html" "$rootfs/app/web/index.html"; then
+  cp -rf $MODDIR/web/* $rootfs/app/web/ 2>/dev/null
+  log "已从模块同步前端资源"
+else
+  log "容器内前端不早于模块内版本，保留容器内版本（面板在线升级的结果）"
+fi
+
+if file_needs_sync "$MODDIR/system/bin/daidai-server" "$rootfs/usr/local/bin/daidai-server"; then
+  cp -f  $MODDIR/system/bin/daidai-server $rootfs/usr/local/bin/daidai-server 2>/dev/null
+  log "已从模块同步 daidai-server"
+else
+  log "容器内 daidai-server 不早于模块内版本，保留容器内版本（面板在线升级的结果）"
+fi
 chmod 755 $rootfs/usr/local/bin/daidai-server 2>/dev/null
 
 # 恢复持久化的依赖目录（容器 overlayfs 重启后可能丢失写入层）
@@ -140,7 +176,9 @@ if [ -d "$DEPS_PERSIST" ]; then
 fi
 
 if [ -f $MODDIR/system/bin/ddp ]; then
-  cp -f  $MODDIR/system/bin/ddp $rootfs/usr/local/bin/ddp 2>/dev/null
+  if file_needs_sync "$MODDIR/system/bin/ddp" "$rootfs/usr/local/bin/ddp"; then
+    cp -f  $MODDIR/system/bin/ddp $rootfs/usr/local/bin/ddp 2>/dev/null
+  fi
   chmod 755 $rootfs/usr/local/bin/ddp 2>/dev/null
 fi
 
@@ -170,6 +208,11 @@ export LANG=C.UTF-8
 export HOME=/root
 export SHELL=/bin/bash
 export DAIDAI_MAGISK_MODULE=1
+# 模块外壳（本脚本 + customize.sh + rootfs 结构）的版本号。
+# 面板的在线升级只替换 daidai-server / ddp / web，覆盖不到外壳；
+# 后端用 requiredMagiskShellVersion 与这个值比对，外壳过旧就拒绝在线升级并提示重刷模块。
+# 任何一次改动 Magisk/*.sh 或 rootfs 结构，这个数字和 Go 里的常量必须一起加一。
+export DAIDAI_MAGISK_SHELL_VERSION=1
 export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
 export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app
 export NODE_PATH=/usr/local/lib/node_modules
@@ -287,19 +330,66 @@ else
   log "!! 面板启动失败，查看 $rootfs/app/Dumb-Panel/daidai.log"
 fi
 
-# ---- 后台定时快照 deps 目录到宿主持久化存储 --------------------------------
-# 容器 overlayfs 的写入层在重启后可能丢失，因此每隔 10 分钟
-# 将 deps 目录同步到宿主 /data/adb/daidai-panel/deps-snapshot/，
-# 下次开机时 service.sh 会自动回填到容器内。
+# ---- 后台守护循环 ----------------------------------------------------------
+# 一条循环干两件事：
+#   1. 存活守护：模块版没有 supervisor，面板进程一旦退出（崩溃、OOM、在线升级失败）
+#      就得重启手机才能回来。这里每 60 秒探一次，不在就重新拉起。
+#   2. deps 快照：容器 overlayfs 的写入层在重启后可能丢失，每 10 分钟把 deps 目录
+#      同步到宿主 /data/adb/daidai-panel/deps-snapshot/，下次开机由上面的逻辑回填。
 (
   DEPS_PERSIST="$PERSIST_DIR/deps-snapshot"
   DEPS_CONTAINER="$rootfs/app/Dumb-Panel/deps"
+  # 面板在线升级期间会写这个哨兵，替换窗口内守护不插手，
+  # 免得在「旧进程已退出、新进程还没起来」的空档里把旧版本又拉起来。
+  UPDATING_FLAG="$rootfs/app/Dumb-Panel/.updating"
+
+  # 直接读 /proc 判断进程是否存活，不依赖 pgrep / busybox 是否可用。
+  # 容器走的是 chroot（ruri 不传 -u），没有 PID namespace，
+  # 容器里的进程在宿主 /proc 里同样可见。
+  #
+  # 注意 read 的退出码：/proc/<pid>/cmdline 是 NUL 分隔且【不以换行结尾】的，
+  # POSIX 规定 read 在读到 EOF 而没遇到分隔符时返回非 0 —— 但变量已经赋好值了。
+  # 所以这里【绝对不能】写成 `read ... || continue`：那会让下面的 case 永远执行不到，
+  # 函数恒返回「未运行」，守护就会每轮无条件重跑启动脚本
+  # （覆盖 config.yaml、把 SSH 密码改回默认值、累积 ruri 挂载）。
+  panel_is_running() {
+    for proc_dir in /proc/[0-9]*; do
+      [ -r "$proc_dir/cmdline" ] || continue
+      proc_cmdline=""
+      read -r proc_cmdline 2>/dev/null < "$proc_dir/cmdline"
+      case "$proc_cmdline" in
+        /usr/local/bin/daidai-server*) return 0 ;;
+      esac
+    done
+    return 1
+  }
+
+  tick=0
+  revive_cooldown=0
   while true; do
-    sleep 600
-    if [ -d "$DEPS_CONTAINER" ] && [ "$(ls -A "$DEPS_CONTAINER" 2>/dev/null)" ]; then
-      mkdir -p "$DEPS_PERSIST"
-      rsync -a --delete "$DEPS_CONTAINER/" "$DEPS_PERSIST/" 2>/dev/null || \
-        cp -rf "$DEPS_CONTAINER/." "$DEPS_PERSIST/" 2>/dev/null
+    sleep 60
+    tick=$((tick + 1))
+    [ "$revive_cooldown" -gt 0 ] && revive_cooldown=$((revive_cooldown - 1))
+
+    # ---- 存活守护 ----
+    # 冷却是为了避免面板一直起不来时每分钟都进一次容器：
+    # ruri 的挂载落在宿主全局 mount namespace，高频重入没有好处。
+    if [ ! -f "$UPDATING_FLAG" ] && [ "$revive_cooldown" -le 0 ]; then
+      if ! panel_is_running; then
+        log "!! 面板进程不在，尝试重新拉起"
+        "$RURIMA" ruri -p -N -S -A $rootfs "$CTR_SHELL" /tmp/daidai-startup.sh
+        revive_cooldown=5
+      fi
+    fi
+
+    # ---- 每 10 分钟快照一次 deps ----
+    if [ "$tick" -ge 10 ]; then
+      tick=0
+      if [ -d "$DEPS_CONTAINER" ] && [ "$(ls -A "$DEPS_CONTAINER" 2>/dev/null)" ]; then
+        mkdir -p "$DEPS_PERSIST"
+        rsync -a --delete "$DEPS_CONTAINER/" "$DEPS_PERSIST/" 2>/dev/null || \
+          cp -rf "$DEPS_CONTAINER/." "$DEPS_PERSIST/" 2>/dev/null
+      fi
     fi
   done
 ) &
