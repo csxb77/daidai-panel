@@ -323,6 +323,23 @@ var registeredNotifyChannels = []NotifyChannelDefinition{
 				{Value: "txt", Label: "纯文本"},
 				{Value: "markdown", Label: "Markdown"},
 			}),
+			// 不写 Default：留空等于完全不发送 channel 参数，由 PushPlus 按账号默认
+			// （微信公众号）处理，没有可言的回退值。写了 Default 会让老渠道编辑保存一次
+			// 就凭空多出一个键，行为反而变了。
+			notifySelect("channel", "发送渠道 (可选)", "留空按 PushPlus 账号默认（微信公众号）", []SystemConfigOption{
+				{Value: "wechat", Label: "微信公众号 (wechat)"},
+				{Value: "app", Label: "App (app)"},
+				{Value: "extension", Label: "浏览器扩展 (extension)"},
+				{Value: "webhook", Label: "第三方 Webhook (webhook)"},
+				{Value: "clawbot", Label: "微信 ClawBot (clawbot)"},
+				{Value: "cp", Label: "企业微信应用 (cp)"},
+				{Value: "mail", Label: "邮箱 (mail)"},
+				{Value: "sms", Label: "短信 (sms，消耗 10 积分/条)"},
+				{Value: "voice", Label: "语音 (voice，消耗 30 积分/条)"},
+			}),
+			// webhook 填的是 PushPlus 后台的 webhook 编码，不是 URL；cp 填企业微信自定义应用编码。
+			// 其余渠道不需要这个参数，所以用 show_when 收起来，避免误填。
+			notifyInput("option", "渠道编码", "webhook 渠道填 webhook 编码，企业微信应用渠道填自定义应用编码").showWhen("channel", "webhook", "cp"),
 		},
 	},
 	{
