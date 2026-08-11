@@ -1793,3 +1793,118 @@ func (h *NotificationHandler) Types(c *gin.Context) {
 decoder := json.NewDecoder(strings.NewReader(trimmed))
 decoder.UseNumber()
 ```
+
+---
+
+## 场景：Magisk 模块版的部署类型与在线升级
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/system_update_magisk.go`、`system_update.go` 的部署类型判定与分派、`Magisk/service.sh`，或前端 `OverviewHeroCard.vue` / `UpdateProgressDialog.vue` / `useSettingsOverview.ts` 里与 `deployment_type` 有关的分支时必须看本节。
+- 原因：模块版的文件分布在**三个互不相同的位置**，任何只改其中一处的升级实现都会在下一次开机被静默回滚：
+
+| 位置 | 路径 |
+|---|---|
+| 模块本体（宿主 Android 侧） | `/data/adb/modules/daidai-panel/` |
+| 容器 rootfs | `/data/daidai` 或 `/data/local/daidai` |
+| 面板实际运行的文件（容器内） | `/usr/local/bin/daidai-server`、`/app/web`、`/app/Dumb-Panel` |
+
+`Magisk/service.sh` 每次开机把第 1 处拷进第 3 处。所以在线升级必须**两处都写**。
+
+### 2. Signatures
+
+- 部署类型常量：`panelUpdateDeploymentMagisk = "magisk"`
+- 运行态判定：`func isMagiskPanelUpdateRuntime() bool`
+- 方案构建：`func buildMagiskPanelUpdatePlan(release *panelReleaseInfo) (*panelUpdatePlan, error)`
+- 未命中哨兵：`var errMagiskRuntimeNotDetected = errors.New(...)`
+- 执行入口：`func executeMagiskPanelUpdateWithOptions(plan *panelUpdatePlan, options panelUpdateExecutionOptions)`
+- 面板进程定位：`func findMagiskPanelServerPID() int`
+- 外壳版本：Go `const requiredMagiskShellVersion` ↔ shell `export DAIDAI_MAGISK_SHELL_VERSION`
+- plan 新增字段：`DataDir` / `WebDir` / `ModuleDir`
+- 升级窗口哨兵：`<DataDir>/.updating`（Go 常量 `magiskUpdatingSentinelName` ↔ service.sh 的 `UPDATING_FLAG`）
+
+### 3. Contracts
+
+- **判定顺序固定**：Watchtower → **magisk** → Docker → binary。magisk 必须排在 Docker 探测之前，否则模块版会拿到「未提供 Docker CLI，请配置 Watchtower」这段与 Android 完全无关的报错（`buildPanelUpdatePlanForRelease` 会把 Docker 与 binary 两段错误拼起来抛出，用户看到的第一句必然是 Docker 那句）。
+- **只有 `errMagiskRuntimeNotDetected` 才继续往下走**。模块版自身的失败（例如外壳版本过旧）必须原样抛给用户，用 `errors.Is` 判定，不要包装它。
+- **升级范围严格限定三样**：`daidai-server`、`ddp`、前端目录。容器 rootfs、apt/apk 系统包、Python venv、`config.yaml`、`ports.conf` 一概不动。更新包里自带的 `config.yaml` 必须跳过——它会覆盖模块生成的端口配置。
+- **进程路径与名字必须是 `/usr/local/bin/daidai-server`**。`service.sh` 与 `action.sh` 都用 `pgrep -f /usr/local/bin/daidai-server` 去重，改名会让下次开机再拉起一个实例抢同一个端口。
+- **启动前必须 `cd` 到数据目录**。否则 `appboot.ResolveConfigPath()` 四个候选全落空，`main.go` 直接 `log.Fatalf`。
+- **二进制必须 rename 覆盖**，不能直接写正在执行的文件（`ETXTBSY`）。
+- **前端换完必须重启进程**，不能指望热生效：`main.go` 只在启动时对 `assets` / `monaco` / `sponsor-portal` 三个子目录调 `engine.Static`，新版 dist 多出顶层目录时不重启会走 SPA fallback，静态资源等于坏掉。
+- **运行态判定只校验目录、不校验文件名**：`ddp` 装在 `/usr/local/bin/ddp`，写死 `daidai-server` 会让 CLI 分支全成死代码。相应地 plan 必须记录真正的面板 PID，CLI 发起时由 helper 显式 `kill -TERM`，且此时**不得**自杀（会截断 CLI 输出）。
+- **`os.Executable()` 要剥掉 `" (deleted)"` 后缀**：二进制被替换后 `/proc/self/exe` 会带这个后缀。
+- **外壳版本号必须与 Go 常量同步**。改任何 `Magisk/*.sh` 或 rootfs 结构，`requiredMagiskShellVersion` 与 `DAIDAI_MAGISK_SHELL_VERSION` 一起加一。
+- **`service.sh` 的模块→容器同步必须是条件覆盖**（模块内文件更新才 cp）。这是模块目录写不进去时（KernelSU 下分区可能只读）唯一的防回滚保险。`-nt` 不被支持时必须回落成无条件同步——宁可丢一次在线升级，也不能让刷入新模块后同步不进容器。
+- **构建方案失败时也要回填 `deployment_type`**（`detectPanelDeploymentTypeHint`）。否则前端只能看到空对象，会退回到「请在宿主机执行 docker compose pull」那句兜底，对 Android 模块版和裸机二进制部署都是误导。
+
+### 4. Validation & Error Matrix
+
+- 非模块版 -> `errMagiskRuntimeNotDetected`，继续走 Docker / binary，**不算升级失败**。
+- `DAIDAI_MAGISK_SHELL_VERSION` 缺失或小于 required -> 不生成 plan，返回「请重新刷入模块 zip」。
+- Release 缺少本机架构的 `daidai-linux-<arch>.tar.gz` -> 明确报缺哪个包。
+- 更新包里没有 `web/` 目录 -> 直接终止，不做半截替换。
+- 模块目录不存在 / 不可写 -> **只告警不中断**，提示「本次升级只在容器内生效」，靠 `service.sh` 的条件同步兜底。
+- `module.prop` 缺 `version=` 行 -> 报错（说明模块结构已被改动，不该盲写）。
+- helper 启动失败 -> 必须清掉 `.updating` 哨兵，否则存活守护永久不敢接管。
+
+### 5. Good/Base/Bad Cases
+
+- Good：面板内点「立即更新」，几十秒完成，容器与已装依赖不动，不用重启手机；重启后仍是新版本。
+- Base：模块外壳有变更的版本，面板自检后拒绝在线升级并提示重刷 ZIP。
+- Bad：只写容器内路径 —— 下次开机被 `service.sh` 用模块里的旧文件覆盖，升级静默回滚。
+- Bad：复用二进制链路 —— `InstallDir` 会是 `/usr/local/bin`，前端落到 `/usr/local/bin/web`（config 里是 `/app/web`），新进程 cwd 错导致找不到 config.yaml 直接 `log.Fatalf`，且进程改名后 pgrep 去重失效。
+- Bad：`ddp update` 发起时不找面板 PID —— 会在面板还活着的时候替换二进制并再起一个实例。
+
+### 6. Tests Required
+
+见 `server/handler/system_update_magisk_test.go` 与 `magisk_assets_test.go`：
+
+- helper 脚本必须包含 `TARGET_BIN='/usr/local/bin/daidai-server'`、`mv -f "$TARGET_BIN.new" "$TARGET_BIN"`，且 `cd "$DATA_DIR"` 出现在 `nohup "$TARGET_BIN"` **之前**。
+- CLI 场景（`CurrentPID != ServerPID`）：`kill -TERM` → `kill -KILL` → 替换文件，三者顺序不能乱。
+- `rewriteMagiskModuleProp` 只改 `version` / `versionCode` 两行，`updateJson`、`id`、`author` 必须原样保留（debian flavor 的 `updateJson` 与 alpine 不同，整体重写会抹平它）。
+- `replaceDirAtomically` 必须清掉旧的 hash 产物，且不留 `.new` / `.old` 残留。
+- `buildPanelUpdateTarget` 的 magisk 分支不得带出 `image_name` / `container_name`。
+- 非模块版必须返回 `errMagiskRuntimeNotDetected` 本身（用 `errors.Is` 判定的前提）。
+- `service.sh` 必须包含 `file_needs_sync`、`panel_is_running`、`UPDATING_FLAG`，且 `DAIDAI_MAGISK_SHELL_VERSION` 与 Go 常量一致。
+
+> **这些都只是静态字符串断言，防不住 shell 逻辑写错。** 改 `Magisk/service.sh` 后必须真机跑完整回路：装 → 重启 → 面板内升级 → 再重启确认不回滚 → 杀掉面板进程确认自动拉起。Debian flavor 至今没做过真机安装。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```sh
+# 错误：POSIX 规定 read 在读到 EOF 而没遇到分隔符时返回非 0，
+# 而 /proc/<pid>/cmdline 是 NUL 分隔、不以换行结尾的。
+# `|| continue` 会对每个条目都触发，下面的 case 永远执行不到，函数恒返回「未运行」。
+# 后果：守护每轮无条件重跑容器启动脚本，把用户改过的 SSH 密码改回默认值、
+# 覆盖 config.yaml、放开目录权限，还持续累积 ruri 挂载 —— 全程静默。
+read -r proc_cmdline < "$proc_dir/cmdline" 2>/dev/null || continue
+case "$proc_cmdline" in
+  /usr/local/bin/daidai-server*) return 0 ;;
+esac
+```
+
+```sh
+# 错误：无条件覆盖，会把面板内在线升级的结果在下次开机悄悄回滚掉。
+cp -f $MODDIR/system/bin/daidai-server $rootfs/usr/local/bin/daidai-server
+```
+
+#### Correct
+
+```sh
+# 正确：不判 read 的退出码，先清空变量再读，然后直接判断内容。
+proc_cmdline=""
+read -r proc_cmdline 2>/dev/null < "$proc_dir/cmdline"
+case "$proc_cmdline" in
+  /usr/local/bin/daidai-server*) return 0 ;;
+esac
+```
+
+```sh
+# 正确：只有模块里的文件确实更新（或容器里没有）才同步。
+if file_needs_sync "$MODDIR/system/bin/daidai-server" "$rootfs/usr/local/bin/daidai-server"; then
+  cp -f "$MODDIR/system/bin/daidai-server" "$rootfs/usr/local/bin/daidai-server"
+fi
+```
