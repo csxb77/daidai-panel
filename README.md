@@ -20,8 +20,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.0.2` · [更新日志](./docs/release-notes/v3.0.2.md)<br>
-> 本次重点：任务半路静默死亡不再被记成成功，修复移动端全屏弹窗少 8vw 与 Open API 少一个权限。<br>
+> 最新稳定版：`v3.0.3` · [更新日志](./docs/release-notes/v3.0.3.md)<br>
+> 本次重点：Magisk 模块版支持面板内在线升级（不用刷模块、不用重启手机），PushPlus 可选发送渠道，依赖安装超时可配。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 功能特性
@@ -264,16 +264,16 @@ docker run -d \
 
 | 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
 |--------------|------------------|----------|--------|----------|----------|
-| `latest` | `3.0.2` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-full` | `3.0.2-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-3.10` | `3.0.2-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
-| `latest-3.11` | `3.0.2-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
-| `latest-all` | `3.0.2-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `3.0.2-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `3.0.2-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `3.0.2-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `3.0.2-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `3.0.2-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `latest` | `3.0.3` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `3.0.3-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `3.0.3-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `3.0.3-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `3.0.3-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `3.0.3-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `3.0.3-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `3.0.3-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `3.0.3-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `3.0.3-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
 
 后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
@@ -297,7 +297,7 @@ docker run -d \
 | `debian3.11` | `debian-3.11` |
 | `debianall` | `debian-all` |
 
-Debian 的旧固定版本格式也保留兼容别名：`3.0.2-debian3.10`、`3.0.2-debian3.11`、`3.0.2-debianall` 分别对应新的 `3.0.2-debian-3.10`、`3.0.2-debian-3.11`、`3.0.2-debian-all`。新部署请直接使用新名称。
+Debian 的旧固定版本格式也保留兼容别名：`3.0.3-debian3.10`、`3.0.3-debian3.11`、`3.0.3-debianall` 分别对应新的 `3.0.3-debian-3.10`、`3.0.3-debian-3.11`、`3.0.3-debian-all`。新部署请直接使用新名称。
 
 #### 切换标签与本地构建
 
@@ -417,7 +417,7 @@ daidai-panel-windows-amd64/
 
 - **支持**：Magisk v24.0+ / KernelSU / APatch；Android 6.0+（建议 8.0+）；**仅 `arm64`**（容器运行时只有 aarch64 构建，x86_64 设备安装时会被明确拦截）
 - **默认访问**：`http://127.0.0.1:5700`，后端绑定 `0.0.0.0`，局域网 / 内网穿透可直连
-- **一键更新**：模块 `updateJson` 自动推送新版 ZIP，升级保留数据（**仅 Alpine 版**，见下）
+- **一键更新**：自 `v3.0.3` 起可在面板里在线升级（只换面板程序与前端，容器与已装依赖不动，不用重启手机）；模块外壳有变更时才需要重刷 ZIP，模块 `updateJson` 会推送新版 ZIP 并保留数据
 - **下载**：[GitHub Release](https://github.com/linzixuanzz/daidai-panel/releases)
 
 两个可选版本，**装哪个都行，但只能装一个**：
@@ -427,7 +427,7 @@ daidai-panel-windows-amd64/
 | `daidai-panel-magisk-vX.Y.Z.zip` | Alpine 3.18（musl） | **默认选它**。体积小、装得快，磁盘 ≥1.5 GB |
 | `daidai-panel-magisk-debian-vX.Y.Z.zip` | Debian 12（glibc） | 需要跑 glibc 预编译产物时。最典型的是面板「依赖管理」里的**一键安装 Python / Node 运行时**——它下发的是 `*-unknown-linux-gnu` 与 nodejs.org 官方构建，**在 Alpine(musl) 容器里根本无法执行**（实测 0/2）。磁盘 ≥2.5 GB |
 
-> ⚠️ Debian 版**没有模块卡片一键更新**（`updateJson` 只能填一个 zipUrl，两个 flavor 又共用同一个模块 id），需要手动下载 Debian ZIP 升级；并且**尚未经过真机验证**。详见 `Magisk/README.md`。
+> 自 `v3.0.3` 起两个 flavor 各有各的 `updateJson`，Debian 版在管理器里点「更新」不会再被静默换成 Alpine 版。从 `v3.0.2` 或更早升上来的 Debian 用户需要先手动刷一次 v3.0.3 的 Debian ZIP，之后管理器才会走对地址。Debian 版**仍未经过真机验证**。详见 `Magisk/README.md`。
 
 > 📱 **完整的安装 / 升级 / 卸载 / 端口配置 / 排障文档请看 → [`Magisk/README.md`](./Magisk/README.md)**
 
@@ -448,7 +448,7 @@ daidai-panel-windows-amd64/
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.0.2 更新日志](./docs/release-notes/v3.0.2.md) |
+| 看这一版改了什么 | [v3.0.3 更新日志](./docs/release-notes/v3.0.3.md) |
 
 ## 端口与反向代理
 
@@ -586,15 +586,16 @@ server {
 ## 更新
 
 <details>
-<summary><b>展开：面板内一键更新分别走哪条链路（Watchtower / Docker CLI / 二进制）· Compose 手动 pull 重建怎么写</b></summary>
+<summary><b>展开：面板内一键更新分别走哪条链路（Watchtower / Docker CLI / 二进制 / Magisk 模块）· Compose 手动 pull 重建怎么写</b></summary>
 
 ### 面板内一键更新（推荐）
 
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
 - **Docker 精简版**：自 `v3.0.0` 起，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
-- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.2-full`、`3.0.2-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
+- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.3-full`、`3.0.3-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
+- **Magisk 模块版**（自 `v3.0.3`）：下载对应架构的 `daidai-linux-*.tar.gz`，只替换容器内的 `daidai-server`、`ddp` 和前端目录，同时写回模块目录并同步 `module.prop` 版本号，保证重启后不回滚。容器 rootfs、apt/apk 系统包、Python venv 与已装依赖、`config.yaml`、`ports.conf` 一概不动，**不需要重启手机**。模块外壳（`service.sh` / rootfs）有变更的版本会被外壳版本自检拦下并提示重刷 ZIP。
 
 ### 手动更新
 
