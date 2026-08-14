@@ -6,8 +6,10 @@ export const taskApi = {
     return request.get('/tasks', { params }) as Promise<{ data: any[]; total: number; page: number; page_size: number }>
   },
 
+  // push_scope 见 @/api/notification 的 NotifyPushScope：
+  // 'bound' 的渠道不参与广播，任务不显式选中它就一条通知都收不到，任务表单需要据此打标。
   notificationChannels() {
-    return request.get('/tasks/notification-channels') as Promise<{ data: { id: number; name: string; type: string; enabled: boolean }[] }>
+    return request.get('/tasks/notification-channels') as Promise<{ data: { id: number; name: string; type: string; enabled: boolean; push_scope?: string }[] }>
   },
 
   create(data: any) {

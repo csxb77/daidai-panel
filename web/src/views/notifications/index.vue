@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { notificationApi, type NotifyChannelDefinition, type NotifyFieldDefinition } from '@/api/notification'
+import { notificationApi, type NotifyChannelDefinition, type NotifyFieldDefinition, type NotifyPushScope } from '@/api/notification'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Bell, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
@@ -14,7 +14,40 @@ const channelTypes = ref<NotifyChannelDefinition[]>([])
 
 const showChannelDialog = ref(false)
 const isCreateChannel = ref(true)
-const channelForm = ref({ id: 0, name: '', type: 'webhook', config: '{}' })
+
+interface ChannelFormState {
+  id: number
+  name: string
+  type: string
+  config: string
+  // 这里刻意用宽松的 string 而不是 'default' | 'bound'：
+  // el-radio-group 的 v-model 回写类型是 string | number | boolean，标成字面量联合类型
+  // 会让 vue-tsc 在 v-model 上报不兼容。收窄统一放在提交前的 normalizePushScope 里做。
+  push_scope: string
+}
+
+const channelForm = ref<ChannelFormState>({ id: 0, name: '', type: 'webhook', config: '{}', push_scope: 'default' })
+
+// 服务端把空串也当作「默认推送」，所以只认 'bound' 这一个值，其余一律归到默认。
+function normalizePushScope(raw: unknown): NotifyPushScope {
+  return raw === 'bound' ? 'bound' : 'default'
+}
+
+function isBoundChannel(row: any): boolean {
+  return normalizePushScope(row?.push_scope) === 'bound'
+}
+
+// 一条「所有渠道都不参与广播」的顶部警示。
+//
+// 只列举仓库里真实存在的广播调用点：资源告警（service/resource_monitor.go）、
+// 登录通知（handler/auth.go）、静默更新结果（handler/system_update_auto.go）。
+// 不要往里加订阅同步 / 备份 / 依赖安装 —— 面板根本没有这几处通知调用，写上去是在承诺不存在的能力。
+const hasEnabledDefaultChannel = computed(() =>
+  channels.value.some(c => c.enabled && !isBoundChannel(c))
+)
+const showNoDefaultChannelAlert = computed(() =>
+  !channelLoading.value && channels.value.length > 0 && !hasEnabledDefaultChannel.value
+)
 
 // --- Search / filter state ---
 const searchKeyword = ref('')
@@ -179,7 +212,8 @@ function onChannelTypeChange() {
 
 function openCreateChannel() {
   isCreateChannel.value = true
-  channelForm.value = { id: 0, name: '', type: 'webhook', config: '{}' }
+  // 新建默认给「默认推送」：与老版本行为一致，用户想隔离时再手动切成「绑定推送」。
+  channelForm.value = { id: 0, name: '', type: 'webhook', config: '{}', push_scope: 'default' }
   configData.value = {}
   applyChannelTypeDefaults()
   showChannelDialog.value = true
@@ -187,7 +221,13 @@ function openCreateChannel() {
 
 function openEditChannel(row: any) {
   isCreateChannel.value = false
-  channelForm.value = { id: row.id, name: row.name, type: row.type, config: row.config || '{}' }
+  channelForm.value = {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    config: row.config || '{}',
+    push_scope: normalizePushScope(row.push_scope),
+  }
   syncFormToConfig()
   showChannelDialog.value = true
 }
@@ -237,12 +277,19 @@ async function handleSaveChannel() {
     return
   }
   syncConfigToForm()
+  // 提交前把 push_scope 收窄成服务端认的两个值：服务端对非法取值会直接 400。
+  const payload = {
+    name: channelForm.value.name,
+    type: channelForm.value.type,
+    config: channelForm.value.config,
+    push_scope: normalizePushScope(channelForm.value.push_scope),
+  }
   try {
     if (isCreateChannel.value) {
-      await notificationApi.create(channelForm.value)
+      await notificationApi.create(payload)
       ElMessage.success('创建成功')
     } else {
-      await notificationApi.update(channelForm.value.id, channelForm.value)
+      await notificationApi.update(channelForm.value.id, payload)
       ElMessage.success('更新成功')
     }
     showChannelDialog.value = false
@@ -428,6 +475,24 @@ function getChannelConfigSummary(row: any): string[] {
       </div>
     </div>
 
+        <!--
+          没有任何「默认推送」渠道时的警示。
+          只列举仓库里真实存在的三处广播调用点，不要扩写成「所有系统通知」之类的模糊说法。
+        -->
+        <el-alert
+          v-if="showNoDefaultChannelAlert"
+          type="warning"
+          show-icon
+          :closable="false"
+          class="no-default-alert"
+          title="当前没有启用中的「默认推送」渠道"
+        >
+          <template #default>
+            资源告警、登录通知、静默更新结果这三类系统通知将不会发送（面板不做兜底，也不会退回其它渠道）。
+            如需接收，请把至少一个已启用的渠道改为「默认推送」。
+          </template>
+        </el-alert>
+
         <!-- Toolbar -->
         <div class="toolbar">
           <div class="toolbar__left">
@@ -475,6 +540,7 @@ function getChannelConfigSummary(row: any): string[] {
                 <span class="dd-mobile-card__title">{{ row.name }}</span>
                 <div class="dd-mobile-card__badges">
                   <el-tag size="small" :type="getTypeBadgeType(row.type)" effect="plain">{{ getTypeName(row.type) }}</el-tag>
+                  <el-tag v-if="isBoundChannel(row)" size="small" type="warning" effect="plain">仅绑定</el-tag>
                 </div>
               </div>
               <el-switch :model-value="row.enabled" size="small" @change="handleToggleChannel(row)" />
@@ -529,6 +595,20 @@ function getChannelConfigSummary(row: any): string[] {
             <el-table-column prop="type" label="类型" width="130">
               <template #default="{ row }">
                 <el-tag size="small" :type="getTypeBadgeType(row.type)" effect="plain" round>{{ getTypeName(row.type) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="推送范围" width="120" align="center">
+              <template #default="{ row }">
+                <el-tooltip
+                  :content="isBoundChannel(row)
+                    ? '不参与广播，只有任务绑定它、或脚本显式指定它时才推送'
+                    : '参与广播：资源告警、登录通知、静默更新结果，以及未绑定渠道的任务通知都会发到这里'"
+                  placement="top"
+                >
+                  <el-tag size="small" :type="isBoundChannel(row) ? 'warning' : 'success'" effect="plain" round>
+                    {{ isBoundChannel(row) ? '仅绑定' : '默认推送' }}
+                  </el-tag>
+                </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column label="配置概览" min-width="180">
@@ -601,6 +681,21 @@ function getChannelConfigSummary(row: any): string[] {
             <el-option v-for="t in channelTypes" :key="t.type" :label="t.name" :value="t.type" />
           </el-select>
         </el-form-item>
+        <!--
+          推送范围是渠道自身的属性（数据库一等列），不是渠道 config 里的字段，
+          所以必须手写在这里，绝不能混进下面由服务端 schema 驱动的 configFields 循环。
+        -->
+        <el-form-item label="推送范围">
+          <el-radio-group v-model="channelForm.push_scope">
+            <el-radio-button value="default">默认推送</el-radio-button>
+            <el-radio-button value="bound">绑定推送</el-radio-button>
+          </el-radio-group>
+          <div class="form-tip">
+            <strong>默认推送</strong>：参与广播。资源告警、登录通知、静默更新结果，以及没有绑定渠道的任务通知都会发到这里。<br />
+            <strong>绑定推送</strong>：不参与广播，只有任务在「通知渠道」里选中它、或脚本调用时显式指定它才会推送。
+            想做到「一个脚本对应一个通知」就选这个。
+          </div>
+        </el-form-item>
         <el-divider content-position="left">配置</el-divider>
         <!--
           通用渲染器：字段来自服务端 schema，widget 只有 input / password / textarea / select 四种。
@@ -658,6 +753,22 @@ function getChannelConfigSummary(row: any): string[] {
 
   h2 { margin: 0; font-size: 22px; font-weight: 700; color: var(--el-text-color-primary); line-height: 1.3; }
   .page-subtitle { font-size: 13px; color: var(--el-text-color-secondary); margin: 6px 0 0; line-height: 1.6; max-width: 720px; }
+}
+
+// 「没有默认推送渠道」警示条：跟在页头之后，不占满页面高度
+.no-default-alert {
+  margin-bottom: 4px;
+}
+
+// 弹窗里推送范围单选的说明文字。
+// el-form-item__content 是 flex + wrap，这里必须占满整行，否则会挤到单选按钮右边。
+.form-tip {
+  flex: 0 0 100%;
+  width: 100%;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--el-text-color-secondary);
 }
 
 // 工具条：与定时任务页/订阅管理页统一（margin:14px 0、左区 gap 12、右区 gap 10）

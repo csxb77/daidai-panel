@@ -158,6 +158,10 @@ func EnsureColumns() {
 		{"today_send_date", "VARCHAR(10) DEFAULT ''"},
 		{"last_test_at", "DATETIME"},
 		{"last_test_status", "VARCHAR(16) DEFAULT ''"},
+		// push_scope：default = 参与广播，bound = 只有被显式绑定时才推送。
+		// 带 NOT NULL DEFAULT 是为了让老库 ALTER TABLE 补列时，存量行直接落成 'default'，
+		// 升级后的行为与升级前完全一致（同表 success_exit_codes 也是这个写法）。
+		{"push_scope", "VARCHAR(16) NOT NULL DEFAULT 'default'"},
 	})
 
 	ensureTableColumns("open_apps", []columnDef{

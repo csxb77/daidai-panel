@@ -254,6 +254,7 @@ func snapshotConfigBundle() (BackupConfigBundle, error) {
 			Name:      channel.Name,
 			Type:      channel.Type,
 			Config:    channel.Config,
+			PushScope: channel.EffectivePushScope(),
 			Enabled:   channel.Enabled,
 			CreatedAt: channel.CreatedAt,
 			UpdatedAt: channel.UpdatedAt,
@@ -562,12 +563,15 @@ func restoreLegacyJSONBytes(data []byte) error {
 		},
 	}
 
+	// legacy.Channels 是 []model.NotifyChannel，老备份里 push_scope 是空串，
+	// EffectivePushScope 归一后落成 default —— 老备份本来就没有「绑定推送」这个概念。
 	for _, channel := range legacy.Channels {
 		manifest.Data.Configs.NotifyChannels = append(manifest.Data.Configs.NotifyChannels, BackupNotifyChannel{
 			ID:        channel.ID,
 			Name:      channel.Name,
 			Type:      channel.Type,
 			Config:    channel.Config,
+			PushScope: channel.EffectivePushScope(),
 			Enabled:   channel.Enabled,
 			CreatedAt: channel.CreatedAt,
 			UpdatedAt: channel.UpdatedAt,
@@ -919,10 +923,19 @@ func restoreNotifyChannels(tx *gorm.DB, channels []BackupNotifyChannel) (map[uin
 			config = normalized
 		}
 
+		// 老备份没有 push_scope 键，反序列化后是空串；非法值同样按 default 落库。
+		// 归一后一定是 default / bound 之一，不会把「绑定推送」在恢复时悄悄翻成参与广播 ——
+		// 那正是同一行 Enabled 踩过的坑（GORM 省略零值 false，DB 默认 true 反而生效）。
+		pushScope, ok := model.NormalizeNotifyPushScope(item.PushScope)
+		if !ok {
+			pushScope = model.NotifyPushScopeDefault
+		}
+
 		channel := model.NotifyChannel{
 			Name:      item.Name,
 			Type:      item.Type,
 			Config:    config,
+			PushScope: pushScope,
 			Enabled:   item.Enabled,
 			CreatedAt: item.CreatedAt,
 			UpdatedAt: item.UpdatedAt,

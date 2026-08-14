@@ -58,12 +58,25 @@ export interface NotifyChannelDefinition {
   fields?: NotifyFieldDefinition[]
 }
 
+/**
+ * 渠道推送范围。
+ *
+ * - `default`：参与广播。资源告警、登录通知、静默更新结果，以及没有绑定渠道的任务通知
+ *   都会发到这类渠道。
+ * - `bound`：不参与广播，只有任务显式绑定它、或调用方显式传了 channel_id 时才推送。
+ *   「一个脚本对应一个通知」靠的就是它。
+ *
+ * 服务端把空串也当作 `default`（老库升级后的存量渠道就是这种），
+ * 所以读取时一律用 `row.push_scope === 'bound'` 判断，不要写成 `!== 'default'`。
+ */
+export type NotifyPushScope = 'default' | 'bound'
+
 export const notificationApi = {
   list() {
     return request.get('/notifications') as Promise<{ data: any[] }>
   },
 
-  create(data: { name: string; type: string; config: string }) {
+  create(data: { name: string; type: string; config: string; push_scope?: NotifyPushScope }) {
     return request.post('/notifications', data) as Promise<{ message: string; data: any }>
   },
 

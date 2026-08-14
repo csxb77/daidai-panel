@@ -57,6 +57,12 @@ func SendNotificationWithOptions(title, content string, options NotificationDisp
 	if len(channels) == 0 {
 		if len(options.ChannelIDs) > 0 {
 			log.Printf("notification skipped: no enabled channels matched ids=%v", options.ChannelIDs)
+		} else {
+			// 广播 0 命中在这之前是完全静默的：这条分支上的调用方（资源告警、登录通知、
+			// 静默更新结果、未绑定渠道的任务通知）全都不看返回值，也没有任何日志。
+			// 加了 bound 语义后，用户只要把所有渠道都设成「绑定推送」，系统通知就会全部人间蒸发
+			// 且零线索，所以这里必须留一行 warn 作为唯一可查的痕迹。
+			log.Printf("warn: notification broadcast skipped: no channel with push_scope=default is enabled (title=%q)", title)
 		}
 		return
 	}
@@ -79,9 +85,10 @@ func SendNotificationSyncWithOptions(title, content string, options Notification
 	}
 	if len(channels) == 0 {
 		if len(options.ChannelIDs) > 0 {
+			// 这句被 handler 的回归测试逐字断言，改文案会挂，也会让老客户端的错误匹配失效。
 			return result, fmt.Errorf("未找到已启用的通知渠道")
 		}
-		return result, fmt.Errorf("暂无已启用的通知渠道")
+		return result, fmt.Errorf("暂无参与广播的默认推送渠道")
 	}
 
 	for _, ch := range channels {
@@ -103,11 +110,26 @@ func dispatchNotificationToChannel(ch model.NotifyChannel, title, content string
 	}
 }
 
+// loadEnabledNotificationChannels 是全后端唯一的渠道筛选点，两种语义在这里分叉：
+//
+//   - 定向（channelIDs 非空）：按 ID 精确命中，**完全忽略 push_scope**。
+//     「绑定推送」渠道存在的意义就是只在被显式指定时才推，这里再叠一层 push_scope 过滤
+//     会让它永远发不出去，等于把功能做废。
+//   - 广播（channelIDs 为空）：只命中「默认推送」渠道。
 func loadEnabledNotificationChannels(channelIDs []uint) ([]model.NotifyChannel, error) {
 	var channels []model.NotifyChannel
 	query := database.DB.Where("enabled = ?", true)
 	if ids := uniqueNotificationChannelIDs(channelIDs); len(ids) > 0 {
 		query = query.Where("id IN ?", ids)
+	} else {
+		// 必须写「不等于 bound」而不是「等于 default」。
+		// 这一列的语义是「空即默认」，只有明确写着 bound 才排除出广播。
+		// 老库补列、手工改库、以及未来任何忘了填这一列的写入路径，都可能留下空串或 NULL；
+		// 写成等值比较，这些行会静默退出广播，表现成「升级之后突然一条通知都收不到」，
+		// 而且没有任何报错可查 —— 方向反了的默认值是这类功能最贵的 bug。
+		// 用 COALESCE 兜住 NULL：SQL 里 `NULL <> 'bound'` 求值为 NULL（不成立），
+		// 不兜的话 NULL 行照样会被漏掉。
+		query = query.Where("COALESCE(push_scope, '') <> ?", model.NotifyPushScopeBound)
 	}
 	if err := query.Order("created_at DESC, id DESC").Find(&channels).Error; err != nil {
 		return nil, err

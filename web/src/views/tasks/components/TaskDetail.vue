@@ -124,7 +124,8 @@ function handleClose() {
           {{ task.notification_channel_name }}
           <span v-if="task.notification_channel_enabled === false" style="color: var(--el-color-danger)">（已禁用）</span>
         </span>
-        <span v-else style="color: var(--el-text-color-placeholder)">全部已启用渠道</span>
+        <!-- 未绑定渠道 = 走广播。广播只命中「默认推送」渠道，「绑定推送」渠道收不到。 -->
+        <span v-else style="color: var(--el-text-color-placeholder)">全部默认推送渠道</span>
       </el-descriptions-item>
       <el-descriptions-item label="下次运行时间" :span="2">
         {{ formatTime(task.next_run_at) }}

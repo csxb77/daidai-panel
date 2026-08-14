@@ -57,7 +57,9 @@ const loading = ref(false)
 const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
 const batchLabelVisible = ref(false)
-const notificationChannels = ref<{ id: number; name: string; type: string; enabled: boolean }[]>([])
+// push_scope 由 GET /tasks/notification-channels 下发：'bound' 表示该渠道不参与广播，
+// 任务不在表单里显式选中它，它就一条通知都收不到 —— 表单需要据此打标。
+const notificationChannels = ref<{ id: number; name: string; type: string; enabled: boolean; push_scope?: string }[]>([])
 const defaultPythonVersion = ref('3.12')
 // 任务表单的 Python 版本候选：保留后端算好的 available/message，用于标注/禁用未安装版本
 const pythonRuntimeOptions = ref<PythonRuntimeInfo[]>([])
