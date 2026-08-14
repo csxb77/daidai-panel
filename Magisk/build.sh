@@ -3,9 +3,9 @@
 # 呆呆面板 Magisk 模块打包脚本 (容器方案 v2.0.6+)
 #
 # 用法（版本号必填）:
-#   bash Magisk/build.sh 3.0.3                # arm64 + alpine
-#   bash Magisk/build.sh 3.0.3 all            # 同时打包 arm64 + amd64
-#   bash Magisk/build.sh 3.0.3 arm64 debian   # Debian(glibc) flavor
+#   bash Magisk/build.sh 3.0.4                # arm64 + alpine
+#   bash Magisk/build.sh 3.0.4 all            # 同时打包 arm64 + amd64
+#   bash Magisk/build.sh 3.0.4 arm64 debian   # Debian(glibc) flavor
 #
 # 产物:
 #   alpine（默认）: dist/daidai-panel-magisk-v<版本>.zip
