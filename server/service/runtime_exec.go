@@ -99,12 +99,53 @@ sys.argv = [module_name] + module_args
 runpy.run_module(module_name, run_name="__main__", alter_sys=True)
 `
 
+// shellEnvBootstrap 里那段 __dd_dump_env 只为「任务前置钩子回传环境变量」服务，
+// 且**只有 DAIDAI_HOOK_ENV_DUMP 非空时才装**，其余 bash 任务、订阅钩子、后置钩子
+// 走的仍然是原来的两行逻辑（见 hookEnvDumpPathEnvKey 的注释）。
+//
+// 为什么必须用 trap EXIT、不能把 dump 代码追加在用户脚本尾部：
+// 这里对用户脚本是 `. "$__dd_script"`（source，不是 exec），用户写一句 `exit 0`
+// 会直接终止整个 bootstrap shell，任何追加在其后的代码永远不会执行 —— 而
+// `exit 0` / `[ -z "$X" ] && exit 1` 恰恰是前置脚本里最常见的收尾写法。
+// trap EXIT 装在 source 之前，正常结束、exit、绝大多数异常退出都能兜住
+// （被 SIGKILL 强杀除外，那时 dump 文件不存在，Go 侧跳过合并）。
+//
+// dump 走 NUL 分隔的 "KEY=VALUE\0"，是为了原样承载含换行、含 '=' 的值。
+// 三级降级链：env -0（不依赖 bash 特性，Alpine 容器里未必有真 bash 的 compgen）
+// → bash 内建 compgen -e + ${!k} → 逐行 env（多行值会丢，纯兜底）。
+// 三者都失败就留一个空文件，Go 侧跳过合并并写一行日志，不影响任务继续执行。
+//
+// 采集两次（.base 与最终）而不是只采一次：bootstrap 进程自身的环境里本来就有
+// PATH / HOME / LANG / HTTP_PROXY 等一批不属于 envVars 的键，只采一次的话它们会被
+// 当成「前置脚本新增的变量」合并进任务环境（代理地址还会被冻结成快照）。
+// 以 source 用户脚本之前的快照为基线做差集，得到的才是用户脚本真正改动的那部分。
+//
+// 开关除了「变量非空」还要求同名 .ok 标记文件存在（由 newHookEnvCapture 落盘）。
+// 这一道是防呆：用户完全可以在「环境变量」页手建一条同名变量，值随手填成
+// /app/config.yaml，那样每个 bash 任务都会用 `>` 把它截断。多一个只有面板才会创建的
+// 标记文件，误设的值就只是个空转。
 const shellEnvBootstrap = `__dd_env_file=$1
 __dd_script=$2
 shift 2
 export DAIDAI_RUNTIME_SHELL_ENV_FILE="$__dd_env_file"
 if [ -f "$__dd_env_file" ]; then
   . "$__dd_env_file"
+fi
+if [ -n "$DAIDAI_HOOK_ENV_DUMP" ] && [ -f "${DAIDAI_HOOK_ENV_DUMP}.ok" ]; then
+  __dd_dump_env() {
+    if env -0 >"$1" 2>/dev/null; then
+      return 0
+    fi
+    if { for __dd_key in $(compgen -e 2>/dev/null); do
+           printf '%s=%s\0' "$__dd_key" "${!__dd_key}"
+         done; } >"$1" 2>/dev/null && [ -s "$1" ]; then
+      return 0
+    fi
+    env >"$1" 2>/dev/null || : >"$1" 2>/dev/null || true
+    return 0
+  }
+  __dd_dump_env "${DAIDAI_HOOK_ENV_DUMP}.base"
+  trap '__dd_dump_env "$DAIDAI_HOOK_ENV_DUMP"' EXIT
 fi
 . "$__dd_script" "$@"
 `

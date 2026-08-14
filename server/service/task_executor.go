@@ -446,12 +446,24 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	onOutput(fmt.Sprintf("=== 开始执行 [%s] ===\n", startTime.Format("2006-01-02 15:04:05")))
 
+	// 前置脚本（任务专属 + 全局 task_before.sh）里 export 的环境变量会按执行顺序
+	// 增量合并回 envVars，供后面的目标脚本、task_after.sh、extra.sh 和后置脚本共用。
+	// 这是青龙 task_before 的语义；细节与保护名单见 task_hook_env.go。
 	if task.TaskBefore != nil && *task.TaskBefore != "" {
 		onOutput("[执行前置脚本]\n")
-		RunInlineScript(*task.TaskBefore, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...)
+		captureHookEnvExports(envVars, onOutput, func(hookEnv map[string]string) {
+			// 前置脚本的错误过去被直接丢弃，bash 找不到、临时文件写不进去、超时，
+			// 用户在任务日志里只能看到「[执行前置脚本]」一行。这里把它说出来，
+			// 但仍然保持「前置脚本失败不中断任务」的既有行为。
+			if err := RunInlineScript(*task.TaskBefore, e.scriptsDir, hookEnv, 60, onOutput, plan.ScriptArgs...); err != nil {
+				onOutput(fmt.Sprintf("[前置脚本执行失败: %s]\n", err.Error()))
+			}
+		})
 	}
 
-	RunHookScript("task_before.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
+	captureHookEnvExports(envVars, onOutput, func(hookEnv map[string]string) {
+		RunHookScript("task_before.sh", e.scriptsDir, hookEnv, onOutput, plan.ScriptArgs...)
+	})
 
 	retries := 0
 	var lastExitCode int
@@ -525,9 +537,13 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	exitCode = lastExitCode
 
+	// 后置脚本不参与环境变量回传：它跑完任务就结束了，回写没有消费方。
+	// 但同样要把执行错误说出来，理由与前置脚本一致。
 	if task.TaskAfter != nil && *task.TaskAfter != "" {
 		onOutput("[执行后置脚本]\n")
-		RunInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...)
+		if err := RunInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...); err != nil {
+			onOutput(fmt.Sprintf("[后置脚本执行失败: %s]\n", err.Error()))
+		}
 	}
 
 	RunHookScript("task_after.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
@@ -650,9 +666,19 @@ func buildTaskExecutionNotification(task *model.Task, taskLogID uint, runStatus 
 	return title, content, context
 }
 
+// panelMetaLinePrefixes 登记所有「面板自己打进任务日志」的元信息行前缀。
+//
+// isPanelMetaLine 靠它把这些行从成功通知的日志摘录里滤掉。摘录只有 30 行 / 1500 字符，
+// 漏登记一条，它就会顶掉用户真正想看的脚本输出 —— 所以新增任何面板输出行时，
+// 必须同步登记到这里（契约见 quality-guidelines.md）。
 var panelMetaLinePrefixes = []string{
 	"[执行前置脚本]",
 	"[执行后置脚本]",
+	"[前置脚本执行失败:",
+	"[后置脚本执行失败:",
+	// 前置钩子的环境变量回传日志：已生效 / 已忽略受保护变量 / 未采集到回传数据 /
+	// 采集准备失败 / 运行时关键变量被整体覆盖的「注意：」提示，全部共用这个前缀。
+	"[前置脚本环境变量]",
 	"[执行错误:",
 	"[提示]",
 	"[第 ",
