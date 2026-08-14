@@ -36,20 +36,29 @@ import (
 //
 // 升级范围严格限定为三样：daidai-server、ddp、web/。
 // 容器 rootfs、apt 依赖、Python venv、config.yaml、ports.conf 一概不动。
-// 模块外壳（service.sh / customize.sh / rootfs）有变更的版本必须重刷 zip，
-// 由下面的 shell 版本自检拦下来。
+// 在线升级覆盖不到模块外壳（service.sh / customize.sh / action.sh / rootfs 结构），
+// 所以外壳带来的新能力只能靠重刷 zip 拿到 —— 见下面两个版本常量的分工。
 // ============================================================================
 
 const (
-	// requiredMagiskShellVersion 是当前面板代码要求的模块外壳版本。
-	// 任何一次改动 Magisk/*.sh 或 rootfs 结构，都要把这个数字和 service.sh 里
-	// export 的 DAIDAI_MAGISK_SHELL_VERSION 一起加一，否则在线升级会把新面板
-	// 装到不兼容的旧外壳上。
+	// currentMagiskShellVersion 是【本仓库 Magisk/service.sh 当前 export 的】外壳版本号。
+	// 每改一次 Magisk/*.sh 或 rootfs 结构就加一；magisk_assets_test.go 静态断言两者一致。
+	// 它只表示「仓库里的外壳长什么样」，不参与任何放行判断。
+	currentMagiskShellVersion = 2
+
+	// requiredMagiskShellVersion 是【在线升级放行的最低外壳版本】。
+	//
+	// 只有当新面板【无法】在旧外壳上运行时才提这个数字 —— 一旦提了，所有还在跑旧外壳的
+	// 用户都必须先手动重刷一次模块 zip 才能继续在面板内一键升级。
+	// 反过来，外壳只是多了一项增量能力（例如 v2 的手动停止开关）时必须保持不动：
+	// 新面板在旧外壳上照常运行，只是那项能力不可用，由前端按外壳版本 gating 并提示重刷。
+	//
+	// 所以这里【不是】必须等于 currentMagiskShellVersion，只要求 <= 它。
 	requiredMagiskShellVersion = 1
 	magiskShellVersionEnv      = "DAIDAI_MAGISK_SHELL_VERSION"
 
 	// 容器内的固定运行路径。名字和路径都不能变：
-	// Magisk/service.sh 与 action.sh 都用 `pgrep -f /usr/local/bin/daidai-server`
+	// Magisk/service.sh 与 action.sh 都靠 `/usr/local/bin/daidai-server` 这个 argv0
 	// 判断面板是否在跑，改名会让开机时重复拉起第二个实例抢同一个端口。
 	magiskPanelBinaryPath = "/usr/local/bin/daidai-server"
 	magiskPanelCLIPath    = "/usr/local/bin/ddp"
@@ -57,6 +66,33 @@ const (
 	// 升级窗口哨兵。service.sh 的存活守护看到它就不插手，
 	// 避免在「旧进程已退出、新进程还没起来」的空档里抢着拉起旧版本。
 	magiskUpdatingSentinelName = ".updating"
+
+	// magiskPersistDir 是模块的宿主侧持久目录，service.sh / customize.sh /
+	// action.sh / uninstall.sh 四个脚本用的都是它。
+	magiskPersistDir = "/data/adb/daidai-panel"
+
+	// magiskStopFlagName 是跨重启的「手动停止」开关文件名。
+	//
+	// 存在即表示用户显式停了面板：service.sh 在同步完模块文件后直接早退，
+	// 存活守护读到它也会自退，所以重启手机同样不会把面板拉起来。
+	//
+	// 放在 magiskPersistDir 下而不是容器数据目录里，是因为：
+	//   1. 它不在 rootfs 内，刷模块 zip 时的 `rm -rf "$rootfs"` 碰不到；
+	//   2. 容器内可读写（面板进程自己要写它）；
+	//   3. 容器数据目录里的 .updating 每次开机被无条件删除，
+	//      跨重启的状态放在同一个目录迟早被同类清理误伤。
+	//
+	// 这三个常量必须与 Magisk/*.sh 里的字面量逐字一致，magisk_assets_test.go 有静态断言。
+	magiskStopFlagName    = "stopped"
+	magiskStopFlagPath    = magiskPersistDir + "/" + magiskStopFlagName
+	magiskWatchdogGenName = "watchdog.gen"
+
+	// magiskStopSupportedShellVersion 是「手动停止面板」这项能力所需的最低外壳版本。
+	//
+	// 停止开关和守护自退都是 v2 外壳（v3.0.4）才有的东西：在 v1 外壳上写下开关根本
+	// 没有任何代码会读它，面板会被存活守护在 60 秒内原样拉回来。
+	// 所以必须在接口层就拦下并提示重刷 zip，而不是让用户以为自己停成功了。
+	magiskStopSupportedShellVersion = 2
 )
 
 // errMagiskRuntimeNotDetected 是内部哨兵，表示「当前不是模块版」，
@@ -150,6 +186,25 @@ func resolveMagiskShellVersion() int {
 		return 0
 	}
 	return version
+}
+
+// magiskStopFlagPathForTest 只为测试可替换，生产恒等于 magiskStopFlagPath。
+// 真机上 /data/adb 是 root 专属路径，测试里不可能也不应该去写它。
+var magiskStopFlagPathForTest = magiskStopFlagPath
+
+// writeMagiskStopFlag 写下跨重启的停止开关。
+//
+// 只有「停止面板服务」这一条路径可以调用它。
+// 特别注意不要在 /system/restart 里复用：restart 只是退出进程、靠存活守护拉回来，
+// 一旦顺手写了这个开关，一次正常重启就会变成永久停机，
+// 而此时 Web 已经没了，用户在面板上再也没有自救手段。
+func writeMagiskStopFlag() error {
+	flagPath := magiskStopFlagPathForTest
+	if err := os.MkdirAll(filepath.Dir(flagPath), 0o755); err != nil {
+		return err
+	}
+	content := fmt.Sprintf("stopped by panel at %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	return os.WriteFile(flagPath, []byte(content), 0o644)
 }
 
 // resolveMagiskModuleDir 找到模块本体目录，找不到返回空串（不是错误）。

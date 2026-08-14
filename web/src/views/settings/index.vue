@@ -43,6 +43,7 @@ const {
   updateStatus,
   checkingUpdate,
   updatingPanel,
+  stoppingPanel,
   autoUpdateEnabled,
   savingAutoUpdate,
   lastCheckTime,
@@ -59,6 +60,7 @@ const {
   handleCheckUpdate,
   handleUpdatePanel,
   handleRestartPanel,
+  handleStopPanel,
   handleToggleAutoUpdate,
   openReleaseNotes,
   closeReleaseNotes,
@@ -267,8 +269,10 @@ watch(
             :current-version="currentVersion"
             :update-info="updateInfo"
             :update-status="updateStatus"
+            :system-info="systemInfo"
             :checking-update="checkingUpdate"
             :updating-panel="updatingPanel"
+            :stopping-panel="stoppingPanel"
             :auto-update-enabled="autoUpdateEnabled"
             :saving-auto-update="savingAutoUpdate"
             :release-notes-visible="releaseNotesVisible"
@@ -278,6 +282,7 @@ watch(
             :on-check-update="handleCheckUpdate"
             :on-start-update="handleUpdatePanel"
             :on-restart-panel="handleRestartPanel"
+            :on-stop-panel="handleStopPanel"
             :on-toggle-auto-update="handleToggleAutoUpdate"
             :on-open-release-notes="openReleaseNotes"
             :on-close-release-notes="closeReleaseNotes"

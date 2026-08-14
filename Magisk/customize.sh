@@ -295,10 +295,12 @@ if [ "$INSTALL_BACKUP_READY" != "1" ] && [ -d "$rootfs/app/Dumb-Panel" ]; then
     su -c "sh $PERSIST_DIR/restore-last-update.sh"
 
   方式 B —— 手动：
-    su -c "pkill -f daidai-server"
+    # 先停面板（点模块卡片的「运行 / Action」按钮，或用下面这条等价命令）。
+    # 别用 pkill：存活守护 60 秒内就会把面板拉回来。
+    su -c "sh /data/adb/modules/$MODID/action.sh"
     su -c "cp -rf $PERSIST_BACKUP_DIR/. $rootfs/app/Dumb-Panel/"
-    # 重启设备，或：
-    su -c "sh /data/adb/modules/$MODID/service.sh"
+    # 再点一次动作按钮启动，或重启设备：
+    su -c "sh /data/adb/modules/$MODID/action.sh"
 
 ⚠️ 注意：
   - 此快照在每次模块更新时会被清空重写，只保留"最近一次更新前"的版本
@@ -316,6 +318,35 @@ if [ -e "$rootfs/sys/kernel" ] && [ "$current_ver" = "0" ]; then
   abort "- 请重启后再尝试安装！"
 fi
 
+# ---- 先让存活守护自退 ----------------------------------------------------
+# 下面这段停容器的老写法只 pkill 了 daidai-server 和 ruri，**打不到守护子 shell**
+# —— 它的 argv 继承自 service.sh。紧接着几行就要把整个 rootfs 删掉重装，
+# 也就是说刷 zip 的这几分钟里，守护仍在每轮进容器抢同一个 rootfs。
+#
+# 收口方式和 action.sh 一致：写停止开关 + 删守护代次标记，任一条命中守护都会自退
+# （最坏 10 秒，见 service.sh 的分片睡眠）。这里【不能】用 pkill -f service.sh：
+# 那会误杀正在跑的 service.sh 自己。
+#
+# 无条件写（不放进下面的 `if [ -d "$rootfs" ]`）：rootfs 被手工删过、但守护还活着
+# 的情况同样要收口。文件末尾的收尾段会无条件把停止开关删掉。
+#
+# 【已知限制，非漏洞】只有「清掉旧 rootfs」**之前**那条 abort（备份未完成）会把停止
+# 开关撤掉，因为那条路径上 rootfs 还完好、面板本来能跑，留着开关等于永久停机。
+# 删完 rootfs **之后**的 abort（rootfs 下载 / 解压失败、用户数据恢复失败、依赖验证
+# 不通过）一律不撤：那时 rootfs 已经没了，service.sh 本来就会因为「找不到 rootfs」
+# 直接退出，有没有停止开关都一样起不来；而下一次安装成功时，文件末尾的收尾段会
+# 无条件把它清掉。所以这里刻意**不**加 `trap ... EXIT` 做跨 abort 的兜底清理：
+# trap 与 abort/exit 的交互、以及误在成功路径上触发的风险，都大于这点收益。
+#
+# 注意：本段注释与下方代码都不要再出现「删 rootfs 那条命令」的字面写法 ——
+# magisk_assets_test.go 用 strings.Index 找它的**首次出现**来断言
+# 「先写停止开关、再删 rootfs」的先后顺序，注释里复述一遍会让那条断言假阳性。
+mkdir -p "$PERSIST_DIR" 2>/dev/null
+printf '%s\n' "stopped by customize.sh at $(date '+%Y-%m-%d %H:%M:%S')" > "$PERSIST_DIR/stopped" 2>/dev/null
+rm -f "$PERSIST_DIR/watchdog.gen" 2>/dev/null
+ui_print "- 正在等待存活守护退出..."
+sleep 12
+
 # ---- 停止运行中的容器，防止 rm -rf 因活跃挂载点导致安装器闪退 ------------
 if [ -d "$rootfs" ]; then
   # $RURIMA 已在上面做过存在性 + 可执行性检查
@@ -332,6 +363,10 @@ fi
 # ---- 清掉旧 rootfs 重装 -------------------------------------------------
 # 安全检查：如果面板数据存在但备份未完成，禁止继续
 if [ -d "$rootfs/app/Dumb-Panel" ] && [ "$INSTALL_BACKUP_READY" != "1" ]; then
+  # 这条路径上 rootfs 还完好，用户原来的面板本来是能跑的。
+  # 上面为了让守护自退而写下的停止开关必须在这里撤掉，
+  # 否则「中止一次安装」= 永久停机（重启也不会自动起来），而且完全没有线索。
+  rm -f "$PERSIST_DIR/stopped" 2>/dev/null
   abort "! 面板数据存在但未成功备份，已中止安装以保护数据。请重试或手动备份 $rootfs/app/Dumb-Panel"
 fi
 if [ "$INSTALL_BACKUP_READY" = "1" ]; then
@@ -736,10 +771,15 @@ if [ -d "\$TARGET" ] && [ -n "\$(ls -A "\$TARGET" 2>/dev/null)" ]; then
 fi
 
 # 停面板
+# 必须先写停止开关再 kill：service.sh fork 的存活守护每分钟探活一次，
+# 光 pkill 的话 60 秒内面板就会被拉回来，恢复到一半的数据目录会被新进程接管。
+# 收尾时会把开关删掉。
 log "停止 daidai-server ..."
+mkdir -p "\$PERSIST_DIR" 2>/dev/null || true
+echo "stopped by restore-last-update.sh" > "\$PERSIST_DIR/stopped" 2>/dev/null || true
 pkill -f /usr/local/bin/daidai-server 2>/dev/null || true
 pkill -f daidai-server 2>/dev/null || true
-sleep 1
+sleep 12
 
 # 回拷（覆盖式 cp，但用 -a 保留属性；不删 TARGET 里的额外文件）
 mkdir -p "\$TARGET"
@@ -750,14 +790,22 @@ for item in "\$BACKUP_DIR"/* "\$BACKUP_DIR"/.[!.]* "\$BACKUP_DIR"/..?*; do
   cp -af "\$item" "\$TARGET/"
 done
 
+# 清掉停止开关，否则重启后 service.sh 会在早退点直接退出、面板不会自动启动。
+rm -f "\$PERSIST_DIR/stopped" 2>/dev/null || true
+
 log "恢复完成"
-log "下一步：重启模块（推荐重启设备），或："
-log "  su -c \"sh /data/adb/modules/\$MODID/service.sh\""
+log "下一步：重启设备，或点模块卡片的「运行 / Action」按钮启动面板，也可以执行："
+log "  su -c \"sh /data/adb/modules/\$MODID/action.sh\""
 RESTORE
 chmod +x "$PERSIST_DIR/restore-last-update.sh" 2>/dev/null
 
 # ---- 收尾 --------------------------------------------------------------
 "$RURIMA" ruri -w -U $rootfs 2>/dev/null || true
+
+# 无条件清掉停止开关（包括上面为了让守护自退而写的那一份）。
+# 「刚装完的模块必须能起来」优先级高于「记住我停过」：
+# 留着它的话，用户刷完 zip 重启会得到一个静默不启动的面板，且完全没有线索。
+rm -f "$PERSIST_DIR/stopped" 2>/dev/null
 
 # 「安装完成！」必须是有条件的。
 # 上面每一条失败路径都走 abort（abort 自身 exit 1，走不到这里），所以这道判断

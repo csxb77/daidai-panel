@@ -40,6 +40,115 @@ func TestMagiskServiceScriptGuardsOnlineUpgrade(t *testing.T) {
 	}
 }
 
+// TestMagiskScriptsShareStopFlagPath 锁住「手动停止」这条链路里唯一的跨文件契约：
+// Go 侧写开关、四个 shell 脚本读/写/删开关，用的必须是同一个路径。
+//
+// 这条断言只能防住路径被改歪（改一处漏三处 = 停止功能静默失效、或卸载后重装永远起不来），
+// 防不住 shell 逻辑写错，真机验证不可省。
+func TestMagiskScriptsShareStopFlagPath(t *testing.T) {
+	if magiskStopFlagPath != magiskPersistDir+"/"+magiskStopFlagName {
+		t.Fatalf("magiskStopFlagPath 必须由 magiskPersistDir + magiskStopFlagName 拼出，当前=%q", magiskStopFlagPath)
+	}
+	if magiskStopFlagPath != "/data/adb/daidai-panel/stopped" {
+		t.Fatalf("停止开关路径与 Magisk 脚本约定的 /data/adb/daidai-panel/stopped 不一致：%q", magiskStopFlagPath)
+	}
+	// 停止开关绝不能落在容器数据目录里：service.sh 每次开机都会无条件删掉那里的
+	// .updating，同目录的跨重启标记迟早被同类清理误伤；rootfs 重装还会整体删除它。
+	if strings.Contains(magiskStopFlagPath, "Dumb-Panel") {
+		t.Fatalf("停止开关不得放在容器数据目录下：%q", magiskStopFlagPath)
+	}
+	// 停止能力所需的外壳版本不能超过仓库里外壳的实际版本，
+	// 否则刚刷完最新 zip 的用户在面板里也会看到「需重刷 ZIP」，永远点不动这个按钮。
+	if magiskStopSupportedShellVersion > currentMagiskShellVersion {
+		t.Fatalf("magiskStopSupportedShellVersion(%d) 不得大于 currentMagiskShellVersion(%d)",
+			magiskStopSupportedShellVersion, currentMagiskShellVersion)
+	}
+
+	// service.sh：定义开关 + 定义守护代次文件 + 早退。
+	serviceSh := readMagiskScript(t, "service.sh")
+	for _, snippet := range []string{
+		`PERSIST_DIR=/data/adb/daidai-panel`,
+		`STOP_FLAG="$PERSIST_DIR/` + magiskStopFlagName + `"`,
+		`WATCHDOG_GEN_FILE="$PERSIST_DIR/` + magiskWatchdogGenName + `"`,
+		`if [ -f "$STOP_FLAG" ]; then`,
+		// 守护自退：停止开关 + 代次比对，缺一条 toggle 就不成立
+		`watchdog_should_exit() {`,
+		`watchdog_should_exit && exit 0`,
+		`printf '%s\n' "$WATCHDOG_GEN" > "$WATCHDOG_GEN_FILE"`,
+	} {
+		if !strings.Contains(serviceSh, snippet) {
+			t.Fatalf("service.sh 缺少停止开关 / 守护代次相关片段: %q", snippet)
+		}
+	}
+	// 早退点必须排在「模块→容器条件同步」之后、「进容器拉起面板」之前。
+	// 放到同步之前会导致：停止状态下刷入新模块 zip 再重启，新二进制同步不进容器，
+	// 点启动跑的还是旧版本，表现成「刷了新版但版本号没变」。
+	syncIdx := strings.Index(serviceSh, `file_needs_sync "$MODDIR/system/bin/daidai-server"`)
+	stopIdx := strings.Index(serviceSh, `if [ -f "$STOP_FLAG" ]; then`)
+	startIdx := strings.Index(serviceSh, `"$RURIMA" ruri -p -N -S -A $rootfs "$CTR_SHELL" /tmp/daidai-startup.sh`)
+	if syncIdx < 0 || stopIdx < 0 || startIdx < 0 {
+		t.Fatalf("service.sh 找不到定位锚点 (sync=%d stop=%d start=%d)", syncIdx, stopIdx, startIdx)
+	}
+	if stopIdx < syncIdx {
+		t.Fatal("service.sh 的停止早退点必须放在模块→容器条件同步之后，否则停止状态下刷新模块 zip 不会同步进容器")
+	}
+	if stopIdx > startIdx {
+		t.Fatal("service.sh 的停止早退点必须放在拉起容器之前")
+	}
+
+	// action.sh：toggle 两条路径都要在。
+	actionSh := readMagiskScript(t, "action.sh")
+	for _, snippet := range []string{
+		`STOP_FLAG="$PERSIST_DIR/` + magiskStopFlagName + `"`,
+		// 停：写开关
+		`> "$STOP_FLAG"`,
+		// 启：删开关 + 重跑 service.sh（它会写新的守护代次）
+		`rm -f "$STOP_FLAG"`,
+		`sh "$MODDIR/service.sh"`,
+	} {
+		if !strings.Contains(actionSh, snippet) {
+			t.Fatalf("action.sh 缺少 toggle 相关片段: %q", snippet)
+		}
+	}
+	// 守护子 shell 靠停止开关自退，绝不能用 pkill -f service.sh：
+	// 那会误杀正在执行的 service.sh 自己。
+	if strings.Contains(actionSh, "pkill -f service.sh") {
+		t.Fatal("action.sh 不得用 pkill -f service.sh 结束守护（会误杀正在执行的 service.sh 本身）")
+	}
+
+	// uninstall.sh：停止开关与守护代次必须【无条件】删除。
+	// uninstall.sh 有 .keep_on_uninstall 分支，命中时 PERSIST_DIR 整个不删 ——
+	// 删除语句要是落进那个分支里，「停止 → 保留数据卸载 → 重装」会得到一个
+	// 永远起不来的新模块，而且零线索。
+	uninstallSh := readMagiskScript(t, "uninstall.sh")
+	keepIdx := strings.Index(uninstallSh, `if [ -f "$KEEP_FLAG" ]; then`)
+	removeStopIdx := strings.Index(uninstallSh, `rm -f "$STOP_FLAG"`)
+	removeGenIdx := strings.Index(uninstallSh, `rm -f "$WATCHDOG_GEN_FILE"`)
+	if keepIdx < 0 || removeStopIdx < 0 || removeGenIdx < 0 {
+		t.Fatalf("uninstall.sh 找不到定位锚点 (keep=%d stop=%d gen=%d)", keepIdx, removeStopIdx, removeGenIdx)
+	}
+	if removeStopIdx < keepIdx || removeGenIdx < keepIdx {
+		t.Fatal("uninstall.sh 删除停止开关 / 守护代次的语句必须排在 KEEP_FLAG 分支之后（无条件执行）")
+	}
+
+	// customize.sh：刷 zip 前先让守护自退，装完无条件清掉开关。
+	customize := readMagiskCustomizeScript(t)
+	for _, snippet := range []string{
+		`> "$PERSIST_DIR/` + magiskStopFlagName + `"`,
+		`rm -f "$PERSIST_DIR/` + magiskWatchdogGenName + `"`,
+		`rm -f "$PERSIST_DIR/` + magiskStopFlagName + `"`,
+	} {
+		if !strings.Contains(customize, snippet) {
+			t.Fatalf("customize.sh 缺少停止开关收口片段: %q", snippet)
+		}
+	}
+	stopWriteIdx := strings.Index(customize, `> "$PERSIST_DIR/`+magiskStopFlagName+`"`)
+	rmRootfsIdx := strings.Index(customize, `rm -rf "$rootfs"`)
+	if stopWriteIdx < 0 || rmRootfsIdx < 0 || stopWriteIdx > rmRootfsIdx {
+		t.Fatalf("customize.sh 必须先写停止开关让守护自退，再 rm -rf rootfs (write=%d rm=%d)", stopWriteIdx, rmRootfsIdx)
+	}
+}
+
 func TestMagiskServiceScriptExportsAndroidRuntimeEnv(t *testing.T) {
 	scriptPath := filepath.Join("..", "..", "Magisk", "service.sh")
 	data, err := os.ReadFile(scriptPath)
@@ -54,15 +163,25 @@ func TestMagiskServiceScriptExportsAndroidRuntimeEnv(t *testing.T) {
 		"/data/adb/daidai-panel/bin/python/bin",
 		"/data/adb/daidai-panel/bin/node/bin",
 	}
-	// 外壳版本号必须与 Go 侧的 requiredMagiskShellVersion 对齐，
-	// 否则模块版一升级就会被自己的外壳版本校验挡下来。
+	// service.sh 里 export 的外壳版本必须等于 currentMagiskShellVersion
+	// —— 后者的定义就是「本仓库 service.sh 当前 export 的值」。
+	//
+	// 注意这里对齐的【不是】 requiredMagiskShellVersion：那个是「在线升级放行的最低外壳版本」，
+	// 只有当新面板无法在旧外壳上运行时才提。两者相等只是巧合，不是契约。
 	requiredSnippets = append(requiredSnippets,
-		"export DAIDAI_MAGISK_SHELL_VERSION="+strconv.Itoa(requiredMagiskShellVersion),
+		"export DAIDAI_MAGISK_SHELL_VERSION="+strconv.Itoa(currentMagiskShellVersion),
 	)
 	for _, snippet := range requiredSnippets {
 		if !strings.Contains(text, snippet) {
 			t.Fatalf("expected service.sh to contain %q", snippet)
 		}
+	}
+
+	// 放行的最低外壳版本永远不能超过仓库里外壳的实际版本 —— 否则刚打出来的 zip
+	// 装上去就会被自己的外壳版本自检拦住，在线升级直接变成死路。
+	if requiredMagiskShellVersion > currentMagiskShellVersion {
+		t.Fatalf("requiredMagiskShellVersion(%d) 不得大于 currentMagiskShellVersion(%d)",
+			requiredMagiskShellVersion, currentMagiskShellVersion)
 	}
 
 	if strings.Contains(text, `deps/python/3.12`) {

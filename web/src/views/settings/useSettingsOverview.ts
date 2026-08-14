@@ -12,6 +12,7 @@ export function useSettingsOverview() {
   const updateStatus = ref<PanelUpdateStatus | null>(null)
   const checkingUpdate = ref(false)
   const updatingPanel = ref(false)
+  const stoppingPanel = ref(false)
   const autoUpdateEnabled = ref(false)
   const savingAutoUpdate = ref(false)
   const lastCheckTime = ref('')
@@ -345,6 +346,45 @@ export function useSettingsOverview() {
     }
   }
 
+  // 停止面板服务（仅 Magisk 模块版）。
+  //
+  // ⚠️ 这里【绝对不能】复用 waitForRestart：那是给「重启」用的 3 秒延迟 + 每 2 秒 × 60 次
+  // 的轮询窗口，而停止之后面板永远不会自己回来，轮询只会白等 123 秒再弹一句「重启超时」，
+  // 反而让用户以为出了故障。
+  //
+  // 二次确认必须把恢复路径写死在文案里 —— 点下去之后 Web 页面就没了，
+  // 用户能看到的最后一段文字就是这个弹窗。
+  async function handleStopPanel() {
+    try {
+      await ElMessageBox.confirm(
+        '停止后面板进程会退出，<b>这个网页将永久失联</b>（刷新也打不开），重启手机同样不会自动启动。<br/><br/>'
+          + '只有两种方式能再启动回来：<br/>'
+          + '1. 在 Magisk / KernelSU / APatch 管理器里点模块卡片的「运行 / Action」按钮（再点一次就是启动）；<br/>'
+          + '2. 用 adb shell 或 Termux 执行：<code>su -c "sh /data/adb/modules/daidai-panel/action.sh"</code><br/><br/>'
+          + '确定要停止吗？',
+        '停止面板服务',
+        {
+          confirmButtonText: '确认停止',
+          cancelButtonText: '取消',
+          type: 'warning',
+          dangerouslyUseHTMLString: true
+        }
+      )
+    } catch {
+      return
+    }
+
+    stoppingPanel.value = true
+    try {
+      await systemApi.stopPanel()
+      ElMessage.success('面板即将停止；恢复请到模块管理器点动作按钮')
+    } catch (err: any) {
+      ElMessage.error(err?.response?.data?.error || err?.message || '停止面板失败')
+    } finally {
+      stoppingPanel.value = false
+    }
+  }
+
   function stopRestartPolling() {
     if (restartDelayTimer) {
       clearTimeout(restartDelayTimer)
@@ -481,6 +521,7 @@ export function useSettingsOverview() {
     updateStatus,
     checkingUpdate,
     updatingPanel,
+    stoppingPanel,
     autoUpdateEnabled,
     savingAutoUpdate,
     lastCheckTime,
@@ -497,6 +538,7 @@ export function useSettingsOverview() {
     handleCheckUpdate,
     handleUpdatePanel,
     handleRestartPanel,
+    handleStopPanel,
     handleToggleAutoUpdate,
     openReleaseNotes,
     closeReleaseNotes,

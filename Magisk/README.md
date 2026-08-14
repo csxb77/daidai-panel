@@ -122,10 +122,13 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 
 容器 rootfs、apt/apk 装的系统包、Python venv 与已装依赖、`config.yaml`、`ports.conf` 一概不动，**不需要重启手机**。
 
-两个例外仍然需要重刷模块 ZIP：
+**在线升级覆盖不到模块外壳**（`service.sh` / `customize.sh` / `action.sh` / rootfs 结构）。也就是说升完之后你拿到的是「新面板程序 + 旧模块脚本」，管理器里显示的版本号也已经是新版 —— 这是正常的，面板照常工作，只是外壳带来的新能力拿不到。
 
-1. 某个版本改动了模块外壳（`service.sh` / `customize.sh` / rootfs 结构）。面板会自己检测到并明确提示，不会硬装上去。
-2. 从 v3.0.2 或更早版本升级——在线升级能力本身要先随 v3.0.3 装上，所以这一跳必须刷 ZIP。
+需要重刷模块 ZIP 的情况：
+
+1. 想用某个**由模块脚本实现**的新能力。例如 v3.0.4 的「停止面板服务」：它靠新版 `service.sh` / `action.sh` 实现，在线升级上来的用户面板里那个按钮会显示为禁用，并提示当前外壳版本。
+2. 某个版本的新面板**无法**在旧外壳上运行。这种情况面板会在检查更新时直接拒绝并提示重刷 ZIP，不会硬装上去（判据是后端的 `requiredMagiskShellVersion`，只有真正不兼容时才会提高）。
+3. 从 v3.0.2 或更早版本升级——在线升级能力本身要先随 v3.0.3 装上，所以这一跳必须刷 ZIP。
 
 > 说明：需要管理器版本支持 `updateJson`（Magisk v24.0+、KernelSU、APatch 新版均支持）。如果你自己 fork 了本项目发版，请把 `module.prop` 里的 `linzixuanzz/daidai-panel` 替换成自己的仓库路径即可；`customize.sh` 里 Debian rootfs 的下载地址同样写着这个仓库路径，也要一起改。
 
@@ -167,13 +170,35 @@ npm 默认镜像源两边都已切到 `npmmirror.com`；apk / apt 源都指向 `
 
 ---
 
-## 在管理器内查看状态（推荐）
+## 动作按钮 = 停止 / 启动 + 状态摘要（推荐）
 
-模块内置 `action.sh`。在 **Magisk v26+ / KernelSU / APatch** 的模块列表里，呆呆面板条目右侧会出现「运行 / Action」按钮，点击会直接在管理器弹窗里打印：
+模块内置 `action.sh`。在 **Magisk v26+ / KernelSU / APatch** 的模块列表里，呆呆面板条目右侧会出现「运行 / Action」按钮。
+
+### 它是一个 toggle（自 v3.0.4）
+
+管理器的动作按钮只能「无参数、单次执行、回显 stdout」，不能传参也不能交互，所以停止和启动共用这一个按钮：
+
+| 点击时面板 | 本次动作 |
+|-----------|---------|
+| 正在运行 | **停止**：写下停止开关 → 结束面板进程（先 TERM 后 KILL）→ 释放 wake_lock |
+| 未在运行 | **启动**：删掉停止开关 → 重跑 `service.sh`（同步模块文件 + 拉起容器 + 起新的存活守护） |
+
+判定**以进程状态为准**：面板刚崩掉但没有停止开关时，本次执行的是「启动」。每次点击的输出最前面都会打印这次到底做了什么。
+
+**停止状态跨重启保持**：开关文件在 `/data/adb/daidai-panel/stopped`，重启手机后 `service.sh` 会同步完模块文件就直接退出，不会把面板拉起来。再点一次动作按钮即可启动。
+
+停止时**不动**这两样：
+
+- 容器内 `sshd` 不停 —— 面板停了 Web 也没了，SSH 是唯一的排障退路
+- `ruri` 挂载不卸载 —— 卸载会让下次「启动」变成一次完整的容器重入
+
+> 也可以在面板里操作：设置 → 概览 → 「停止面板服务」。该按钮只在模块版显示；通过面板内在线升级上来的用户模块脚本还是旧版，按钮会显示为禁用并提示重刷一次模块 ZIP。
+
+### 同一次点击还会打印
 
 - 当前容器基础系统（`alpine` / `debian`）——忘了自己装的哪个版本时看这一行
 - 当前端口配置（`PANEL_PORT` / `SSH_PORT` / `EXTRA_CORS_ORIGINS`）
-- 面板进程状态 + 容器内 PID
+- 面板进程状态 + PID（动作执行**之后**的实际状态）
 - 宿主侧 `PANEL_PORT` 的实际监听情况
 - 容器运行时自检（`python3` / `node` / `npm` / `git` / `curl` / `bash` 的路径与版本）
 - `service.log`（宿主侧启动日志）最近 60 行
@@ -211,11 +236,19 @@ ddp backup list
 
 **不重启手机、只重启面板**（改端口 / 换二进制后让配置立即生效）：
 
+**点两次模块卡片的「运行 / Action」按钮** —— 第一次停止，第二次启动。等价的命令行写法：
+
 ```bash
-su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
+# 与按钮完全等价的 toggle，跑两次 = 停 + 起
+su -c "sh /data/adb/modules/daidai-panel/action.sh"
 ```
 
-> `service.sh` 检测到 `daidai-server` 已在跑时会直接跳过（避免重复拉起），所以 **必须先 `pkill`** 才能让新配置生效，单独再跑一次 `service.sh` 是无效的。
+> ⚠️ 别再用 `su -c "pkill -f daidai-server; sh .../service.sh"`（v3.0.3 及更早的文档里是这么写的）。两个问题：
+>
+> 1. 自 v3.0.3 起 `service.sh` 会 fork 一个存活守护，`pkill` 掉的面板 60 秒内就会被它拉回来；
+> 2. 执行这条命令的 `sh -c` 进程自己的 cmdline 里就含 `daidai-server`，会被 `pkill -f` 命中，分号后半句多半根本没执行到（用户看到「面板过一会儿又回来了」其实是守护拉的）。
+>
+> `action.sh` 用的是完整路径 `/usr/local/bin/daidai-server` + `kill <pid>`，并且会先写停止开关让守护自退，不存在这两个问题。
 
 ## 忘记密码
 
@@ -265,15 +298,17 @@ EXTRA_CORS_ORIGINS="https://panel.example.com,https://xx.trycloudflare.com"
 
 **生效方式**（任选其一）：
 
+- 方式 1：重启手机，`service.sh` 开机自动重跑
+- 方式 2（不用重启手机）：**点两次模块卡片的「运行 / Action」按钮** —— 第一次停止，第二次启动
+
 ```bash
-# 方式 1：重启手机，service.sh 开机自动重跑
-# 方式 2：先 kill 旧 daidai-server 再重跑 service.sh（不用重启手机）
-su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
+# 方式 2 的命令行等价写法，跑两次 = 停 + 起
+su -c "sh /data/adb/modules/daidai-panel/action.sh"
 ```
 
-> 单独再跑一次 `service.sh` 是**无效的**——它检测到 `daidai-server` 已在跑会直接跳过（避免重复拉起），所以必须先 `pkill` 让旧进程退出，新进程才会按新 `ports.conf` 重新生成 `config.yaml` 并绑定新端口。
+> 单独再跑一次 `service.sh` 是**无效的**——它检测到 `daidai-server` 已在跑会直接跳过（避免重复拉起）。必须先让旧进程退出，新进程才会按新 `ports.conf` 重新生成 `config.yaml` 并绑定新端口。而「让旧进程退出」现在只能走 `action.sh`：直接 `pkill` 的话，存活守护 60 秒内就把它拉回来了。
 
-改完后想确认实际监听状态，可以在 Magisk / KernelSU / APatch 管理器里点模块卡片的「运行」按钮，会直接打印 `PANEL_PORT` / `SSH_PORT` 的当前监听情况。
+改完后想确认实际监听状态，点「运行 / Action」按钮即可看到 `PANEL_PORT` / `SSH_PORT` 的当前监听情况。⚠️ 注意这个按钮自 v3.0.4 起同时是停止 / 启动开关：**每点一次都会切换面板的运行状态**（在跑就停、没跑就起），输出最前面的「本次动作」会写清这次做了什么，按需再点一次即可切回来。
 
 ## 对系统的影响
 
@@ -285,11 +320,13 @@ su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
 | `system.prop` / `sepolicy.rule` | ❌ | 不写系统属性、不加 SELinux 规则 |
 | 应用安装 / 广告 / 服务伪装 | ❌ | 不装 APK、不注册账户、不开后台伪装 |
 | 网络监听 | ⚠️ | 绑定 `0.0.0.0:PANEL_PORT`（默认 5700）+ 容器内 `sshd` 监听 `0.0.0.0:SSH_PORT`（默认 22），局域网任何人都能尝试连接 |
-| 写入位置 | ✅ | 三处：`/data/adb/modules/daidai-panel/`（模块本体）、`/data/daidai/` 或 `/data/local/daidai/`（容器 rootfs + 所有用户数据，占大空间）、`/data/adb/daidai-panel/`（端口配置 + 启动日志） |
+| 写入位置 | ✅ | 三处：`/data/adb/modules/daidai-panel/`（模块本体）、`/data/daidai/` 或 `/data/local/daidai/`（容器 rootfs + 所有用户数据，占大空间）、`/data/adb/daidai-panel/`（端口配置 + 启动日志 + 停止开关） |
 
 > **局域网可见性**：面板后端默认对局域网开放。家里 / 自己 WiFi 没问题；公共网络（咖啡馆、公司 Guest Wi-Fi）建议把 `SSH_PORT` 换掉或进容器 `rc-service sshd stop`，并在路由器 / 防火墙层面限制面板端口。
 
-> **禁用 ≠ 停服**：在管理器里「禁用」模块只阻止下次开机加载，**不会 kill 当前的容器进程**（`daidai-server` 是 `rurima` 启的独立进程树）。想立即停：`su -c "pkill -f daidai-server"`。
+> **禁用 ≠ 停服**：在管理器里「禁用」模块只阻止下次开机加载，**不会 kill 当前的容器进程**（`daidai-server` 是 `rurima` 启的独立进程树）。想立即停：**点模块卡片的「运行 / Action」按钮**（面板在跑时这一次点击就是停止），或在面板里点「设置 → 概览 → 停止面板服务」。
+>
+> ⚠️ `su -c "pkill -f daidai-server"` 自 v3.0.3 起就**停不掉**了：`service.sh` fork 的存活守护每分钟探活一次，60 秒内就会把它拉回来（刚拉起过的话最坏要等 5 分钟，看起来像是随机复活）。
 
 ## 卸载（默认彻底清理，不留痕迹）
 
@@ -339,16 +376,16 @@ ddp backup create --name before-uninstall
 
 ```bash
 # 默认只打 arm64 + alpine（CI 发布用的也是这个）
-bash Magisk/build.sh 3.0.3
+bash Magisk/build.sh 3.0.4
 
 # 只打 amd64
-bash Magisk/build.sh 3.0.3 amd64
+bash Magisk/build.sh 3.0.4 amd64
 
 # 同时打 arm64 + amd64
-bash Magisk/build.sh 3.0.3 all
+bash Magisk/build.sh 3.0.4 all
 
 # Debian flavor（第 3 个参数；不传就是 alpine）
-bash Magisk/build.sh 3.0.3 arm64 debian
+bash Magisk/build.sh 3.0.4 arm64 debian
 ```
 
 > `amd64` / `all` 保留的是**构建能力**，不代表模块支持 x86_64：容器运行时 `rurima` 只有 aarch64 构建，`customize.sh` 会在 x86_64 设备上直接拦截。这两个参数是为「将来拿到 x86_64 的 rurima」留的口子，日常发布请用默认的 `arm64`。
@@ -402,11 +439,16 @@ bash Magisk/build.sh 3.0.3 arm64 debian
 
 **Q: 改了 `ports.conf` 但端口没生效**
 
-`service.sh` 检测到 `daidai-server` 已在跑会直接跳过，光重跑 `service.sh` 是不行的。必须先 `pkill` 再重跑：
+`service.sh` 检测到 `daidai-server` 已在跑会直接跳过，光重跑 `service.sh` 是不行的。必须先让旧进程退出。
+
+**点两次模块卡片的「运行 / Action」按钮**（第一次停、第二次起）即可，或用等价命令：
 
 ```bash
-su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
+# 跑两次 = 停 + 起
+su -c "sh /data/adb/modules/daidai-panel/action.sh"
 ```
+
+⚠️ 别用 `pkill -f daidai-server`：存活守护 60 秒内就会把它拉回来，而且执行这条命令的 `sh -c` 自身就会被 `pkill -f` 命中。
 
 **Q: 升级后旧数据会丢吗？**
 
@@ -425,7 +467,11 @@ su -c "pkill -f daidai-server; sh /data/adb/modules/daidai-panel/service.sh"
 
 **Q: 禁用模块之后面板还在跑？**
 
-对，禁用 = 下次开机 Magisk 不挂载模块，不等于 kill 进程。`daidai-server` 是 `rurima` 启的独立进程树，和模块本身解耦。立即停用：`su -c "pkill -f daidai-server"`。
+对，禁用 = 下次开机 Magisk 不挂载模块，不等于 kill 进程。`daidai-server` 是 `rurima` 启的独立进程树，和模块本身解耦。
+
+立即停用：**点模块卡片的「运行 / Action」按钮**（面板在跑时这一次就是停止），或在面板里点「设置 → 概览 → 停止面板服务」。停止状态跨重启保持，再点一次按钮即可启动回来。
+
+⚠️ `su -c "pkill -f daidai-server"` 停不掉：`service.sh` fork 的存活守护 60 秒内就会重新拉起面板（刚拉起过则最坏 5 分钟）。
 
 **Q: 能用面板内的"检查系统更新"一键更新吗？**
 

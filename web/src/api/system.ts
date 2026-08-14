@@ -47,6 +47,25 @@ export interface PanelUpdateStatus {
   watchtower_response?: Record<string, any>
 }
 
+/**
+ * GET /system/info 里与「部署形态」有关的两个字段（v3.0.4 新增）。
+ *
+ * 其余字段是资源快照，仍然平铺在同一层（服务端用匿名嵌入保证老字段位置不变），
+ * 这里只声明前端真正要拿来做分支判断的两项。
+ */
+export interface SystemDeploymentInfo {
+  /** 取值与 PanelUpdateStatus.deployment_type 同一套 */
+  deployment_type?: 'docker' | 'binary' | 'magisk'
+  /**
+   * Magisk 模块外壳版本。非模块版、或 v3.0.3 之前的旧外壳都是 0。
+   * 「停止面板服务」需要 >= 2（v3.0.4 的外壳），低于它只能重刷模块 ZIP。
+   */
+  magisk_shell_version?: number
+}
+
+/** 「停止面板服务」所需的最低模块外壳版本，与后端 magiskStopSupportedShellVersion 对齐 */
+export const MAGISK_STOP_SUPPORTED_SHELL_VERSION = 2
+
 export interface SystemHealthItem {
   name: string
   status: string
@@ -75,6 +94,13 @@ export const systemApi = {
   updateStatus: () => request.get('/system/update-status'),
   updatePanel: () => request.post('/system/update'),
   restart: () => request.post('/system/restart'),
+  /**
+   * 停止面板服务 —— 只有 Magisk 模块版可用，且要求外壳版本 >= 2。
+   *
+   * 与 restart 的区别：停止之后没有任何东西会把面板拉回来（重启手机也不会），
+   * 所以【不要】复用 waitForRestart 那套轮询，它永远等不到。
+   */
+  stopPanel: () => request.post('/system/stop'),
   panelLog: (params?: { lines?: number; keyword?: string; level?: 'debug' | 'info' | 'warn' | 'error' | '' }) =>
     request.get('/system/panel-log', { params }),
   backup: (password?: string, selection?: Partial<BackupSelection>, name?: string) => request.post('/system/backup', { password, selection, name }),

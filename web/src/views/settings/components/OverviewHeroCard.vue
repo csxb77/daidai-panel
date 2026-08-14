@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { PanelUpdateStatus } from '@/api/system'
+import { MAGISK_STOP_SUPPORTED_SHELL_VERSION, type PanelUpdateStatus } from '@/api/system'
 import UpdateProgressDialog from './UpdateProgressDialog.vue'
 
 const props = defineProps<{
@@ -8,8 +8,11 @@ const props = defineProps<{
   currentVersion: string
   updateInfo: any
   updateStatus: PanelUpdateStatus | null
+  /** GET /system/info 的整包资源信息，这里只用 deployment_type / magisk_shell_version 两项 */
+  systemInfo: any
   checkingUpdate: boolean
   updatingPanel: boolean
+  stoppingPanel: boolean
   autoUpdateEnabled: boolean
   savingAutoUpdate: boolean
   releaseNotesVisible: boolean
@@ -19,6 +22,7 @@ const props = defineProps<{
   onCheckUpdate: () => void | Promise<void>
   onStartUpdate: () => void | Promise<void>
   onRestartPanel: () => void | Promise<void>
+  onStopPanel: () => void | Promise<void>
   onToggleAutoUpdate: (value: boolean) => void | Promise<void>
   onOpenReleaseNotes: () => void | Promise<void>
   onCloseReleaseNotes: () => void | Promise<void>
@@ -33,6 +37,22 @@ const isDockerUpdateTarget = computed(() => {
   const deploymentType = props.updateInfo?.update_target?.deployment_type
   return deploymentType !== 'binary' && deploymentType !== 'magisk'
 })
+
+// ---- 停止面板服务（仅 Magisk 模块版） ------------------------------------
+// 判断依据来自 GET /system/info，不是 CheckUpdate：后者要联网拉 GitHub Release，
+// 而且前端只在「有新版本」时才渲染它的内容，平时根本拿不到部署形态。
+const isMagiskDeployment = computed(() => props.systemInfo?.deployment_type === 'magisk')
+
+const magiskShellVersion = computed(() => Number(props.systemInfo?.magisk_shell_version ?? 0) || 0)
+
+// 在线升级只替换面板程序与前端，覆盖不到 service.sh / action.sh。
+// 所以「新面板 + 旧外壳」是完全正常的组合，此时停止功能不可用，只能重刷一次模块 ZIP。
+const canStopPanel = computed(() => isMagiskDeployment.value && magiskShellVersion.value >= MAGISK_STOP_SUPPORTED_SHELL_VERSION)
+
+// 提示里必须带上实际外壳版本号，否则用户无从判断自己到底差在哪。
+const stopPanelDisabledTip = computed(
+  () => `此功能需重新刷入一次模块 ZIP（当前外壳版本 ${magiskShellVersion.value}，需要 ${MAGISK_STOP_SUPPORTED_SHELL_VERSION}）。在线升级只更新面板程序与前端，覆盖不到模块脚本。`
+)
 </script>
 
 <template>
@@ -65,6 +85,28 @@ const isDockerUpdateTarget = computed(() => {
           <el-button v-if="isAdmin" type="warning" round @click="onRestartPanel" class="hero-btn hero-btn--warning">
             重启面板
           </el-button>
+          <!-- 停止面板服务：非模块版完全不显示（其它部署形态的进程管理器会立刻把面板拉回来）；
+               模块版但外壳过旧时显示为禁用态，并在 tooltip 里说明要重刷 ZIP。
+               el-tooltip 包 disabled 的按钮必须套一层 span，否则按钮不派发 hover 事件、提示出不来。 -->
+          <el-tooltip
+            v-if="isAdmin && isMagiskDeployment"
+            :disabled="canStopPanel"
+            :content="stopPanelDisabledTip"
+            placement="top"
+          >
+            <span class="hero-btn-wrap">
+              <el-button
+                type="danger"
+                round
+                :disabled="!canStopPanel"
+                :loading="stoppingPanel"
+                @click="onStopPanel"
+                class="hero-btn"
+              >
+                停止面板服务
+              </el-button>
+            </span>
+          </el-tooltip>
           <el-button round @click="onOpenGitHub" class="hero-btn hero-btn--ghost">
             访问 GitHub
           </el-button>
@@ -262,6 +304,11 @@ const isDockerUpdateTarget = computed(() => {
 
 .hero-btn-icon {
   margin-right: 4px;
+}
+
+// tooltip 的宿主：禁用态按钮自己不派发 hover 事件，必须由外层 span 接管
+.hero-btn-wrap {
+  display: inline-flex;
 }
 
 .hero-btn--ghost {
