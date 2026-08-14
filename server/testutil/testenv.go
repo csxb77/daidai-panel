@@ -96,9 +96,21 @@ func SetupTestEnv(t *testing.T) string {
 	)
 	model.InitDefaultConfigs()
 
+	// middleware 的可信代理列表是包级全局，只在 middleware 包 init() 时装一次默认私网段，
+	// 而任何经 ConfigHandler 写 trusted_proxy_cidrs 的路径（Set 与 BatchSet 都会走
+	// reloadRuntimeConfigKeys）都是整体「替换」而非追加，用例跑完也不会自己恢复。
+	// 默认私网段一旦被改窄，后续依赖 X-Forwarded-For 的用例就会拿到代理自身 IP 而不是真实客户端 IP。
+	// 进入侧重置：保证当前用例不继承上一个用例留下的脏状态。
+	// 这里必须传空串（等价于注册表默认值），不要改成 model.GetRegisteredConfig 读 DB，
+	// 否则会给这行加上「必须排在 database.Init 之后」的隐式顺序依赖。
+	_ = middleware.ConfigureTrustedProxyCIDRs("")
+
 	t.Cleanup(func() {
 		closeExistingDB()
 		config.C = nil
+		// 退出侧重置：保证当前用例不污染下一个用例，顺带覆盖那些不调 SetupTestEnv 的用例，
+		// 以及 service/backup_runtime.go 恢复备份后同源的跨包写。
+		_ = middleware.ConfigureTrustedProxyCIDRs("")
 	})
 
 	return root
