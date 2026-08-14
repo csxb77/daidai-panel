@@ -13,7 +13,7 @@ const props = defineProps<{
   prefill?: any
   defaultPythonVersion?: string
   pythonRuntimes?: PythonRuntimeInfo[]
-  notificationChannels?: { id: number; name: string; type: string; enabled: boolean }[]
+  notificationChannels?: { id: number; name: string; type: string; enabled: boolean; push_scope?: string }[]
 }>()
 
 const emit = defineEmits<{
@@ -351,18 +351,19 @@ function handleSubmit() {
                 v-model="form.notification_channel_id"
                 clearable
                 filterable
-                placeholder="留空则发送到全部启用渠道"
+                placeholder="留空则发送到全部默认推送渠道"
                 style="width: 100%"
               >
                 <el-option
                   v-for="channel in (props.notificationChannels || [])"
                   :key="channel.id"
-                  :label="channel.enabled ? `${channel.name} (${channel.type})` : `${channel.name} (${channel.type}，已禁用)`"
+                  :label="`${channel.name} (${channel.type}${channel.enabled ? '' : '，已禁用'}${channel.push_scope === 'bound' ? '，仅绑定' : ''})`"
                   :value="channel.id"
                 />
               </el-select>
               <div style="font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px">
-                可绑定单个通知渠道；留空时仍按全部已启用渠道发送。
+                可绑定单个通知渠道；留空时按广播发送，也就是只发到「默认推送」渠道。
+                设为「绑定推送」的渠道不参与广播，必须在这里选中才会收到本任务的通知。
               </div>
             </div>
           </el-form-item>
@@ -381,12 +382,34 @@ function handleSubmit() {
           <div class="hooks-help">
             当前任务专属的 shell 脚本。前置脚本会在目标脚本执行前运行，后置脚本会在目标脚本结束后运行；如果任务命令传入了参数，这里也可以通过 $1、$2 等读取同一份参数。
           </div>
+          <div class="hooks-help">
+            <strong>前置脚本里 export 的环境变量，会对随后的目标脚本生效。</strong>
+            全局 <code>task_before.sh</code> 同样参与，按执行顺序依次合并；合并结果还会一并交给
+            <code>task_after.sh</code>、<code>extra.sh</code> 和后置脚本。后置脚本自身的 export 不回传。
+            三条限制请务必留意：
+            <ol class="hooks-help-list">
+              <li>
+                只支持<strong>新增和覆盖</strong>，<strong>unset 不会传导</strong>。想让某个变量变空请写
+                <code>export VAR=</code>，不要用 <code>unset VAR</code>。
+              </li>
+              <li>
+                <code>TZ</code> 和所有 <code>DAIDAI_</code> 开头的变量属于面板运行时契约（面板时区、通知渠道绑定、脚本令牌等），
+                在前置脚本里改了不会生效，任务日志里会写明被忽略了哪些。
+              </li>
+              <li>
+                <strong>任务命令用了 desi / conc，就别在前置脚本里改同名变量。</strong>
+                账号收窄发生在前置脚本<strong>之后</strong>，撞车时 desi / conc 会赢，
+                你会遇到「明明 export 了单个值，结果还是全跑」。只想跑第 N 个账号，正规写法是
+                <code>task 脚本.py desi 变量名 3</code>（序号从 1 开始，也支持 <code>2 3</code>、<code>1,3</code>、<code>2-5</code>）。
+              </li>
+            </ol>
+          </div>
           <el-form-item label="前置脚本">
             <el-input
               v-model="form.task_before"
               type="textarea"
               :rows="4"
-              placeholder="任务执行前运行，例如设置代理、准备环境变量、创建临时目录；可用 $1、$2 读取任务参数"
+              placeholder="任务执行前运行，例如设置代理、准备环境变量、创建临时目录；这里 export 的变量会传给目标脚本；可用 $1、$2 读取任务参数"
             />
           </el-form-item>
           <el-form-item label="后置脚本">
@@ -394,7 +417,7 @@ function handleSubmit() {
               v-model="form.task_after"
               type="textarea"
               :rows="4"
-              placeholder="任务执行后运行，例如清理临时文件、输出收尾日志、恢复环境；可用 $1、$2 读取任务参数"
+              placeholder="任务执行后运行，例如清理临时文件、输出收尾日志、恢复环境；这里 export 的变量不会回传；可用 $1、$2 读取任务参数"
             />
           </el-form-item>
         </el-form>
@@ -444,6 +467,18 @@ function handleSubmit() {
   color: var(--el-text-color-regular);
   font-size: 13px;
   line-height: 1.7;
+}
+
+.hooks-help code {
+  padding: 0 4px;
+  background: var(--el-fill-color-dark);
+  font-family: var(--el-font-family-mono, monospace);
+  font-size: 12px;
+}
+
+.hooks-help-list {
+  margin: 6px 0 0;
+  padding-left: 20px;
 }
 
 @media (max-width: 768px) {

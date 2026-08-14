@@ -19,6 +19,7 @@
 - [5. 更新环境变量的正确姿势](#5-更新环境变量的正确姿势)
 - [6. 安全说明](#6-安全说明)
 - [7. `ddp` 在哪些安装方式里有](#7-ddp-在哪些安装方式里有)
+- [8. 任务前置 / 后置脚本](#8-任务前置--后置脚本)
 
 ---
 
@@ -33,7 +34,7 @@
 | `DAIDAI_NOTIFY_URL` | 发通知接口的完整地址，等价于 `$DAIDAI_API_BASE/notifications/send`。为兼容既有脚本保留 |
 | `DAIDAI_NOTIFY_TOKEN` | 与 `DAIDAI_TOKEN` **完全同值**，同样为兼容既有脚本保留。新脚本用哪个都行 |
 | `DAIDAI_NOTIFY_TIMEOUT` | 内置通知 helper 的请求超时，固定 `15000`（毫秒） |
-| `DAIDAI_NOTIFY_CHANNEL_ID` | 当前任务在「通知渠道」里选定的默认渠道 ID。**任务没有选渠道时这个变量不存在**，内置 helper 会退回「发给全部启用渠道」 |
+| `DAIDAI_NOTIFY_CHANNEL_ID` | 当前任务在「通知渠道」里选定的默认渠道 ID。**任务没有选渠道时这个变量不存在**，内置 helper 会退回广播 —— 广播只发到「默认推送」渠道，设为「绑定推送」的渠道收不到 |
 | `DAIDAI_SCRIPTS_DIR` | 脚本根目录的绝对路径（面板里「脚本管理」看到的那个根） |
 | `DAIDAI_NOTIFY_PY` | 内置 Python 通知 helper `notify.py` 的绝对路径 |
 | `DAIDAI_SEND_NOTIFY_JS` | 内置 Node 通知 helper `sendNotify.js` 的绝对路径 |
@@ -323,9 +324,13 @@ echo
 | `GET /scripts/content?path=<相对路径>` | 读脚本文件 |
 | `PUT /scripts/content` | 写脚本文件，body `{"path": "...", "content": "..."}` |
 | `PUT /subscriptions/<id>/pull` | 立即拉取一次订阅 |
-| `POST /notifications/send` | 发通知，body `{"title": "...", "content": "...", "channel_id": 1}`。`channel_id` / `channel_ids` 都可省略，省略即发给全部启用渠道 |
+| `POST /notifications/send` | 发通知，body `{"title": "...", "content": "...", "channel_id": 1}`。`channel_id` / `channel_ids` 都可省略，省略即广播到全部「默认推送」渠道（`push_scope=default`）；显式指定 ID 时按 ID 精确投递，「绑定推送」渠道同样能收到。传了 `channel_id` / 非空 `channel_ids` 但里面没有大于 0 的 ID 会直接返回 400，不会退化成广播 |
 
 > 注：面板同时保留了不带版本号的 `/api/...` 路径（等价于 `/api/v1/...`），脚本里用 `$DAIDAI_API_BASE` 即可，不必关心。
+>
+> 内置 helper 的 `ignore_default_config=True`（Node 侧是 `{ ignore_default_config: true }`）**不是「发给所有人」**：
+> 它跳过的只是 `DAIDAI_NOTIFY_CHANNEL_ID`，也就是任务绑定的那个渠道，跳过之后退回广播 ——
+> 而广播只发到「默认推送」渠道，等于「只发默认推送渠道」。要连「绑定推送」渠道一起发，必须显式列出 `channel_ids`。
 
 ---
 
@@ -540,6 +545,90 @@ console.log(execFileSync('ddp', ['env', 'list'], { encoding: 'utf8' }));
 ```bash
 ddp env list
 ```
+
+---
+
+## 8. 任务前置 / 后置脚本
+
+任务表单的「前后置脚本」标签页里有两段 shell 脚本：**前置脚本**在目标脚本之前跑，**后置脚本**在目标脚本结束之后跑。
+除此之外，脚本根目录下的 `task_before.sh` / `task_after.sh` / `extra.sh` 是**全局**钩子，对每个任务都生效。
+
+完整执行顺序：
+
+```text
+任务前置脚本  →  task_before.sh  →  目标脚本  →  任务后置脚本  →  task_after.sh  →  extra.sh
+```
+
+任务命令里传的参数（`task demo.py foo bar` 里的 `foo bar`）会原样传给这些钩子，用 `$1`、`$2` 读取。
+
+### 前置脚本里 `export` 的变量，对目标脚本生效
+
+这是青龙 `task_before` 的语义。**任务前置脚本**和**全局 `task_before.sh`** 都参与，按执行顺序依次合并；
+合并结果同时交给目标脚本、`task_after.sh`、`extra.sh` 和任务后置脚本。
+
+```bash
+# 前置脚本
+export API_BASE_URL="https://api.example.com"
+export RUN_ID="$(date +%s)"
+exit 0            # ← 这么写也没问题，变量照样传得过去
+```
+
+```python
+# 目标脚本
+import os
+print(os.environ["API_BASE_URL"])   # https://api.example.com
+```
+
+四条必须知道的限制：
+
+1. **只支持新增和覆盖，`unset` 不会传导。** 想让某个变量变成空值，写 `export VAR=`，不要写 `unset VAR`。
+   （原因：面板只能看到「新增」和「值变了」，看不到「被删了」；而超大的账号变量本来就不会出现在前置脚本的环境里，
+   按「缺席即删除」处理会把它们误删。）
+2. **后置脚本自身的 `export` 不回传** —— 它跑完任务就结束了，没有下游消费方。
+3. **`TZ` 和所有 `DAIDAI_` 开头的变量改了不生效。** 它们是面板的运行时契约：`TZ` 决定面板时区，
+   `DAIDAI_TOKEN` / `DAIDAI_API_BASE` 是脚本调面板接口的凭据，`DAIDAI_NOTIFY_CHANNEL_ID` 决定任务通知发给哪个渠道。
+   前置脚本改动它们会被忽略，任务日志里会写明「已忽略受保护变量: …」。
+   `PWD`、`SHLVL`、`BASH_VERSION` 这类 shell 内部变量同样不会回传（静默忽略）。
+4. **`PATH` 不在保护名单里**，前置脚本改 `PATH` 是生效的 —— 它决定你脚本里 `subprocess` 调 `pip` / `npm` / `git` 时用哪个。
+   面板自己找 python / node / bash 用的是面板进程的 PATH，不受影响。
+   `PYTHONPATH` / `NODE_PATH` / `NODE_OPTIONS` 同理，改了都生效；但它们和 `PATH` 一样是**面板注入过内容**的路径类变量
+   （venv 的 site-packages、托管 `node_modules`、`sendNotify.js` 的预加载）。**请用追加写法**：
+   `export PYTHONPATH=/my/lib:$PYTHONPATH`。写成整体覆盖（`export PYTHONPATH=/my/lib`）也照样生效，
+   只是脚本可能突然「找不到已装的依赖」，这时任务日志里会有一行以「注意：… 已被前置脚本整体覆盖」开头的提示。
+
+合并结果会写进任务日志（`[前置脚本环境变量] 已生效: …`），不用猜有没有生效。
+另外从本版起，前置 / 后置脚本执行失败（bash 找不到、超时、脚本里 `exit 1`）也会在任务日志里出现，
+但**仍然不会中断任务**——这是既有行为，没有改。
+
+### ⚠️ 用了 `desi` / `conc` 就别在前置脚本里改同名变量
+
+多账号收窄（`desi` / `conc`）发生在**前置脚本之后**。两者撞上同一个变量时 **`desi` / `conc` 赢**：
+你在前置脚本里 `export JD_COOKIE='单个账号'`，随后 `desi` 会把这个单值当成新的账号列表重新按序号切分，
+结果就是「明明 export 了一个值，脚本还是把所有账号都跑了一遍」。
+
+**只想跑第 N 个账号，用命令自带的语法就够了**，不需要写前置脚本：
+
+| 写法 | 含义 |
+|------|------|
+| `task 脚本.py desi 变量名 3` | 单进程，把该变量收窄成第 3 个值 |
+| `desi 脚本.py 变量名 3` | 顶层关键字写法，与上面完全等价 |
+| `task 脚本.py conc 变量名 3` | 每个选中的账号各起一个进程；只选一个时与 `desi` 等价 |
+
+序号语法（`desi` / `conc` 通用）：
+
+- **从 1 开始**，不是 0
+- **留空默认 `1-max`**，即全部账号：`task 脚本.py desi 变量名`
+- 多个值用**空格或逗号**分隔：`2 3`、`1,3`
+- 区间分隔符 `-`、`~`、`_` 都认，且**支持倒序**：`2-5`、`5~2`、`1_3`
+- 区间端点写 `max` 或直接留空表示总数：`3-max`、`3-`
+
+两个容易踩的点：
+
+- **「第 N 个」按合并后的顺序算，不是数据库 id。** 同名的多条环境变量按
+  `置顶 → 分组内位置 → 创建时间 → id` 排序后用 `&` 合并（详见[第 5 节](#5-更新环境变量的正确姿势)），
+  第 N 个指的是合并串里的第 N 段。
+- **`conc` 会抑制实时日志。** 它同时起多个进程，输出交错没法看，所以只在任务结束后落盘。
+  `conc` 还会额外给每个进程注入 `TASK_ACCOUNT_NUMBER`（当前账号序号），脚本里可以直接读。
 
 ---
 

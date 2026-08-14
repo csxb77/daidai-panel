@@ -1566,6 +1566,122 @@ if closeAt := findClosingQuote(value[1:], quote); closeAt < 0 {
 
 ---
 
+## 场景：任务前后置钩子的环境变量回传
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/task_hook_env.go`、`server/service/task_executor.go` 里前置 / 后置钩子的调用点，或 `server/service/runtime_exec.go` 的 `shellEnvBootstrap` 时必须看本节。
+- 原因：这条链路（青龙 `task_before` 语义：前置脚本里 `export` 的变量对目标脚本生效）踩点极密集，而**每一个坑的失败模式都是静默的**：要么用户的 `export` 完全不生效，要么反过来把 bootstrap 自身的环境（`PATH` / `HOME` / `HTTP_PROXY`）当成「新增变量」污染进任务环境，要么把超预算的大账号变量凭空弄没。三种都不报错。
+
+### 2. Signatures
+
+- 采集包装：`func captureHookEnvExports(envVars map[string]string, onOutput OnOutputFunc, run func(hookEnv map[string]string))`
+- 采集现场：`type hookEnvCapture`（临时目录 + `hook-env.dump` + `.base` + `.ok` 标记）
+- 差集合并：`func mergeHookEnvExports(envVars, baseline, final map[string]string) (applied, ignored, notices []string)`
+- 保护判定：`func hookEnvProtection(name string) (protected, report bool)`
+- 放行但提示：`var hookEnvRuntimeCriticalNames` + `func hookEnvRuntimeOverrideNotice(name, before, after string) string`
+- 开关常量：`const hookEnvDumpPathEnvKey = "DAIDAI_HOOK_ENV_DUMP"`
+- shell 侧：`const shellEnvBootstrap`（`runtime_exec.go`）
+
+### 3. Contracts
+
+- **采集必须用 `trap ... EXIT`，并且装在 `. "$__dd_script"` 之前。** 用户脚本是被 **source** 的（不是 exec），一句 `exit 0` 会终止整个 bootstrap shell，任何追加在其后的 dump 代码永远不会执行 —— 而 `exit 0` / `[ -z "$X" ] && exit 1` 恰恰是前置脚本最常见的收尾写法。
+- **必须采两次快照做差集**：source 用户脚本之前落 `.base` 基线，`trap` 里落最终快照。只采一次会把 bootstrap 进程自身就有的 `PATH` / `HOME` / `LANG` / `HTTP_PROXY` 当成「前置脚本新增的变量」合并进任务环境；代理地址还会被**冻结成快照**（它本来是命令创建时从 `system_configs` 实时读的）。
+- **纯增量覆盖，禁止用 dump 结果替换 `envVars`。** `planShellEnvExport` 会把单条超过 `MAX_ARG_STRLEN`、或累计超出导出预算的变量「只赋值不 export」，这类变量在钩子进程里 `env -0` 根本看不到；替换式合并会让它们在目标脚本里凭空消失，表现成「加了前置脚本之后某个账号变量突然没了」。
+- **`unset` 不传导。** 差集只能区分「新增」和「变更」，「缺席」既可能是被 unset，也可能是上面那批从来没进过钩子环境的大变量 —— 按缺席删键会直接删掉用户的账号变量。想清空写 `export VAR=`。
+- **保护名单 = `TZ` + 全部 `DAIDAI_` 前缀 + shell 内部易变量。** 前两类是用户**有意**去改的运行时契约（时区链路、脚本令牌、`DAIDAI_NOTIFY_CHANNEL_ID` 的渠道绑定），拦下来必须往任务日志写一行「已忽略受保护变量: …」，否则用户会一直以为改生效了；`PWD` / `SHLVL` / `IFS` / `BASH_*` / `COMP_*` 这类静默拦，报出来纯属噪音。
+- **`PATH` 不在保护名单里。** 托管解释器用 `resolveManagedBinary` + `sanitizeManagedPath` 算出绝对路径再 exec，完全不受 `envVars["PATH"]` 影响；`envVars["PATH"]` 只决定脚本自己 fork 出来的 `pip` / `npm` / `git` 用哪个 PATH，那正是 shell 语义下用户想要的。
+- **`PATH` / `PYTHONPATH` / `NODE_OPTIONS` / `NODE_PATH` 属于「放行但提示」，不属于保护名单。** 它们都是面板注入的运行时关键变量（`PYTHONPATH` / `NODE_PATH` / `NODE_OPTIONS` 由 `AppendScriptHelperPaths` 注入 venv 的 site-packages、托管 `node_modules` 与 `sendNotify.js` 的 `--require`；`PATH` 由 `BuildManagedRuntimeEnvMapWithScriptToken` 注入），但覆盖 PATH 类变量是 shell 语义、也是用户的合法诉求（追加写法必须能用），所以**照常生效**，只在「面板注入的旧值确实被整体冲掉」时额外打一行带**追加写法**的诊断提示（`hookEnvRuntimeOverrideNotice`）。判定复用 `applied`：没改动的键、用追加写法改的键都不提示，避免刷屏。这类覆盖的失败模式极隐蔽 —— `PYTHONPATH` 被冲掉后目标脚本会突然找不到全部已装依赖；`NODE_OPTIONS` 被冲掉后只有脚本自己 fork 出来的**嵌套** node 进程失去 notify 注入（目标脚本本身走 `createManagedNodeCommand` 里显式的 `--require`，不受影响，所以更难联想）。
+- **开关是「`DAIDAI_HOOK_ENV_DUMP` 非空」**且**「同名 `.ok` 标记文件存在」两个条件同时成立**。只有第二道能挡住这种情况：用户在「环境变量」页手建一条同名变量、值随手填成某个真实路径（比如 `/app/config.yaml`），那样每个 bash 任务都会用 `>` 把那个文件截断。`.ok` 只有面板自己会创建，误设的值就只是个空转。
+- **`RunInlineScript` 还有订阅钩子（`subscription_hook.go`）这个调用方**，`RunHookScript` 也同时服务 `task_after.sh` / `extra.sh`。采集逻辑必须对它们完全 no-op（靠上面那个门禁），不得改变这些调用方的输出与退出码。
+- 后置脚本自身的 `export` **不回传** —— 它跑完任务就结束了，没有下游消费方。
+- 失败分级要精确：基线没落盘 = bootstrap 压根没跑（绝大多数用户没有全局 `task_before.sh`），必须**完全静默**；基线在但最终快照缺失 = 钩子跑了而 `trap` 没能落盘（用户自己装了 EXIT trap，或进程被 SIGKILL），必须**出声**，否则用户以为 `export` 生效了。
+- **新增任何「面板自己打进任务日志」的元信息行（`[前置脚本环境变量] …`、`[前置脚本执行失败: …]`、`[后置脚本执行失败: …]` 等），必须同步登记到 `task_executor.go` 的 `panelMetaLinePrefixes`**，否则它会混进任务成功通知的日志摘录（`summarizeTaskSuccessOutput`，上限 30 行 / 1500 字符），把用户真正想看的脚本输出挤掉。这个失败模式同样是静默的：任务照常成功，只是通知里看不到有用内容。
+
+### 4. Validation & Error Matrix
+
+- 前置脚本 `export A=1` 后 `exit 0` → `A` 仍然回传（`trap EXIT` 兜住）
+- 前置脚本 `export PATH=/custom:$PATH` → 生效（`PATH` 不保护）
+- 前置脚本 `export TZ=UTC` / `export DAIDAI_TOKEN=x` → 被忽略，任务日志出现「已忽略受保护变量: …」
+- 前置脚本 `export PYTHONPATH=/my/lib`（整体覆盖）→ 生效，且任务日志多一行「注意：PYTHONPATH 是面板注入的运行时变量…请改用 `export PYTHONPATH=...:$PYTHONPATH` 的追加写法」
+- 前置脚本 `export PYTHONPATH=/my/lib:$PYTHONPATH`（追加写法）→ 生效且**不提示**
+- 前置脚本 `cd /tmp` → `PWD` 变了但静默丢弃，不进日志
+- 前置脚本 `unset X` → 不传导，`X` 保持原值
+- 只赋值未 export 的超大账号变量 → 合并后仍然存在（增量合并，不是替换）
+- 临时目录建不出来 → 退回「执行但不回传」的旧行为并写一行日志，**不得连钩子都不跑**
+- 订阅钩子 / `task_after.sh` / `extra.sh` → 不注入 `DAIDAI_HOOK_ENV_DUMP`，采集代码整段不装
+
+### 5. Good/Base/Bad Cases
+
+- Good：前置脚本里 `export RUN_ID="$(date +%s)"` 然后 `exit 0`，目标脚本 `os.environ["RUN_ID"]` 读得到，任务日志写明「已生效: RUN_ID」。
+- Base：没有前置脚本的任务，日志里一行多余输出都没有，行为与改动前逐条一致。
+- Bad：把 dump 代码追加在 `. "$__dd_script"` 之后。用户一句 `exit 0`，回传功能完全失效且无任何提示。
+- Bad：只采一次快照。`HTTP_PROXY` 被冻结成快照值，用户在设置页改了代理却发现任务还在用旧地址。
+- Bad：用 final 整体替换 `envVars`。超预算的大账号变量在目标脚本里凭空消失。
+- Bad：把 `PATH` 也加进保护名单。用户改 `PATH` 想让脚本用自己那套 `pip` 却怎么改都不生效。
+
+### 6. Tests Required
+
+见 `server/service/task_hook_env_test.go`：
+
+- 覆盖 `exit 0` 收尾仍能回传、`exit 3` 收尾退出码不被 trap 改写且仍能回传、两次快照差集、保护名单（报告 / 静默两类）、`PATH` 可改、`unset` 不传导、只赋值未 export 的大变量不丢、`.ok` 门禁、订阅钩子 no-op。
+- **注意其中依赖真 bash 的用例在 Windows 上会 skip**（`requireUsableBash` 对 `runtime.GOOS == "windows"` 直接 `t.Skip`），只有 CI 的 `ubuntu-latest` 才真正执行 —— 本机全绿不等于这条链路验过，改动这一节的代码必须看 CI 结果。
+- ⚠️ 过滤器不能只写 `-run "HookEnv"`：那样会漏掉 `TestTaskBeforeInlineScriptExportsMergeIntoTaskEnv` 等 5 条用例，而 trap 方案的主验收恰好就在里面。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "HookEnv|TaskBefore" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```sh
+# 错误：dump 追加在 source 之后。用户脚本一句 exit 0 就永远走不到这里。
+. "$__dd_script" "$@"
+__dd_dump_env "$DAIDAI_HOOK_ENV_DUMP"
+```
+
+```go
+// 错误：替换式合并。只赋值未 export 的大变量在钩子里看不到，会被整个抹掉。
+for key := range envVars {
+    delete(envVars, key)
+}
+for key, value := range final {
+    envVars[key] = value
+}
+```
+
+#### Correct
+
+```sh
+# 正确：先落基线，再把 dump 装成 EXIT trap，最后才 source 用户脚本。
+__dd_dump_env "${DAIDAI_HOOK_ENV_DUMP}.base"
+trap '__dd_dump_env "$DAIDAI_HOOK_ENV_DUMP"' EXIT
+. "$__dd_script" "$@"
+```
+
+```go
+// 正确：只回写「钩子里新增」和「钩子里改过值」的键，缺席一律不动。
+for key, value := range final {
+    if before, existed := baseline[key]; existed && before == value {
+        continue
+    }
+    if protected, report := hookEnvProtection(key); protected {
+        if report {
+            ignored = append(ignored, key)
+        }
+        continue
+    }
+    envVars[key] = value
+}
+```
+
+---
+
 ## 场景：系统配置注册表默认值与渲染 schema
 
 ### 1. Scope / Trigger
@@ -1796,20 +1912,124 @@ decoder.UseNumber()
 
 ---
 
+## 场景：通知渠道 push_scope（默认推送 / 绑定推送）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/notifier.go` 的 `loadEnabledNotificationChannels()`、`model.NotifyChannel.PushScope` 及其归一函数、`server/handler/notification.go` 的 `Create` / `Update` / `Send`，或备份链路里 `BackupNotifyChannel` 的四处手抄点时必须看本节。
+- 原因：`push_scope` 决定「一条通知到底发给谁」，而它的四个写入点分散在 handler、notifier、备份采集、备份恢复里，任何一处漏改都表现为**静默的投递面变化**：要么用户设的隔离被悄悄取消（该收不到的收到了），要么老库整批退出广播（升级后一条通知都收不到）。两种方向都没有报错、没有日志，只能靠读代码发现。
+
+### 2. Signatures
+
+- 表列：`model.NotifyChannel.PushScope string`（**一等表列，不是 config JSON 里的键**）
+- 枚举与归一：`model.NotifyPushScopeDefault` / `model.NotifyPushScopeBound`、`model.NormalizeNotifyPushScope(raw string) (string, bool)`、`(*NotifyChannel).EffectivePushScope()`
+- 唯一筛选点：`func loadEnabledNotificationChannels(channelIDs []uint) ([]model.NotifyChannel, error)`
+- 写入口：`POST /api/notifications`、`PUT /api/notifications/:id`、`service.restoreNotifyChannels`
+- 备份结构：`service.BackupNotifyChannel.PushScope`
+
+### 3. Contracts
+
+- **`push_scope` 是一等表列，不进 `notify_channel_registry.go`。** 那张注册表是 config JSON 的 schema 真源，被 `TestNotifySchemaCoversAllConfigKeysReadByNotifier` 用 go/ast 与 `notifier.go` 实际读的 `cfg["..."]` 键**双向绑死**；往里塞一个 `notifier.go` 根本不从 config 读的键，会直接把那条用例弄红。
+- **取值必须是字符串枚举，不能改成 `IsDefault bool`。** 同一张表的 `Enabled bool gorm:"default:true"` 已经有一个踩过的活体坑：GORM 的 `ConvertToCreateValues` 把 `false` 当零值从 INSERT 里省掉，DB 侧的 `DEFAULT true` 反而生效（`DefaultValueInterface`），于是 `restoreNotifyChannels` 的 `tx.Create` 会把一条禁用渠道静默写回启用 —— 回归测试为此被迫写成 `Select("*").Create` + 单独 `Update`。bool 版的 push_scope 会以同样的方式把用户设的 bound 悄悄翻成 default，也就是把隔离意图反着执行。字符串的 Go 零值 `""` 归一后正好是 default，漏填只会退回升级前的老行为，方向安全。
+- **定向发送完全忽略 `push_scope`。** `channelIDs` 非空时只按 ID 精确命中 —— 「绑定推送」存在的意义就是只在被显式指定时才推，再叠一层过滤等于把功能做废。
+- **广播过滤条件必须写 `COALESCE(push_scope, '') <> 'bound'`，禁止写 `= 'default'`。** 这一列的语义是「空即默认」：老库补列、手工改库、以及未来任何忘了填这一列的写入路径都会留下空串或 `NULL`，等值比较会让这些历史行静默退出广播。`COALESCE` 那一层是为了兜 `NULL` —— SQL 里 `NULL <> 'bound'` 求值为 `NULL`（不成立），不兜同样会漏。
+- **广播 0 命中严格不兜底，但必须留一行 warn 日志。** 不允许「广播没命中就退回全部已启用渠道」——那等于取消隔离。改动前这条路径是完全静默的，用户只要把所有渠道都设成 bound，系统通知（资源告警、登录通知、静默更新结果）就会全部人间蒸发且零线索，所以 `log.Printf("warn: notification broadcast skipped: ...")` 是这条路径唯一可查的痕迹，不得删。
+- **`PUT /notifications/:id` 是按键更新，请求里没出现的键一概不动已有值。** 独立发版的 Flutter APP 编辑渠道时不带 `push_scope`，改成「缺省即 default」会让用户在 Web 上设的 bound 被 APP 的一次保存悄悄清掉。**显式传 `null` 同样视为「未提供」**：APP 很可能把未填字段序列化成 null，按类型错误 400 会让它一升级就全线保存失败，代价远大于收益。其余非字符串类型仍然 400，拼错的字符串值也仍然 400。
+- **`notifier.go` 里定向分支那句 `未找到已启用的通知渠道` 被 `notification_send_regression_test.go` 逐字断言，不得改动**（改文案会挂用例，也会让老客户端的错误匹配失效）。只有广播分支那句可以改。
+- **备份四处手抄一个都不能漏**：`backup_types.go` 的结构体字段、`backup_runtime.go` 的采集、旧版备份转换、恢复落库。漏一处的表现是「还原之后所有渠道全退回默认推送」，用户的隔离配置一次备份往返就没了。恢复口对非法值一律按 default 落库，**不得让整批恢复失败**。
+
+### 4. Validation & Error Matrix
+
+- `Create` 不带 `push_scope`（老客户端）→ 空串归一成 `default`，与升级前行为一致
+- `Create` / `Update` 传 `"bind"` 之类拼错值 → `400`，**不做「就近纠正」**（把 bind 当 default 落库等于反着执行用户意图），且不落库
+- `Update` 不带 `push_scope` → 跳过该键，已有值不变
+- `Update` 传 `"push_scope": null` → 跳过该键，返回 `200`，已有值不变；同一请求里的其它键仍生效
+- `Update` 传数字 / 布尔 / 数组 → `400`
+- 广播时库里只有 bound 渠道 → 同步口返回「暂无参与广播的默认推送渠道」；异步口只写 warn 日志，**不退回全量**
+- 历史行 `push_scope` 为空串或 `NULL` → 仍参与广播
+- 渠道测试按钮（`SendNotificationToChannel`）→ 完全绕过筛选，`push_scope` 不得拦它，否则用户没法验证 bound 渠道的配置
+
+### 5. Good/Base/Bad Cases
+
+- Good：用户建一个「脚本专用」渠道设成 bound，系统告警和其它任务都不会打扰它，只有显式绑定了它的那个任务能发进去。
+- Base：老库全部是空串 / `default`，升级后广播行为与升级前逐条一致。
+- Bad：广播过滤写成 `push_scope = 'default'`。升级后老库整批静默退出广播，无报错、无日志。
+- Bad：`push_scope` 用 `bool`。GORM 零值替换把 bound 翻成 default，用户的隔离被反着执行。
+- Bad：`Update` 把缺省当成 default。APP 保存一次就把 Web 上设的 bound 清掉。
+- Bad：广播 0 命中时兜底退回全部已启用渠道。功能等于没做，而且用户完全看不出来。
+
+### 6. Tests Required
+
+见 `server/handler/notification_push_scope_test.go`、`server/service/notifier_push_scope_test.go`、`server/database/notify_channel_push_scope_migration_test.go`：
+
+- `TestNotificationBroadcastOnlyHitsDefaultPushScopeChannels`（核心验收：广播不碰 bound）
+- `TestNotificationSendTargetsBoundChannelExplicitly`（定向必须忽略 push_scope，少了它 bound 就是死渠道）
+- `TestNotificationBroadcastIncludesLegacyBlankPushScopeRow`（锁死「不等于 bound」而不是「等于 default」，含空串与 `NULL` 两种历史形态）
+- `TestNotificationTestButtonWorksForBoundChannel`
+- `TestNotificationSendRejectsBlankChannelTargets`（点名了渠道却没有有效 ID 时 `400`，不退化成广播）
+- `TestUpdateNotificationChannelKeepsPushScopeWhenFieldAbsent`（缺席与显式 `null` 都不清值；非法值与非字符串类型仍 `400`）
+- `TestCreateNotificationChannelHandlesPushScope`
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./handler ./service ./database -run "PushScope|TestNotificationSend|TestNotificationBroadcast" -count=1
+go test ./...
+```
+
+> **突变验证**：把 `loadEnabledNotificationChannels` 的广播条件改成 `push_scope = 'default'`，`TestNotificationBroadcastIncludesLegacyBlankPushScopeRow` 必须变红；把定向分支也加上 push_scope 过滤，`TestNotificationSendTargetsBoundChannelExplicitly` 必须从另一个方向再红一次。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：等值比较。空串 / NULL 的历史行会静默退出广播，升级后「一条通知都收不到」且零线索。
+query = query.Where("push_scope = ?", model.NotifyPushScopeDefault)
+```
+
+```go
+// 错误：把缺席（以及显式 null）当成 default，APP 一次保存就清掉用户设的 bound。
+updates["push_scope"] = model.NotifyPushScopeDefault
+```
+
+#### Correct
+
+```go
+// 正确：只排除明确写着 bound 的行，并用 COALESCE 兜住 NULL。
+query = query.Where("COALESCE(push_scope, '') <> ?", model.NotifyPushScopeBound)
+```
+
+```go
+// 正确：null 视为「未提供」直接跳过；其余非字符串类型仍然 400。
+if v == nil {
+    continue
+}
+raw, ok := v.(string)
+if !ok {
+    response.BadRequest(c, "推送范围必须是字符串")
+    return
+}
+```
+
+---
+
 ## 场景：Magisk 模块版的部署类型与在线升级
 
 ### 1. Scope / Trigger
 
-- 触发：修改 `server/handler/system_update_magisk.go`、`system_update.go` 的部署类型判定与分派、`Magisk/service.sh`，或前端 `OverviewHeroCard.vue` / `UpdateProgressDialog.vue` / `useSettingsOverview.ts` 里与 `deployment_type` 有关的分支时必须看本节。
-- 原因：模块版的文件分布在**三个互不相同的位置**，任何只改其中一处的升级实现都会在下一次开机被静默回滚：
+- 触发：修改 `server/handler/system_update_magisk.go`、`system_update.go` 的部署类型判定与分派、`server/handler/system.go` 的 `Info` / `Restart` / `StopPanel`、任何 `Magisk/*.sh`，或前端 `OverviewHeroCard.vue` / `UpdateProgressDialog.vue` / `useSettingsOverview.ts` 里与 `deployment_type` 有关的分支时必须看本节。
+- 原因：模块版的文件分布在**四个互不相同的位置**，任何只改其中一处的升级实现都会在下一次开机被静默回滚：
 
-| 位置 | 路径 |
-|---|---|
-| 模块本体（宿主 Android 侧） | `/data/adb/modules/daidai-panel/` |
-| 容器 rootfs | `/data/daidai` 或 `/data/local/daidai` |
-| 面板实际运行的文件（容器内） | `/usr/local/bin/daidai-server`、`/app/web`、`/app/Dumb-Panel` |
+| 位置 | 路径 | 在线升级能不能改到 |
+|---|---|---|
+| 模块本体（宿主 Android 侧） | `/data/adb/modules/daidai-panel/` | 能（best-effort，只写三样） |
+| 容器 rootfs | `/data/daidai` 或 `/data/local/daidai` | 不动 |
+| 面板实际运行的文件（容器内） | `/usr/local/bin/daidai-server`、`/app/web`、`/app/Dumb-Panel` | 能 |
+| 宿主持久目录 | `/data/adb/daidai-panel/`（`ports.conf`、`service.log`、`deps-snapshot/`、`stopped`、`watchdog.gen`） | 不动 |
 
 `Magisk/service.sh` 每次开机把第 1 处拷进第 3 处。所以在线升级必须**两处都写**。
+**模块脚本（`*.sh`）本身在线升级永远改不到** —— 由模块脚本实现的能力只能靠重刷 zip 获得，这一点必须在 UI 提示、README、release notes 三处如实说明，不要写成「外壳有变更会被自检拦下」。
 
 ### 2. Signatures
 
@@ -1819,22 +2039,38 @@ decoder.UseNumber()
 - 未命中哨兵：`var errMagiskRuntimeNotDetected = errors.New(...)`
 - 执行入口：`func executeMagiskPanelUpdateWithOptions(plan *panelUpdatePlan, options panelUpdateExecutionOptions)`
 - 面板进程定位：`func findMagiskPanelServerPID() int`
-- 外壳版本：Go `const requiredMagiskShellVersion` ↔ shell `export DAIDAI_MAGISK_SHELL_VERSION`
+- 外壳版本：Go `const currentMagiskShellVersion`（= service.sh 当前 export 的值）与 `const requiredMagiskShellVersion`（在线升级放行的最低值）↔ shell `export DAIDAI_MAGISK_SHELL_VERSION`
 - plan 新增字段：`DataDir` / `WebDir` / `ModuleDir`
 - 升级窗口哨兵：`<DataDir>/.updating`（Go 常量 `magiskUpdatingSentinelName` ↔ service.sh 的 `UPDATING_FLAG`）
+- 手动停止开关：`/data/adb/daidai-panel/stopped`（Go 常量 `magiskStopFlagPath` ↔ 四个 shell 的 `STOP_FLAG` / `$PERSIST_DIR/stopped`）
+- 守护代次标记：`/data/adb/daidai-panel/watchdog.gen`（Go 常量 `magiskWatchdogGenName` ↔ service.sh 的 `WATCHDOG_GEN_FILE`）
+- 停止接口：`func (h *SystemHandler) StopPanel(c *gin.Context)` + `func writeMagiskStopFlag() error` + `const magiskStopSupportedShellVersion`
+- 进程退出注入点：`var panelProcessExit` / `var panelProcessExitDelay`（Restart 与 StopPanel 共用，仅为可测）
 
 ### 3. Contracts
 
 - **判定顺序固定**：Watchtower → **magisk** → Docker → binary。magisk 必须排在 Docker 探测之前，否则模块版会拿到「未提供 Docker CLI，请配置 Watchtower」这段与 Android 完全无关的报错（`buildPanelUpdatePlanForRelease` 会把 Docker 与 binary 两段错误拼起来抛出，用户看到的第一句必然是 Docker 那句）。
 - **只有 `errMagiskRuntimeNotDetected` 才继续往下走**。模块版自身的失败（例如外壳版本过旧）必须原样抛给用户，用 `errors.Is` 判定，不要包装它。
 - **升级范围严格限定三样**：`daidai-server`、`ddp`、前端目录。容器 rootfs、apt/apk 系统包、Python venv、`config.yaml`、`ports.conf` 一概不动。更新包里自带的 `config.yaml` 必须跳过——它会覆盖模块生成的端口配置。
-- **进程路径与名字必须是 `/usr/local/bin/daidai-server`**。`service.sh` 与 `action.sh` 都用 `pgrep -f /usr/local/bin/daidai-server` 去重，改名会让下次开机再拉起一个实例抢同一个端口。
+- **进程路径与名字必须是 `/usr/local/bin/daidai-server`**（这条 argv0 是三方共同依赖的契约）：容器启动脚本用 `pgrep -f /usr/local/bin/daidai-server` 去重；`service.sh` 的守护（`panel_is_running`）与 `action.sh` 的 `panel_pids` 逐个读 `/proc/<pid>/cmdline` 按这条前缀匹配；Go 侧 `findMagiskPanelServerPID` 拿 argv0 与 `magiskPanelBinaryPath` 做全等比较。改名会让下次开机再拉起一个实例抢同一个端口，也会让动作按钮永远探不到面板、停止功能直接失效。
+  - 注意 `action.sh` / `service.sh` **不用 `pkill -f daidai-server` 停面板**：执行它的 `sh -c` 自身 cmdline 就含这串字符、会被自己命中。停止路径必须先探到 PID 再 `kill -TERM` / `kill -KILL`。
 - **启动前必须 `cd` 到数据目录**。否则 `appboot.ResolveConfigPath()` 四个候选全落空，`main.go` 直接 `log.Fatalf`。
 - **二进制必须 rename 覆盖**，不能直接写正在执行的文件（`ETXTBSY`）。
 - **前端换完必须重启进程**，不能指望热生效：`main.go` 只在启动时对 `assets` / `monaco` / `sponsor-portal` 三个子目录调 `engine.Static`，新版 dist 多出顶层目录时不重启会走 SPA fallback，静态资源等于坏掉。
 - **运行态判定只校验目录、不校验文件名**：`ddp` 装在 `/usr/local/bin/ddp`，写死 `daidai-server` 会让 CLI 分支全成死代码。相应地 plan 必须记录真正的面板 PID，CLI 发起时由 helper 显式 `kill -TERM`，且此时**不得**自杀（会截断 CLI 输出）。
 - **`os.Executable()` 要剥掉 `" (deleted)"` 后缀**：二进制被替换后 `/proc/self/exe` 会带这个后缀。
-- **外壳版本号必须与 Go 常量同步**。改任何 `Magisk/*.sh` 或 rootfs 结构，`requiredMagiskShellVersion` 与 `DAIDAI_MAGISK_SHELL_VERSION` 一起加一。
+- **外壳版本是两个常量，别当成一个**：
+  - `DAIDAI_MAGISK_SHELL_VERSION`（service.sh）↔ `currentMagiskShellVersion`（Go）：**每改一次 `Magisk/*.sh` 或 rootfs 结构就一起加一**，`magisk_assets_test.go` 静态断言两者逐字相等。它只描述「仓库里的外壳长什么样」。
+  - `requiredMagiskShellVersion`（Go）：在线升级放行的**最低**外壳版本，**只有当新面板无法在旧外壳上运行时才提**。提了就意味着所有还在跑旧外壳的用户必须先手动重刷一次模块 zip 才能继续在面板内一键升级——这是很贵的操作，不要因为「改了 shell」就顺手提。
+  - 不变式：`requiredMagiskShellVersion <= currentMagiskShellVersion`（有测试钉死）。反过来会让刚打出来的 zip 装上去就被自己的外壳自检拦住。
+  - 外壳只是多了增量能力时（例如 v2 的手动停止），保持 required 不动，改由**接口层 + 前端按外壳版本 gating** 并提示重刷 ZIP，提示里必须带上实际外壳版本号。
+  - ⚠️ 版本门禁本身有 off-by-one：`resolveMagiskShellVersion` 读的是**当前进程**的 env，而门禁在**发起升级的旧进程**里执行，所以提高 required 也挡不住本次升级、只挡下一次。别把它当成能拦住「本次」的手段。
+- **手动停止开关（v2 外壳）的四条契约**：
+  - 路径固定 `/data/adb/daidai-panel/stopped`。**绝不能**放进 `$rootfs/app/Dumb-Panel/`：那里的 `.updating` 每次开机被无条件删除，同目录的跨重启标记迟早被同类清理误伤；rootfs 重装还会整体删除它。
+  - `service.sh` 的早退点必须在「模块→容器条件同步 + deps 回填」**之后**、「进容器拉起面板」**之前**。放太靠前 → 停止状态下刷入新 zip 再重启，新二进制同步不进容器，点启动跑的还是旧版本，表现成「刷了新版但版本号没变」。
+  - `uninstall.sh` 必须**无条件**删除停止开关与守护代次标记（放在 `.keep_on_uninstall` 判断之外）。落进 KEEP 分支的话，「停止 → 保留数据卸载 → 重装」会得到一个永远起不来的新模块，且零线索。`customize.sh` 安装收尾同样无条件清掉开关：「刚装完的模块必须能起来」优先级更高。
+  - `/system/restart` **绝对不能**写这个开关。restart 的语义是「重来一次」，写了开关就变成永久停机，而此时 Web 已经没了，用户在面板上再无自救手段。这条有回归测试（`system_stop_panel_test.go`）。
+- **守护子 shell 必须有代次去重**。`service.sh` 只对 `daidai-server` 做了 pgrep 去重，对自己 fork 的守护没有任何去重手段；文档与 `action.sh` 又在教用户重跑 `service.sh`。做法是 fork 前写 `watchdog.gen`，守护每轮比对、值变即自退。结束守护**不能**用 `pkill -f service.sh`（会误杀正在执行的 service.sh 本身）。
 - **`service.sh` 的模块→容器同步必须是条件覆盖**（模块内文件更新才 cp）。这是模块目录写不进去时（KernelSU 下分区可能只读）唯一的防回滚保险。`-nt` 不被支持时必须回落成无条件同步——宁可丢一次在线升级，也不能让刷入新模块后同步不进容器。
 - **构建方案失败时也要回填 `deployment_type`**（`detectPanelDeploymentTypeHint`）。否则前端只能看到空对象，会退回到「请在宿主机执行 docker compose pull」那句兜底，对 Android 模块版和裸机二进制部署都是误导。
 
@@ -1851,7 +2087,10 @@ decoder.UseNumber()
 ### 5. Good/Base/Bad Cases
 
 - Good：面板内点「立即更新」，几十秒完成，容器与已装依赖不动，不用重启手机；重启后仍是新版本。
-- Base：模块外壳有变更的版本，面板自检后拒绝在线升级并提示重刷 ZIP。
+- Good：管理器里点动作按钮停止面板，等 3 分钟不自动回来，重启手机仍是停止；再点一次恢复。
+- Base：外壳只是多了增量能力时，在线升级照常放行，面板里那项功能显示为禁用并提示「需重刷模块 ZIP（当前外壳版本 N）」。
+- Base：新面板确实无法在旧外壳上运行时，面板自检后拒绝在线升级并提示重刷 ZIP。
+- Bad：`/system/restart` 顺手写了停止开关 —— 用户点一次「重启面板」变成永久停机，Web 没了，只能去模块管理器抢救。
 - Bad：只写容器内路径 —— 下次开机被 `service.sh` 用模块里的旧文件覆盖，升级静默回滚。
 - Bad：复用二进制链路 —— `InstallDir` 会是 `/usr/local/bin`，前端落到 `/usr/local/bin/web`（config 里是 `/app/web`），新进程 cwd 错导致找不到 config.yaml 直接 `log.Fatalf`，且进程改名后 pgrep 去重失效。
 - Bad：`ddp update` 发起时不找面板 PID —— 会在面板还活着的时候替换二进制并再起一个实例。
@@ -1866,7 +2105,9 @@ decoder.UseNumber()
 - `replaceDirAtomically` 必须清掉旧的 hash 产物，且不留 `.new` / `.old` 残留。
 - `buildPanelUpdateTarget` 的 magisk 分支不得带出 `image_name` / `container_name`。
 - 非模块版必须返回 `errMagiskRuntimeNotDetected` 本身（用 `errors.Is` 判定的前提）。
-- `service.sh` 必须包含 `file_needs_sync`、`panel_is_running`、`UPDATING_FLAG`，且 `DAIDAI_MAGISK_SHELL_VERSION` 与 Go 常量一致。
+- `service.sh` 必须包含 `file_needs_sync`、`panel_is_running`、`UPDATING_FLAG`，且 `DAIDAI_MAGISK_SHELL_VERSION` 与 `currentMagiskShellVersion` 逐字一致；同时断言 `requiredMagiskShellVersion <= currentMagiskShellVersion`。
+- 停止开关链路（`TestMagiskScriptsShareStopFlagPath`）：Go 常量与四个 shell 的字面量同路径；`service.sh` 的早退点位置（同步之后、拉起容器之前）；`action.sh` 的停/启两条路径且不得出现 `pkill -f service.sh`；`uninstall.sh` 的两条 `rm -f` 排在 `KEEP_FLAG` 分支之后；`customize.sh` 先写开关再 `rm -rf "$rootfs"`、收尾无条件清开关。
+- 停止接口行为（`system_stop_panel_test.go`）：`/system/restart` 不写停止开关且退出码仍是 1；`/system/stop` 在模块版 + 外壳 >= 2 时写开关并以 0 退出；非模块版、旧外壳一律 400 且不留文件；`/system/info` 平铺返回 `deployment_type` / `magisk_shell_version` 且老字段位置不变。
 
 > **这些都只是静态字符串断言，防不住 shell 逻辑写错。** 改 `Magisk/service.sh` 后必须真机跑完整回路：装 → 重启 → 面板内升级 → 再重启确认不回滚 → 杀掉面板进程确认自动拉起。Debian flavor 至今没做过真机安装。
 
