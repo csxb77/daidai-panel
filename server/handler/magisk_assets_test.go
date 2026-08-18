@@ -548,3 +548,340 @@ func TestMagiskCheckRuntimesScriptIncludesInstalledRuntimePaths(t *testing.T) {
 		}
 	}
 }
+
+// ---- 容器内 DNS / apt 加固相关断言 ---------------------------------------
+//
+// 背景：Debian flavor 装依赖时 apt 全部报 Temporary failure resolving，
+// Alpine 不受影响。三个互斥候选（apt 降权被拒网 / glibc 解析器行为 / DNS 本身不可达）
+// 在脚本里原本没有任何东西能区分。下面这几条锁住的是「判别手段」和「低风险修复」本身，
+// 同样只是静态字符串断言 —— 真机验证不可省。
+
+// Debian 的 resolv.conf 不能再是单条硬编码：要吃宿主 net.dns*、要有公共 DNS 兜底、
+// 还必须带 options single-request-reopen（这条正是 musl 不受影响而 glibc 受影响的关键）。
+// 但这一整套【只能】落在 Debian 分支里 —— Alpine 必须逐字保留改动前那条单一 DNS，
+// 原因见下面 alpineSingleDNS 处的注释。
+func TestMagiskCustomizeScriptWritesResilientResolvConf(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		// 宿主真实 DNS 优先
+		"for p in net.dns1 net.dns2 net.dns3 net.dns4; do",
+		// 公共 DNS 兜底
+		"for d in 223.5.5.5 119.29.29.29 8.8.8.8; do",
+		// glibc 的 A+AAAA 同源端口并发查询是主要嫌疑，必须关掉
+		"options single-request-reopen timeout:2 attempts:3",
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected customize.sh to contain resolv.conf snippet %q", snippet)
+		}
+	}
+
+	// Alpine 必须逐字保留改动前那条单一 DNS，这【不是】残留而是刻意的 flavor 差异：
+	// musl 对所有 nameserver 并行发查询、谁先回就采信谁，并且把 NXDOMAIN 也当成
+	// 确定性应答直接接受。把宿主 net.dns（校园网 / 企业网 / Captive Portal 的强制
+	// 解析器）塞进 Alpine 的 resolv.conf，只要它抢先回一个 NXDOMAIN，musl 就直接判定
+	// 域名不存在 —— 本来装得上的网络会开始装不上。Alpine 是目前唯一被真机证实可用的
+	// flavor，不能拿它冒这个险。
+	//
+	// 但这条单行必须待在 else 分支里：一旦跑到公共段（或跑到 Debian 分支后面），
+	// 它就会把上面那套多源写入整段覆盖掉，等于 Debian 的修复白做。
+	const alpineSingleDNS = `echo "nameserver 223.5.5.5" > $rootfs/etc/resolv.conf`
+	if got := strings.Count(text, alpineSingleDNS); got != 1 {
+		t.Fatalf("单条硬编码 nameserver 应恰好出现 1 次（Alpine 分支），实际 %d 次", got)
+	}
+
+	// 用「标记行号严格递增」锁住 DNS 段落的结构：
+	//   DNS 段落起头 -> cp hosts（公共段，两个 flavor 都要）-> if debian
+	//     -> 多源写入 -> options -> else -> Alpine 单条写死 -> fi
+	// 这样既保证 Alpine 的单条只在 else 里，也保证 cp hosts 没被误挪进某个分支。
+	lines := strings.Split(text, "\n")
+	findFrom := func(from int, match func(string) bool) int {
+		for i := from; i < len(lines); i++ {
+			if match(lines[i]) {
+				return i
+			}
+		}
+		return -1
+	}
+	contains := func(s string) func(string) bool {
+		return func(line string) bool { return strings.Contains(line, s) }
+	}
+	// else / fi 必须整行精确匹配，否则会被注释里的字样勾到
+	exact := func(s string) func(string) bool {
+		return func(line string) bool { return strings.TrimSpace(line) == s }
+	}
+
+	at := findFrom(0, contains("# ---- DNS / hosts 准备"))
+	if at < 0 {
+		t.Fatal("customize.sh 里找不到「DNS / hosts 准备」段落")
+	}
+	for _, step := range []struct {
+		desc  string
+		match func(string) bool
+	}{
+		{"cp /system/etc/hosts（公共段）", contains("cp /system/etc/hosts $rootfs/etc/")},
+		{`if [ "$FLAVOR" = "debian" ]; then`, exact(`if [ "$FLAVOR" = "debian" ]; then`)},
+		{"宿主 net.dns* 循环（Debian 分支）", contains("for p in net.dns1 net.dns2 net.dns3 net.dns4; do")},
+		{"options single-request-reopen（Debian 分支）", contains("options single-request-reopen timeout:2 attempts:3")},
+		{"else（切到 Alpine 分支）", exact("else")},
+		{"Alpine 单条写死", contains(alpineSingleDNS)},
+		{"fi（DNS 分叉结束）", exact("fi")},
+	} {
+		next := findFrom(at+1, step.match)
+		if next < 0 {
+			t.Fatalf("DNS 段落结构不对：在第 %d 行之后按顺序找不到 %s", at+1, step.desc)
+		}
+		at = next
+	}
+
+	// nsswitch.conf 绝不能被截断写：Debian 的这个文件由 base-files 提供、本来就在，
+	// `>` 覆盖会连 passwd: / group: / shadow: 一起删掉，
+	// 直接搞坏紧随其后的 usermod / chpasswd 以及 service.sh 里的 adduser / sshd。
+	for i, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") || !strings.Contains(line, "nsswitch.conf") {
+			continue
+		}
+		for _, bad := range []string{
+			`> "$rootfs/etc/nsswitch.conf"`,
+			`> $rootfs/etc/nsswitch.conf`,
+		} {
+			// 只禁截断写，追加写（>>）是允许的
+			if strings.Contains(line, bad) && !strings.Contains(line, ">"+bad) {
+				t.Fatalf("customize.sh:%d 不得截断写 nsswitch.conf（会删掉 passwd:/group:/shadow: 行）: %s",
+					i+1, trimmed)
+			}
+		}
+	}
+}
+
+// Alpine 分支里【只允许】那一行单条 DNS 写死，多源 DNS 逻辑必须整段被 debian 判断包住。
+//
+// 上面那个用例只锁住了「单条写死恰好出现 1 次」和 if/else/fi 的相对顺序，
+// 锁不住 else 分支里【多出来】的语句：保留那一行、后面再追加 net.dns / 公共 DNS / options，
+// 它照样全绿。而这正是脚本注释里反复警告的那种「顺手统一」回归 ——
+// musl 对所有 nameserver 并行发查询、且把 NXDOMAIN 当成确定性应答直接采信，
+// 宿主强制 DNS（校园网 / 企业网 / Captive Portal）抢先回一个 NXDOMAIN，
+// 就会让本来装得上的 Alpine 变成装不上，而 Alpine 是目前唯一被真机证实可用的 flavor。
+func TestMagiskCustomizeScriptKeepsAlpineDNSBranchSingleLine(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+	lines := strings.Split(text, "\n")
+
+	// 只在「DNS / hosts 准备」段落里定位：装依赖那段有一模一样写法的 flavor 判断，
+	// 从文件开头找会勾错分支。
+	sectionIdx := -1
+	for i, line := range lines {
+		if strings.Contains(line, "# ---- DNS / hosts 准备") {
+			sectionIdx = i
+			break
+		}
+	}
+	if sectionIdx < 0 {
+		t.Fatal("customize.sh 里找不到「DNS / hosts 准备」段落")
+	}
+
+	// else / fi 必须整行精确匹配，否则会被注释里的字样勾到
+	findExact := func(from int, want string) int {
+		for i := from; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == want {
+				return i
+			}
+		}
+		return -1
+	}
+
+	ifIdx := findExact(sectionIdx, `if [ "$FLAVOR" = "debian" ]; then`)
+	if ifIdx < 0 {
+		t.Fatal("DNS 段落里找不到 flavor 判断的起始行")
+	}
+	elseIdx := findExact(ifIdx+1, "else")
+	if elseIdx < 0 {
+		t.Fatal("DNS 段落的 flavor 判断缺少 else 分支（Alpine 必须走单独分支）")
+	}
+	fiIdx := findExact(elseIdx+1, "fi")
+	if fiIdx < 0 {
+		t.Fatal("DNS 段落的 flavor 判断缺少收尾的 fi")
+	}
+
+	// 1. Alpine 分支（else..fi）里可执行的行必须【有且只有】那条单行写死。
+	//    这里做全等比较而不是 Contains：多一条 nameserver、多一个 options、
+	//    甚至把两条语句用 `;` 挤到同一行，都会被这条挡住。
+	//    顺带说明：Alpine 分支里一旦嵌套 if/for，那个块的开头行本身就会算进
+	//    可执行行里，所以不需要额外的嵌套判断。
+	const alpineSingleDNS = `echo "nameserver 223.5.5.5" > $rootfs/etc/resolv.conf`
+	alpineExec := make([]string, 0, 4)
+	for i := elseIdx + 1; i < fiIdx; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		alpineExec = append(alpineExec, trimmed)
+	}
+	if len(alpineExec) != 1 || alpineExec[0] != alpineSingleDNS {
+		t.Fatalf("Alpine 分支只允许保留那条单行 DNS 写死 %q，实际可执行行=%q\n"+
+			"（musl 并行查询 + 采信 NXDOMAIN：多写 nameserver 会让本来装得上的设备开始装不上）",
+			alpineSingleDNS, alpineExec)
+	}
+
+	// 2. 多源 DNS 的三段逻辑必须真的在 debian 分支体内。
+	debianBody := strings.Join(lines[ifIdx+1:elseIdx], "\n")
+	multiSourceSnippets := []string{
+		"for p in net.dns1 net.dns2 net.dns3 net.dns4; do",
+		"for d in 223.5.5.5 119.29.29.29 8.8.8.8; do",
+		"options single-request-reopen timeout:2 attempts:3",
+	}
+	for _, snippet := range multiSourceSnippets {
+		if !strings.Contains(debianBody, snippet) {
+			t.Fatalf("多源 DNS 片段 %q 必须待在 debian 分支体内", snippet)
+		}
+	}
+
+	// 3. 多源 DNS 的每一行都【只能】出现在 debian 分支内。
+	//    把它们挪到公共段（例如 fi 之后）同样会覆盖掉 Alpine 那条单行，
+	//    而第 1 条检查只看 else..fi 之间，单独挡不住这种绕法。
+	for _, marker := range []string{
+		"for p in net.dns1",
+		"for d in 223.5.5.5",
+		"options single-request-reopen",
+	} {
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") || !strings.Contains(line, marker) {
+				continue
+			}
+			if i <= ifIdx || i >= elseIdx {
+				t.Fatalf("customize.sh:%d 的多源 DNS 片段 %q 跑到了 debian 分支之外（分支体为第 %d..%d 行）: %s",
+					i+1, marker, ifIdx+2, elseIdx, trimmed)
+			}
+		}
+	}
+}
+
+// 装依赖之前必须先做 root / _apt 双身份的 DNS 判别探测，
+// 否则三个互斥候选永远分不开，下次还是只能拿到同一句「解析失败」。
+func TestMagiskCustomizeScriptProbesContainerDNSBeforeInstallingDeps(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		"PROBE_ROOT=",
+		"PROBE_APT=",
+		// _apt 在 bookworm 是 uid 42、bullseye 是 100 —— 只能动态取
+		"id -u _apt",
+		"id -g _apt",
+		"setpriv --reuid=",
+		"--clear-groups",
+		`getent hosts "$probe_host"`,
+		// 判别结论要留给后面的报错文案用
+		"DNS_PROBE_VERDICT",
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected customize.sh to contain DNS probe snippet %q", snippet)
+		}
+	}
+
+	// uid 写死过就等于探测错对象，且不会报错，只会给出错误结论
+	for _, forbidden := range []string{"--reuid=42", "--reuid=100"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("customize.sh 不得写死 _apt 的 uid（%s），bookworm 与 bullseye 不同", forbidden)
+		}
+	}
+
+	// 探测必须排在装依赖之前
+	probeIdx := strings.Index(text, "daidai-dns-probe.sh")
+	installIdx := strings.Index(text, `"$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" /tmp/daidai-install-deps.sh`)
+	if probeIdx < 0 || installIdx < 0 {
+		t.Fatalf("customize.sh 找不到 DNS 探测或装依赖的定位锚点 (probe=%d install=%d)", probeIdx, installIdx)
+	}
+	if probeIdx > installIdx {
+		t.Fatal("DNS 判别探测必须排在装依赖之前，否则拿不到「装依赖为什么失败」的判据")
+	}
+}
+
+// Debian 分支的 apt 加固 + 镜像源回退。
+func TestMagiskCustomizeScriptHardensDebianApt(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+	block := heredocBlock(t, text, "DEPS_PKG_DEBIAN_EOF")
+
+	for _, snippet := range []string{
+		// apt.conf 落在 apt.conf.d 下，运行期那三条裸 apt 路径会自动继承
+		"/etc/apt/apt.conf.d/99-daidai-android",
+		`APT::Sandbox::User "root";`,
+		`Acquire::Retries "3";`,
+		`Acquire::ForceIPv4 "true";`,
+		// 镜像源回退列表：第一个仍是 NJU（保持原行为），后面三个是新增兜底
+		"mirrors.nju.edu.cn",
+		"mirrors.tuna.tsinghua.edu.cn",
+		"mirrors.aliyun.com",
+		"deb.debian.org",
+		// 每换一个源都要重跑 update，否则换了也白换
+		"if apt-get update; then",
+		// 供宿主侧报错文案分流用的状态记录
+		"/tmp/daidai-deps-status",
+	} {
+		if !strings.Contains(block, snippet) {
+			t.Fatalf("expected customize.sh Debian 分支 to contain %q", snippet)
+		}
+	}
+
+	// 回退列表必须是「一个循环」而不是只改了域名，否则第一个源挂了照样全盘失败
+	if !strings.Contains(block, "for _mirror in mirrors.nju.edu.cn") {
+		t.Fatal("customize.sh Debian 分支必须用镜像源回退列表，而不是单一硬编码源")
+	}
+
+	// 给 _apt 加 aid_3003 是无效修复：apt 的 DropPrivs() 会 setgroups() 清空附加组，
+	// 加了只会掩盖问题，让下次排查更难。
+	if strings.Contains(text, "aid_3003 _apt") || strings.Contains(text, "_apt aid_3003") {
+		t.Fatal("不得给 _apt 追加 aid_3003 组：apt 的 setgroups() 会清掉附加组，属于无效修复")
+	}
+
+	// 这份 apt.conf 必须留在容器里（运行期装 Linux 依赖同样受益），不能被 clean 段顺手删掉
+	for i, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(line, "99-daidai-android") && strings.Contains(line, "rm ") {
+			t.Fatalf("customize.sh Debian 分支第 %d 行不得删除 99-daidai-android（运行期 apt 也靠它）: %s",
+				i+1, trimmed)
+		}
+	}
+
+	// ca-certificates 必须在那一大批之前先单独装一次：
+	// 没有根证书时镜像源只要 301 到 https，整批安装会死在证书校验上。
+	caIdx := strings.Index(block, "apt-get install -y --no-install-recommends ca-certificates")
+	batchIdx := strings.Index(block, "apt-get install -y --no-install-recommends \\")
+	if caIdx < 0 || batchIdx < 0 {
+		t.Fatalf("customize.sh Debian 分支找不到 ca-certificates / 批量安装锚点 (ca=%d batch=%d)", caIdx, batchIdx)
+	}
+	if caIdx > batchIdx {
+		t.Fatal("ca-certificates 必须排在批量安装之前单独装一次")
+	}
+}
+
+// 装依赖失败时的报错必须能区分 DNS / 镜像源 / 下载中断，
+// 且分流只作用于 Debian —— Alpine 的文案与行为要保持原样。
+func TestMagiskCustomizeScriptSplitsDepsFailureHintByFlavor(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		"容器内 DNS 解析失败",
+		"apt 的降权用户 _apt 不能",
+		"的 apt-get update 全部失败",
+		"失败发生在下载 / 解包阶段",
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("expected customize.sh 装依赖失败提示 to contain %q", snippet)
+		}
+	}
+
+	// 分流必须在「运行时验证未通过」这一段里，且 Alpine 走原来那句
+	failIdx := strings.Index(text, `if [ -n "$missing_runtimes" ]; then`)
+	hintIdx := strings.Index(text, "容器内 DNS 解析失败")
+	alpineIdx := strings.Index(text, "! 请检查网络（公司 / 校园网被墙时可挂 VPN），然后重新安装本模块。")
+	if failIdx < 0 || hintIdx < 0 || alpineIdx < 0 {
+		t.Fatalf("customize.sh 找不到失败提示分流的定位锚点 (fail=%d hint=%d alpine=%d)", failIdx, hintIdx, alpineIdx)
+	}
+	if hintIdx < failIdx || alpineIdx < failIdx {
+		t.Fatal("装依赖失败的分流提示必须在运行时验证未通过的分支里")
+	}
+}

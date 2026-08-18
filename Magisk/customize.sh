@@ -65,6 +65,9 @@ if [ "$FLAVOR" = "debian" ]; then
   CTR_SHELL=/bin/bash
   CTR_NAME="Debian bookworm"
   CTR_PKG_TOOL="apt-get"
+  # 装依赖失败时的报错文案要说清「从哪儿下」：Debian 侧现在有一串镜像源回退，
+  # 只写 NJU 会让用户误以为换个源就能好，其实四个都试过了。
+  CTR_PKG_SOURCE="镜像站（NJU / TUNA / 阿里云 / Debian 官方，按序自动回退）"
   CTR_DEPS_SIZE="约 300MB"
   CTR_BASHRC="/etc/bash.bashrc"
   # rootfs 与面板版本没有任何耦合，所以用 releases/latest/download/ 这个固定跳转地址，
@@ -74,6 +77,8 @@ else
   CTR_SHELL=/bin/ash
   CTR_NAME="Alpine 3.18"
   CTR_PKG_TOOL="apk"
+  # Alpine 侧仍然只有 NJU 一个源，文案与改动前逐字一致
+  CTR_PKG_SOURCE="mirrors.nju.edu.cn"
   CTR_DEPS_SIZE="约 50MB"
   CTR_BASHRC="/etc/bash/bashrc"
   ROOTFS_URL="https://mirrors.nju.edu.cn/alpine/v3.18/releases/aarch64/alpine-minirootfs-3.18.9-aarch64.tar.gz"
@@ -470,9 +475,93 @@ esac
 
 ui_print "- 正在联网安装面板运行依赖..."
 
-# DNS / hosts 准备
+# ---- DNS / hosts 准备 ----------------------------------------------------
+# hosts 两个 flavor 都照抄宿主的一份，与改动前逐字一致，不随 flavor 分叉。
 cp /system/etc/hosts $rootfs/etc/ 2>/dev/null
-echo "nameserver 223.5.5.5" > $rootfs/etc/resolv.conf
+
+# resolv.conf 【必须】按 flavor 分叉写，这不是风格问题，是 glibc 与 musl 的
+# 解析语义根本不同，同一份 resolv.conf 在两边的效果是相反的：
+#
+#   glibc（Debian）：按 resolv.conf 里的顺序【串行】查，第一个不通就等超时再换下一个。
+#     所以多写几条纯粹是兜底，写得越全越稳，最坏情况只是慢一点。
+#
+#   musl（Alpine）：对【所有】 nameserver 并行发查询，谁先回就采信谁，而且把
+#     NXDOMAIN 也当成「确定性应答」直接接受、不再等其他解析器。这意味着一旦把宿主
+#     net.dns（校园网 / 企业网 / Captive Portal 的强制解析器）塞进来，只要它抢先回
+#     一个 NXDOMAIN，musl 就直接判定域名不存在 —— 本来装得上的网络会开始装不上。
+#
+# Alpine 是目前唯一被真机证实可用的 flavor，回归面太大，所以它保持改动前那条写死的
+# 单一 DNS，一个字都不动。⚠️ 后人别看到两边不一样就「顺手统一」把 Debian 这套合回
+# Alpine —— 那是回归，不是清理。
+if [ "$FLAVOR" = "debian" ]; then
+  # 原来这里两个 flavor 都只写死一条 `nameserver 223.5.5.5`，是 Debian 版
+  # 「装依赖时容器内 DNS 全挂」（apt 报 Temporary failure resolving）最可疑的一环，
+  # 有两条独立的失败路径：
+  #   1. 223.5.5.5 本身不可达 —— 校园网 / 企业网强制 DNS、Captive Portal、部分 APN
+  #      屏蔽对外 53 端口。宿主自己从不走这条路（走的是 netd 的真实 DNS），所以
+  #      「手机能上网」完全不代表容器里这条 DNS 能用。
+  #   2. 没有 options single-request-reopen —— glibc 默认把 A / AAAA 两条查询用
+  #      同一个源端口并发发出，不少家用路由 / 运营商 DNS 只回一条就丢另一条，
+  #      glibc 只能等到超时重试，最终报的就是 EAI_AGAIN（正是那句 Temporary failure）。
+  #      musl 不这么干，所以 Alpine 版一直没事 —— 这条能解释「同样的网络只有 Debian 挂」。
+  # 两条对 glibc 都是「加上没坏处、不加可能致命」，所以不等真机结论就一起上。
+  #
+  # glibc 的 MAXNS 是 3，写再多也只有前 3 条会被用到。
+  # 所以先取宿主 net.dns*（真实网络的 DNS，校园网 / 企业网强制 DNS 场景只有它能用），
+  # 但最多取 2 条，保证至少还能留一个公共 DNS 兜底；不够 3 条再用公共 DNS 补齐。
+  # net.dns* 在 Android 8+ 上通常是空的（netd 不再回写这几个 prop），那样就等价于
+  # 只用公共 DNS —— 与改动前的行为一致，不会让本来能装的设备变得装不上。
+  : > $rootfs/etc/resolv.conf
+  dns_written=0
+  dns_seen=""
+  add_nameserver() {
+    # $1 = 待写入的 DNS 地址；空值 / 重复 / 已满 3 条一律跳过
+    [ -n "$1" ] || return 0
+    [ "$dns_written" -lt 3 ] || return 0
+    case " $dns_seen " in
+      *" $1 "*) return 0 ;;
+    esac
+    echo "nameserver $1" >> $rootfs/etc/resolv.conf
+    dns_seen="$dns_seen $1"
+    dns_written=$((dns_written + 1))
+  }
+  host_dns_used=0
+  for p in net.dns1 net.dns2 net.dns3 net.dns4; do
+    [ "$host_dns_used" -lt 2 ] || break
+    v=$(getprop "$p" 2>/dev/null)
+    # 只收 IPv4/IPv6 字面量，prop 里偶尔会是空串或占位符
+    case "$v" in
+      ""|"0.0.0.0"|"::") continue ;;
+    esac
+    before="$dns_written"
+    add_nameserver "$v"
+    [ "$dns_written" -gt "$before" ] && host_dns_used=$((host_dns_used + 1))
+  done
+  for d in 223.5.5.5 119.29.29.29 8.8.8.8; do
+    add_nameserver "$d"
+  done
+  # single-request-reopen 是这次的重点；timeout/attempts 只是让失败来得快一点，
+  # 免得 apt 在一个不通的 DNS 上卡满默认的 5 秒 × 2 轮。
+  echo 'options single-request-reopen timeout:2 attempts:3' >> $rootfs/etc/resolv.conf
+  ui_print "- 容器 DNS: $(echo $dns_seen)"
+
+  # nsswitch.conf 只在「文件存在但没有 hosts: 行」时才追加一行。
+  # ⚠️ 绝不能 `> $rootfs/etc/nsswitch.conf` 整体覆盖：Debian 的这个文件由 base-files
+  # 提供、本来就在，截断写会连 passwd: / group: / shadow: 一起删掉，
+  # 直接搞坏紧随其后的 usermod / chpasswd 以及 service.sh 里的 adduser / sshd。
+  #
+  # 放进 Debian 分支而不是当公共代码：nsswitch.conf 是 glibc 的 NSS 机制，musl 压根
+  # 不读这个文件（musl 没有 NSS），对 Alpine 是纯死代码；留在公共段只会平白多一处
+  # 「可能动到 Alpine」的写操作。
+  if [ -f "$rootfs/etc/nsswitch.conf" ] && ! grep -q '^hosts:' "$rootfs/etc/nsswitch.conf" 2>/dev/null; then
+    echo 'hosts: files dns' >> "$rootfs/etc/nsswitch.conf"
+  fi
+else
+  # Alpine：与改动前【逐字节一致】的单条写死，只有这一行。
+  # 不读宿主 net.dns、不补公共 DNS、不写 options —— 理由见上面那段 musl 并行查询 +
+  # 采信 NXDOMAIN 的说明。这是刻意保留的差异，不是漏改。
+  echo "nameserver 223.5.5.5" > $rootfs/etc/resolv.conf
+fi
 
 # 装依赖脚本先落到容器 /tmp 再执行，不再直接 heredoc 喂给 shell 的 stdin。
 # 这样「装包」这一段（唯一真正随 flavor 分叉的部分）可以单独写两份，
@@ -489,18 +578,79 @@ export LANG=C.UTF-8
 export DAIDAI_DIR=/app/Dumb-Panel
 export DEBIAN_FRONTEND=noninteractive
 
-# 切到 NJU Debian 镜像源。
+# apt 加固配置。写在任何 apt-get 调用之前，且【装完不删】——
+# 运行期面板装 Linux 依赖走的是同一个容器里的裸 apt-get
+# （server/service/linux_packages.go、server/handler/deps_package_manager.go、
+#  server/service/backup_runtime.go 三处），apt 会自动读 /etc/apt/apt.conf.d/，
+# 留着这份配置就等于顺带把那三条运行期路径一起加固了。
+#
+# APT::Sandbox::User "root"：apt 默认会把下载动作降权到 _apt 用户跑。
+#   在带 CONFIG_ANDROID_PARANOID_NETWORK 的老内核上（Android ≤7），非 AID_INET
+#   组的 uid 连 socket() 都调不通，表现就是「root 手动 wget 得到，apt 却解析不了」。
+#   Android 8+ 换成 netd 的 eBPF 过滤后 _apt 这类系统 uid 默认放行，所以这一条
+#   在主力设备上多半是空转 —— 定位是「消除一个不确定变量」，不是已确认的根因修复。
+#   注意不要改成给 _apt 加 aid_3003 组：apt 自己的 DropPrivs() 会 setgroups() 清掉
+#   附加组，加了也不生效，只会把问题掩盖掉。
+# ForceIPv4：手机上常见「有 IPv6 地址但出不去」，apt 会先试 AAAA 再慢慢回落。
+mkdir -p /etc/apt/apt.conf.d
+cat > /etc/apt/apt.conf.d/99-daidai-android << 'APTCONF_EOF'
+APT::Sandbox::User "root";
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+Acquire::ForceIPv4 "true";
+APTCONF_EOF
+
+# 镜像源改写 + 逐个回退。
 # 注意 bookworm 用的是 deb822 格式的 /etc/apt/sources.list.d/debian.sources，
 # 不是老的 /etc/apt/sources.list —— 只改后者会静默继续走 deb.debian.org，
 # 表现是"装依赖特别慢/偶发超时"而不是报错。两个都试一遍，哪个在就改哪个。
-# NJU 的 security 源路径同样是 /debian-security，所以只换域名 URI 依然正确。
+# NJU / TUNA / 阿里云的 security 源路径同样是 /debian-security，所以只换域名 URI 依然正确。
+#
+# 先留一份原始副本：换第二个源时如果还在已改过的文件上 sed，
+# 就得知道「上一个源叫什么」，每多一个候选就多一层状态；从原始副本重改最省事。
 for _src in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
   [ -f "$_src" ] || continue
-  sed -i -e 's|deb.debian.org|mirrors.nju.edu.cn|g' \
-         -e 's|security.debian.org|mirrors.nju.edu.cn|g' "$_src"
+  [ -f "$_src.daidai-orig" ] || cp -f "$_src" "$_src.daidai-orig"
 done
 
-apt-get update
+# 顺便把 https 钉成 http：此刻 ca-certificates 还没装（debian-slim 不自带根证书），
+# 镜像源一旦 301 到 https，apt-get update 会直接死在证书校验上，
+# 报错还长得跟网络不通一模一样。等下面装完 ca-certificates 就没这个约束了。
+use_mirror() {
+  _host="$1"
+  for _src in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do
+    [ -f "$_src.daidai-orig" ] || continue
+    cp -f "$_src.daidai-orig" "$_src"
+    if [ "$_host" != "deb.debian.org" ]; then
+      sed -i -e "s|deb.debian.org|$_host|g" \
+             -e "s|security.debian.org|$_host|g" "$_src"
+    fi
+    sed -i -e 's|https://|http://|g' "$_src"
+  done
+}
+
+# 顺序：NJU（原来唯一的源）-> TUNA -> 阿里云 -> Debian 官方。
+# 前三个是国内镜像，最后一个是官方源兜底：国内镜像被单位网络整体屏蔽时还有得救。
+_mirror_ok=0
+_mirror_used=""
+for _mirror in mirrors.nju.edu.cn mirrors.tuna.tsinghua.edu.cn mirrors.aliyun.com deb.debian.org; do
+  echo "[daidai] 正在尝试镜像源: $_mirror"
+  use_mirror "$_mirror"
+  if apt-get update; then
+    _mirror_ok=1
+    _mirror_used="$_mirror"
+    echo "[daidai] 镜像源可用: $_mirror"
+    break
+  fi
+  echo "[daidai] 镜像源不可用，换下一个: $_mirror"
+done
+if [ "$_mirror_ok" = "1" ]; then
+  echo "MIRROR=$_mirror_used" > /tmp/daidai-deps-status
+else
+  echo "MIRROR=FAIL" > /tmp/daidai-deps-status
+  echo "[daidai] 所有候选镜像源的 apt-get update 都失败了"
+fi
 
 # 装包期间禁止 dpkg 的 postinst 去拉起服务。
 # openssh-server 的 postinst 会调 invoke-rc.d ssh start —— 这里是 ruri 的 chroot，
@@ -510,6 +660,17 @@ apt-get update
 # sshd 由 service.sh 每次开机直接 exec /usr/sbin/sshd 拉起，不依赖 init 脚本。
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
 chmod +x /usr/sbin/policy-rc.d
+
+# 根证书必须【第一个】装。
+# 原来它混在下面那一大批里，等于「装完这批才有根证书」，可是这批里的 curl / git / pip
+# 一旦在 postinst 或后续步骤里走 https 就已经没证书可用了；更要命的是镜像源只要对
+# http 做一次 301 -> https，整批安装会直接死在证书校验上，报错长得跟网络不通一模一样。
+# 这一步失败不致命（下面那批照装，验证段会兜底），所以不做任何中止。
+#
+# 装完不把 sources 切回 https：apt 的包本来就有 GPG 签名，走 http 是 Debian 官方
+# 推荐做法，安全性不打折；少两轮 apt-get update，也少一处可能失败的分支。
+apt-get install -y --no-install-recommends ca-certificates || \
+  echo "[daidai] ca-certificates 安装失败，pip / npm / git 的 https 可能不可用"
 
 # 与 Alpine 版逐条对齐（左 Alpine / 右 Debian）：
 #   build-base -> build-essential      py3-pip -> python3-pip
@@ -522,6 +683,7 @@ chmod +x /usr/sbin/policy-rc.d
 #   python3-venv       bookworm 把 ensurepip 拆出去了，没有它 python3 -m venv 直接失败，
 #                      而 service.sh 每次开机都要建 deps/python/<小版本> 这个 venv
 #   ca-certificates    Alpine 的 apk 自带根证书，debian-slim 不带，pip/npm/git 走 https 会炸
+#                      （上面已经先单独装过一次，这里留着只是把清单写全，重复装是空操作）
 apt-get install -y --no-install-recommends \
   bash bash-completion coreutils build-essential \
   curl wget git jq openssh-client openssh-server openssl libtool \
@@ -532,7 +694,10 @@ apt-get install -y --no-install-recommends \
 
 rm -f /usr/sbin/policy-rc.d
 
-# 缓存留着只会白占几百 MB，手机内部存储很贵
+# 缓存留着只会白占几百 MB，手机内部存储很贵。
+# 注意【不要】顺手删 /etc/apt/apt.conf.d/99-daidai-android：
+# 面板运行期装 Linux 依赖用的是同一个容器里的 apt，那份配置对它同样有效，
+# 删了等于每次运行期装包又回到没有 Retries / 没有 Sandbox 覆写的裸状态。
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 DEPS_PKG_DEBIAN_EOF
@@ -596,6 +761,90 @@ mkdir -p /app /app/web /app/Dumb-Panel
 DEPS_COMMON_EOF
 
 chmod +x "$DEPS_SCRIPT" 2>/dev/null
+
+# ---- 容器内 DNS 判别探测（仅 Debian）--------------------------------------
+# 目的不是修复，是**区分**。Debian 版报的那句 `Temporary failure resolving`
+# 至少对应三种互斥的失败机制，脚本里原本没有任何东西能把它们分开：
+#   A. apt 降权到 _apt 后被内核按 uid 拒网（只在老内核的 PARANOID_NETWORK 上成立）
+#   B. glibc 解析器行为（A+AAAA 并发查询丢应答，musl 不受影响 -> Alpine 照通）
+#   C. 容器里配的 DNS 本身不可达（强制 DNS / Captive Portal / 屏蔽外部 53）
+# 用 root 和 _apt 两个身份各跑一次 getent hosts，就能把 A 与 B/C 分开：
+#   两条都失败 -> B 或 C（uid 说被证伪）
+#   仅 _apt 失败 -> A 成立
+#
+# 只对 Debian 做：`_apt` 这个用户是 Debian 特有的，Alpine 的 apk 也不降权，
+# 而且要求「Alpine flavor 行为完全不变」，多跑一次 ruri 都不加。
+#
+# 探测失败绝不中止安装 —— 它只负责往日志里留证据，真正的判据仍是后面的运行时验证。
+DNS_PROBE_VERDICT="skipped"
+if [ "$FLAVOR" = "debian" ]; then
+  ui_print "- 正在探测容器内 DNS 解析能力..."
+  cat > "$rootfs/tmp/daidai-dns-probe.sh" << 'DNS_PROBE_EOF'
+#!/bin/bash
+# 输出固定的 KEY=VALUE 行，宿主侧按前缀解析，不依赖任何语言/顺序
+probe_host="mirrors.nju.edu.cn"
+echo "PROBE_DNS=$(awk '/^nameserver/{printf "%s ", $2}' /etc/resolv.conf 2>/dev/null)"
+if getent hosts "$probe_host" >/dev/null 2>&1; then
+  echo "PROBE_ROOT=OK"
+else
+  echo "PROBE_ROOT=FAIL"
+fi
+# _apt 在 bookworm 是 uid 42 / gid 65534(nogroup)，bullseye 才是 100 ——
+# 这里必须动态取，写死过的版本一换基础镜像就静默探测错对象。
+apt_uid=$(id -u _apt 2>/dev/null)
+apt_gid=$(id -g _apt 2>/dev/null)
+if [ -z "$apt_uid" ] || [ -z "$apt_gid" ]; then
+  echo "PROBE_APT=NOUSER"
+elif ! command -v setpriv >/dev/null 2>&1; then
+  echo "PROBE_APT=NOSETPRIV"
+elif setpriv --reuid="$apt_uid" --regid="$apt_gid" --clear-groups \
+     getent hosts "$probe_host" >/dev/null 2>&1; then
+  echo "PROBE_APT=OK(uid=$apt_uid)"
+else
+  echo "PROBE_APT=FAIL(uid=$apt_uid)"
+fi
+DNS_PROBE_EOF
+  chmod +x "$rootfs/tmp/daidai-dns-probe.sh" 2>/dev/null
+  DNS_PROBE_OUT="$TMPDIR/dns-probe.txt"
+  : > "$DNS_PROBE_OUT"
+  "$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" /tmp/daidai-dns-probe.sh \
+    > "$DNS_PROBE_OUT" 2>/dev/null || true
+
+  probe_dns=$(grep '^PROBE_DNS=' "$DNS_PROBE_OUT" 2>/dev/null | cut -d= -f2-)
+  probe_root=$(grep '^PROBE_ROOT=' "$DNS_PROBE_OUT" 2>/dev/null | cut -d= -f2-)
+  probe_apt=$(grep '^PROBE_APT=' "$DNS_PROBE_OUT" 2>/dev/null | cut -d= -f2-)
+  ui_print "-   容器 nameserver: ${probe_dns:-?}"
+  ui_print "-   root 身份解析 mirrors.nju.edu.cn: ${probe_root:-无输出}"
+  ui_print "-   _apt 身份解析 mirrors.nju.edu.cn: ${probe_apt:-无输出}"
+
+  case "$probe_root:$probe_apt" in
+    OK:OK*)
+      DNS_PROBE_VERDICT="ok"
+      ui_print "-   判定：容器内 DNS 正常（两种身份都能解析）"
+      ;;
+    OK:FAIL*)
+      DNS_PROBE_VERDICT="apt_uid_blocked"
+      ui_print "-   判定：root 能解析、apt 的降权用户 _apt 不能 —— 内核按 uid 拦了网络"
+      ui_print "-   （已写入 APT::Sandbox::User \"root\" 让 apt 不再降权，本次安装应能绕过）"
+      ;;
+    OK:*)
+      # NOUSER / NOSETPRIV：降权侧测不了，但 root 侧解析是通的
+      DNS_PROBE_VERDICT="root_ok"
+      ui_print "-   判定：root 能解析；降权身份无法测试（$probe_apt），只能确认 DNS 本身可用"
+      ;;
+    FAIL:*)
+      # root 都解析不了，apt 以 root 跑同样解析不了 —— 无论降权侧结果如何，
+      # 都能确定问题不在 uid 门控上，所以这里不再细分 _apt 的取值。
+      DNS_PROBE_VERDICT="dns_down"
+      ui_print "-   判定：root 身份就解析不了 —— 容器配的 DNS 本身不通，与 apt 降权无关"
+      ;;
+    *)
+      DNS_PROBE_VERDICT="unknown"
+      ui_print "-   判定：探测没有拿到有效输出，无法判别（不影响继续安装）"
+      ;;
+  esac
+fi
+
 "$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" /tmp/daidai-install-deps.sh
 
 # ---- 验证关键运行时真的装上了 --------------------------------------------
@@ -632,8 +881,57 @@ done
 if [ -n "$missing_runtimes" ]; then
   ui_print "! 以下运行时未能安装成功:$missing_runtimes"
   ui_print "!"
-  ui_print "! 这一步强依赖网络：${CTR_PKG_TOOL} 需要从 mirrors.nju.edu.cn 下载${CTR_DEPS_SIZE}。"
-  ui_print "! 请检查网络（公司 / 校园网被墙时可挂 VPN），然后重新安装本模块。"
+  ui_print "! 这一步强依赖网络：${CTR_PKG_TOOL} 需要从 ${CTR_PKG_SOURCE} 下载${CTR_DEPS_SIZE}。"
+
+  # Debian 版分流：DNS 不通 / 镜像源全挂 / 单纯下载中断，用户看到的现象完全不同，
+  # 原来三种都只给同一句「检查网络」，等于把最关键的线索抹掉了。
+  # Alpine 分支的文案与改动前逐字一致，不受这段影响。
+  if [ "$FLAVOR" = "debian" ]; then
+    deps_status=""
+    if [ -f "$rootfs/tmp/daidai-deps-status" ]; then
+      deps_status=$(grep '^MIRROR=' "$rootfs/tmp/daidai-deps-status" 2>/dev/null | cut -d= -f2-)
+    fi
+    case "$DNS_PROBE_VERDICT" in
+      dns_down)
+        ui_print "!"
+        ui_print "! 判定：容器内 DNS 解析失败（连 root 身份都解析不出域名）。"
+        ui_print "! 注意这【不等于】你手机没网 —— 宿主走的是系统 DNS，容器走的是"
+        ui_print "! $rootfs/etc/resolv.conf 里那几个（内容见上面的「容器 nameserver」）。"
+        ui_print "! 常见于校园网 / 企业网强制 DNS、公共 Wi-Fi 的登录门户，"
+        ui_print "! 以及部分运营商屏蔽对外 53 端口。"
+        ui_print "! 解决办法：换个网络（手机热点 / 家里 Wi-Fi）后重装；"
+        ui_print "! 或先把当前网络实际可用的 DNS 写进 $rootfs/etc/resolv.conf 再重装。"
+        ;;
+      apt_uid_blocked)
+        ui_print "!"
+        ui_print "! 判定：root 能解析域名，但 apt 的降权用户 _apt 不能 —— 是内核按 uid"
+        ui_print "! 拦掉了网络（老内核的 PARANOID_NETWORK 策略）。本次安装已写入"
+        ui_print "! /etc/apt/apt.conf.d/99-daidai-android 让 apt 不再降权，若仍失败，"
+        ui_print "! 请把上面这段判别输出反馈给开发者。"
+        ;;
+      *)
+        if [ "$deps_status" = "FAIL" ]; then
+          ui_print "!"
+          ui_print "! 判定：四个候选镜像源（NJU / TUNA / 阿里云 / Debian 官方）"
+          ui_print "! 的 apt-get update 全部失败 —— 多半是镜像源被网络策略拦截，或需要代理。"
+          ui_print "! 请换网络或配置代理后重装。"
+        elif [ -n "$deps_status" ]; then
+          ui_print "!"
+          ui_print "! 判定：镜像源 $deps_status 是通的，软件包索引也拉下来了，"
+          ui_print "! 失败发生在下载 / 解包阶段 —— 常见于中途断网、存储空间不足。"
+          ui_print "! 请确认剩余空间充足、网络稳定后重装。"
+        else
+          ui_print "!"
+          ui_print "! 判定：没能拿到装依赖阶段的状态记录，无法进一步区分失败环节。"
+          ui_print "! 请把上面完整的安装日志反馈给开发者。"
+        fi
+        ;;
+    esac
+  else
+    ui_print "! 请检查网络（公司 / 校园网被墙时可挂 VPN），然后重新安装本模块。"
+  fi
+
+  ui_print "!"
   ui_print "! 缺少这些运行时的话，面板的定时任务和依赖管理都无法工作，"
   ui_print "! 所以这里直接中止，不会给你一个装了却用不了的面板。"
   warn_backup_preserved
