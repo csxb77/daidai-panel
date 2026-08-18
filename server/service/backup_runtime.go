@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -408,8 +409,67 @@ func addDirectoryToTar(tw *tar.Writer, sourceDir, archiveRoot string) error {
 		if err != nil {
 			return err
 		}
+
+		// .git 依然照常打包（还原行为完全不变、零数据丢失风险），
+		// 但 .git/config 里存着订阅 Token 鉴权注入到 remote URL 的 PAT，
+		// 必须在写进 tar 之前把凭据清掉。
+		if isGitConfigRelativePath(relPath) {
+			return addSanitizedGitConfigToTar(tw, path, filepath.Join(archiveRoot, relPath))
+		}
+
 		return addFileToTar(tw, path, filepath.Join(archiveRoot, relPath))
 	})
+}
+
+// isGitConfigRelativePath 判断相对路径是不是某个 git 仓库的 .git/config。
+func isGitConfigRelativePath(relPath string) bool {
+	segments := strings.Split(filepath.ToSlash(relPath), "/")
+	if len(segments) < 2 {
+		return false
+	}
+	return strings.EqualFold(segments[len(segments)-2], ".git") &&
+		strings.EqualFold(segments[len(segments)-1], "config")
+}
+
+// gitURLCredentialPattern 匹配 URL 里带密码的 userinfo（形如 https://user:token@host/...）。
+// 刻意要求 userinfo 中含冒号：ssh://git@host/... 这种只有用户名、没有凭据，不能动，
+// 否则还原后 SSH 订阅会连不上。
+var gitURLCredentialPattern = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s:]+:[^/@\s]*@`)
+
+// sanitizeGitConfigCredentials 去掉 git config 内容里 remote URL 内嵌的账号密码。
+// 只作用于写进备份包的那份字节流，不动磁盘上的真实 .git/config ——
+// 动了会让后续 fetch 直接失去鉴权。还原后下一次拉取会由
+// syncGitRemoteWithCallback 重新写回带凭据的 remote URL。
+func sanitizeGitConfigCredentials(content []byte) []byte {
+	return gitURLCredentialPattern.ReplaceAll(content, []byte("$1"))
+}
+
+func addSanitizedGitConfigToTar(tw *tar.Writer, sourcePath, archivePath string) error {
+	info, err := os.Stat(sourcePath)
+	if err != nil || info.IsDir() {
+		return nil
+	}
+
+	raw, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", sourcePath, err)
+	}
+	sanitized := sanitizeGitConfigCredentials(raw)
+
+	header, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		return fmt.Errorf("build tar header %s: %w", sourcePath, err)
+	}
+	header.Name = filepath.ToSlash(archivePath)
+	header.Size = int64(len(sanitized))
+
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("write tar header %s: %w", sourcePath, err)
+	}
+	if _, err := tw.Write(sanitized); err != nil {
+		return fmt.Errorf("write tar body %s: %w", sourcePath, err)
+	}
+	return nil
 }
 
 func restoreBackupFile(filename, password string) (err error) {

@@ -71,11 +71,22 @@ export function useScriptWorkspaceBrowser() {
     return message
   }
 
+  // 与后端 ShouldHideScriptTreeEntryName 保持一致的纵深防御名单。
+  // .git 等版本控制目录里存着订阅注入的访问令牌，后端已经堵死，这里只是二次过滤。
+  const hiddenScriptTreeSegments = new Set([
+    'node_modules',
+    '__pycache__',
+    '.git',
+    '.svn',
+    '.hg',
+    '.bzr'
+  ])
+
   function shouldSkipFolder(path: string) {
     return path
       .split('/')
       .map(segment => segment.trim().toLowerCase())
-      .some(segment => segment === 'node_modules' || segment === '__pycache__')
+      .some(segment => hiddenScriptTreeSegments.has(segment))
   }
 
   function normalizeTreeNodes(nodes: TreeNode[]): TreeNode[] {

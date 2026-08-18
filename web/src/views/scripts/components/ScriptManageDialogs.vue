@@ -41,7 +41,10 @@ const props = defineProps<{
   onUploadSubmit: () => void | Promise<void>
 }>()
 
-const nestedFolders = computed(() => props.allFolders.filter(folder => folder && !folder.split('/').some(segment => segment.trim().toLowerCase() === 'node_modules')))
+// 移动/复制的目标目录下拉同样要排掉受控目录，
+// 否则用户能在这里选中 .git 当目标（后端会直接拒绝，白跑一趟）。
+const hiddenTargetFolderSegments = new Set(['node_modules', '__pycache__', '.git', '.svn', '.hg', '.bzr'])
+const nestedFolders = computed(() => props.allFolders.filter(folder => folder && !folder.split('/').some(segment => hiddenTargetFolderSegments.has(segment.trim().toLowerCase()))))
 const ignoreWhitespaceDiff = ref(false)
 
 function normalizeWhitespaceForCompare(content: string) {
