@@ -36,6 +36,8 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.PUT("/:id/disable", middleware.RequireRole("operator"), h.Disable)
 		tasks.PUT("/:id/pin", middleware.RequireRole("operator"), h.Pin)
 		tasks.PUT("/:id/unpin", middleware.RequireRole("operator"), h.Unpin)
+		// 清除订阅锁：任务重新跟随订阅源的名称与定时
+		tasks.PUT("/:id/restore-subscription-default", middleware.RequireRole("operator"), h.RestoreSubscriptionDefault)
 		tasks.POST("/:id/copy", middleware.RequireRole("operator"), h.Copy)
 		tasks.DELETE("/:id/log-files/:filename", middleware.RequireRole("operator"), h.DeleteLogFile)
 		tasks.PUT("/batch", middleware.RequireRole("operator"), h.Batch)

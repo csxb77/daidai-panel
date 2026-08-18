@@ -123,6 +123,8 @@ func EnsureColumns() {
 		{"sort_order", "INTEGER DEFAULT 0"},
 		{"is_pinned", "BOOLEAN DEFAULT 0"},
 		{"python_version", "VARCHAR(16) DEFAULT ''"},
+		// DEFAULT 0：存量任务升级后一律未加锁，首次拉取行为与升级前完全一致。
+		{"subscription_locked", "BOOLEAN DEFAULT 0"},
 	})
 	migrateLegacyTaskPIDColumn()
 

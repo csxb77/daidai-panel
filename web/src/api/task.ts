@@ -52,6 +52,11 @@ export const taskApi = {
     return request.post(`/tasks/${id}/copy`) as Promise<{ message: string; data: any }>
   },
 
+  // 清除订阅锁：任务重新跟随订阅源的名称与定时，下次拉取会被订阅源的值覆盖回来
+  restoreSubscriptionDefault(id: number) {
+    return request.put(`/tasks/${id}/restore-subscription-default`) as Promise<{ message: string; data: any }>
+  },
+
   latestLog(id: number) {
     return request.get(`/tasks/${id}/latest-log`) as Promise<any>
   },

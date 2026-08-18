@@ -492,6 +492,29 @@ async function handleCopy(task: any) {
   }
 }
 
+// 清除订阅锁：任务重新跟随订阅源，下次拉取会用订阅源的名称与定时覆盖回来，
+// 所以这里必须二次确认，避免用户误点后手改的时间被打回。
+async function handleRestoreSubscriptionDefault(task: any) {
+  if (!task?.id) return
+  if (!ensureCanOperate('当前账号没有编辑任务权限')) return
+  try {
+    await ElMessageBox.confirm(
+      `任务「${task.name}」将重新跟随订阅源：下次拉取会用订阅源的名称与定时覆盖当前设置，订阅源删除脚本时也会自动删除该任务。确认恢复吗？`,
+      '恢复为订阅默认',
+      { type: 'warning' }
+    )
+    const res = await taskApi.restoreSubscriptionDefault(task.id)
+    if (detailTask.value && detailTask.value.id === task.id) {
+      detailTask.value = res.data
+    }
+    ElMessage.success('已恢复为订阅默认')
+    loadTasks()
+  } catch (err: any) {
+    if (err === 'cancel' || err === 'close') return
+    ElMessage.error(err?.response?.data?.error || '恢复失败')
+  }
+}
+
 async function handlePin(task: any) {
   if (!ensureCanOperate('当前账号没有置顶任务权限')) return
   try {
@@ -767,6 +790,18 @@ async function handleImport(event: Event) {
               <el-tag size="small" effect="plain" class="task-label task-label--type">
                 {{ getTaskTypeLabel(row.task_type) }}
               </el-tag>
+              <!-- 订阅锁：手改过名称/定时的任务不再被订阅拉取覆盖，也不会被自动删除 -->
+              <el-tag
+                v-if="row.subscription_locked"
+                size="small"
+                effect="plain"
+                type="warning"
+                class="task-label"
+                title="已手动调整过名称/定时，订阅拉取不会覆盖，也不会自动删除"
+              >
+                <el-icon><Lock /></el-icon>
+                已锁定
+              </el-tag>
               <el-tag
                 v-for="label in displayTaskLabels(row)"
                 :key="label"
@@ -888,6 +923,18 @@ async function handleImport(event: Event) {
                   </button>
                   <el-tag size="small" effect="plain" class="task-label task-label--type">
                     {{ getTaskTypeLabel(row.task_type) }}
+                  </el-tag>
+                  <!-- 订阅锁：手改过名称/定时的任务不再被订阅拉取覆盖，也不会被自动删除 -->
+                  <el-tag
+                    v-if="row.subscription_locked"
+                    size="small"
+                    effect="plain"
+                    type="warning"
+                    class="task-label"
+                    title="已手动调整过名称/定时，订阅拉取不会覆盖，也不会自动删除"
+                  >
+                    <el-icon><Lock /></el-icon>
+                    已锁定
                   </el-tag>
                   <el-tag
                     v-for="label in displayTaskLabels(row)"
@@ -1024,6 +1071,8 @@ async function handleImport(event: Event) {
     <TaskDetail
       v-model:visible="detailVisible"
       :task="detailTask"
+      :can-operate="canOperateTasks"
+      @restore-subscription-default="handleRestoreSubscriptionDefault"
     />
 
     <LogFileBrowser

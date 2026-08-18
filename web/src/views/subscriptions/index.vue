@@ -1655,6 +1655,9 @@ function viewLogDetail(log: any) {
             active-text="开"
             inactive-text="关"
           />
+          <div class="settings-hint">
+            只作用于脚本文件：开启后拉取前丢弃本地改动，关闭则先暂存再恢复。<b>不影响任务配置</b>——手动改过名称/定时的任务会自动锁定，拉取不会覆盖
+          </div>
         </el-form-item>
         <el-form-item label="默认 Cron 规则">
           <el-input

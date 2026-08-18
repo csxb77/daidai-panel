@@ -8,10 +8,12 @@ import TaskCronList from './TaskCronList.vue'
 const props = defineProps<{
   visible: boolean
   task: any
+  canOperate?: boolean
 }>()
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
+  'restore-subscription-default': [task: any]
 }>()
 const { dialogFullscreen } = useResponsive()
 
@@ -60,6 +62,10 @@ const cronExpressions = computed(() => {
 function handleClose() {
   emit('update:visible', false)
 }
+
+function handleRestoreSubscriptionDefault() {
+  emit('restore-subscription-default', props.task)
+}
 </script>
 
 <template>
@@ -94,6 +100,26 @@ function handleClose() {
       </el-descriptions-item>
       <el-descriptions-item label="执行命令" :span="2">
         <code style="word-break: break-all">{{ task.command }}</code>
+      </el-descriptions-item>
+      <!-- 订阅锁：用户手改过名称或定时后自动加锁，订阅拉取不再覆盖，也不会自动删除它 -->
+      <el-descriptions-item label="订阅同步" :span="2">
+        <div v-if="task.subscription_locked" class="subscription-lock-row">
+          <el-tag type="warning" size="small" effect="plain">
+            <el-icon><Lock /></el-icon>
+            已锁定
+          </el-tag>
+          <span class="subscription-lock-tip">已手动调整过名称/定时，订阅拉取不会覆盖，也不会自动删除</span>
+          <el-button
+            v-if="canOperate"
+            type="primary"
+            text
+            size="small"
+            @click="handleRestoreSubscriptionDefault"
+          >
+            恢复为订阅默认
+          </el-button>
+        </div>
+        <span v-else style="color: var(--el-text-color-secondary)">跟随订阅源（拉取时按订阅源的名称与定时更新）</span>
       </el-descriptions-item>
       <el-descriptions-item label="随机延迟">
         <span v-if="task.random_delay_seconds == null" style="color: var(--el-text-color-secondary)">继承系统设置</span>
@@ -139,3 +165,17 @@ function handleClose() {
     </el-descriptions>
   </el-dialog>
 </template>
+
+<style scoped>
+.subscription-lock-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.subscription-lock-tip {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+</style>

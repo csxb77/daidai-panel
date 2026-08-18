@@ -1064,6 +1064,15 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 	if options.autoAdd {
 		for command, candidate := range candidates {
 			if existing, ok := managedByCommand[command]; ok {
+				// 用户在面板手动改过任务名或定时的任务带 SubscriptionLocked 锁，订阅同步不再回灌订阅源的值。
+				// 这里必须打日志：否则用户改了订阅源时间、任务却没跟着变，会反过来以为同步坏了。
+				if existing.SubscriptionLocked {
+					if existing.Name != candidate.Name || existing.CronExpression != candidate.CronExpression {
+						emit(fmt.Sprintf("[保留手动定时] %s 已被手动调整过，跳过订阅源的名称/定时覆盖（订阅源 cron: %s）；如需重新跟随订阅，请在任务详情点「恢复为订阅默认」",
+							existing.Name, candidate.CronExpression))
+					}
+					continue
+				}
 				changes := map[string]interface{}{}
 				if existing.Name != candidate.Name {
 					changes["name"] = candidate.Name
@@ -1090,7 +1099,13 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 			if err := database.DB.Where("command = ?", command).First(&existing).Error; err == nil {
 				labels := withLabel(existing.GetLabels(), label)
 				existing.SetLabelsFromSlice(labels)
-				if err := database.DB.Model(&existing).Update("labels", existing.Labels).Error; err != nil {
+				// adopt 接管的是用户自建任务，名称与定时本来就是用户自己排的，
+				// 直接加锁，避免下一次同步立刻把它们覆盖成订阅源的值。
+				existing.SubscriptionLocked = true
+				if err := database.DB.Model(&existing).Updates(map[string]interface{}{
+					"labels":              existing.Labels,
+					"subscription_locked": true,
+				}).Error; err != nil {
 					failed++
 					emit(fmt.Sprintf("[关联已有任务失败] %s: %v", existing.Name, err))
 				} else {
@@ -1131,6 +1146,14 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 				continue
 			}
 			if _, ok := candidates[command]; ok {
+				continue
+			}
+			// 带锁任务必须在这里显式判断：删除会连任务带历史日志一起物理删掉，
+			// 标记也随之消失，锁本身守不住，只能在删除前拦一道。
+			// 已知副作用：改 SaveDir/Alias 会让所有 relPath 变化 → 新任务照建、旧的带锁任务被保留，
+			// 会出现重复任务，靠下面这条提示让用户自行清理（自动合并需要路径映射推断，误判代价更高）。
+			if task.SubscriptionLocked {
+				emit(fmt.Sprintf("[保留任务] %s 已加锁，订阅源中已无对应脚本，已保留，请手动确认", task.Name))
 				continue
 			}
 
@@ -1203,8 +1226,11 @@ func getSubscriptionTaskSyncOptions(sub *model.Subscription) subscriptionTaskSyn
 	}
 	// 系统设置里 default_cron_rule 是空时，落到硬兜底。这是用户"git 拉了但一个任务都没建"
 	// 困惑的根因：原默认是 "" → cron 头没识别就 skip，整个仓库一个任务都建不出来。
-	// v2.2.10 起改为：默认兜底 = 每天 0 点。用户想关闭兜底，可以把 default_cron_rule
-	// 设成非法值（比如 "off"），代码会回退到 "" 然后跳过没 cron 的脚本。
+	// v2.2.10 起改为：默认兜底 = 每天 0 点。
+	// 注意：兜底目前**无法关闭**。原注释声称「把 default_cron_rule 设成非法值即可关闭」是错的——
+	// model.normalizeDefaultCronRule 对非法值直接报错拒写，这条逃生口从来就不存在。
+	// 上面那句 cron.Parse 校验只用来兜住直接改库/导入配置绕过注册表写入的脏值。
+	// 想让没有 cron 头的脚本不建任务，请关掉「自动添加定时任务」（auto_add_cron / 订阅的 AutoAddTask）。
 	if defaultCron == "" {
 		defaultCron = FallbackSubscriptionCron
 	}
