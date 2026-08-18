@@ -2152,3 +2152,364 @@ if file_needs_sync "$MODDIR/system/bin/daidai-server" "$rootfs/usr/local/bin/dai
   cp -f "$MODDIR/system/bin/daidai-server" "$rootfs/usr/local/bin/daidai-server"
 fi
 ```
+
+---
+
+## 场景：订阅同步不覆盖用户手改的任务（subscription_locked）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/subscription.go` 的 `syncSubscriptionTasks`、
+  `server/handler/task_mutate.go` 的任务更新、或 `tasks` 表结构时必须看本节。
+- 原因：v3.0.5 前，订阅每次拉取都会**无条件**把仓库当前状态强加到 `tasks` 表，
+  用户手改的 cron 与任务名被重置，且 `autoDelete` 会连历史日志一起物理删除。
+
+### 2. Signatures
+
+- 同步入口：`syncSubscriptionTasks(sub *model.Subscription, emit PullCallback)`
+- 字段：`model.Task.SubscriptionLocked bool` / 列 `subscription_locked BOOLEAN DEFAULT 0`
+- 迁移：`database.EnsureColumns()` → `ensureTableColumns("tasks", ...)`
+- 解锁接口：`PUT /api/tasks/:id/restore-subscription-default`
+
+### 3. Contracts
+
+- `subscription_locked` 语义：**用户手动调整过该任务的名称或定时**。
+  为真时订阅同步不覆盖 name/cron，也不自动删除该任务。
+- **写标记只能由服务端推导**：`task_mutate.go` 比较归一化后的 `cron_expression` / `name`
+  与库中现值，不同则置真。
+- **`subscription_locked` 绝不能进 `allowedFields`** —— 否则前端可传任意值，
+  等于把「谁能加锁」的判定交给客户端。解锁必须走独立接口。
+- `adopt` 分支接管的是用户自建任务，名称与定时本来就是用户排的，接管时直接置真。
+- **`force_overwrite` 与本机制完全正交**：它只作用于 git 工作区文件
+  （`reset --hard` vs `stash push/pop`），从不参与任务表写入。
+  不要因为「用户关了覆盖拉取还是被覆盖」就去改 `force_overwrite` 的分支。
+- `autoAdd` = `sub.AutoAddTask || isConfigEnabled("auto_add_cron", true)`，是 **OR**：
+  关单条订阅的开关不生效，必须全局也关。
+
+### 4. Validation & Error Matrix
+
+- 带锁任务命中 name/cron 差异 → 跳过覆盖，`emit("[保留手动定时] ...")`，**必须打日志**
+  （否则用户改了订阅源时间任务却没变，会反过来以为同步坏了）
+- 带锁任务不在候选集 → 跳过删除，`emit("[保留任务] ... 已加锁，订阅源中已无对应脚本")`
+- 未加锁任务 → 行为与改动前**完全一致**
+- 存量行升级后 `subscription_locked = 0`，首次拉取仍会重置一次（DEFAULT 0 的必然结果）
+
+### 5. Good/Base/Bad Cases
+
+- Good：手改 cron → 自动加锁 → 拉取后 cron 不变、日志有保留提示。
+- Base：未加锁任务，订阅源改了时间仍会跟随。
+- Bad：把守卫写成「无论是否加锁一律跳过覆盖」——订阅从此完全失去同步能力。
+- Bad：只在覆盖分支加守卫、不管 `autoDelete` 分支——标记随任务一起被删，锁守不住自己。
+
+### 6. Tests Required
+
+- 带锁任务手改 cron / name 后同步 → 断言值未变
+- 带锁任务不在候选集 → 断言任务**与其 TaskLog** 都还在
+- **未加锁任务行为不变**的回归用例（这条是护栏，防止守卫写成一律跳过）
+- `task_mutate`：改 cron 后自动加锁；前端传 `subscription_locked` **双向**被忽略
+  （传 true 不加锁、传 false 不解锁——两个断言要能各自独立失败）
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：只守 cron 覆盖，删除分支不管。
+// autoDelete 会连任务带 TaskLog 一起物理删掉，标记也随之消失，锁根本守不住自己。
+if existing.CronExpression != candidate.CronExpression && !existing.SubscriptionLocked {
+    changes["cron_expression"] = candidate.CronExpression
+}
+```
+
+#### Correct
+
+```go
+// 正确：覆盖分支前置守卫 + continue，删除分支再单独拦一道。
+if existing.SubscriptionLocked {
+    if existing.Name != candidate.Name || existing.CronExpression != candidate.CronExpression {
+        emit(fmt.Sprintf("[保留手动定时] %s 已被手动调整过，跳过订阅源的名称/定时覆盖", existing.Name))
+    }
+    continue
+}
+// ... autoDelete 分支：
+if task.SubscriptionLocked {
+    emit(fmt.Sprintf("[保留任务] %s 已加锁，订阅源中已无对应脚本，已保留，请手动确认", task.Name))
+    continue
+}
+```
+
+---
+
+## 场景：脚本树隐藏名单与启动期隔离名单必须分开
+
+### 1. Scope / Trigger
+
+- 触发：想让某个目录名「在脚本管理里不出现」时必须看本节。
+- 原因：`ShouldIgnoreScriptEntryName` 被 `QuarantineUnexpectedScriptEntriesOnStartup`
+  复用，命中即 `os.Rename` **物理搬走**。往它的名单里加 `.git`，
+  会在「脚本根目录本身是 git 仓库」时把整个仓库搬走。
+- 配套阅读：`## 场景：脚本目录污染隔离与 Windows 资源监控`
+
+### 2. Signatures
+
+- 隔离语义（会搬走文件）：`ShouldIgnoreScriptEntryName(name string) bool`
+- 隐藏语义（只是不展示 / 不可访问）：`ShouldHideScriptTreeEntryName(name string) bool`
+- 逐段路径判定：`ShouldHideScriptTreePath(scriptsDir, targetPath string) bool` /
+  `ShouldHideScriptTreeRelativePath(relPath string) bool`
+
+### 3. Contracts
+
+- **两套名单语义不同，绝不可合并**。隐藏名单复合隔离名单（`Ignore || hidden`），
+  反向不成立：`ShouldIgnoreScriptEntryName(".git")` 必须**恒为 false**。
+- 路径判定必须**逐段遍历**。旧的 `ShouldIgnoreScriptPath` 只判第一段，
+  导致 `SmallWorld/.git/**`、`SmallWorld/node_modules/**` 全部漏网。
+- 「树里隐藏」与「API 读不到」是**两套独立闸门**，都要接：
+  - 展示：`handler/script_file_ops.go` 的 Tree + List
+  - 访问：`handler/script.go` 的 `safePath`（13 个入口的唯一收口）
+  - 写入：`script_file_mutate.go` 的 `resolveScriptUploadPath` / `validateScriptLeafName` / `copyDir`
+  - CLI：`cmd/ddp/script_commands.go` 的 `resolveCLIScriptPath`（管 `script cat` / `script fetch`）
+- 名单**硬编码，不做可配置** —— 一旦可配置，用户清空配置就重新打开凭据读取路径。
+- **不要一刀切隐藏 dotfile**：`.env` / `.hidden-dir` 必须保持可见，已有回归断言钉死
+  （历史见 `docs/release-notes/v2.2.17.md`）。
+
+### 4. Validation & Error Matrix
+
+- `safePath` 命中隐藏段 → 返回「该路径不可访问」错误，13 个入口一并拒绝
+- `validateScriptLeafName` 命中 → 拒绝改名成该名字
+- `copyDir` 遍历命中 → 跳过，避免产生**看不见的凭据副本**
+- `ShouldIgnoreScriptEntryName` 命中 → 启动期 `os.Rename` 搬走（**只用于真正的污染目录**）
+
+### 5. Good/Base/Bad Cases
+
+- Good：`.git` 在树里不出现，`GET /api/scripts/content?path=X/.git/config` 被拒。
+- Base：`.env`、`.hidden-dir`、`.github` 仍然可见可读。
+- Bad：把 `.git` 加进 `ShouldIgnoreScriptEntryName` —— 脚本根目录是 git 仓库时仓库被搬走。
+- Bad：只改 `runScriptList` 不改 `resolveCLIScriptPath` —— `ddp script cat X/.git/config`
+  仍直接打印 PAT（CLI 的扩展名闸门对无扩展名文件一律放行）。
+
+### 6. Tests Required
+
+- `ShouldHideScriptTreeEntryName(".git")` 为真，且 `ShouldIgnoreScriptEntryName(".git")`
+  **仍为假**（守住 quarantine 不误搬）
+- quarantine 不搬走 `.git` 仓库的用例
+- `.hidden-dir` / `.env` 可见断言**必须保留**，同用例追加 tree 不含 `.git`
+- GetContent / Download / Delete / Copy / CLI 命中隐藏段的拒绝用例
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：直接往隔离名单里加，启动期会把整个 git 仓库 os.Rename 搬走。
+func ShouldIgnoreScriptEntryName(name string) bool {
+    switch strings.ToLower(name) {
+    case "node_modules", "__pycache__", ".git":
+        return true
+    }
+    ...
+}
+```
+
+#### Correct
+
+```go
+// 正确：另起一套隐藏语义，复合隔离名单但不反向污染它。
+var hiddenScriptTreeNames = map[string]bool{
+    ".git": true, ".svn": true, ".hg": true, ".bzr": true,
+}
+
+func ShouldHideScriptTreeEntryName(name string) bool {
+    return ShouldIgnoreScriptEntryName(name) ||
+        hiddenScriptTreeNames[strings.ToLower(strings.TrimSpace(name))]
+}
+```
+
+---
+
+## 场景：备份 tar 与还原过滤规则必须对称
+
+### 1. Scope / Trigger
+
+- 触发：给备份打包（`backup_runtime.go` 的 `addDirectoryToTar`）或还原
+  （`copyDirectoryContents` / `restoreDirectoryWithStage`）加任何过滤规则时必须看本节。
+
+### 2. Contracts
+
+- 还原链路是 **stage 目录填完后整目录 rename 顶掉 live**，随后 `os.RemoveAll` 旧目录。
+- 因此：**备份端不打包 X + 还原端也跳过 X ⇒ 每次恢复备份都会删掉 live 的 X**。
+- 对 `.git` 而言，后果是所有 git 订阅退化成 `git init` 重来分支。
+
+### 3. Validation & Error Matrix
+
+- 想让敏感内容不进备份包 → 优先**清洗内容**，而不是排除文件
+- 确需排除 → 必须同时保证还原端不会因为跳过它而连带删除 live 副本
+
+### 4. Good/Base/Bad Cases
+
+- Good：tar 仍打包 `.git`，但写入 tar 前剥掉 `.git/config` 里的 `user:token@`，
+  **磁盘上的真实文件不动**（动了后续 fetch 就失去鉴权）。
+- Base：JSON 备份走 `allowedExts` 白名单，`.git/config` 本就进不去。
+- Bad：备份端排除 `.git`、还原端也跳过 `.git` —— 恢复一次备份，git 订阅全废。
+
+### 5. Tests Required
+
+- tar 内 `.git/config` 已脱敏，且 `.git/HEAD` 等其余文件照常打包
+- 磁盘上的 `.git/config` 字节与打包前**完全相同**
+- 凭据清洗只剥离含冒号的 userinfo（`user:token@`）；
+  `ssh://git@host/...` 与 scp 风格 `git@host:repo.git` 的 `git@` 是用户名不是凭据，
+  一起剥掉会让还原后的 SSH 订阅连不上
+
+---
+
+## 场景：登录失败响应的机器可读 code 与 4xx 中间态
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/auth.go` 的登录失败分支、或调整登录相关限流时必须看本节。
+- 原因：面板用 **401 承载 2FA / 验证码挑战**，这是「成功语义、4xx 载体」的中间态。
+  客户端只要把 4xx 一律当失败抛异常，这个信号就会被吞掉，且 **CI 全绿**——
+  服务端测试只测服务端，客户端在独立仓库独立发版，没有任何机制发现这种脱节。
+
+### 2. Signatures
+
+- `POST /api/auth/login` 与 `POST /api/v1/auth/login`（`router.go` 注册**两次**）
+- 常量：`LoginCodeTwoFactorRequired` / `LoginCodeInvalidTOTP` /
+  `LoginCodeInvalidCredentials` / `LoginCodeCaptchaRequired` / `LoginCodeAccountLocked`
+
+### 3. Contracts
+
+- 所有登录失败分支返回体在保留原有 `error` 中文文案的前提下，**增加**稳定 `code` 字段。
+  只增不删——Web 与存量客户端都在读 `error`。
+- 2FA 挑战分支（`ErrTOTPRequired` / `ErrInvalidTOTP`）**必须一并回带**
+  `captcha_required` / `captcha_id` / `captcha_threshold` / `require_after_failures`。
+  漏了的话，客户端第二次带 `totp_code` 的 POST 无从得知还要重做人机验证——
+  这是修好客户端之后的**第二个阻断点**。
+- `ErrTOTPRequired` 是**中间态**，不写「登录失败」登录日志；
+  `ErrInvalidTOTP` 是真失败，照常记录。
+- 限流器**必须每次注册各构造一个**：`RegisterRoutes` 被调用两次，
+  共用一个闭包会让两个前缀共享同一个按 IP 计数的桶，手机与浏览器同出口互相挤占。
+
+### 4. Validation & Error Matrix
+
+- 未提供 totp → 401 `two_factor_required` + captcha 上下文，**不记失败日志**
+- totp 错误 → 401 `invalid_totp` + captcha 上下文，记失败日志
+- 密码错误 / 用户不存在 → 401 `invalid_credentials`（同一 code，避免用户枚举）
+- 未提交验证码 → 401 `captcha_required`
+- 验证码校验不通过 → 401 `captcha_required` + `captcha_invalid` + `captcha_reason`
+- 账号锁定 → 429 `account_locked` + `locked` + `remaining_seconds`
+
+### 5. Good/Base/Bad Cases
+
+- Good：开 2FA 的账号登录 → 401 + `two_factor_required` + captcha 上下文 → 客户端展示验证码框。
+- Bad：客户端把 4xx 一律 `throw` —— 中间态被吞，界面显示「请输入两步验证码」
+  却没有任何能输验证码的地方，**永久死锁**。
+- Bad：只给 2FA 两个 code 写断言 —— 另外三个 code 删掉也没测试会红。
+
+### 6. Tests Required
+
+- 五个 code **每个都要有断言**，且各自能独立失败
+  （`captcha_required` 的两个分支要能互相隔离：只删其中一处，另一处的用例必须仍绿）
+- 2FA 挑战响应含 captcha 上下文字段
+- 2FA 中间态**不**产生失败登录日志，totp 错误**会**产生
+- 两个路由前缀限流各自独立计数
+- 现成工具：`service.GenerateCurrentTOTPForTest`
+- ⚠️ 测账号锁定时**直接播种 `model.LoginAttempt` 行**，不要连发 5 次错误登录——
+  第 6 个请求会先被 `RateLimit(5, time.Minute)` 挡住并返回**同样的 429**，
+  断言就变成在测限流器而不是锁定逻辑。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```dart
+// 错误（客户端）：全局收紧 validateStatus，登录的 401 中间态在读到 body 之前就抛了。
+validateStatus: (status) => status != null && status < 400,
+...
+final response = await _dio.post(ApiEndpoints.login, data: data); // 就地 throw
+if (result['two_factor_required'] == true) { ... }                // 死代码
+```
+
+#### Correct
+
+```dart
+// 正确：登录接口做请求级放宽，显式区分「中间态」与「真失败」。
+final response = await _dio.post(
+  ApiEndpoints.login, data: data,
+  options: Options(validateStatus: (s) => s != null && s < 500),
+);
+final body = response.data;
+if (body is Map && (body['two_factor_required'] == true || body['captcha_required'] == true)) {
+  return body;          // 中间态：正常返回，交给上层展示输入框
+}
+if (response.statusCode! >= 400) {
+  throw DioException.badResponse(...);   // 其余 4xx 保持原有错误提示语义
+}
+```
+
+---
+
+## 场景：Magisk 容器脚本的 flavor 隔离（musl vs glibc）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `Magisk/customize.sh` 中任何与 DNS、apt/apk、用户降权相关的逻辑时必须看本节。
+- 原因：Alpine(musl) 与 Debian(glibc) 的**解析器语义不同**，
+  对一方是修复的改动，对另一方可能是回归。
+
+### 2. Contracts
+
+- **glibc**：A/AAAA 两条查询用同一源端口并发发出，不少家用路由 / 运营商 DNS 只回一条，
+  只能等超时重试 → `EAI_AGAIN`，报的就是 `Temporary failure resolving`。
+  `options single-request-reopen` 是针对它的。
+- **musl**：向所有 nameserver **并行**发查询并采信第一个确定性应答（**NXDOMAIN 也算**）。
+  给它配多条 DNS，若某条是强制解析器抢先回 NXDOMAIN，
+  会在**原本能正常工作的网络上开始失败**。
+- 因此：多源 DNS / `options` / apt 加固**只对 Debian 分支生效**，
+  Alpine 分支保持单条写死，resolv.conf 内容要与改动前**逐字节一致**。
+- `apt` 的 `DropPrivs()` 会 `setgroups()` **清空附加组** →
+  给 `_apt` 加 `aid_3003` 组在机制上不可能生效，加了只会掩盖问题。
+  正确做法是 `APT::Sandbox::User "root"`。
+- `_apt` 在 bookworm 是 **uid 42 / gid 65534**（bullseye 才是 100）→ 必须 `id -u _apt` 动态取。
+
+### 3. Validation & Error Matrix
+
+- **绝不能 `> $rootfs/etc/nsswitch.conf`**：Debian 的该文件由 base-files 提供、本来就在，
+  截断写会连 `passwd:` / `group:` / `shadow:` 一起删掉，
+  直接搞坏紧随其后的 `usermod` / `chpasswd` 与 `service.sh` 的 adduser / sshd。
+  只能 `grep -q '^hosts:' || echo ... >>`。
+- 镜像源必须有回退列表，但 `mirrors.nju.edu.cn` 字面量要保留
+  （`magisk_assets_test.go` 有断言）。
+
+### 4. Tests Required
+
+- `magisk_assets_test.go` 断言 Alpine 分支（`else`..`fi`）内**可执行行有且只有**
+  单条 `echo "nameserver 223.5.5.5" > ...`，做**全等**比较而非 `Contains`
+- 断言多源 DNS 的每一行都只出现在 `if [ "$FLAVOR" = "debian" ]` 分支体内
+  （堵住「挪到公共段照样覆盖 Alpine」这条绕法）
+- ⚠️ 静态字符串断言只能防「整段被删掉」，**防不住逻辑写错**；
+  shell 侧改动仍必须真机验证。
+
+### 5. Wrong vs Correct
+
+#### Wrong
+
+```sh
+# 错误：DNS 多源回退写在公共段，Alpine 被一起改掉。
+: > $rootfs/etc/resolv.conf
+for p in net.dns1 net.dns2; do ...; done
+echo 'options single-request-reopen timeout:2 attempts:3' >> $rootfs/etc/resolv.conf
+```
+
+#### Correct
+
+```sh
+# 正确：只给 Debian 上多源 DNS，Alpine 保持改动前的单条写死。
+if [ "$FLAVOR" = "debian" ]; then
+  : > $rootfs/etc/resolv.conf
+  for p in net.dns1 net.dns2; do ...; done
+  echo 'options single-request-reopen timeout:2 attempts:3' >> $rootfs/etc/resolv.conf
+else
+  # musl 并行查询且采信 NXDOMAIN，多源反而可能在强制 DNS 的网络上引入新失败。
+  echo "nameserver 223.5.5.5" > $rootfs/etc/resolv.conf
+fi
+```
