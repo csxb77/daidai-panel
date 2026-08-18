@@ -255,7 +255,11 @@ export DAIDAI_MAGISK_MODULE=1
 #     必须先重刷一次模块 zip 才能继续在面板内一键升级。
 #
 # v2（v3.0.4）新增：停止开关 + 守护代次标记，面板可以被手动停止且跨重启保持。
-export DAIDAI_MAGISK_SHELL_VERSION=2
+# v3（v3.0.5）改动 customize.sh：Debian 容器 DNS 改为多源回退（宿主 net.dns* + 公共 DNS +
+#   options single-request-reopen）、apt 加固（Sandbox::User / 重试 / 超时 / ForceIPv4）、
+#   镜像源四级回退，并在装依赖前加了 root / _apt 双身份的 DNS 判别探测。
+#   这些只在刷 ZIP 时执行，所以 requiredMagiskShellVersion 保持 1，在线升级照常放行。
+export DAIDAI_MAGISK_SHELL_VERSION=3
 export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
 export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app
 export NODE_PATH=/usr/local/lib/node_modules
