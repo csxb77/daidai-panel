@@ -24,15 +24,26 @@ import (
 	"github.com/google/uuid"
 )
 
+// 登录失败的稳定机器可读标识。
+// 登录失败的几种情况共用 HTTP 401，而响应体此前只有 {"error": 中文文案}，
+// 客户端（APP / 第三方脚本）只能靠中文文案区分原因，文案一改就全线失效。
+// 这里只「增加」code 字段，原有 error 文案与状态码一律保持不变，
+// Web 与存量 APP 都不受影响。
+const (
+	LoginCodeAccountLocked      = "account_locked"
+	LoginCodeCaptchaRequired    = "captcha_required"
+	LoginCodeInvalidCredentials = "invalid_credentials"
+	LoginCodeTwoFactorRequired  = "two_factor_required"
+	LoginCodeInvalidTOTP        = "invalid_totp"
+)
+
 type AuthHandler struct {
-	authService  *service.AuthService
-	loginLimiter gin.HandlerFunc
+	authService *service.AuthService
 }
 
 func NewAuthHandler() *AuthHandler {
 	return &AuthHandler{
-		authService:  service.NewAuthService(),
-		loginLimiter: middleware.RateLimit(5, time.Minute),
+		authService: service.NewAuthService(),
 	}
 }
 
@@ -101,6 +112,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		remainSec := int(remaining.Seconds())
 		c.JSON(429, gin.H{
 			"error":             fmt.Sprintf("账号已锁定，请 %.0f 分钟后重试", remaining.Minutes()),
+			"code":              LoginCodeAccountLocked,
 			"locked":            true,
 			"remaining_seconds": remainSec,
 		})
@@ -121,6 +133,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			case service.ErrCaptchaRequired:
 				c.JSON(401, gin.H{
 					"error":                  err.Error(),
+					"code":                   LoginCodeCaptchaRequired,
 					"captcha_required":       true,
 					"captcha_id":             captchaCfg.CaptchaID,
 					"captcha_threshold":      captchaCfg.RequireAfterFailures,
@@ -148,6 +161,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 			c.JSON(401, gin.H{
 				"error":                  "验证码校验失败，请重新完成人机验证",
+				"code":                   LoginCodeCaptchaRequired,
 				"captcha_required":       true,
 				"captcha_invalid":        true,
 				"captcha_id":             captchaCfg.CaptchaID,
@@ -167,6 +181,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			service.RecordLoginLog(0, req.Username, ip, clientName, ua, 1, "登录失败")
 			c.JSON(401, gin.H{
 				"error":                  "用户名或密码错误",
+				"code":                   LoginCodeInvalidCredentials,
 				"failed_attempts":        failedAttempts,
 				"captcha_required":       captchaCfg.Enabled,
 				"captcha_id":             captchaCfg.CaptchaID,
@@ -177,16 +192,32 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			service.RecordLoginLog(0, req.Username, ip, clientName, ua, 1, "登录失败")
 			response.Forbidden(c, "账号已被禁用")
 		case service.ErrTOTPRequired:
-			service.RecordLoginLog(0, req.Username, ip, clientName, ua, 1, "登录失败")
+			// 「要码但还没给码」是登录流程的中间态：用户名密码都是对的，只是还差第二步。
+			// 记成「登录失败」会污染登录日志，运维无法区分真失败与中间态，故这里不写日志。
+			// 注意：锁定策略走的是 LoginAttempt 表（RecordFailedLogin），与登录日志是两套，不受影响。
+			//
+			// captcha_* 字段必须一并回带：验证码是「每次登录都要过」（RequireAfterFailures = 0），
+			// 客户端拿到 2FA 挑战后要发第二次登录请求，没有这些字段就无从得知还要重做人机验证。
 			c.JSON(401, gin.H{
-				"error":               "请输入两步验证码",
-				"two_factor_required": true,
+				"error":                  "请输入两步验证码",
+				"code":                   LoginCodeTwoFactorRequired,
+				"two_factor_required":    true,
+				"captcha_required":       captchaCfg.Enabled,
+				"captcha_id":             captchaCfg.CaptchaID,
+				"captcha_threshold":      captchaCfg.RequireAfterFailures,
+				"require_after_failures": captchaCfg.RequireAfterFailures,
 			})
 		case service.ErrInvalidTOTP:
+			// 「给了码但错了」属于真失败，登录日志照记。
 			service.RecordLoginLog(0, req.Username, ip, clientName, ua, 1, "登录失败")
 			c.JSON(401, gin.H{
-				"error":               "两步验证码错误",
-				"two_factor_required": true,
+				"error":                  "两步验证码错误",
+				"code":                   LoginCodeInvalidTOTP,
+				"two_factor_required":    true,
+				"captcha_required":       captchaCfg.Enabled,
+				"captcha_id":             captchaCfg.CaptchaID,
+				"captcha_threshold":      captchaCfg.RequireAfterFailures,
+				"require_after_failures": captchaCfg.RequireAfterFailures,
 			})
 		default:
 			service.RecordFailedLogin(ip, req.Username)
@@ -457,11 +488,17 @@ func (h *AuthHandler) ServeAvatar(c *gin.Context) {
 }
 
 func (h *AuthHandler) RegisterRoutes(r *gin.RouterGroup) {
+	// RegisterRoutes 会被 /api/v1 与 /api 两个分组各调用一次（router.go）。
+	// 限流器必须在每次注册时现构造：以前它是 handler 上的一个字段，两个前缀因此共用
+	// 同一个按 IP 计数的桶——2FA 每次登录要发 2 个请求，等效只剩约 2.5 次/分钟，
+	// 手机与浏览器同出口还会互相挤占。现在两条路由各自持有独立限流器。
+	loginLimiter := middleware.RateLimit(5, time.Minute)
+
 	auth := r.Group("/auth")
 	{
 		auth.GET("/check-init", h.CheckInit)
 		auth.POST("/init", h.Init)
-		auth.POST("/login", h.loginLimiter, h.Login)
+		auth.POST("/login", loginLimiter, h.Login)
 		auth.POST("/logout", middleware.JWTAuth(), h.Logout)
 		auth.POST("/refresh", h.Refresh)
 		auth.GET("/user", middleware.JWTAuth(), h.GetUser)
