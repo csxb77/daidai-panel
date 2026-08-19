@@ -872,7 +872,7 @@ async function handleImport(event: Event) {
             </el-button>
             <el-button size="small" @click="openLogViewer(row)">实时日志</el-button>
             <el-button v-if="canOperateTasks" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-dropdown trigger="click">
+            <el-dropdown trigger="click" placement="bottom-end">
               <el-button size="small">
                 更多
                 <el-icon><More /></el-icon>
@@ -1008,7 +1008,12 @@ async function handleImport(event: Event) {
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right" align="center">
+        <!--
+          列宽 270：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24。
+          清掉 EP 的按钮外边距后这五个按钮实测需要 228px，270 留出 18px 余量（旧的 260 只剩 8px，太紧）。
+          按钮组一旦超出可用宽，.cell 就会变成可滚动容器，点 ⋯ 时整行按钮会被滚偏，详见下方 .action-btns 注释。
+        -->
+        <el-table-column label="操作" width="270" fixed="right" align="center">
           <template #default="{ row }">
             <div class="action-btns">
               <el-button v-if="canOperateTasks && row.status !== 2" type="primary" text size="small" @click="handleRun(row)">运行</el-button>
@@ -1018,7 +1023,12 @@ async function handleImport(event: Event) {
               </el-button>
               <el-button text size="small" @click="openLogViewer(row)">实时日志</el-button>
               <el-button v-if="canOperateTasks" text size="small" @click="openEdit(row)">编辑</el-button>
-              <el-dropdown trigger="click">
+              <!-- 触发器贴在表格最右侧，默认的 bottom 是居中对齐，菜单右半边会探出表格。
+                   bottom-end 让菜单右对齐触发器，正常情况下整块都落在表格内。
+                   注意 EP 在 dropdown.vue 里写死了 fallback-placements: ['bottom','top']，
+                   靠近视口底部、bottom-end 放不下时仍会退回居中的 top —— 这属于 EP 限制，
+                   但配合上面收窄后的按钮组，那种情况下菜单也只是略微探出表格，不会再被顶到窗口边。 -->
+              <el-dropdown trigger="click" placement="bottom-end">
                 <el-button text size="small"><el-icon><More /></el-icon></el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
@@ -1327,6 +1337,15 @@ async function handleImport(event: Event) {
   align-items: center;
   justify-content: center;
   gap: 4px;
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }`，它会叠加在上面的 flex gap 上：
+  // 连续四个按钮凭空多吃 36px，按钮组总宽超过「操作」列的可用内容宽（列宽 - .cell 的 24px 内边距），
+  // 于是 .cell（EP 给的 overflow:hidden）变成可滚动容器 —— 点最右边的 ⋯ 时浏览器会把获得焦点的
+  // 按钮滚进可视区，整行按钮左移、最左边的「运行」被裁掉且不会自动复位。
+  // 间距统一交给 gap，这里把这份外边距清零；顺带修掉「前四个按钮间距 16px、编辑与 ⋯ 之间只有 4px」的不一致。
+  :deep(.el-button + .el-button) {
+    margin-left: 0;
+  }
 
   :deep(.el-button) {
     padding: 4px 8px;

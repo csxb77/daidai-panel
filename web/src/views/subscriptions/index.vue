@@ -1204,7 +1204,12 @@ function viewLogDetail(log: any) {
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="200" fixed="right" align="center">
+        <!--
+          列宽 220：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24。
+          清掉 EP 的按钮相邻外边距后这四个按钮实测需要 172px，220 留出 24px 余量。
+          原来的 200（可用 176）配上那份外边距要 208px，「拉取」和「删除」两头都会被裁掉一截。
+        -->
+        <el-table-column label="操作" width="220" fixed="right" align="center">
           <template #default="{ row }">
             <div class="action-btns">
               <el-button
@@ -1905,6 +1910,14 @@ function viewLogDetail(log: any) {
   align-items: center;
   justify-content: center;
   gap: 4px;
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在上面的 flex gap 上，
+  // 四个按钮凭空多吃 36px、撑破「操作」列的可用内容宽，两端的按钮被 .cell 的 overflow:hidden 裁掉。
+  // 间距统一交给 gap（与 tasks / deps 两页一致）。
+  :deep(.el-button + .el-button) {
+    margin-left: 0;
+  }
+
   :deep(.el-button) {
     padding: 4px 8px;
   }
