@@ -22,6 +22,9 @@ type Subscription struct {
 	Whitelist   string     `gorm:"size:512;default:''" json:"whitelist"`
 	Blacklist   string     `gorm:"size:512;default:''" json:"blacklist"`
 	DependOn    string     `gorm:"size:512;default:''" json:"depend_on"`
+	// PreScript 是「拉取前指令」，在 git 拉取之前执行；HookScript 是「拉取后钩子」，
+	// 在拉取成功之后、同步定时任务之前执行。两者共用同一套环境变量与超时。
+	PreScript   string     `gorm:"type:text;default:''" json:"pre_script"`
 	HookScript  string     `gorm:"type:text;default:''" json:"hook_script"`
 	AutoAddTask bool       `gorm:"default:false" json:"auto_add_task"`
 	AutoDelTask bool       `gorm:"default:false" json:"auto_del_task"`
@@ -55,6 +58,7 @@ func (s *Subscription) ToDict() map[string]interface{} {
 		"whitelist":       s.Whitelist,
 		"blacklist":       s.Blacklist,
 		"depend_on":       s.DependOn,
+		"pre_script":      s.PreScript,
 		"hook_script":     s.HookScript,
 		"auto_add_task":   s.AutoAddTask,
 		"auto_del_task":   s.AutoDelTask,

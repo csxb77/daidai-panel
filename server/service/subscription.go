@@ -70,11 +70,19 @@ func PullSubscriptionWithContext(ctx context.Context, sub *model.Subscription, o
 	var output string
 	var pullErr error
 
-	switch sub.Type {
-	case model.SubTypeSingleFile:
-		output, pullErr = pullSingleFileWithCallback(ctx, sub, sshKeyPath, emit)
-	default:
-		output, pullErr = pullGitRepoWithCallback(ctx, sub, authCfg, emit)
+	// 拉取前指令跑在真正拉取之前，失败就不往下走了（详见 runSubscriptionPreScriptIfConfigured）。
+	pullErr = runSubscriptionPreScriptIfConfigured(sub, emit)
+	if pullErr == nil && ctx.Err() != nil {
+		pullErr = fmt.Errorf("拉取已停止")
+	}
+
+	if pullErr == nil {
+		switch sub.Type {
+		case model.SubTypeSingleFile:
+			output, pullErr = pullSingleFileWithCallback(ctx, sub, sshKeyPath, emit)
+		default:
+			output, pullErr = pullGitRepoWithCallback(ctx, sub, authCfg, emit)
+		}
 	}
 
 	if pullErr == nil && ctx.Err() != nil {
@@ -752,6 +760,15 @@ var (
 	// 通过 `\b` 词界避免误匹配 `crontab` / `cron-utils` 等关键字。
 	cronLabelPrefixRe      = regexp.MustCompile(`(?im)^[\s#*@/]*@?cron\b\s*[:：]?\s*(\S.*)$`)
 	subscriptionTaskNameRe = regexp.MustCompile(`new\s+Env\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]\s*\)`)
+	// 注释头里的任务名声明，覆盖用户实际在用的几种写法：
+	//   //name: 远程开机        // name: 雀巢会员      （js / mjs / ts）
+	//   #name: X               ## name: DDNS IP更新   （sh / py）
+	//   * name: X              @name: X               （JSDoc 块注释 / 标签）
+	//   <!-- name: X -->                              （html）
+	// 刻意**要求**行首带注释标记，不接受裸 `name: xxx`：JS/TS 里 `{ name: 'foo' }`
+	// 这种对象字面量太常见，裸匹配会把它误判成任务名。cron 那边敢接受裸写法，
+	// 是因为还有 cron.Parse 兜底校验，而 name 没有可校验的形态，只能靠注释标记收窄。
+	subscriptionTaskNameLabelRe = regexp.MustCompile(`(?i)^\s*(?:<!--|//+|#+|\*+|--+|@)\s*@?name\s*[:：]\s*(\S.*)$`)
 	// 青龙风格 `cron "EXPR" filename, tag:xxx` 单行声明，常见于 JS 顶部注释。
 	// 例如：cron "6 6 6 6 *" jd_CheckCK.js, tag:京东CK检测by-ccwav
 	cronDirectiveLineRe = regexp.MustCompile(`(?i)\bcron\s+["']([^"'\n\r]+)["']\s+([^\s,;]+)`)
@@ -1513,6 +1530,13 @@ func resolveCronForSubscriptionTask(path string, defaultCron string) string {
 	return strings.TrimSpace(defaultCron)
 }
 
+// resolveSubscriptionTaskName 从脚本头部推断任务名，优先级：
+//
+//	new Env('名称')  >  注释头 `// name: 名称`  >  fallback（去掉扩展名的文件名）
+//
+// new Env 必须排在前面：它是青龙沿用至今的写法，存量任务名都是由它决定的。
+// 如果让后加的注释头抢先，老用户升级后一批「没加订阅锁」的任务会在下次拉取时被静默改名。
+// 所以这里两种声明都扫完再决定，而不是「哪个先在文件里出现就用哪个」。
 func resolveSubscriptionTaskName(path, fallback string) string {
 	fallback = strings.TrimSpace(fallback)
 
@@ -1522,6 +1546,7 @@ func resolveSubscriptionTaskName(path, fallback string) string {
 	}
 	defer f.Close()
 
+	var envName, labelName string
 	scanner := bufio.NewScanner(f)
 	lineCount := 0
 	for scanner.Scan() {
@@ -1529,16 +1554,52 @@ func resolveSubscriptionTaskName(path, fallback string) string {
 		if lineCount > 120 {
 			break
 		}
+		line := scanner.Text()
 
-		if matches := subscriptionTaskNameRe.FindStringSubmatch(scanner.Text()); len(matches) > 1 {
-			name := strings.TrimSpace(matches[1])
-			if name != "" {
-				return name
+		if envName == "" {
+			if matches := subscriptionTaskNameRe.FindStringSubmatch(line); len(matches) > 1 {
+				envName = strings.TrimSpace(matches[1])
 			}
+		}
+		if labelName == "" {
+			labelName = extractSubscriptionTaskNameFromLabel(line)
+		}
+		if envName != "" && labelName != "" {
+			break
 		}
 	}
 
+	if envName != "" {
+		return envName
+	}
+	if labelName != "" {
+		return labelName
+	}
 	return fallback
+}
+
+// extractSubscriptionTaskNameFromLabel 解析单行注释头里的任务名。
+// 除了正则本身，还要收尾处理块注释/HTML 注释的结束标记和包裹引号，
+// 否则 `<!-- name: X -->` 会把 `-->` 也算进名字里。
+func extractSubscriptionTaskNameFromLabel(line string) string {
+	matches := subscriptionTaskNameLabelRe.FindStringSubmatch(line)
+	if len(matches) < 2 {
+		return ""
+	}
+
+	name := strings.TrimSpace(matches[1])
+	name = strings.TrimSpace(strings.TrimSuffix(name, "-->"))
+	name = strings.TrimSpace(strings.TrimSuffix(name, "*/"))
+	name = strings.TrimSpace(strings.Trim(name, "\"'`"))
+	if name == "" {
+		return ""
+	}
+
+	// 任务名列是 VARCHAR(128)，注释里写超长句子时截断，避免建出一条离谱的任务名。
+	if runes := []rune(name); len(runes) > 128 {
+		name = strings.TrimSpace(string(runes[:128]))
+	}
+	return name
 }
 
 func extractSubscriptionCronExpression(line, scriptBase string) string {

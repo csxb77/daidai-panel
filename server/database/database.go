@@ -153,6 +153,8 @@ func EnsureColumns() {
 		{"blacklist", "VARCHAR(512) DEFAULT ''"},
 		{"depend_on", "VARCHAR(512) DEFAULT ''"},
 		{"hook_script", "TEXT DEFAULT ''"},
+		// 拉取前指令。DEFAULT ''：存量订阅升级后一律为空，拉取链路与升级前完全一致。
+		{"pre_script", "TEXT DEFAULT ''"},
 	})
 
 	ensureTableColumns("notify_channels", []columnDef{

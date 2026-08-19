@@ -13,26 +13,42 @@ import (
 
 const subscriptionHookTimeoutSeconds = 900
 
+// runSubscriptionPreScriptIfConfigured 执行「拉取前指令」，在 git 拉取之前跑。
+// 返回错误会让整次拉取中断并记为失败 —— 与「拉取后钩子」一致。
+// 这么定是因为前置指令的典型用途是「准备环境 / 挂载目录 / 换源 / 生成凭据」，
+// 它没跑成功还继续拉，拉下来的东西多半也是错的，静默继续只会更难查。
+func runSubscriptionPreScriptIfConfigured(sub *model.Subscription, emit PullCallback) error {
+	return runSubscriptionInlineScript(sub, sub.PreScript, "拉取前指令", "pre", emit)
+}
+
 func runSubscriptionHookIfConfigured(sub *model.Subscription, emit PullCallback) error {
-	hookScript := normalizeSubscriptionHookScript(sub)
-	if hookScript == "" {
+	return runSubscriptionInlineScript(sub, sub.HookScript, "订阅钩子", "hook", emit)
+}
+
+// runSubscriptionInlineScript 是前置指令与拉取后钩子共用的执行体。
+// label 用于日志里的中文提示，logPrefix 用于每行输出的前缀，便于在一次拉取日志里区分两段。
+func runSubscriptionInlineScript(sub *model.Subscription, rawScript, label, logPrefix string, emit PullCallback) error {
+	script := normalizeSubscriptionScriptPaths(sub, rawScript)
+	if script == "" {
 		return nil
 	}
 
+	// 首次拉取时订阅目录还不存在（前置指令尤其容易撞上），退回脚本根目录，
+	// 保证指令总有一个确定的 cwd，而不是继承服务进程的当前目录。
 	workDir := subscriptionWorkingDir(sub)
 	if _, err := os.Stat(workDir); err != nil {
 		workDir = config.C.Data.ScriptsDir
 	}
 
-	emit("[执行订阅钩子]")
-	err := RunInlineScript(hookScript, workDir, buildSubscriptionHookEnv(sub, workDir), subscriptionHookTimeoutSeconds, func(line string) {
-		emit("[hook] " + line)
+	emit("[执行" + label + "]")
+	err := RunInlineScript(script, workDir, buildSubscriptionHookEnv(sub, workDir), subscriptionHookTimeoutSeconds, func(line string) {
+		emit("[" + logPrefix + "] " + line)
 	})
 	if err != nil {
-		return fmt.Errorf("执行订阅钩子失败: %w", err)
+		return fmt.Errorf("执行%s失败: %w", label, err)
 	}
 
-	emit("[订阅钩子完成]")
+	emit("[" + label + "完成]")
 	return nil
 }
 
@@ -60,7 +76,13 @@ func buildSubscriptionHookEnv(sub *model.Subscription, workDir string) map[strin
 }
 
 func normalizeSubscriptionHookScript(sub *model.Subscription) string {
-	hookScript := strings.TrimSpace(sub.HookScript)
+	return normalizeSubscriptionScriptPaths(sub, sub.HookScript)
+}
+
+// normalizeSubscriptionScriptPaths 把用户从青龙抄来的绝对路径改写成 $SUB_DIR，
+// 前置指令与拉取后钩子共用（用户往往两处都直接粘贴青龙那套命令）。
+func normalizeSubscriptionScriptPaths(sub *model.Subscription, rawScript string) string {
+	hookScript := strings.TrimSpace(rawScript)
 	if hookScript == "" {
 		return ""
 	}

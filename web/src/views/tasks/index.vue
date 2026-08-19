@@ -23,7 +23,13 @@ import type { TaskViewFilter, TaskViewSortRule } from '@/api/taskView'
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
-const { isMobile } = useResponsive()
+const { isMobile, width: viewportWidth } = useResponsive()
+// 窄桌面：还没到移动端卡片布局，但表格已经装不下全部列。
+// 1600 这个阈值来自实测：固定宽列合计 930px，加上三个弹性列的 min-width 230px 共 1160px，
+// 再算上侧栏 218px 与 .layout-main 的左右 20px 内边距，窗口宽 <1600 时弹性列就开始被压到下限，
+// 命令/标签/定时规则接连换行，行高从 ~50px 涨到 100~190px（1280×720 下只剩 3~4 行可见）。
+// 典型受害者是 14 寸笔记本 1920×1080 + 150% 系统缩放 = 等效 1280×720。
+const isNarrowDesktop = computed(() => !isMobile.value && viewportWidth.value < 1600)
 const { isPageActive } = usePageActivity()
 let statusTimer: ReturnType<typeof setInterval> | null = null
 
@@ -896,7 +902,7 @@ async function handleImport(event: Event) {
       <el-empty v-if="!loading && tasks.length === 0" description="暂无任务" />
     </div>
 
-    <div v-else class="table-card">
+    <div v-else class="table-card" :class="{ 'is-compact': isNarrowDesktop }">
       <el-table
         v-loading="loading"
         :data="tasks"
@@ -907,7 +913,10 @@ async function handleImport(event: Event) {
         :row-style="{ cursor: 'pointer' }"
       >
         <el-table-column v-if="canOperateTasks" type="selection" width="40" />
-        <el-table-column label="任务名称" min-width="80">
+        <!-- 三个弹性列按 min-width 的比例瓜分剩余宽度（EP 的分配规则）。
+             窄桌面改成 90 : 70 : 95：cron 表达式长度固定且短，全显出来价值最高；
+             命令是长路径，任何窄宽度下都得省略，让它少分一点最划算。 -->
+        <el-table-column label="任务名称" :min-width="isNarrowDesktop ? 90 : 80">
           <template #default="{ row }">
             <div class="task-name-cell">
               <el-icon v-if="row.is_pinned" class="pin-icon" :class="{ 'is-readonly': !canOperateTasks }" @click.stop="canOperateTasks && handlePin(row)"><Star /></el-icon>
@@ -921,7 +930,10 @@ async function handleImport(event: Event) {
                   >
                     {{ row.name }}
                   </button>
-                  <el-tag size="small" effect="plain" class="task-label task-label--type">
+                  <!-- 窄桌面隐藏任务类型标签：它和右边的「定时规则」列完全冗余
+                       （cron 类型显示表达式、其余类型显示的就是这个标签的文案），
+                       但在被压窄的名称列里它会独占一行，是行高翻倍的直接原因 -->
+                  <el-tag v-if="!isNarrowDesktop" size="small" effect="plain" class="task-label task-label--type">
                     {{ getTaskTypeLabel(row.task_type) }}
                   </el-tag>
                   <!-- 订阅锁：手改过名称/定时的任务不再被订阅拉取覆盖，也不会被自动删除 -->
@@ -950,9 +962,10 @@ async function handleImport(event: Event) {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="命令 / 脚本" min-width="80">
+        <el-table-column label="命令 / 脚本" :min-width="isNarrowDesktop ? 70 : 80">
           <template #default="{ row }">
-            <code class="command-text">
+            <!-- 窄桌面下这一列会被压到 100px 出头，不省略就要换 5 行；title 挂全文兜底 -->
+            <code class="command-text" :title="row.command">
               <template v-if="splitTaskCommandDisplay(row.command).script">
                 <span>{{ splitTaskCommandDisplay(row.command).before }}</span>
                 <span class="script-link" @click.stop="navigateToScript(splitTaskCommandDisplay(row.command).script!)">{{ splitTaskCommandDisplay(row.command).script }}</span>
@@ -962,7 +975,7 @@ async function handleImport(event: Event) {
             </code>
           </template>
         </el-table-column>
-        <el-table-column label="定时规则" min-width="70">
+        <el-table-column label="定时规则" :min-width="isNarrowDesktop ? 95 : 70">
           <template #default="{ row }">
             <template v-if="row.task_type === 'cron'">
               <TaskCronList
@@ -973,7 +986,9 @@ async function handleImport(event: Event) {
             <span v-else class="text-muted">{{ getTaskTypeLabel(row.task_type) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="110" align="center">
+        <!-- 窄桌面把「状态」「上次结果」收到刚好装下标签的宽度，省出的 36px 还给
+             名称/命令/定时规则三个弹性列，让 cron 表达式尽量不被省略号截断 -->
+        <el-table-column label="状态" :width="isNarrowDesktop ? 90 : 110" align="center">
           <template #default="{ row }">
             <el-tag :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
               <span v-if="row.status === 2" class="pulse-dot"></span>
@@ -981,7 +996,9 @@ async function handleImport(event: Event) {
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="最后运行" width="160" align="center">
+        <!-- 窄桌面隐藏「最后运行」「耗时」：这两列固定占 250px，是把弹性列压到下限的主因。
+             信息没丢——任务详情弹窗里都有，「下次运行」「上次结果」这两个更常看的仍然保留。 -->
+        <el-table-column v-if="!isNarrowDesktop" label="最后运行" width="160" align="center">
           <template #default="{ row }">
             <span v-if="row.last_run_at" class="time-text">{{ formatTime(row.last_run_at) }}</span>
             <span v-else class="text-muted">-</span>
@@ -993,7 +1010,7 @@ async function handleImport(event: Event) {
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="上次结果" width="100" align="center">
+        <el-table-column label="上次结果" :width="isNarrowDesktop ? 84 : 100" align="center">
           <template #default="{ row }">
             <div class="last-run-result">
               <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
@@ -1002,7 +1019,7 @@ async function handleImport(event: Event) {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="耗时" width="90" align="center">
+        <el-table-column v-if="!isNarrowDesktop" label="耗时" width="90" align="center">
           <template #default="{ row }">
             <span v-if="row.last_running_time != null" class="time-text">{{ formatDuration(row.last_running_time) }}</span>
             <span v-else class="text-muted">-</span>
@@ -1419,6 +1436,48 @@ async function handleImport(event: Event) {
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+}
+
+// ===== 窄桌面紧凑模式（视口 <1600px，由 isNarrowDesktop 挂 .is-compact）=====
+// 目标是把行高从 94~186px 压回 40px 上下。三件事一起做才有效，缺一件都会被最高的那格顶回去：
+//   1) 命令 / 定时规则单行省略（不省略就是 5 行和 3 行）；
+//   2) 名称行不再换行（配合模板里隐藏任务类型标签，多数行只剩一行文字）；
+//   3) 收紧单元格上下内边距。
+// 列的隐藏在模板里做（v-if="!isNarrowDesktop"），不在这里用 display:none —— el-table 的
+// 列宽是 JS 算出来写进 <colgroup> 的，CSS 藏列只会留下一段空白，宽度并不会还给其它列。
+.table-card.is-compact {
+  :deep(.el-table__cell) {
+    padding: 6px 0;
+  }
+
+  .command-text {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    // 单行省略要求不能按字符断行，否则 text-overflow 不生效
+    word-break: normal;
+  }
+
+  // 名称行保持 wrap：一旦改成 nowrap，标签（flex-shrink:0）会把任务名挤成 0 宽，
+  // 出现「只剩两个标签、名字整个不见了」。让标签换到第二行，名字始终独占第一行。
+  .task-name-link {
+    flex: 1 1 100%;
+  }
+
+  .task-label {
+    flex-shrink: 0;
+  }
+
+  :deep(.task-cron-list__code) {
+    // 内边距从 4px 8px 收到 3px 6px：正好让 `0 8,15,21 * * *` 这类 15 字符的表达式
+    // 在窄桌面的列宽里完整显示，而不是差几个像素被省略号截掉
+    padding: 3px 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: normal;
   }
 }
 

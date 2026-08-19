@@ -66,6 +66,15 @@ const (
 	DefaultPanelTimezone   = "Asia/Shanghai"
 )
 
+const (
+	// DefaultRepoFileExtensions 是订阅扫描任务候选时认的脚本后缀。
+	// LegacyRepoFileExtensions 是 v3.0.5 及之前的默认值，它漏了 mjs。
+	// 两个常量都要留着：升级时靠「库里存的正好等于旧默认」来判断用户没改过这项配置，
+	// 只有这种情况才把它抬到新默认，用户自己填过的值一律不动。
+	DefaultRepoFileExtensions = "py js mjs ts sh"
+	LegacyRepoFileExtensions  = "py js sh ts"
+)
+
 // defaultBackupScheduleSelection 同时给注册表默认值和 normalizeBackupScheduleSelectionValue 使用。
 //
 // 这两处历史上是各写各的字面量，注册表那份少了 task_views：
@@ -136,7 +145,10 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newBoolConfig("auto_del_cron", "自动删除失效任务", "true", "自动删除失效任务", "subscription"),
 	newBoolConfig("subscription_force_overwrite", "覆盖拉取", "true", "订阅拉取时覆盖本地修改并清理多余文件", "subscription"),
 	newValidatedStringConfig("default_cron_rule", "默认 Cron 规则", "", "订阅脚本未声明 cron 时使用的默认规则", "subscription", normalizeDefaultCronRule),
-	newTrimmedStringConfig("repo_file_extensions", "拉取文件后缀", "py js sh ts", "订阅自动识别任务时扫描的脚本后缀", "subscription"),
+	// 默认值必须含 mjs：ESM 脚本（.mjs）在青龙生态里很常见，
+	// 旧默认 LegacyRepoFileExtensions 漏了它，表现为「仓库拉取成功、.mjs 却一个任务都不建」。
+	// 存量实例的补齐见 system_config.go 的 InitDefaultConfigs。
+	newTrimmedStringConfig("repo_file_extensions", "拉取文件后缀", DefaultRepoFileExtensions, "订阅自动识别任务时扫描的脚本后缀", "subscription"),
 	newBoolConfig("notify_on_resource_warn", "资源超限发送通知", "false", "资源超限发送通知", "alerts"),
 	newTrimmedStringConfig("notify_panel_label", "通知面板名称", "", "通知标题前缀的面板名称（多面板区分用，留空不附带）", "alerts"),
 	newBoolConfig("notify_on_login", "登录成功发送通知", "false", "登录成功发送通知", "security"),

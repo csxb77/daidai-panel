@@ -69,6 +69,7 @@ const editForm = ref({
   whitelist: "",
   blacklist: "",
   depend_on: "",
+  pre_script: "",
   hook_script: "",
   auto_add_task: false,
   auto_del_task: false,
@@ -235,6 +236,7 @@ function openCreate() {
     whitelist: "",
     blacklist: "",
     depend_on: "",
+    pre_script: "",
     hook_script: "",
     auto_add_task: false,
     auto_del_task: false,
@@ -475,6 +477,7 @@ function openEdit(row: any) {
     whitelist: row.whitelist || "",
     blacklist: row.blacklist || "",
     depend_on: row.depend_on || "",
+    pre_script: row.pre_script || "",
     hook_script: row.hook_script || "",
     auto_add_task: row.auto_add_task,
     auto_del_task: row.auto_del_task,
@@ -1472,6 +1475,26 @@ function viewLogDetail(log: any) {
             个参数。命中的文件会被拉取到脚本目录供主脚本调用，但<strong>不会</strong>建成定时任务——只有命中白名单的文件才建任务；黑名单对两者都生效。匹配方式同白名单（子串包含，片段命中目录名时目录下的全部文件一并检出，所以填
             utils 就能把 utils/date.js
             带下来）。含空格或中文的内容会被当作文字备注跳过，不参与检出。
+          </div>
+        </el-form-item>
+        <el-form-item label="拉取前指令" class="form-item--full">
+          <el-input
+            v-model="editForm.pre_script"
+            type="textarea"
+            :rows="3"
+            placeholder="拉取开始前执行的 Shell 命令。支持使用 $SUB_DIR、$SCRIPTS_DIR、$QL_DIR 等变量。"
+          />
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            在 git 拉取之前执行，适合做「准备环境 / 挂载目录 / 换源 / 生成凭据」这类前置动作。<strong>执行失败（非
+            0 退出）会中断本次拉取并记为失败</strong>，不会带着半成品环境继续拉。首次拉取时订阅目录还不存在，$SUB_DIR
+            会退回脚本根目录。
           </div>
         </el-form-item>
         <el-form-item label="拉取后钩子" class="form-item--full">

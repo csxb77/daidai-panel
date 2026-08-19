@@ -39,7 +39,8 @@ const isMultiLine = computed(() => normalizedExpressions.value.length > 1)
       >
         {{ index + 1 }}
       </span>
-      <code class="task-cron-list__code">{{ expression }}</code>
+      <!-- title 是窄屏单行省略时的兜底：列被压窄后表达式会被截断，鼠标悬停仍能看全 -->
+      <code class="task-cron-list__code" :title="expression">{{ expression }}</code>
     </div>
   </div>
 </template>

@@ -889,6 +889,8 @@ X-Content-Type-Options: nosniff
           { name: 'depend_on', type: 'string', description: '依赖规则：对应青龙 ql repo 的第 4 个参数 dependence，匹配规则同白名单（填 utils 会把 utils/ 目录下的文件一并检出）。命中的文件会被检出落盘供主脚本调用，但不会建成定时任务；白名单为空时本字段不生效', example: 'sendNotify|utils' },
           { name: 'sub_path', type: 'string', description: '只检出仓库内的指定子目录（多个用 , 或 | 分隔），优先级高于白名单' },
           { name: 'save_dir', type: 'string', description: '脚本存放子目录，留空则按仓库名推导' },
+          { name: 'pre_script', type: 'string', description: '拉取前指令：在 git 拉取之前执行的 Shell 命令，可用 $SUB_DIR / $SCRIPTS_DIR / $QL_DIR 等变量。非 0 退出会中断本次拉取并记为失败', example: 'mount -a' },
+          { name: 'hook_script', type: 'string', description: '拉取后钩子：拉取成功后、同步定时任务之前执行的 Shell 命令，变量与失败语义同 pre_script', example: 'bash $SUB_DIR/copyfiles.sh' },
         ],
         responseExample: JSON.stringify({ message: '创建成功', data: { id: 1 } }, null, 2),
       },
