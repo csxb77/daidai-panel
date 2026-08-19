@@ -1697,9 +1697,11 @@ function viewLogDetail(log: any) {
         <el-form-item label="拉取文件后缀">
           <el-input
             v-model="settingsForm.repo_file_extensions"
-            placeholder="py js sh ts"
+            placeholder="py js mjs ts sh"
           />
-          <div class="settings-hint">空格分隔，如 py js sh ts</div>
+          <div class="settings-hint">
+            空格分隔，如 py js mjs ts sh。订阅同步时只有这些后缀的脚本会被识别成定时任务
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
