@@ -16,6 +16,10 @@
   <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker">
 </p>
 
+<p align="center">
+  <a href="https://linzixuanzz.github.io/daidai-panel/"><img src="https://img.shields.io/badge/在线演示-点开即用-2EA44F?logo=github&logoColor=white" alt="在线演示"></a>
+</p>
+
 ---
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
@@ -23,6 +27,16 @@
 > 最新稳定版：`v3.0.6` · [更新日志](./docs/release-notes/v3.0.6.md)<br>
 > 本次重点：笔记本小屏下定时任务列表一屏能看的行数翻三倍，订阅终于认得 `.mjs` 脚本、也认得 `// name:` 这类注释头任务名，订阅新增「拉取前指令」，顺带修掉「已锁定」标签换行与操作列按钮错位。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
+
+## 在线演示
+
+想先看看效果再决定装不装，直接打开 **<https://linzixuanzz.github.io/daidai-panel/>**，点「进入演示环境」就能逛完整面板 —— 不用注册，也不用装 Docker。演示站跟随每个正式版自动更新，打开看到的就是最新正式版的界面。
+
+里面新建任务、编辑脚本、拖拽排序都会真的生效，所以更要先说清楚它是什么：
+
+> **演示站不是一台真实运行的面板**，而是面板前端单独打包后配上浏览器内的模拟数据，没有后端，也不会真的执行任何脚本。<br>
+> **你的所有操作只存在你自己的浏览器里，刷新页面即恢复初始状态**，不会保存，也不会被别人看到。<br>
+> 因此**请不要在演示站里填写真实的 Cookie、密码或推送密钥**——那里没有能托管它们的服务端，填了也只是白填。
 
 ## 功能特性
 
@@ -440,6 +454,7 @@ daidai-panel-windows-amd64/
 
 | 我想… | 看哪里 |
 |-------|--------|
+| 先看看界面长什么样，不想为此先装一遍 | [在线演示](#在线演示)，或直接打开 <https://linzixuanzz.github.io/daidai-panel/> |
 | 跑 Go 任务、装需要现场编译的依赖、换 Debian 运行时、指定 Python 3.10 / 3.11 | [快速部署](#快速部署) → 「该选哪个镜像标签」 |
 | 不用 Docker，在 Windows 上直接跑 | [快速部署](#快速部署) → 「Windows 单机版」 |
 | 在已 Root 的安卓手机上跑 | [快速部署](#快速部署) → 「Android Magisk 模块」，完整文档见 [`Magisk/README.md`](./Magisk/README.md) |

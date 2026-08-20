@@ -1,6 +1,25 @@
 import axios from 'axios'
 import type { AxiosAdapter, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import request from '@/api/request'
+import notificationTypesFixture from './fixtures/notification-types.json'
+import configsFixture from './fixtures/configs.json'
+
+/**
+ * ⚠️ 上面这两个 fixture 是【生成产物，不要手改】。
+ *
+ * 重新生成：
+ *   cd server
+ *   go run ./cmd/gen-demo-fixtures
+ *
+ * 它们的真源在服务端，不在这里：
+ *   notification-types.json <- server/model/notify_channel_registry.go
+ *   configs.json            <- server/model/system_config_registry.go
+ *
+ * .trellis/spec/frontend/index.md 有专门一节讲这件事：这两类知识只允许有一份声明。
+ * 通知渠道字段历史上在仓库里存在过四份副本并且已经漂移过（apiData.ts 的 wecom_app 漏了
+ * mpnews），手写这两个文件就是制造第五份副本。后端加渠道 / 加配置项时，
+ * 只要重跑一次生成器，演示站就自动跟上，不需要在这里改任何代码。
+ */
 
 /**
  * 在线演示 Demo 的浏览器内 mock 传输层。
@@ -91,6 +110,19 @@ type DemoHandler = (ctx: DemoRequestContext) => unknown
  */
 function createFallbackBody() {
   return { data: [], total: 0, page: 1, page_size: 20 }
+}
+
+/**
+ * 把 fixture 深拷贝一份再返回。
+ *
+ * import 进来的 JSON 是模块级单例，整个会话里只求值一次。直接把它交给页面的话，
+ * 任何一处就地修改（设置页回填后改表单、渠道弹窗往 config 里塞值）都会污染后续请求，
+ * 而且刷新页面也恢复不了——模块不会重新求值。
+ *
+ * 与 createFallbackBody() 每次返回新对象是同一条理由。
+ */
+function cloneFixture<T>(fixture: T): T {
+  return structuredClone(fixture)
 }
 
 /** 演示剧本里的任务规模。P1 铺 /tasks 列表 fixture 时要与这两个数对齐，别各写各的。 */
@@ -347,9 +379,19 @@ const exactRoutes: Record<string, DemoHandler> = {
     last_checked_at: isoNow(),
   }),
 
-  // configApi.list 的类型是 { data: SystemConfigMap }，是对象而不是数组。
-  // 真正的 47 项配置 schema 要由服务端 registry 导出，这里先给空对象保证设置页不炸。
-  'GET /configs': () => ({ data: {} }),
+  // ---- 由服务端 registry 导出的 schema fixture ------------------------------
+  // 这两个响应体就是生成器写出来的 JSON 本身（已经是 { data: ... } 这层后端 body），
+  // 不要再包一层——request.ts:50 的响应拦截器返回的是 response.data。
+
+  // 全部通知渠道及其字段定义。新建 / 编辑渠道弹窗的输入框完全靠它渲染
+  //（notifications/index.vue:141 拿 fields 生成表单），拿不到就是一张空表单。
+  'GET /notifications/types': () => cloneFixture(notificationTypesFixture),
+
+  // configApi.list 的类型是 { data: SystemConfigMap }，是「键 -> 配置项」的对象而不是数组。
+  // fixture 是「全新安装、system_configs 表一行都没有」时的响应：每项的 value 等于
+  // 注册表里的 default_value（依据 server/handler/config.go:87-89）。
+  // 设置页 6 个 tab 的表单、以及按 schema 兜底渲染的 ExtraConfigCard 都读它。
+  'GET /configs': () => cloneFixture(configsFixture),
 
   // 这两个端点返回的是【裸数组】，不是 { data: [...] } 信封
   //（api/taskView.ts:38 与 api/task.ts:130 的返回类型可以佐证）。
