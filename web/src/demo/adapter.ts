@@ -1,11 +1,41 @@
-import axios from 'axios'
+import axios, { AxiosError } from 'axios'
 import type { AxiosAdapter, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
+import { ElMessage } from 'element-plus'
 import request from '@/api/request'
 import notificationTypesFixture from './fixtures/notification-types.json'
-import configsFixture from './fixtures/configs.json'
+import {
+  appendTaskRunLog,
+  buildDashboard,
+  buildLogContent,
+  buildScriptList,
+  buildScriptTree,
+  buildSystemStats,
+  db,
+  filterEnvs,
+  filterLogs,
+  filterTasks,
+  findScriptFile,
+  findTask,
+  isValidEnvName,
+  joinEnvGroups,
+  nextEnvPosition,
+  nextId,
+  nextRunTimes,
+  nowIso,
+  paginate,
+  reorderEnv,
+  saveScriptContent,
+  sortEnvs,
+  splitEnvGroups,
+  toEnvDict,
+  toLogDict,
+  toTaskDict,
+} from './db'
+import type { DemoOpenApp, DemoTask, DemoUser } from './types'
+import { TASK_STATUS_DISABLED, TASK_STATUS_ENABLED, TASK_STATUS_RUNNING } from './types'
 
 /**
- * ⚠️ 上面这两个 fixture 是【生成产物，不要手改】。
+ * ⚠️ fixtures/notification-types.json 与 fixtures/configs.json 是【生成产物，不要手改】。
  *
  * 重新生成：
  *   cd server
@@ -19,6 +49,9 @@ import configsFixture from './fixtures/configs.json'
  * 通知渠道字段历史上在仓库里存在过四份副本并且已经漂移过（apiData.ts 的 wecom_app 漏了
  * mpnews），手写这两个文件就是制造第五份副本。后端加渠道 / 加配置项时，
  * 只要重跑一次生成器，演示站就自动跟上，不需要在这里改任何代码。
+ *
+ * 业务数据（任务、日志、脚本、环境变量……）是另一回事：服务端没有对应的注册表，
+ * 它们是手写剧本，放在 fixtures/business.ts 与 fixtures/scripts.ts。
  */
 
 /**
@@ -52,31 +85,47 @@ const DEMO_PANEL_VERSION = String(import.meta.env.VITE_DEMO_VERSION || '')
 const DEMO_ACCESS_TOKEN = 'demo-access-token'
 const DEMO_REFRESH_TOKEN = 'demo-refresh-token'
 
+const BLOCKED_MESSAGE = '演示环境不可用'
+
 /**
- * 演示访客的用户对象。
+ * 「这个动作在演示环境里做不了」。
  *
- * avatar_url 必须留空：MainLayout 侧边栏与抽屉里的头像 <img> 没有 @error 兜底，
- * 一旦指向任何取不到的地址就会显示破图。留空会走「用户名首字母占位块」分支。
+ * 抛它的端点会被 adapter 转成一次带 403 的拒绝 + 一条 warning toast。
+ * 为什么不是返回 200 + 一句提示：像「重启面板」「系统更新」这类按钮，
+ * 拿到 200 之后页面会进入等待重启的轮询（fetch('/', HEAD) → 静态站恒 200 → 自动刷新），
+ * 演示数据当场全丢。拒绝掉才能让那条路径根本走不进去。
+ *
+ * ⚠️ 状态码必须是 403，不能是 401 —— request.ts:54 遇到 401 会尝试刷新 token，
+ *    失败就 clearAuth() 并跳登录页。
  */
-const DEMO_USER = {
-  id: 1,
-  username: 'demo',
-  role: 'admin',
-  enabled: true,
-  avatar_url: '',
-  last_login_at: isoNow(),
-  created_at: '2026-01-05T09:12:00Z',
-  updated_at: isoNow(),
+class DemoBlockedError extends Error {
+  constructor(message: string = BLOCKED_MESSAGE) {
+    super(message)
+    this.name = 'DemoBlockedError'
+  }
 }
 
-function isoNow() {
-  return new Date().toISOString()
+function blocked(message?: string): never {
+  throw new DemoBlockedError(message)
 }
 
-function delay(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms)
-  })
+let lastBlockedNoticeAt = 0
+
+/**
+ * 弹「演示环境不可用」。
+ *
+ * 必须由 adapter 自己弹，不能指望调用方：
+ *   - useSettingsOverview 的 handleRestartPanel 整个 catch 是空的，什么都不提示；
+ *   - deps 页的 handleCreate catch 里写死的是「提交安装失败」。
+ * 两处都不会把服务端给的 error 文案透出来，访客只会觉得「点了没反应」。
+ *
+ * 1.2 秒内的重复提示直接丢弃：批量操作会连着打好几发请求。
+ */
+function notifyBlocked(message: string) {
+  const now = Date.now()
+  if (now - lastBlockedNoticeAt < 1200) return
+  lastBlockedNoticeAt = now
+  ElMessage({ type: 'warning', message, grouping: true })
 }
 
 /** 请求经过归一化之后交给各端点处理函数的上下文 */
@@ -87,11 +136,100 @@ interface DemoRequestContext {
   path: string
   /** URL 查询串与 axios config.params 合并后的结果 */
   params: Record<string, string>
+  /** 路径变量，如 /tasks/:id 里的 id */
+  vars: Record<string, string>
   /** 请求体（能解析成 JSON 时是对象，否则原样） */
   body: any
 }
 
 type DemoHandler = (ctx: DemoRequestContext) => unknown
+
+// ---------------------------------------------------------------------------
+// 路由表
+// ---------------------------------------------------------------------------
+
+const exactRoutes = new Map<string, DemoHandler>()
+const patternRoutes: Array<{ method: string; regex: RegExp; keys: string[]; handler: DemoHandler }> = []
+
+/**
+ * 注册一个端点。
+ *
+ * 静态路径进 Map（O(1) 命中），带 `:var` 的进有序数组（按注册顺序匹配）。
+ * ⚠️ 静态路径永远优先于模式路径，所以 `/envs/by-name` 不会被 `/envs/:id` 抢走；
+ *    模式之间则按注册顺序，注册 `/tasks/views/:id` 必须早于 `/tasks/:id`。
+ */
+function route(method: string, template: string, handler: DemoHandler) {
+  if (!template.includes(':')) {
+    exactRoutes.set(`${method} ${template}`, handler)
+    return
+  }
+
+  const keys: string[] = []
+  const source = template.replace(/:([A-Za-z_][A-Za-z0-9_]*)/g, (_match, key: string) => {
+    keys.push(key)
+    return '([^/]+)'
+  })
+  patternRoutes.push({ method, regex: new RegExp(`^${source}$`), keys, handler })
+}
+
+function resolveHandler(method: string, path: string): { handler: DemoHandler; vars: Record<string, string> } | null {
+  const exact = exactRoutes.get(`${method} ${path}`)
+  if (exact) return { handler: exact, vars: {} }
+
+  for (const item of patternRoutes) {
+    if (item.method !== method) continue
+    const matched = item.regex.exec(path)
+    if (!matched) continue
+
+    const vars: Record<string, string> = {}
+    item.keys.forEach((key, index) => {
+      vars[key] = decodeURIComponent(matched[index + 1] ?? '')
+    })
+    return { handler: item.handler, vars }
+  }
+
+  return null
+}
+
+// ---------------------------------------------------------------------------
+// 小工具
+// ---------------------------------------------------------------------------
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function intVar(ctx: DemoRequestContext, key = 'id'): number {
+  return Number.parseInt(ctx.vars[key] ?? '', 10)
+}
+
+function bodyObject(ctx: DemoRequestContext): Record<string, any> {
+  return ctx.body && typeof ctx.body === 'object' && !Array.isArray(ctx.body) ? ctx.body : {}
+}
+
+function idList(ctx: DemoRequestContext, ...keys: string[]): number[] {
+  const body = bodyObject(ctx)
+  for (const key of keys) {
+    const raw = body[key]
+    if (Array.isArray(raw)) {
+      return raw.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+    }
+  }
+  return []
+}
+
+/** 需要 404 语义时用它：页面普遍读 err.response.data.error 展示 */
+function notFound(message: string): never {
+  throw new AxiosError(message, 'ERR_BAD_REQUEST', undefined, null, {
+    status: 404,
+    statusText: 'Not Found',
+    data: { error: message },
+    headers: {},
+    config: { headers: {} },
+  } as unknown as AxiosResponse)
+}
 
 /**
  * 兜底响应体。
@@ -112,312 +250,1661 @@ function createFallbackBody() {
   return { data: [], total: 0, page: 1, page_size: 20 }
 }
 
+// ===========================================================================
+// 登录与会话
+// ===========================================================================
+
 /**
- * 把 fixture 深拷贝一份再返回。
+ * 演示访客本人。avatar_url 恒为空串，见 fixtures/business.ts 里的说明。
  *
- * import 进来的 JSON 是模块级单例，整个会话里只求值一次。直接把它交给页面的话，
- * 任何一处就地修改（设置页回填后改表单、渠道弹窗往 config 里塞值）都会污染后续请求，
- * 而且刷新页面也恢复不了——模块不会重新求值。
- *
- * 与 createFallbackBody() 每次返回新对象是同一条理由。
+ * 兜底到一个常量对象而不是允许返回 undefined：访客可以在用户管理页把账号删光，
+ * 而 GET /auth/user 一旦返回空对象，router.beforeEach 会 clearAuth() 把人踢回登录页。
  */
-function cloneFixture<T>(fixture: T): T {
-  return structuredClone(fixture)
+const FALLBACK_DEMO_USER: DemoUser = {
+  id: 1,
+  username: 'demo',
+  role: 'admin',
+  enabled: true,
+  avatar_url: '',
+  last_login_at: null,
+  created_at: '2026-01-05T09:12:00.000Z',
+  updated_at: '2026-01-05T09:12:00.000Z',
 }
 
-/** 演示剧本里的任务规模。P1 铺 /tasks 列表 fixture 时要与这两个数对齐，别各写各的。 */
-const DEMO_TASK_COUNT = 14
-const DEMO_RUNNING_TASKS = 2
-
-/**
- * 执行日志状态码，取值必须与 server/model/task_log.go:8-11 一致。
- * 仪表盘用它区分成功 / 失败 / 运行中 / 已终止（dashboard/index.vue:47-50）。
- */
-const LOG_STATUS_SUCCESS = 0
-const LOG_STATUS_FAILED = 1
-const LOG_STATUS_RUNNING = 2
-const LOG_STATUS_ABORTED = 3
-
-const DAY_MS = 24 * 60 * 60 * 1000
-
-/**
- * 7 天一轮的趋势基准（分布刻意做得不规整，比等差数列更像真实运维数据）。
- * 区间超过 7 天时按下标取模循环，保证 30 天区间每一格也都有非零数据。
- */
-const TREND_SUCCESS = [176, 187, 170, 194, 181, 209, 191]
-const TREND_FAILED = [6, 9, 4, 11, 7, 5, 8]
-const TREND_ABORTED = [1, 0, 2, 1, 0, 1, 2]
-
-/** 与 server/handler/system.go 的 DailyStat 同形状 */
-interface DemoDailyStat {
-  /** `MM-DD`，与后端 `day.Format("01-02")` 一致 */
-  date: string
-  success: number
-  failed: number
-  aborted: number
+function demoUser(): DemoUser {
+  const current = db()
+  return current.users.find((user) => user.username === 'demo')
+    ?? current.users[0]
+    ?? FALLBACK_DEMO_USER
 }
 
-/**
- * 生成截止到今天、长度为 days 的每日统计。
- *
- * ⚠️ 字段形状必须与 server/handler/system.go:165-183 的 DailyStat 完全一致：
- *    `date` 是 `MM-DD`（不是 `YYYY-MM-DD`）、有 `aborted`、**没有** `total`。
- *    web/mock-server.mjs:19-25 里那份 daily_stats 是早就和后端漂移掉的旧形状，别照抄——
- *    它多了一个 total、少了 aborted、日期还是 10 位的。
- *    趋势图的「执行总数」是 success + failed + aborted 现算的
- *    （ExecutionTrendChart.vue:102-104），多给一个 total 既不会被读到，
- *    还会让后来的人误以为它是权威值。
- *
- * 取样下标按「距 1970-01-01 的绝对天数」取模，而不是按窗口内位置取模：
- * 后者会让同一个日历日在「近 7 天」和「近 30 天」下取到不同的数，
- * 访客切一下区间，今天的成功率就跟着跳，看起来像数据在乱变。
- */
-function buildDailyStats(days: number): DemoDailyStat[] {
-  const stats: DemoDailyStat[] = []
-  // 今天所处的绝对天序号；减去 offset 后依然为正，不会踩 JS 负数取模
-  const todayIndex = Math.floor(Date.now() / DAY_MS)
+// need_init:false 才会走「登录」而不是「初始化管理员」流程
+route('GET', '/auth/check-init', () => ({ need_init: false }))
 
-  for (let offset = days - 1; offset >= 0; offset -= 1) {
-    const day = new Date(Date.now() - offset * DAY_MS)
-    const slot = (todayIndex - offset) % TREND_SUCCESS.length
-    stats.push({
-      // 用本地时间取月日，与后端按 now.Location() 划分自然日的口径一致
-      date: `${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`,
-      success: TREND_SUCCESS[slot] ?? 180,
-      failed: TREND_FAILED[slot] ?? 5,
-      aborted: TREND_ABORTED[slot] ?? 1,
-    })
-  }
-  return stats
-}
+// enabled:false 会让 login/index.vue 提前 return，
+// 从而【阻止极验 SDK 的 <script src="https://static.geetest.com/..."> 被注入】。
+// 那是 script 标签注入，不走 fetch/XHR，任何网络层 mock 都拦不住；
+// 演示站没有后端，SDK 一旦被注入就会卡在「极验 SDK 加载失败」上，登录直接走不下去。
+route('GET', '/auth/captcha-config', () => ({
+  enabled: false,
+  captcha_id: '',
+  configured: false,
+  implemented: false,
+  required: false,
+  require_after_failures: 0,
+  message: '',
+}))
 
-/**
- * 「最近执行任务」表格的剧本。
- *
- * 字段名照抄 server/model/task_log.go:32-54 的 ToDict()——仪表盘表格读的是
- * task_name / status / created_at / duration / task_type / labels，
- * 少一个就会出现「未命名任务」或空白列。
- *
- * 两点刻意为之：
- * 1. 覆盖全部四种状态，让表头那排「全部 / 成功 / 失败 / 终止 / 运行中」筛选每一档都有内容
- *    （dashboard/index.vue:414-426 是先过滤全量再取前 5 条）；
- * 2. 运行中的两条 duration 给 null，与「运行中的任务 = 2」那张卡片对得上；
- *    其余条目都带 duration，否则「平均执行时长」会显示 `-`
- *    （dashboard/index.vue:462-469 在没有任何可用样本时返回 null）。
- *
- * 时间用「距现在多少分钟」现算，保证任何时候打开演示站，看到的都是刚刚发生的执行。
- */
-const RECENT_LOG_SEED: Array<{
-  taskId: number
-  name: string
-  status: number
-  duration: number | null
-  minutesAgo: number
-  taskType: string
-  labels: string[]
-}> = [
-  { taskId: 8, name: '系统健康检查', status: LOG_STATUS_RUNNING, duration: null, minutesAgo: 1, taskType: 'cron', labels: ['监控'] },
-  { taskId: 11, name: '监控指标采集', status: LOG_STATUS_RUNNING, duration: null, minutesAgo: 3, taskType: 'cron', labels: ['监控'] },
-  { taskId: 3, name: '同步配置文件', status: LOG_STATUS_SUCCESS, duration: 5.4, minutesAgo: 12, taskType: 'cron', labels: ['配置'] },
-  { taskId: 12, name: '证书到期巡检', status: LOG_STATUS_FAILED, duration: 31.8, minutesAgo: 38, taskType: 'cron', labels: ['监控'] },
-  { taskId: 1, name: '每日数据备份', status: LOG_STATUS_SUCCESS, duration: 184.6, minutesAgo: 95, taskType: 'cron', labels: ['备份'] },
-  { taskId: 9, name: '离线报表导出', status: LOG_STATUS_ABORTED, duration: 62, minutesAgo: 143, taskType: 'manual', labels: [] },
-  { taskId: 2, name: '清理临时文件', status: LOG_STATUS_SUCCESS, duration: 2.1, minutesAgo: 205, taskType: 'cron', labels: [] },
-  { taskId: 7, name: '发送运营日报', status: LOG_STATUS_SUCCESS, duration: 3.8, minutesAgo: 268, taskType: 'cron', labels: ['通知'] },
-  { taskId: 5, name: '更新 IP 数据库', status: LOG_STATUS_SUCCESS, duration: 8.7, minutesAgo: 402, taskType: 'startup', labels: [] },
-]
+// 唯一的硬阻塞：router.beforeEach 在没有 user 时会 await fetchUser()，
+// 这里失败会 clearAuth() 并打回登录页，15 个页面一个都进不去。
+route('GET', '/auth/user', () => ({ user: demoUser() }))
 
-function buildRecentLogs() {
-  return RECENT_LOG_SEED.map((seed, index) => {
-    const createdAt = new Date(Date.now() - seed.minutesAgo * 60 * 1000)
-    // 运行中的日志还没结束，ended_at 留空；其余按 duration 反推结束时间
-    const endedAt = seed.duration == null ? null : new Date(createdAt.getTime() + seed.duration * 1000)
-    return {
-      id: index + 1,
-      task_id: seed.taskId,
-      task_name: seed.name,
-      task_type: seed.taskType,
-      labels: [...seed.labels],
-      task: { task_type: seed.taskType, labels: [...seed.labels] },
-      status: seed.status,
-      duration: seed.duration,
-      content: '',
-      log_path: '',
-      started_at: createdAt.toISOString(),
-      ended_at: endedAt ? endedAt.toISOString() : null,
-      created_at: createdAt.toISOString(),
-      updated_at: (endedAt ?? createdAt).toISOString(),
-    }
-  })
-}
+route('POST', '/auth/login', () => ({
+  message: '登录成功',
+  access_token: DEMO_ACCESS_TOKEN,
+  refresh_token: DEMO_REFRESH_TOKEN,
+  user: demoUser(),
+}))
+route('POST', '/auth/logout', () => ({ message: '已退出登录' }))
+// 走的是 api/auth.ts 里那个裸全局 axios（见文件末尾的双实例挂载说明）
+route('POST', '/auth/refresh', () => ({ access_token: DEMO_ACCESS_TOKEN }))
+route('POST', '/auth/init', () => ({ message: '初始化成功', user: demoUser() }))
+route('PUT', '/auth/password', () => ({ message: '密码修改成功' }))
 
-/**
- * P0 阶段的端点表：只覆盖「不铺就进不去面板」的那几个。
- *
- * 响应体写的就是后端 JSON body 本身，**不要再包一层**——
- * request.ts 的响应拦截器 `return response.data`，页面拿到的已经是这里写的对象。
- *
- * 业务数据（任务、日志、脚本、环境变量……）与由 Go registry 导出的 schema fixture
- * 属于后续阶段，未铺到的端点一律走 createFallbackBody()。
- */
-const exactRoutes: Record<string, DemoHandler> = {
-  // ---- 登录与会话 ----------------------------------------------------------
-  // need_init:false 才会走「登录」而不是「初始化管理员」流程
-  'GET /auth/check-init': () => ({ need_init: false }),
+route('PUT', '/auth/username', (ctx) => {
+  const user = demoUser()
+  const username = String(bodyObject(ctx)['username'] ?? '').trim()
+  if (!user || !username) return notFound('用户名不能为空')
+  user.username = username
+  user.updated_at = nowIso()
+  return { message: '用户名已更新', user }
+})
 
-  // enabled:false 会让 login/index.vue 提前 return，
-  // 从而【阻止极验 SDK 的 <script src="https://static.geetest.com/..."> 被注入】。
-  // 那是 script 标签注入，不走 fetch/XHR，任何网络层 mock 都拦不住；
-  // 演示站没有后端，SDK 一旦被注入就会卡在「极验 SDK 加载失败」上，登录直接走不下去。
-  'GET /auth/captcha-config': () => ({
-    enabled: false,
-    captcha_id: '',
-    configured: false,
-    implemented: false,
-    required: false,
-    require_after_failures: 0,
-    message: '',
-  }),
+// 头像上传要真生效就得把文件转成 data: URL 存起来，而 C5 明确要求 avatar_url 恒为空
+//（MainLayout 那三处 <img> 没有 @error 兜底）。与其做半套，不如直接说明这里不可用。
+route('POST', '/auth/avatar', () => blocked())
+route('DELETE', '/auth/avatar', () => ({ message: '头像已删除' }))
 
-  // 唯一的硬阻塞：router.beforeEach 在没有 user 时会 await fetchUser()，
-  // 这里失败会 clearAuth() 并打回登录页，15 个页面一个都进不去。
-  'GET /auth/user': () => ({ user: DEMO_USER }),
+// ===========================================================================
+// 系统信息 / 面板设置
+// ===========================================================================
 
-  'POST /auth/login': () => ({
-    message: '登录成功',
-    access_token: DEMO_ACCESS_TOKEN,
-    refresh_token: DEMO_REFRESH_TOKEN,
-    user: DEMO_USER,
-  }),
-  'POST /auth/logout': () => ({ message: '已退出登录' }),
-  // 走的是 api/auth.ts 里那个裸全局 axios（见文件末尾的双实例挂载说明）
-  'POST /auth/refresh': () => ({ access_token: DEMO_ACCESS_TOKEN }),
+route('GET', '/system/version', () => ({ data: { version: DEMO_PANEL_VERSION } }))
+route('GET', '/system/public-version', () => ({ version: DEMO_PANEL_VERSION }))
+route('GET', '/system/panel-settings', () => ({
+  data: { panel_title: '呆呆面板', panel_icon: '' },
+}))
+route('GET', '/system/machine-code', () => ({ data: { machine_code: 'DEMO-0000-0000-0000' } }))
 
-  // ---- 面板基础信息 --------------------------------------------------------
-  'GET /system/version': () => ({ data: { version: DEMO_PANEL_VERSION } }),
-  'GET /system/public-version': () => ({ version: DEMO_PANEL_VERSION }),
-  'GET /system/panel-settings': () => ({
-    data: { panel_title: '呆呆面板', panel_icon: '' },
-  }),
-
-  'GET /system/info': () => ({
-    data: {
-      os: 'linux',
-      arch: 'amd64',
-      deployment_type: 'docker',
-      magisk_shell_version: 0,
-      cpu_usage: 12.5,
-      memory_usage: 45.2,
-      disk_usage: 32.1,
-      num_cpu: 4,
-      goroutines: 28,
-      uptime: '6d 4h 18m',
-      memory_used: 1073741824,
-      memory_total: 2147483648,
-      disk_used: 10737418240,
-      disk_total: 32212254720,
-      go_version: 'go1.25.0',
-    },
-  }),
-
-  // 仪表盘。这一份响应里的每个数字都会被至少一张卡片读到，且卡片之间互相印证，
-  // 少给一个字段就会当场自相矛盾（详见下面各字段上的说明）。
-  // 字段清单对齐 server/handler/system.go:185-205。
-  'GET /system/dashboard': (ctx) => {
-    // 趋势区间由 range 决定，合法范围与后端一致（system.go:158-163：1 ≤ n ≤ 90）
-    const range = Number.parseInt(ctx.params['range'] ?? '', 10)
-    const days = Number.isFinite(range) && range > 0 && range <= 90 ? range : 7
-
-    // 多算一天：「较昨日」那几个对比卡片需要窗口外的前一天，
-    // range=1 时窗口里根本没有「昨天」，直接取 dailyStats[length-2] 会是 undefined。
-    // days ≥ 1 恒成立，所以 series 至少有 2 项，下面两个非空断言是可证明安全的。
-    const series = buildDailyStats(days + 1)
-    const dailyStats = series.slice(1)
-    const today = series[series.length - 1]!
-    const yesterday = series[series.length - 2]!
-
-    // 后端 today_logs 数的是当天全部日志行（含 status=running 那几条），
-    // 而 daily_stats 只统计已结束的三类，所以这里要把运行中的补回去，
-    // 否则「今日执行」会比同页三段占比条的当日合计还小。
-    const todayLogs = today.success + today.failed + today.aborted + DEMO_RUNNING_TASKS
-    const yesterdayLogs = yesterday.success + yesterday.failed + yesterday.aborted
-
-    return {
-      data: {
-        task_count: DEMO_TASK_COUNT,
-        enabled_tasks: DEMO_TASK_COUNT - DEMO_RUNNING_TASKS - 1,
-        running_tasks: DEMO_RUNNING_TASKS,
-        // 「任务总数」卡片的增量 = task_count - prev_task_count。
-        // 不给 prev_task_count 会退化成 0，卡片显示「+14」，
-        // 等于说 14 个任务全是今天建的，与「用了一阵子」的剧本对不上。
-        prev_task_count: DEMO_TASK_COUNT - 1,
-        today_logs: todayLogs,
-        success_logs: today.success,
-        // failed_logs / aborted_logs 缺一不可：成功率卡片算的是
-        // success_logs / (success_logs + failed_logs)（dashboard/index.vue:180-186），
-        // 少了 failed_logs 会恒等于 100.0%，与同页「执行统计」里 96% 的成功占比直接打架。
-        failed_logs: today.failed,
-        aborted_logs: today.aborted,
-        // 「较昨日」的四个对比值，缺了会让所有增量都变成「与 0 相比」，
-        // 成功率卡片直接显示 +100%。
-        yesterday_logs: yesterdayLogs,
-        yesterday_success: yesterday.success,
-        yesterday_failed: yesterday.failed,
-        yesterday_aborted: yesterday.aborted,
-        env_count: 18,
-        sub_count: 3,
-        daily_stats: dailyStats,
-        recent_logs: buildRecentLogs(),
-        range_days: days,
-      },
-    }
+route('GET', '/system/info', () => ({
+  data: {
+    os: 'linux',
+    arch: 'amd64',
+    deployment_type: 'docker',
+    magisk_shell_version: 0,
+    cpu_usage: 12.5,
+    memory_usage: 45.2,
+    disk_usage: 32.1,
+    num_cpu: 4,
+    goroutines: 28,
+    uptime: '6d 4h 18m',
+    memory_used: 1073741824,
+    memory_total: 2147483648,
+    disk_used: 10737418240,
+    disk_total: 32212254720,
+    go_version: 'go1.26.4',
   },
+}))
 
-  // 类型是 SystemHealthSnapshot，页面直接读 .items，走兜底体会拿到 undefined
-  'GET /system/health-check': () => ({
-    items: [{ name: '面板服务', status: 'ok', message: '演示环境运行中' }],
-    last_checked_at: isoNow(),
-  }),
+// 仪表盘与「系统概况」的每一个数字都是从 db 里的 tasks / logs 现算的，
+// 这里不再写死任何常量，详见 db.ts 的 buildDashboard / buildSystemStats。
+route('GET', '/system/dashboard', (ctx) => ({ data: buildDashboard(ctx.params) }))
+route('GET', '/system/stats', () => ({ data: buildSystemStats() }))
 
-  // ---- 由服务端 registry 导出的 schema fixture ------------------------------
-  // 这两个响应体就是生成器写出来的 JSON 本身（已经是 { data: ... } 这层后端 body），
-  // 不要再包一层——request.ts:50 的响应拦截器返回的是 response.data。
+// 类型是 SystemHealthSnapshot，页面直接读 .items，走兜底体会拿到 undefined
+function healthSnapshot() {
+  return {
+    items: [
+      { name: '面板服务', status: 'ok', message: '演示环境运行中' },
+      { name: '数据库', status: 'ok', message: '连接正常' },
+      { name: '任务调度器', status: 'ok', message: `已加载 ${db().tasks.length} 个任务` },
+      { name: '磁盘空间', status: 'ok', message: '已用 32.1%' },
+      { name: '网络连通性', status: 'warn', message: '演示环境无外网出口' },
+    ],
+    last_checked_at: nowIso(),
+  }
+}
+route('GET', '/system/health-check', () => healthSnapshot())
+route('POST', '/system/health-check', () => healthSnapshot())
 
-  // 全部通知渠道及其字段定义。新建 / 编辑渠道弹窗的输入框完全靠它渲染
-  //（notifications/index.vue:141 拿 fields 生成表单），拿不到就是一张空表单。
-  'GET /notifications/types': () => cloneFixture(notificationTypesFixture),
+route('GET', '/system/panel-log', (ctx) => {
+  const keyword = (ctx.params['keyword'] ?? '').trim()
+  const level = (ctx.params['level'] ?? '').trim().toLowerCase()
+  const lines = [
+    '[INFO] 面板启动完成，监听 0.0.0.0:8080',
+    `[INFO] 已加载 ${db().tasks.length} 个定时任务`,
+    '[INFO] 订阅调度器已启动，3 个订阅',
+    '[INFO] 任务 系统健康检查 开始执行',
+    '[WARN] 任务 证书到期巡检 退出码 1，已触发通知',
+    '[INFO] 任务 同步配置文件 执行完成，耗时 4.2s',
+    '[INFO] 备份计划任务已跳过：本日已存在自动备份',
+    '[ERROR] 通知渠道 （停用）旧告警群 已禁用，跳过推送',
+    '[INFO] 这里是演示环境，日志内容为静态样例',
+  ]
+  const filtered = lines.filter((line) => {
+    if (level && !line.toLowerCase().includes(`[${level}]`)) return false
+    return !keyword || line.includes(keyword)
+  })
+  return { data: { logs: filtered } }
+})
 
-  // configApi.list 的类型是 { data: SystemConfigMap }，是「键 -> 配置项」的对象而不是数组。
-  // fixture 是「全新安装、system_configs 表一行都没有」时的响应：每项的 value 等于
-  // 注册表里的 default_value（依据 server/handler/config.go:87-89）。
-  // 设置页 6 个 tab 的表单、以及按 schema 兜底渲染的 ExtraConfigCard 都读它。
-  'GET /configs': () => cloneFixture(configsFixture),
+// 「配置文件」页：真可写，保存后重新打开内容保持
+route('GET', '/system/config-script', () => ({
+  content: db().configScript,
+  path: 'config/extra.sh',
+}))
+route('PUT', '/system/config-script', (ctx) => {
+  db().configScript = String(bodyObject(ctx)['content'] ?? '')
+  return { message: '配置文件已保存' }
+})
 
-  // 这两个端点返回的是【裸数组】，不是 { data: [...] } 信封
-  //（api/taskView.ts:38 与 api/task.ts:130 的返回类型可以佐证）。
-  // 兜底体是对象，页面上的 .map / .filter 会直接抛错，必须单独列出来。
-  // 同类的还有 GET /tasks/{id}/log-files，因为带路径变量放在下面的 patternRoutes 里。
-  'GET /tasks/views': () => [],
-  'GET /tasks/cron/templates': () => [],
+route('GET', '/system/backups', () => ({ data: db().backups }))
+route('DELETE', '/system/backup', (ctx) => {
+  const current = db()
+  const filename = ctx.params['filename'] ?? ''
+  current.backups = current.backups.filter((item) => item.name !== filename)
+  return { message: '删除成功' }
+})
+
+route('GET', '/system/restore/progress', () => ({
+  data: { active: false, status: 'idle', percent: 0 },
+}))
+
+route('GET', '/system/update-status', () => ({ data: { status: 'idle' } }))
+route('GET', '/system/check-update', () => ({
+  data: {
+    current: DEMO_PANEL_VERSION || '0.0.0',
+    latest: DEMO_PANEL_VERSION || '0.0.0',
+    has_update: false,
+    auto_update_supported: false,
+    update_disabled_reason: '演示环境不支持面板内更新',
+    release_notes: '',
+    update_target: { deployment_type: 'docker' },
+  },
+}))
+
+// ---- 危险操作：一律拒绝 + toast ------------------------------------------
+// 这些按钮在真实面板上会动到进程或数据；在演示站上更要命的是「重启 / 更新 / 恢复」
+// 拿到 200 之后页面会开始轮询 fetch('/', {method:'HEAD'})，
+// 而静态站的 / 恒返 200 ⇒ 判定为「服务已回来」⇒ window.location.reload()，
+// 访客的全部演示数据当场清零。
+route('POST', '/system/update', () => blocked())
+route('POST', '/system/restart', () => blocked())
+route('POST', '/system/stop', () => blocked())
+route('POST', '/system/restore', () => blocked())
+route('POST', '/system/backup', () => blocked())
+route('POST', '/system/backup/upload', () => blocked())
+// 备份文件是编出来的剧本，没有真实内容可下；给个空文件比给个 200 更诚实
+route('GET', '/system/backup/download', () => blocked())
+
+// ===========================================================================
+// 系统配置（/configs）
+// ===========================================================================
+
+// configApi.list 的类型是 { data: SystemConfigMap }，是「键 -> 配置项」的对象而不是数组。
+// fixture 是「全新安装、system_configs 表一行都没有」时的响应：每项的 value 等于
+// 注册表里的 default_value（依据 server/handler/config.go:87-89）。
+// 设置页 6 个 tab 的表单、以及按 schema 兜底渲染的 ExtraConfigCard 都读它。
+route('GET', '/configs', () => ({ data: db().configs }))
+
+route('GET', '/configs/:key', (ctx) => {
+  const key = ctx.vars['key'] ?? ''
+  const item = db().configs[key]
+  if (!item) return notFound('配置不存在')
+  return { data: { key, value: item.value ?? '', config: item } }
+})
+
+function setConfigValue(key: string, value: string) {
+  const current = db()
+  const existing = current.configs[key]
+  if (existing) {
+    existing.value = value
+    existing.updated_at = nowIso()
+    return
+  }
+  // 注册表里没有的键：与服务端一致，仍然存下来，只是 registered=false（不参与 schema 渲染）
+  current.configs[key] = { value, registered: false, updated_at: nowIso() }
 }
 
-/** 路径带变量的端点：按顺序匹配，命中即返回 */
-const patternRoutes: Array<{ method: string; pattern: RegExp; handler: DemoHandler }> = [
-  // GET /tasks/{id}/log-files 同样返回裸数组
-  { method: 'GET', pattern: /^\/tasks\/[^/]+\/log-files$/, handler: () => [] },
-]
+route('POST', '/configs', (ctx) => {
+  const body = bodyObject(ctx)
+  const key = String(body['key'] ?? '').trim()
+  if (!key) return notFound('配置项不存在')
+  setConfigValue(key, String(body['value'] ?? ''))
+  return { message: '配置已更新' }
+})
 
-function resolveHandler(method: string, path: string): DemoHandler | null {
-  const exact = exactRoutes[`${method} ${path}`]
-  if (exact) return exact
-
-  for (const route of patternRoutes) {
-    if (route.method === method && route.pattern.test(path)) {
-      return route.handler
+route('PUT', '/configs/batch', (ctx) => {
+  const configs = bodyObject(ctx)['configs']
+  if (configs && typeof configs === 'object') {
+    for (const [key, value] of Object.entries(configs as Record<string, unknown>)) {
+      setConfigValue(key, String(value ?? ''))
     }
   }
-  return null
+  return { message: '配置已更新' }
+})
+
+route('DELETE', '/configs/:key', (ctx) => {
+  const key = ctx.vars['key'] ?? ''
+  delete db().configs[key]
+  return { message: '配置已删除' }
+})
+
+// ===========================================================================
+// 定时任务
+// ===========================================================================
+
+/** 任务表单可以写的字段。没列进来的（id / created_at / 运行态）一律不允许被请求体覆盖。 */
+const TASK_WRITABLE_KEYS = [
+  'name', 'command', 'python_version', 'cron_expression', 'task_type', 'timeout',
+  'success_exit_codes', 'random_delay_seconds', 'max_retries', 'retry_interval',
+  'notify_on_failure', 'notify_on_success', 'notify_on_abort', 'notification_channel_id',
+  'depends_on', 'task_before', 'task_after', 'allow_multiple_instances', 'stop_schedule',
+] as const
+
+function applyTaskPayload(task: DemoTask, body: Record<string, any>) {
+  for (const key of TASK_WRITABLE_KEYS) {
+    if (body[key] === undefined) continue
+    // 逐字段赋值而不是 Object.assign(task, body)：后者会让请求体里夹带的
+    // id / status / created_at 直接覆盖掉运行态，属于「客户端说什么就是什么」
+    ;(task as unknown as Record<string, unknown>)[key] = body[key]
+  }
+  if (Array.isArray(body['labels'])) {
+    task.labels = body['labels'].map((label: unknown) => String(label))
+  }
+  if (typeof body['status'] === 'number') {
+    task.status = body['status']
+  }
+  task.updated_at = nowIso()
 }
+
+function createTask(body: Record<string, any>): DemoTask {
+  const now = nowIso()
+  const task: DemoTask = {
+    id: nextId('task'),
+    name: String(body['name'] ?? '未命名任务'),
+    command: String(body['command'] ?? ''),
+    python_version: String(body['python_version'] ?? ''),
+    cron_expression: String(body['cron_expression'] ?? ''),
+    task_type: String(body['task_type'] ?? 'cron'),
+    status: TASK_STATUS_ENABLED,
+    labels: Array.isArray(body['labels']) ? body['labels'].map((label: unknown) => String(label)) : [],
+    last_run_at: null,
+    last_run_status: null,
+    timeout: Number(body['timeout'] ?? 0),
+    success_exit_codes: String(body['success_exit_codes'] ?? '0'),
+    random_delay_seconds: body['random_delay_seconds'] ?? null,
+    max_retries: Number(body['max_retries'] ?? 0),
+    retry_interval: Number(body['retry_interval'] ?? 0),
+    notify_on_failure: Boolean(body['notify_on_failure']),
+    notify_on_success: Boolean(body['notify_on_success']),
+    notify_on_abort: Boolean(body['notify_on_abort']),
+    notification_channel_id: body['notification_channel_id'] ?? null,
+    depends_on: body['depends_on'] ?? null,
+    // 新建的任务排在最前面：服务端默认排序里 sort_order 越小越靠前
+    sort_order: -1,
+    is_pinned: false,
+    subscription_locked: false,
+    pid: null,
+    log_path: null,
+    last_running_time: null,
+    task_before: body['task_before'] ?? null,
+    task_after: body['task_after'] ?? null,
+    allow_multiple_instances: Boolean(body['allow_multiple_instances']),
+    stop_schedule: String(body['stop_schedule'] ?? ''),
+    created_at: now,
+    updated_at: now,
+  }
+  db().tasks.push(task)
+  return task
+}
+
+function requireTask(ctx: DemoRequestContext): DemoTask {
+  const task = findTask(intVar(ctx))
+  if (!task) return notFound('任务不存在')
+  return task
+}
+
+route('GET', '/tasks', (ctx) => {
+  const page = paginate(filterTasks(ctx.params), ctx.params)
+  return { ...page, data: page.data.map(toTaskDict) }
+})
+
+route('GET', '/tasks/notification-channels', () => ({
+  data: db().channels.map((channel) => ({
+    id: channel.id,
+    name: channel.name,
+    type: channel.type,
+    push_scope: channel.push_scope,
+    enabled: channel.enabled,
+  })),
+}))
+
+// 这两个端点返回的是【裸数组】，不是 { data: [...] } 信封
+//（api/taskView.ts:38 与 api/task.ts:130 的返回类型可以佐证）。
+// 兜底体是对象，页面上的 .map / .filter 会直接抛错，必须单独列出来。
+// 同类的还有 GET /tasks/{id}/log-files。
+route('GET', '/tasks/views', () => [...db().taskViews].sort((left, right) => left.sort_order - right.sort_order))
+
+route('POST', '/tasks/views', (ctx) => {
+  const body = bodyObject(ctx)
+  const current = db()
+  const view = {
+    id: nextId('taskView'),
+    name: String(body['name'] ?? '新视图'),
+    filters: String(body['filters'] ?? '[]'),
+    sort_rules: String(body['sort_rules'] ?? '[]'),
+    hidden: false,
+    sort_order: current.taskViews.length,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  }
+  current.taskViews.push(view)
+  return view
+})
+
+// reorder 是静态路径，会被 exactRoutes 先命中，不会被下面的 /tasks/views/:id 抢走。
+// 但 /tasks/views/:id 与 /tasks/:id 都是模式路由，两者【按注册顺序匹配】，
+// 所以 /tasks/views/:id 必须写在 /tasks/:id 前面（本文件里确实如此，别调换）。
+route('PUT', '/tasks/views/reorder', (ctx) => {
+  const current = db()
+  const items = bodyObject(ctx)['views']
+  if (Array.isArray(items)) {
+    for (const item of items as Array<Record<string, unknown>>) {
+      const view = current.taskViews.find((row) => row.id === Number(item['id']))
+      if (!view) continue
+      view.sort_order = Number(item['sort_order'] ?? view.sort_order)
+      if (typeof item['hidden'] === 'boolean') view.hidden = item['hidden']
+      view.updated_at = nowIso()
+    }
+  }
+  const views = [...current.taskViews].sort((left, right) => left.sort_order - right.sort_order)
+  return { updated: views.length, views }
+})
+
+route('PUT', '/tasks/views/:id', (ctx) => {
+  const view = db().taskViews.find((row) => row.id === intVar(ctx))
+  if (!view) return notFound('视图不存在')
+  const body = bodyObject(ctx)
+  if (body['name'] !== undefined) view.name = String(body['name'])
+  if (body['filters'] !== undefined) view.filters = String(body['filters'])
+  if (body['sort_rules'] !== undefined) view.sort_rules = String(body['sort_rules'])
+  if (typeof body['hidden'] === 'boolean') view.hidden = body['hidden']
+  if (body['sort_order'] !== undefined) view.sort_order = Number(body['sort_order'])
+  view.updated_at = nowIso()
+  return view
+})
+
+route('DELETE', '/tasks/views/:id', (ctx) => {
+  const current = db()
+  current.taskViews = current.taskViews.filter((row) => row.id !== intVar(ctx))
+  return { message: '视图已删除' }
+})
+
+// cron 模板与解析：模板照抄 server/pkg/cron/cron.go 的 GetTemplates()（六段含秒），
+// 解析结果的字段名照抄 handler/task_cron.go 的 CronParse。
+const CRON_TEMPLATES = [
+  { name: '每分钟', expression: '0 * * * * *', description: '每分钟执行一次', category: '高频' },
+  { name: '每5分钟', expression: '0 */5 * * * *', description: '每5分钟执行一次', category: '高频' },
+  { name: '每10分钟', expression: '0 */10 * * * *', description: '每10分钟执行一次', category: '高频' },
+  { name: '每15分钟', expression: '0 */15 * * * *', description: '每15分钟执行一次', category: '高频' },
+  { name: '每30分钟', expression: '0 */30 * * * *', description: '每30分钟执行一次', category: '常用' },
+  { name: '每小时', expression: '0 0 * * * *', description: '每小时整点执行', category: '常用' },
+  { name: '每2小时', expression: '0 0 */2 * * *', description: '每2小时执行一次', category: '常用' },
+  { name: '每6小时', expression: '0 0 */6 * * *', description: '每6小时执行一次', category: '常用' },
+  { name: '每天0点', expression: '0 0 0 * * *', description: '每天凌晨0点执行', category: '每天' },
+  { name: '每天6点', expression: '0 0 6 * * *', description: '每天早上6点执行', category: '每天' },
+  { name: '每天9点', expression: '0 0 9 * * *', description: '每天上午9点执行', category: '每天' },
+  { name: '每天12点', expression: '0 0 12 * * *', description: '每天中午12点执行', category: '每天' },
+  { name: '每天18点', expression: '0 0 18 * * *', description: '每天下午6点执行', category: '每天' },
+  { name: '工作日9点', expression: '0 0 9 * * 1-5', description: '工作日上午9点执行', category: '工作日' },
+  { name: '工作日18点', expression: '0 0 18 * * 1-5', description: '工作日下午6点执行', category: '工作日' },
+  { name: '周末10点', expression: '0 0 10 * * 0,6', description: '周末上午10点执行', category: '周末' },
+  { name: '每周一0点', expression: '0 0 0 * * 1', description: '每周一凌晨0点执行', category: '每周' },
+  { name: '每月1日0点', expression: '0 0 0 1 * *', description: '每月1日凌晨0点执行', category: '每月' },
+  { name: '每月15日0点', expression: '0 0 0 15 * *', description: '每月15日凌晨0点执行', category: '每月' },
+]
+
+route('GET', '/tasks/cron/templates', () => CRON_TEMPLATES)
+
+route('POST', '/tasks/cron/parse', (ctx) => {
+  const expression = String(bodyObject(ctx)['expression'] ?? '').trim()
+  const times = nextRunTimes(expression, Date.now(), 5)
+  if (times.length === 0) {
+    return { is_valid: false, error: '无法解析该 cron 表达式' }
+  }
+  const fieldCount = expression.split(/\s+/).length
+  return {
+    is_valid: true,
+    description: '演示环境按标准 cron 语义解析',
+    next_run_times: times,
+    format: fieldCount === 6 ? '扩展格式 (6位含秒)' : '标准格式 (5位)',
+  }
+})
+
+route('DELETE', '/tasks/clean-logs', (ctx) => {
+  const days = Number.parseInt(ctx.params['days'] ?? '', 10)
+  const current = db()
+  const cutoff = Date.now() - (Number.isFinite(days) && days > 0 ? days : 7) * 24 * 60 * 60 * 1000
+  const before = current.logs.length
+  current.logs = current.logs.filter((log) => new Date(log.started_at).getTime() >= cutoff)
+  return { message: `已清理 ${before - current.logs.length} 条日志` }
+})
+
+route('GET', '/tasks/export', () => ({ data: db().tasks.map(toTaskDict) }))
+
+route('POST', '/tasks/import', (ctx) => {
+  const rows = bodyObject(ctx)['tasks']
+  if (!Array.isArray(rows)) return { message: '未导入任何任务', errors: ['请求内容为空'] }
+  for (const row of rows as Array<Record<string, any>>) createTask(row)
+  return { message: `成功导入 ${rows.length} 个任务`, errors: [] }
+})
+
+// ---- 批量操作（静态路径必须先于 /tasks/:id 系列声明才不会被抢） ------------
+route('PUT', '/tasks/batch/enable', (ctx) => {
+  const ids = idList(ctx, 'task_ids', 'ids')
+  for (const task of db().tasks) {
+    if (ids.includes(task.id)) task.status = TASK_STATUS_ENABLED
+  }
+  return { message: `已启用 ${ids.length} 个任务`, success_count: ids.length }
+})
+
+route('PUT', '/tasks/batch/disable', (ctx) => {
+  const ids = idList(ctx, 'task_ids', 'ids')
+  for (const task of db().tasks) {
+    if (ids.includes(task.id)) task.status = TASK_STATUS_DISABLED
+  }
+  return { message: `已禁用 ${ids.length} 个任务`, success_count: ids.length }
+})
+
+route('DELETE', '/tasks/batch/delete', (ctx) => {
+  const ids = idList(ctx, 'task_ids', 'ids')
+  const current = db()
+  current.tasks = current.tasks.filter((task) => !ids.includes(task.id))
+  return { message: `已删除 ${ids.length} 个任务`, count: ids.length }
+})
+
+route('POST', '/tasks/batch/run', (ctx) => {
+  const ids = idList(ctx, 'task_ids', 'ids')
+  for (const id of ids) {
+    const task = findTask(id)
+    if (task) appendTaskRunLog(task, 'ok', 2 + Math.random() * 6)
+  }
+  return { message: `已提交 ${ids.length} 个任务`, count: ids.length }
+})
+
+route('PUT', '/tasks/batch/add-labels', (ctx) => {
+  const ids = idList(ctx, 'task_ids', 'ids')
+  const labels = bodyObject(ctx)['labels']
+  if (Array.isArray(labels)) {
+    for (const task of db().tasks) {
+      if (!ids.includes(task.id)) continue
+      for (const label of labels as unknown[]) {
+        const value = String(label).trim()
+        if (value && !task.labels.includes(value)) task.labels.push(value)
+      }
+      task.updated_at = nowIso()
+    }
+  }
+  return { message: `已为 ${ids.length} 个任务添加标签`, success_count: ids.length }
+})
+
+route('PUT', '/tasks/batch', (ctx) => {
+  const body = bodyObject(ctx)
+  const ids = idList(ctx, 'ids', 'task_ids')
+  const action = String(body['action'] ?? '')
+  const current = db()
+
+  switch (action) {
+    case 'enable':
+      current.tasks.forEach((task) => { if (ids.includes(task.id)) task.status = TASK_STATUS_ENABLED })
+      break
+    case 'disable':
+      current.tasks.forEach((task) => { if (ids.includes(task.id)) task.status = TASK_STATUS_DISABLED })
+      break
+    case 'delete':
+      current.tasks = current.tasks.filter((task) => !ids.includes(task.id))
+      break
+    case 'run':
+      ids.forEach((id) => {
+        const task = findTask(id)
+        if (task) appendTaskRunLog(task, 'ok', 2 + Math.random() * 6)
+      })
+      break
+    default:
+      break
+  }
+  return { message: `已处理 ${ids.length} 个任务`, count: ids.length }
+})
+
+route('POST', '/tasks', (ctx) => {
+  const task = createTask(bodyObject(ctx))
+  return { message: '创建成功', data: toTaskDict(task) }
+})
+
+// ---- 单个任务 --------------------------------------------------------------
+route('GET', '/tasks/:id/log-files', () => [])
+
+route('GET', '/tasks/:id/latest-log', (ctx) => {
+  const task = requireTask(ctx)
+  const log = db().logs.find((row) => row.task_id === task.id)
+  if (!log) return null
+  return toLogDict(log, true)
+})
+
+route('GET', '/tasks/:id/live-logs', (ctx) => {
+  const task = requireTask(ctx)
+  const log = db().logs.find((row) => row.task_id === task.id)
+  return {
+    logs: log ? buildLogContent(log).split('\n') : [],
+    done: task.status !== TASK_STATUS_RUNNING,
+    status: task.status,
+  }
+})
+
+route('GET', '/tasks/:id/stats', (ctx) => {
+  const task = requireTask(ctx)
+  const logs = db().logs.filter((row) => row.task_id === task.id)
+  const success = logs.filter((row) => row.status === 0).length
+  const failed = logs.filter((row) => row.status === 1).length
+  const durations = logs.map((row) => row.duration).filter((value): value is number => value != null)
+  const avg = durations.length > 0 ? durations.reduce((sum, value) => sum + value, 0) / durations.length : 0
+  return {
+    data: {
+      task_id: task.id,
+      total: logs.length,
+      success,
+      failed,
+      success_rate: success + failed > 0 ? (success / (success + failed)) * 100 : 0,
+      avg_duration: Math.round(avg * 10) / 10,
+    },
+  }
+})
+
+route('PUT', '/tasks/:id/run', (ctx) => {
+  const task = requireTask(ctx)
+  // P2 会把这里换成「先落一条 running 日志，假 SSE 流跑完再收尾」。
+  // 现阶段直接落一条已完成的成功日志：仪表盘的今日执行/成功数/趋势图当天那一格
+  // 会立刻跟着 +1，而不会留下一条永远运行中的日志把「运行中的任务」越算越多。
+  appendTaskRunLog(task, 'ok', 2 + Math.random() * 6)
+  return { message: '任务已开始执行' }
+})
+
+route('PUT', '/tasks/:id/stop', (ctx) => {
+  const task = requireTask(ctx)
+  const running = db().logs.find((row) => row.task_id === task.id && row.status === 2)
+  if (running) {
+    running.status = 3
+    running.kind = 'abort'
+    running.duration = Math.round(((Date.now() - new Date(running.started_at).getTime()) / 1000) * 10) / 10
+    running.ended_at = nowIso()
+  }
+  task.status = TASK_STATUS_ENABLED
+  task.pid = null
+  task.updated_at = nowIso()
+  return { message: '任务已停止' }
+})
+
+route('PUT', '/tasks/:id/enable', (ctx) => {
+  const task = requireTask(ctx)
+  task.status = TASK_STATUS_ENABLED
+  task.updated_at = nowIso()
+  return { message: '已启用', data: toTaskDict(task) }
+})
+
+route('PUT', '/tasks/:id/disable', (ctx) => {
+  const task = requireTask(ctx)
+  task.status = TASK_STATUS_DISABLED
+  task.updated_at = nowIso()
+  return { message: '已禁用', data: toTaskDict(task) }
+})
+
+route('PUT', '/tasks/:id/pin', (ctx) => {
+  const task = requireTask(ctx)
+  task.is_pinned = true
+  return { message: '已置顶' }
+})
+
+route('PUT', '/tasks/:id/unpin', (ctx) => {
+  const task = requireTask(ctx)
+  task.is_pinned = false
+  return { message: '已取消置顶' }
+})
+
+route('PUT', '/tasks/:id/restore-subscription-default', (ctx) => {
+  const task = requireTask(ctx)
+  task.subscription_locked = false
+  task.updated_at = nowIso()
+  return { message: '已恢复为订阅默认', data: toTaskDict(task) }
+})
+
+route('POST', '/tasks/:id/copy', (ctx) => {
+  const task = requireTask(ctx)
+  const copied = createTask({
+    ...task,
+    name: `${task.name} - 副本`,
+    labels: [...task.labels],
+  } as Record<string, any>)
+  copied.subscription_locked = false
+  return { message: '复制成功', data: toTaskDict(copied) }
+})
+
+route('PUT', '/tasks/:id', (ctx) => {
+  const task = requireTask(ctx)
+  applyTaskPayload(task, bodyObject(ctx))
+  return { message: '更新成功', data: toTaskDict(task) }
+})
+
+route('DELETE', '/tasks/:id', (ctx) => {
+  const task = requireTask(ctx)
+  const current = db()
+  current.tasks = current.tasks.filter((row) => row.id !== task.id)
+  return { message: '任务已删除' }
+})
+
+// ===========================================================================
+// 执行日志
+// ===========================================================================
+
+route('GET', '/logs', (ctx) => {
+  const page = paginate(filterLogs(ctx.params), ctx.params)
+  return { ...page, data: page.data.map((log) => toLogDict(log)) }
+})
+
+route('DELETE', '/logs/clean', (ctx) => {
+  const days = Number.parseInt(ctx.params['days'] ?? '', 10)
+  const current = db()
+  const cutoff = Date.now() - (Number.isFinite(days) && days > 0 ? days : 7) * 24 * 60 * 60 * 1000
+  const before = current.logs.length
+  current.logs = current.logs.filter((log) => new Date(log.started_at).getTime() >= cutoff)
+  return { message: `已清理 ${before - current.logs.length} 条日志（保留最近 ${Number.isFinite(days) ? days : 7} 天）` }
+})
+
+function deleteLogsByIds(ids: number[]) {
+  const current = db()
+  const before = current.logs.length
+  current.logs = current.logs.filter((log) => !ids.includes(log.id))
+  return before - current.logs.length
+}
+
+route('DELETE', '/logs/batch', (ctx) => ({ message: `已删除 ${deleteLogsByIds(idList(ctx, 'ids'))} 条日志` }))
+route('POST', '/logs/batch-delete', (ctx) => ({ message: `已删除 ${deleteLogsByIds(idList(ctx, 'ids'))} 条日志` }))
+
+// 日志详情返回的是【裸的 log 字典】，不是 { data: ... }（handler/log.go:214 直接 Success(result)）
+route('GET', '/logs/:id', (ctx) => {
+  const log = db().logs.find((row) => row.id === intVar(ctx))
+  if (!log) return notFound('日志不存在')
+  return toLogDict(log, true)
+})
+
+route('DELETE', '/logs/:id', (ctx) => {
+  deleteLogsByIds([intVar(ctx)])
+  return { message: '日志已删除' }
+})
+
+// ===========================================================================
+// 环境变量
+// ===========================================================================
+
+route('GET', '/envs', (ctx) => {
+  const page = paginate(filterEnvs(ctx.params), ctx.params)
+  return { ...page, data: page.data.map(toEnvDict) }
+})
+
+route('GET', '/envs/groups', () => {
+  const groups = new Set<string>()
+  for (const env of db().envs) {
+    for (const group of splitEnvGroups(env.group)) groups.add(group)
+  }
+  return { data: [...groups].sort() }
+})
+
+route('GET', '/envs/export', () => {
+  const data: Record<string, string> = {}
+  for (const env of sortEnvs(db().envs)) {
+    if (env.enabled) data[env.name] = env.value
+  }
+  return { data }
+})
+
+route('GET', '/envs/export-all', () => ({
+  data: sortEnvs(db().envs).map((env) => ({
+    name: env.name,
+    value: env.value,
+    remarks: env.remarks,
+    group: env.group,
+    groups: splitEnvGroups(env.group),
+    enabled: env.enabled,
+  })),
+}))
+
+route('POST', '/envs/export-files', (ctx) => {
+  const format = String(bodyObject(ctx)['format'] ?? 'all')
+  const rows = sortEnvs(db().envs).filter((env) => env.enabled)
+  const result: Record<string, string> = {}
+
+  if (format === 'shell' || format === 'all') {
+    result['shell'] = ['#!/bin/bash', '# 呆呆面板 - 环境变量', '']
+      .concat(rows.map((env) => `export ${env.name}='${env.value.replace(/'/g, "'\\''")}'`))
+      .join('\n')
+  }
+  if (format === 'js' || format === 'all') {
+    result['js'] = ['// 呆呆面板 - 环境变量', '']
+      .concat(rows.map((env) => `process.env.${env.name} = ${JSON.stringify(env.value)};`))
+      .join('\n')
+  }
+  if (format === 'python' || format === 'all') {
+    result['python'] = ['# -*- coding: utf-8 -*-', '# 呆呆面板 - 环境变量', 'import os', '']
+      .concat(rows.map((env) => `os.environ['${env.name}'] = ${JSON.stringify(env.value)}`))
+      .join('\n')
+  }
+  return { data: result }
+})
+
+/**
+ * 拖拽排序。
+ *
+ * ⚠️ 这里必须真的改数据顺序（db.reorderEnv 会重排整桶的 position）。
+ *    只回一句成功而不动数据的话，页面下一次 loadData 会把行弹回原位，
+ *    看起来就是「拖了个寂寞」。
+ */
+route('PUT', '/envs/sort', (ctx) => {
+  const body = bodyObject(ctx)
+  const targetRaw = body['target_id']
+  const result = reorderEnv(
+    Number(body['source_id']),
+    targetRaw === undefined || targetRaw === null ? undefined : Number(targetRaw),
+  )
+  if (!result.ok) return notFound(result.error)
+  return { message: '排序更新成功' }
+})
+
+route('PUT', '/envs/by-name', (ctx) => {
+  const body = bodyObject(ctx)
+  const name = String(body['name'] ?? '').trim()
+  if (!isValidEnvName(name)) return notFound('变量名格式无效')
+
+  const current = db()
+  const existing = current.envs.find((env) => env.name === name)
+  if (existing) {
+    if (body['value'] !== undefined) existing.value = String(body['value'])
+    if (body['remarks'] !== undefined) existing.remarks = String(body['remarks'])
+    existing.updated_at = nowIso()
+    return { message: '更新成功', data: toEnvDict(existing), created: false }
+  }
+
+  const created = createEnv(body)
+  return { message: '创建成功', data: toEnvDict(created), created: true }
+})
+
+function createEnv(item: Record<string, any>) {
+  const now = nowIso()
+  const env = {
+    id: nextId('env'),
+    name: String(item['name'] ?? ''),
+    value: String(item['value'] ?? ''),
+    remarks: String(item['remarks'] ?? ''),
+    enabled: item['enabled'] === undefined ? true : Boolean(item['enabled']),
+    position: nextEnvPosition(0),
+    sort_order: 0,
+    group: Array.isArray(item['groups'])
+      ? joinEnvGroups(item['groups'].map((group: unknown) => String(group)))
+      : joinEnvGroups([String(item['group'] ?? '')]),
+    created_at: now,
+    updated_at: now,
+  }
+  db().envs.push(env)
+  return env
+}
+
+route('POST', '/envs', (ctx) => {
+  // 青龙兼容：请求体既可能是单个对象，也可能是数组
+  const raw = ctx.body
+  const items: Array<Record<string, any>> = Array.isArray(raw) ? raw : [bodyObject(ctx)]
+  const created: Array<Record<string, unknown>> = []
+  const errors: string[] = []
+
+  items.forEach((item, index) => {
+    const name = String(item['name'] ?? '').trim()
+    if (!name) {
+      errors.push(`第 ${index + 1} 项: 缺少名称`)
+      return
+    }
+    if (!isValidEnvName(name)) {
+      errors.push(`第 ${index + 1} 项: 变量名 '${name}' 格式无效`)
+      return
+    }
+    created.push(toEnvDict(createEnv({ ...item, name })))
+  })
+
+  if (created.length === 1 && errors.length === 0) {
+    return { message: '创建成功', data: created[0] }
+  }
+  return { message: `新增 ${created.length} 条`, data: created, errors, created: created.length }
+})
+
+route('DELETE', '/envs/batch', (ctx) => {
+  const ids = idList(ctx, 'ids')
+  const current = db()
+  current.envs = current.envs.filter((env) => !ids.includes(env.id))
+  return { message: `已删除 ${ids.length} 个环境变量` }
+})
+
+route('PUT', '/envs/batch/rename', (ctx) => {
+  const body = bodyObject(ctx)
+  const ids = idList(ctx, 'ids')
+  const name = String(body['name'] ?? '').trim()
+  const search = String(body['search'] ?? '')
+  const replace = String(body['replace'] ?? '')
+
+  let changed = 0
+  for (const env of db().envs) {
+    if (!ids.includes(env.id)) continue
+    const next = name || (search ? env.name.split(search).join(replace) : env.name)
+    if (next === env.name || !isValidEnvName(next)) continue
+    env.name = next
+    env.updated_at = nowIso()
+    changed += 1
+  }
+  return { message: `已批量改名 ${changed} 个环境变量` }
+})
+
+route('PUT', '/envs/batch/enable', (ctx) => {
+  const ids = idList(ctx, 'ids')
+  db().envs.forEach((env) => { if (ids.includes(env.id)) env.enabled = true })
+  return { message: `已启用 ${ids.length} 个环境变量` }
+})
+
+route('PUT', '/envs/batch/disable', (ctx) => {
+  const ids = idList(ctx, 'ids')
+  db().envs.forEach((env) => { if (ids.includes(env.id)) env.enabled = false })
+  return { message: `已禁用 ${ids.length} 个环境变量` }
+})
+
+route('PUT', '/envs/batch/group', (ctx) => {
+  const body = bodyObject(ctx)
+  const ids = idList(ctx, 'ids')
+  const group = Array.isArray(body['groups'])
+    ? joinEnvGroups(body['groups'].map((item: unknown) => String(item)))
+    : joinEnvGroups([String(body['group'] ?? '')])
+  db().envs.forEach((env) => { if (ids.includes(env.id)) env.group = group })
+  return { message: `已更新 ${ids.length} 个变量的分组` }
+})
+
+route('POST', '/envs/import', (ctx) => {
+  const body = bodyObject(ctx)
+  const rows = body['envs']
+  if (!Array.isArray(rows)) return { message: '成功导入 0 个环境变量', errors: ['请求内容为空'] }
+  if (String(body['mode'] ?? 'merge') === 'replace') db().envs = []
+
+  let imported = 0
+  for (const item of rows as Array<Record<string, any>>) {
+    const name = String(item['name'] ?? '').trim()
+    if (!isValidEnvName(name)) continue
+    createEnv({ ...item, name })
+    imported += 1
+  }
+  return { message: `成功导入 ${imported} 个环境变量`, errors: [] }
+})
+
+function requireEnv(ctx: DemoRequestContext) {
+  const env = db().envs.find((row) => row.id === intVar(ctx))
+  if (!env) return notFound('环境变量不存在')
+  return env
+}
+
+route('GET', '/envs/:id', (ctx) => ({ data: toEnvDict(requireEnv(ctx)) }))
+
+route('PUT', '/envs/:id/enable', (ctx) => {
+  const env = requireEnv(ctx)
+  env.enabled = true
+  return { message: '已启用', data: toEnvDict(env) }
+})
+
+route('PUT', '/envs/:id/disable', (ctx) => {
+  const env = requireEnv(ctx)
+  env.enabled = false
+  return { message: '已禁用', data: toEnvDict(env) }
+})
+
+route('PUT', '/envs/:id/move-top', (ctx) => {
+  const env = requireEnv(ctx)
+  const pinned = db().envs.filter((row) => row.sort_order === 1)
+  const min = pinned.reduce((acc, row) => Math.min(acc, row.position), Number.POSITIVE_INFINITY)
+  env.sort_order = 1
+  env.position = Number.isFinite(min) ? min - 1000 : 1000
+  return { message: '已置顶' }
+})
+
+route('PUT', '/envs/:id/cancel-top', (ctx) => {
+  const env = requireEnv(ctx)
+  env.sort_order = 0
+  env.position = nextEnvPosition(0)
+  return { message: '已取消置顶' }
+})
+
+route('PUT', '/envs/:id', (ctx) => {
+  const env = requireEnv(ctx)
+  const body = bodyObject(ctx)
+  if (body['name'] !== undefined) {
+    const name = String(body['name']).trim()
+    if (!isValidEnvName(name)) return notFound('变量名格式无效')
+    env.name = name
+  }
+  if (body['value'] !== undefined) env.value = String(body['value'])
+  if (body['remarks'] !== undefined) env.remarks = String(body['remarks'])
+  if (Array.isArray(body['groups'])) env.group = joinEnvGroups(body['groups'].map((item: unknown) => String(item)))
+  else if (body['group'] !== undefined) env.group = joinEnvGroups([String(body['group'])])
+  if (typeof body['enabled'] === 'boolean') env.enabled = body['enabled']
+  env.updated_at = nowIso()
+  return { message: '更新成功', data: toEnvDict(env) }
+})
+
+route('DELETE', '/envs/:id', (ctx) => {
+  const current = db()
+  current.envs = current.envs.filter((row) => row.id !== intVar(ctx))
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// 脚本管理
+// ===========================================================================
+
+route('GET', '/scripts', (ctx) => {
+  const rows = buildScriptList((ctx.params['keyword'] ?? '').trim())
+  return { data: rows, total: rows.length }
+})
+
+route('GET', '/scripts/tree', () => ({ data: buildScriptTree() }))
+
+/**
+ * 脚本下载。
+ *
+ * 这条是全站少数几个 `responseType: 'blob'` 的接口之一，调用方直接
+ * `URL.createObjectURL(blob)`，返回普通对象会当场 TypeError。
+ * 好在 Blob 是可结构化克隆的，adapter 末尾那层 detach() 不会把它弄坏。
+ */
+route('GET', '/scripts/download', (ctx) => {
+  const path = ctx.params['path'] ?? ''
+  const file = findScriptFile(path)
+  if (!file) return notFound(`文件不存在: ${path}`)
+  return new Blob([file.content], { type: 'text/plain;charset=utf-8' })
+})
+
+route('GET', '/scripts/content', (ctx) => {
+  const path = ctx.params['path'] ?? ''
+  const file = findScriptFile(path)
+  if (!file) return notFound(`文件不存在: ${path}`)
+  return { data: { path, content: file.content, binary: false, is_binary: false } }
+})
+
+route('PUT', '/scripts/content', (ctx) => {
+  const body = bodyObject(ctx)
+  saveScriptContent(String(body['path'] ?? ''), String(body['content'] ?? ''))
+  return { message: '保存成功' }
+})
+
+route('POST', '/scripts/directory', (ctx) => {
+  const path = String(bodyObject(ctx)['path'] ?? '').replace(/^\/+|\/+$/g, '')
+  if (!path) return notFound('路径不能为空')
+  const current = db()
+  if (!current.scriptDirs.includes(path)) current.scriptDirs.push(path)
+  return { message: '目录已创建' }
+})
+
+route('PUT', '/scripts/rename', (ctx) => {
+  const body = bodyObject(ctx)
+  const oldPath = String(body['old_path'] ?? '').replace(/^\/+/, '')
+  const newName = String(body['new_name'] ?? '').trim()
+  const file = findScriptFile(oldPath)
+  if (!file || !newName) return notFound('文件不存在')
+
+  const parent = oldPath.includes('/') ? oldPath.slice(0, oldPath.lastIndexOf('/')) : ''
+  file.path = parent ? `${parent}/${newName}` : newName
+  file.mtime = Math.floor(Date.now() / 1000)
+  return { message: '重命名成功', new_path: file.path }
+})
+
+route('PUT', '/scripts/move', (ctx) => {
+  const body = bodyObject(ctx)
+  const sourcePath = String(body['source_path'] ?? '').replace(/^\/+/, '')
+  const targetDir = String(body['target_dir'] ?? '').replace(/^\/+|\/+$/g, '')
+  const file = findScriptFile(sourcePath)
+  if (!file) return notFound('文件不存在')
+
+  const name = sourcePath.slice(sourcePath.lastIndexOf('/') + 1)
+  file.path = targetDir ? `${targetDir}/${name}` : name
+  return { message: '移动成功' }
+})
+
+route('POST', '/scripts/copy', (ctx) => {
+  const body = bodyObject(ctx)
+  const source = findScriptFile(String(body['source_path'] ?? ''))
+  if (!source) return notFound('文件不存在')
+  saveScriptContent(String(body['target_path'] ?? ''), source.content)
+  return { message: '复制成功' }
+})
+
+// 上传需要真的读文件内容才有意义，而请求体在这一层已经是 FormData 了；
+// 与其存一个空文件让访客以为上传成功，不如明确告知不可用。
+route('POST', '/scripts/upload', () => blocked())
+
+route('DELETE', '/scripts/batch', (ctx) => {
+  const paths = bodyObject(ctx)['paths']
+  if (Array.isArray(paths)) {
+    const set = new Set(paths.map((item: unknown) => String(item).replace(/^\/+/, '')))
+    const current = db()
+    current.scriptFiles = current.scriptFiles.filter((file) => !set.has(file.path))
+  }
+  return { message: '删除成功' }
+})
+
+// 版本历史在演示环境里不铺剧本：真正有价值的是「改了能存住」，
+// 空列表也是合法状态（新装的面板就是这样），不会让页面报错。
+route('GET', '/scripts/versions', () => ({ data: [] }))
+route('DELETE', '/scripts/versions', () => ({ message: '版本历史已清空', cleared_count: 0 }))
+route('GET', '/scripts/versions/:id', () => notFound('版本不存在'))
+route('PUT', '/scripts/versions/:id/rollback', () => notFound('版本不存在'))
+
+route('POST', '/scripts/format', (ctx) => ({
+  data: { content: String(bodyObject(ctx)['content'] ?? '') },
+}))
+
+// 脚本调试是【轮询】拿日志的（useScriptExecution.ts:77 的 debugLogs），不是 SSE，
+// 所以这一小段与 P2 的假日志流没有关系，铺了才不会让「运行」按钮一直转圈。
+route('POST', '/scripts/run', (ctx) => {
+  const body = bodyObject(ctx)
+  return { message: '已开始运行', run_id: `demo-${String(body['path'] ?? 'inline')}-${Date.now()}` }
+})
+route('POST', '/scripts/run-code', () => ({ message: '已开始运行', run_id: `demo-inline-${Date.now()}` }))
+route('GET', '/scripts/run/:runId/logs', () => ({
+  data: {
+    logs: [
+      '演示环境不会真的执行脚本。',
+      '这里展示的是一段静态输出，用来说明调试面板长什么样。',
+      '',
+      '> exit code 0',
+    ],
+    done: true,
+    exit_code: 0,
+    status: 'success',
+  },
+}))
+route('PUT', '/scripts/run/:runId/stop', () => ({ message: '已停止' }))
+route('DELETE', '/scripts/run/:runId', () => ({ message: '已清理' }))
+
+route('DELETE', '/scripts', (ctx) => {
+  const path = (ctx.params['path'] ?? '').replace(/^\/+/, '')
+  const current = db()
+  const type = ctx.params['type'] ?? 'file'
+  if (type === 'directory') {
+    current.scriptDirs = current.scriptDirs.filter((dir) => dir !== path && !dir.startsWith(`${path}/`))
+    current.scriptFiles = current.scriptFiles.filter((file) => !file.path.startsWith(`${path}/`))
+  } else {
+    current.scriptFiles = current.scriptFiles.filter((file) => file.path !== path)
+  }
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// 订阅管理 / SSH 密钥
+// ===========================================================================
+
+route('GET', '/subscriptions', (ctx) => {
+  let rows = db().subscriptions
+  const keyword = (ctx.params['keyword'] ?? '').trim()
+  if (keyword) {
+    rows = rows.filter((sub) => sub.name.includes(keyword) || sub.url.includes(keyword))
+  }
+  const type = (ctx.params['type'] ?? '').trim()
+  if (type) rows = rows.filter((sub) => sub.type === type)
+  const enabledRaw = (ctx.params['enabled'] ?? '').trim()
+  if (enabledRaw !== '') {
+    const enabled = enabledRaw.toLowerCase() === 'true' || enabledRaw === '1'
+    rows = rows.filter((sub) => sub.enabled === enabled)
+  }
+  return paginate([...rows].sort((left, right) => right.created_at.localeCompare(left.created_at)), ctx.params)
+})
+
+route('POST', '/subscriptions', (ctx) => {
+  const body = bodyObject(ctx)
+  const now = nowIso()
+  const sub = {
+    id: nextId('subscription'),
+    name: String(body['name'] ?? '新订阅'),
+    type: String(body['type'] ?? 'git-repo'),
+    url: String(body['url'] ?? ''),
+    branch: String(body['branch'] ?? ''),
+    schedule: String(body['schedule'] ?? ''),
+    whitelist: String(body['whitelist'] ?? ''),
+    blacklist: String(body['blacklist'] ?? ''),
+    depend_on: String(body['depend_on'] ?? ''),
+    pre_script: String(body['pre_script'] ?? ''),
+    hook_script: String(body['hook_script'] ?? ''),
+    auto_add_task: Boolean(body['auto_add_task']),
+    auto_del_task: Boolean(body['auto_del_task']),
+    enabled: body['enabled'] === undefined ? true : Boolean(body['enabled']),
+    status: 0,
+    last_pull_at: null,
+    sub_path: String(body['sub_path'] ?? ''),
+    save_dir: String(body['save_dir'] ?? ''),
+    ssh_key_id: body['ssh_key_id'] ?? null,
+    auth_type: String(body['auth_type'] ?? ''),
+    auth_username: String(body['auth_username'] ?? ''),
+    has_auth_token: Boolean(body['auth_token']),
+    alias: String(body['alias'] ?? ''),
+    force_overwrite: body['force_overwrite'] === undefined ? true : Boolean(body['force_overwrite']),
+    created_at: now,
+    updated_at: now,
+  }
+  db().subscriptions.push(sub)
+  return { message: '创建成功', data: sub }
+})
+
+route('DELETE', '/subscriptions/batch', (ctx) => {
+  const ids = idList(ctx, 'ids')
+  const current = db()
+  current.subscriptions = current.subscriptions.filter((sub) => !ids.includes(sub.id))
+  current.subLogs = current.subLogs.filter((log) => !ids.includes(log.subscription_id))
+  return { message: `已删除 ${ids.length} 个订阅` }
+})
+
+function requireSubscription(ctx: DemoRequestContext) {
+  const sub = db().subscriptions.find((row) => row.id === intVar(ctx))
+  if (!sub) return notFound('订阅不存在')
+  return sub
+}
+
+route('GET', '/subscriptions/:id/logs', (ctx) => {
+  const id = intVar(ctx)
+  const rows = db().subLogs.filter((log) => log.subscription_id === id)
+  return paginate(rows, ctx.params)
+})
+
+route('PUT', '/subscriptions/:id/enable', (ctx) => {
+  const sub = requireSubscription(ctx)
+  sub.enabled = true
+  return { message: '已启用', data: sub }
+})
+
+route('PUT', '/subscriptions/:id/disable', (ctx) => {
+  const sub = requireSubscription(ctx)
+  sub.enabled = false
+  return { message: '已禁用', data: sub }
+})
+
+// 拉取的实时日志流属于 P2（sse.ts 的假流）。这里只负责记一条拉取记录，
+// 让「拉取历史」有东西可看；弹窗里的滚动日志等 P2 落地。
+route('PUT', '/subscriptions/:id/pull', (ctx) => {
+  const sub = requireSubscription(ctx)
+  const current = db()
+  const pulledAt = nowIso()
+  sub.last_pull_at = pulledAt
+  sub.updated_at = pulledAt
+  current.subLogs.unshift({
+    id: nextId('subLog'),
+    subscription_id: sub.id,
+    subscription_name: sub.name,
+    status: 0,
+    content: '拉取成功（演示环境不会真的访问远端仓库）',
+    duration: 1.6,
+    created_at: pulledAt,
+  })
+  return { message: '已开始拉取' }
+})
+
+route('PUT', '/subscriptions/:id/pull/stop', () => ({ message: '已停止拉取' }))
+
+route('PUT', '/subscriptions/:id', (ctx) => {
+  const sub = requireSubscription(ctx)
+  const body = bodyObject(ctx)
+  const writable = [
+    'name', 'type', 'url', 'branch', 'schedule', 'whitelist', 'blacklist', 'depend_on',
+    'pre_script', 'hook_script', 'auto_add_task', 'auto_del_task', 'enabled', 'sub_path',
+    'save_dir', 'ssh_key_id', 'auth_type', 'auth_username', 'alias', 'force_overwrite',
+  ]
+  for (const key of writable) {
+    if (body[key] === undefined) continue
+    ;(sub as unknown as Record<string, unknown>)[key] = body[key]
+  }
+  sub.updated_at = nowIso()
+  return { message: '更新成功', data: sub }
+})
+
+route('DELETE', '/subscriptions/:id', (ctx) => {
+  const id = intVar(ctx)
+  const current = db()
+  current.subscriptions = current.subscriptions.filter((sub) => sub.id !== id)
+  current.subLogs = current.subLogs.filter((log) => log.subscription_id !== id)
+  return { message: '删除成功' }
+})
+
+route('GET', '/ssh-keys', () => ({ data: db().sshKeys }))
+
+route('POST', '/ssh-keys', (ctx) => {
+  const now = nowIso()
+  const key = {
+    id: nextId('sshKey'),
+    name: String(bodyObject(ctx)['name'] ?? '新密钥'),
+    created_at: now,
+    updated_at: now,
+  }
+  db().sshKeys.push(key)
+  return { message: '创建成功', data: key }
+})
+
+route('GET', '/ssh-keys/:id', (ctx) => {
+  const key = db().sshKeys.find((row) => row.id === intVar(ctx))
+  if (!key) return notFound('密钥不存在')
+  // 私钥永远不下发明文，与服务端 ToDict()（PrivateKey 打了 json:"-"）一致
+  return { data: key }
+})
+
+route('PUT', '/ssh-keys/:id', (ctx) => {
+  const key = db().sshKeys.find((row) => row.id === intVar(ctx))
+  if (!key) return notFound('密钥不存在')
+  const name = bodyObject(ctx)['name']
+  if (name !== undefined) key.name = String(name)
+  key.updated_at = nowIso()
+  return { message: '更新成功', data: key }
+})
+
+route('DELETE', '/ssh-keys/:id', (ctx) => {
+  const current = db()
+  current.sshKeys = current.sshKeys.filter((row) => row.id !== intVar(ctx))
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// 通知渠道
+// ===========================================================================
+
+// 全部通知渠道及其字段定义。新建 / 编辑渠道弹窗的输入框完全靠它渲染
+//（notifications/index.vue:141 拿 fields 生成表单），拿不到就是一张空表单。
+route('GET', '/notifications/types', () => notificationTypesFixture)
+
+route('GET', '/notifications', () => ({ data: db().channels }))
+
+route('POST', '/notifications', (ctx) => {
+  const body = bodyObject(ctx)
+  const now = nowIso()
+  const channel = {
+    id: nextId('channel'),
+    name: String(body['name'] ?? '新渠道'),
+    type: String(body['type'] ?? 'webhook'),
+    // config 服务端存的就是 JSON 字符串，页面拿到后自己 JSON.parse
+    config: String(body['config'] ?? '{}'),
+    push_scope: body['push_scope'] === 'bound' ? 'bound' : 'default',
+    enabled: true,
+    today_send_count: 0,
+    last_test_at: null,
+    last_test_status: '',
+    created_at: now,
+    updated_at: now,
+  }
+  db().channels.push(channel)
+  return { message: '创建成功', data: channel }
+})
+
+function requireChannel(ctx: DemoRequestContext) {
+  const channel = db().channels.find((row) => row.id === intVar(ctx))
+  if (!channel) return notFound('通知渠道不存在')
+  return channel
+}
+
+route('PUT', '/notifications/:id/enable', (ctx) => {
+  const channel = requireChannel(ctx)
+  channel.enabled = true
+  return { message: '已启用', data: channel }
+})
+
+route('PUT', '/notifications/:id/disable', (ctx) => {
+  const channel = requireChannel(ctx)
+  channel.enabled = false
+  return { message: '已禁用', data: channel }
+})
+
+route('POST', '/notifications/:id/test', (ctx) => {
+  const channel = requireChannel(ctx)
+  channel.last_test_at = nowIso()
+  channel.last_test_status = 'success'
+  // 说实话：演示站没有出网能力，这里不可能真发。文案直说，好过假装发成功。
+  return { message: '演示环境不会真的发送通知，已记录一次测试' }
+})
+
+route('PUT', '/notifications/:id', (ctx) => {
+  const channel = requireChannel(ctx)
+  const body = bodyObject(ctx)
+  if (body['name'] !== undefined) channel.name = String(body['name'])
+  if (body['type'] !== undefined) channel.type = String(body['type'])
+  if (body['config'] !== undefined) channel.config = String(body['config'])
+  if (body['push_scope'] !== undefined) channel.push_scope = body['push_scope'] === 'bound' ? 'bound' : 'default'
+  if (typeof body['enabled'] === 'boolean') channel.enabled = body['enabled']
+  channel.updated_at = nowIso()
+  return { message: '更新成功', data: channel }
+})
+
+route('DELETE', '/notifications/:id', (ctx) => {
+  const id = intVar(ctx)
+  const current = db()
+  current.channels = current.channels.filter((row) => row.id !== id)
+  // 绑了这条渠道的任务要一起解绑，否则任务详情里会挂着一个已经不存在的渠道
+  current.tasks.forEach((task) => {
+    if (task.notification_channel_id === id) task.notification_channel_id = null
+  })
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// Open API 应用
+// ===========================================================================
+
+function openAppDict(app: DemoOpenApp, withSecret = false): Record<string, unknown> {
+  const item: Record<string, unknown> = {
+    id: app.id,
+    name: app.name,
+    app_key: app.app_key,
+    scopes: app.scopes,
+    enabled: app.enabled,
+    rate_limit: app.rate_limit,
+    call_count: app.call_count,
+    created_at: app.created_at,
+    updated_at: app.updated_at,
+  }
+  if (withSecret) item['app_secret'] = app.app_secret
+  return item
+}
+
+route('GET', '/open-api/apps', () => ({ data: db().openApps.map((app) => openAppDict(app)) }))
+
+route('POST', '/open-api/apps', (ctx) => {
+  const body = bodyObject(ctx)
+  const now = nowIso()
+  const id = nextId('openApp')
+  const app: DemoOpenApp = {
+    id,
+    name: String(body['name'] ?? '新应用'),
+    app_key: `ak_demo_${String(id).padStart(4, '0')}${Math.random().toString(36).slice(2, 10)}`,
+    app_secret: `sk_demo_${Math.random().toString(36).slice(2, 18)}${Math.random().toString(36).slice(2, 18)}`,
+    scopes: String(body['scopes'] ?? ''),
+    enabled: true,
+    rate_limit: Number(body['rate_limit'] ?? 0),
+    call_count: 0,
+    created_at: now,
+    updated_at: now,
+  }
+  db().openApps.push(app)
+  return { message: '创建成功', data: openAppDict(app, true) }
+})
+
+function requireOpenApp(ctx: DemoRequestContext) {
+  const app = db().openApps.find((row) => row.id === intVar(ctx))
+  if (!app) return notFound('应用不存在')
+  return app
+}
+
+route('GET', '/open-api/apps/:id/logs', (ctx) => {
+  const id = intVar(ctx)
+  return paginate(db().apiCallLogs.filter((log) => log.app_id === id), ctx.params)
+})
+
+route('PUT', '/open-api/apps/:id/enable', (ctx) => {
+  const app = requireOpenApp(ctx)
+  app.enabled = true
+  return { message: '已启用' }
+})
+
+route('PUT', '/open-api/apps/:id/disable', (ctx) => {
+  const app = requireOpenApp(ctx)
+  app.enabled = false
+  return { message: '已禁用' }
+})
+
+route('PUT', '/open-api/apps/:id/reset-secret', (ctx) => {
+  const app = requireOpenApp(ctx)
+  app.app_secret = `sk_demo_${Math.random().toString(36).slice(2, 18)}${Math.random().toString(36).slice(2, 18)}`
+  app.updated_at = nowIso()
+  return { message: '密钥已重置', data: openAppDict(app, true) }
+})
+
+route('POST', '/open-api/apps/:id/view-secret', (ctx) => ({
+  data: { app_secret: requireOpenApp(ctx).app_secret },
+}))
+
+route('PUT', '/open-api/apps/:id', (ctx) => {
+  const app = requireOpenApp(ctx)
+  const body = bodyObject(ctx)
+  if (body['name'] !== undefined) app.name = String(body['name'])
+  if (body['scopes'] !== undefined) app.scopes = String(body['scopes'])
+  if (body['rate_limit'] !== undefined) app.rate_limit = Number(body['rate_limit'])
+  app.updated_at = nowIso()
+  return { message: '更新成功', data: openAppDict(app) }
+})
+
+route('DELETE', '/open-api/apps/:id', (ctx) => {
+  const id = intVar(ctx)
+  const current = db()
+  current.openApps = current.openApps.filter((app) => app.id !== id)
+  current.apiCallLogs = current.apiCallLogs.filter((log) => log.app_id !== id)
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// 用户管理
+// ===========================================================================
+
+route('GET', '/users', () => ({ data: db().users }))
+
+route('POST', '/users', (ctx) => {
+  const body = bodyObject(ctx)
+  const now = nowIso()
+  const user = {
+    id: nextId('user'),
+    username: String(body['username'] ?? 'user'),
+    role: String(body['role'] ?? 'viewer'),
+    enabled: true,
+    // 恒为空：MainLayout 的头像 <img> 没有 @error 兜底
+    avatar_url: '',
+    last_login_at: null,
+    created_at: now,
+    updated_at: now,
+  }
+  db().users.push(user)
+  return { message: '创建成功', data: user }
+})
+
+route('PUT', '/users/:id/reset-password', () => ({ message: '密码已重置' }))
+
+route('PUT', '/users/:id', (ctx) => {
+  const user = db().users.find((row) => row.id === intVar(ctx))
+  if (!user) return notFound('用户不存在')
+  const body = bodyObject(ctx)
+  if (body['role'] !== undefined) user.role = String(body['role'])
+  if (typeof body['enabled'] === 'boolean') user.enabled = body['enabled']
+  user.updated_at = nowIso()
+  return { message: '更新成功', data: user }
+})
+
+route('DELETE', '/users/:id', (ctx) => {
+  const current = db()
+  current.users = current.users.filter((row) => row.id !== intVar(ctx))
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// 安全（登录日志 / 会话 / IP 白名单 / 2FA）
+// ===========================================================================
+
+route('GET', '/security/login-logs', (ctx) => paginate(db().loginLogs, ctx.params))
+
+route('DELETE', '/security/login-logs', () => {
+  db().loginLogs = []
+  return { message: '登录日志已清空' }
+})
+
+route('GET', '/security/sessions', () => ({ data: db().sessions }))
+
+route('DELETE', '/security/sessions/others', () => {
+  const current = db()
+  current.sessions = current.sessions.slice(0, 1)
+  return { message: '已注销其它会话' }
+})
+
+route('DELETE', '/security/sessions/:id', (ctx) => {
+  const current = db()
+  current.sessions = current.sessions.filter((row) => row.id !== intVar(ctx))
+  return { message: '会话已注销' }
+})
+
+route('GET', '/security/ip-whitelist', () => ({ data: db().ipWhitelist }))
+
+route('POST', '/security/ip-whitelist', (ctx) => {
+  const body = bodyObject(ctx)
+  const item = {
+    id: nextId('ipWhitelist'),
+    ip: String(body['ip'] ?? ''),
+    remarks: String(body['remarks'] ?? ''),
+    created_at: nowIso(),
+  }
+  db().ipWhitelist.push(item)
+  return { message: '添加成功', data: item }
+})
+
+route('DELETE', '/security/ip-whitelist/:id', (ctx) => {
+  const current = db()
+  current.ipWhitelist = current.ipWhitelist.filter((row) => row.id !== intVar(ctx))
+  return { message: '删除成功' }
+})
+
+route('GET', '/security/audit-logs', (ctx) => paginate([], ctx.params))
+route('GET', '/security/login-stats', () => ({ data: { total: db().loginLogs.length, success: db().loginLogs.filter((row) => row.status === 0).length } }))
+
+// 2FA 的完整链路（开启 → 退出 → 重新登录看到 TOTP 弹窗）属于 R2 里「不额外设计就被演示到」
+// 的部分，这里只保证接口不报错；真正的密钥校验演示环境做不了。
+route('GET', '/security/2fa/status', () => ({ data: { enabled: false } }))
+route('POST', '/security/2fa/setup', () => ({
+  data: {
+    secret: 'DEMODEMODEMODEMO',
+    uri: 'otpauth://totp/%E5%91%86%E5%91%86%E9%9D%A2%E6%9D%BF:demo?secret=DEMODEMODEMODEMO&issuer=DaiDaiPanel',
+  },
+}))
+route('POST', '/security/2fa/verify', () => blocked('演示环境无法校验动态验证码'))
+route('DELETE', '/security/2fa', () => ({ message: '已关闭两步验证' }))
+
+// ===========================================================================
+// 依赖管理 / Android 运行时
+// ===========================================================================
+
+route('GET', '/deps', (ctx) => {
+  const type = (ctx.params['type'] ?? '').trim()
+  const pythonVersion = (ctx.params['python_version'] ?? '').trim()
+  const rows = db().deps.filter((dep) => {
+    if (type && dep.type !== type) return false
+    if (dep.type === 'python' && pythonVersion && dep.python_version !== pythonVersion) return false
+    return true
+  })
+  return { data: rows, total: rows.length }
+})
+
+route('GET', '/deps/python-runtimes', () => ({
+  data: [
+    { version: '3.10', label: 'Python 3.10', default: false, venv_path: '/opt/venv/py310', venv_healthy: true, python_path: '/opt/venv/py310/bin/python', pip_path: '/opt/venv/py310/bin/pip', available: true, message: '' },
+    { version: '3.11', label: 'Python 3.11', default: false, venv_path: '/opt/venv/py311', venv_healthy: true, python_path: '/opt/venv/py311/bin/python', pip_path: '/opt/venv/py311/bin/pip', available: true, message: '' },
+    { version: '3.12', label: 'Python 3.12', default: true, venv_path: '/opt/venv/py312', venv_healthy: true, python_path: '/opt/venv/py312/bin/python', pip_path: '/opt/venv/py312/bin/pip', available: true, message: '' },
+  ],
+  default_version: '3.12',
+}))
+
+route('PUT', '/deps/python-runtime-default', (ctx) => ({
+  message: '默认 Python 版本已更新',
+  default_version: String(bodyObject(ctx)['version'] ?? '3.12'),
+}))
+
+route('GET', '/deps/mirrors', () => ({
+  pip_mirror: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+  npm_mirror: 'https://registry.npmmirror.com',
+  linux_mirror: 'https://mirrors.tuna.tsinghua.edu.cn/debian',
+  linux_package_manager: 'apt',
+  linux_distribution: 'debian',
+  linux_mirror_supported: true,
+  linux_mirror_label: 'Debian',
+  linux_mirror_message: '',
+}))
+route('PUT', '/deps/mirrors', () => ({ message: '镜像源已更新' }))
+
+// 依赖清单导出同样是 responseType: 'blob'（见 /scripts/download 上的说明）
+route('GET', '/deps/export', (ctx) => {
+  const type = (ctx.params['type'] ?? 'python').trim()
+  const pythonVersion = (ctx.params['python_version'] ?? '').trim()
+  const names = db().deps
+    .filter((dep) => dep.type === type && (!pythonVersion || dep.python_version === pythonVersion))
+    .map((dep) => dep.name)
+  return new Blob([`${names.join('\n')}\n`], { type: 'text/plain;charset=utf-8' })
+})
+
+route('GET', '/deps/:id/status', (ctx) => {
+  const dep = db().deps.find((row) => row.id === intVar(ctx))
+  if (!dep) return notFound('依赖不存在')
+  return { data: { ...dep, log: '演示环境不保留安装日志' } }
+})
+
+// 依赖安装/重装会真的调 pip / npm，演示环境一律拒绝
+route('POST', '/deps', () => blocked())
+route('PUT', '/deps/:id/reinstall', () => blocked())
+route('POST', '/deps/batch-reinstall', () => blocked())
+
+route('POST', '/deps/batch-delete', (ctx) => {
+  const ids = idList(ctx, 'ids')
+  const current = db()
+  current.deps = current.deps.filter((dep) => !ids.includes(dep.id))
+  return { message: `已删除 ${ids.length} 个依赖` }
+})
+
+route('PUT', '/deps/:id/cancel', () => ({ message: '已取消' }))
+
+route('DELETE', '/deps/:id', (ctx) => {
+  const current = db()
+  current.deps = current.deps.filter((dep) => dep.id !== intVar(ctx))
+  return { message: '删除成功' }
+})
+
+route('GET', '/android-runtime/status', () => ({
+  data: {
+    supported: false,
+    arch: 'amd64',
+    bin_dir: '',
+    termux_detected: false,
+    runtimes: [],
+    presets: [],
+  },
+}))
+route('POST', '/android-runtime/uninstall', () => blocked())
+
+// ===========================================================================
+// 其它
+// ===========================================================================
+
+// 赞助名单要联网拉，演示环境直接给 unavailable，页面会显示「暂时无法获取」而不是空白
+route('GET', '/sponsors', () => ({
+  data: { sponsors: [], count: 0, total_amount: 0, updated_at: null, unavailable: true },
+}))
+
+route('GET', '/platform-tokens/platforms', () => ({ data: [] }))
+route('GET', '/platform-tokens', () => ({ data: [] }))
+
+// ---------------------------------------------------------------------------
+// 请求归一化与 adapter
+// ---------------------------------------------------------------------------
 
 /**
  * 把 axios 的 config 归一化成 { method, path, params, body }。
@@ -440,7 +1927,7 @@ function normalizeRequest(config: InternalAxiosRequestConfig): DemoRequestContex
     }
   }
 
-  return { method, path: stripApiPrefix(pathPart), params, body: parseBody(config.data) }
+  return { method, path: stripApiPrefix(pathPart), params, vars: {}, body: parseBody(config.data) }
 }
 
 /**
@@ -503,6 +1990,24 @@ function buildResponse(config: InternalAxiosRequestConfig, data: unknown): Axios
   }
 }
 
+/**
+ * 把响应体深拷贝一份再交出去。
+ *
+ * 页面拿到列表之后普遍会就地改：open-api 页 `app.enabled = val`、任务页 `task.status = 2`、
+ * 设置页把 configs 回填进表单再随手改。直接把内存里的对象引用递出去，
+ * 这些改动会绕过所有 mutation 入口悄悄写进 db —— 包括「弹窗里改了一半又取消」
+ * 这种根本不该落库的中间态，表现为「有时候生效有时候不生效」。
+ */
+function detach(body: unknown): unknown {
+  try {
+    return structuredClone(body)
+  } catch {
+    // 极端情况（body 里混进了不可结构化克隆的值）下退回原对象：
+    // 宁可少一层隔离，也不能让一次响应直接抛异常
+    return body
+  }
+}
+
 const demoAdapter: AxiosAdapter = async (config) => {
   // 整段包 try/catch：这是「绝不逃逸出 200」这条规则的最后一道闸。
   // adapter 抛出的异常会被 axios 当成网络错误，error.response 是 undefined，
@@ -511,21 +2016,47 @@ const demoAdapter: AxiosAdapter = async (config) => {
   let body: unknown
   try {
     const ctx = normalizeRequest(config)
-    const handler = resolveHandler(ctx.method, ctx.path)
+    const matched = resolveHandler(ctx.method, ctx.path)
 
-    if (!handler) {
+    if (!matched) {
       // 打一条 debug 方便后续补端点；这里【不能】抛错或返回非 2xx，见 createFallbackBody 的说明
       console.debug('[demo] 未铺设的端点，返回空数据兜底:', ctx.method, ctx.path)
+      body = createFallbackBody()
+    } else {
+      ctx.vars = matched.vars
+      body = matched.handler(ctx)
+    }
+  } catch (error) {
+    await delay(DEMO_LATENCY_MS)
+
+    if (error instanceof DemoBlockedError) {
+      notifyBlocked(error.message)
+      throw new AxiosError(error.message, 'ERR_BAD_REQUEST', config, null, {
+        status: 403,
+        statusText: 'Forbidden',
+        data: { error: error.message },
+        headers: {},
+        config,
+      } as unknown as AxiosResponse)
     }
 
-    body = handler ? handler(ctx) : createFallbackBody()
-  } catch (error) {
+    // notFound() 抛出来的就是这一类：状态码由 handler 决定，但【永远不会是 401】
+    if (error instanceof AxiosError && error.response) {
+      throw new AxiosError(
+        error.message,
+        error.code,
+        config,
+        null,
+        { ...error.response, config } as unknown as AxiosResponse,
+      )
+    }
+
     console.error('[demo] mock 端点执行出错，已回落到空数据兜底:', config.url, error)
-    body = createFallbackBody()
+    return buildResponse(config, createFallbackBody())
   }
 
   await delay(DEMO_LATENCY_MS)
-  return buildResponse(config, body)
+  return buildResponse(config, detach(body))
 }
 
 /**
@@ -544,4 +2075,7 @@ const demoAdapter: AxiosAdapter = async (config) => {
 export function installDemoAdapter() {
   request.defaults.adapter = demoAdapter
   axios.defaults.adapter = demoAdapter
+  // 首次访问就把数据播种好：db() 是纯内存的，没有任何快照要落，
+  // 后面每个 handler 直接改内存对象即可（刷新页面就回到初始 fixture）
+  db()
 }

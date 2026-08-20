@@ -1,4 +1,5 @@
 import { installDemoAdapter } from './adapter'
+import { installDemoBanner } from './banner'
 
 /**
  * 产物门禁哨兵（`.github/workflows/checks.yml` 的两条断言就是靠它判定的）。
@@ -36,6 +37,12 @@ const DEMO_BUILD_MARKER = '__DAIDAI_DEMO_MOCK__'
  */
 export function installDemo() {
   installDemoAdapter()
+
+  // 横幅是直接往 body 里插 DOM 的（见 banner.ts 里为什么不写成 Vue 组件）。
+  // 入口脚本是 <script type="module">（天然 defer），此刻 body 与 index.html 里的
+  // #app 容器都已存在、Vue 还没往里渲染，插到 body 最前面就正好落在 #app 之上。
+  installDemoBanner()
+
   // 这行日志同时承担两个作用：一是让访客在控制台一眼看出「后端是假的」，
   // 二是把哨兵字符串钉进产物，供 CI 的两条产物断言使用（见上方常量说明）。
   console.info(`[demo] 演示环境 mock 层已安装 ${DEMO_BUILD_MARKER}`)
