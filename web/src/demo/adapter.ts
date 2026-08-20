@@ -31,7 +31,9 @@ import {
   toLogDict,
   toTaskDict,
 } from './db'
-import type { DemoOpenApp, DemoTask, DemoUser } from './types'
+import { DEMO_PANEL_VERSION, demoPanelSettings } from './shortcuts'
+import { cancelDemoTaskRun, startDemoTaskRun } from './taskRuns'
+import type { DemoOpenApp, DemoTask, DemoTaskLog, DemoUser } from './types'
 import { TASK_STATUS_DISABLED, TASK_STATUS_ENABLED, TASK_STATUS_RUNNING } from './types'
 
 /**
@@ -68,19 +70,6 @@ import { TASK_STATUS_DISABLED, TASK_STATUS_ENABLED, TASK_STATUS_RUNNING } from '
 
 /** 统一的假延迟。0 延迟会让所有 loading 态一闪而过，反而不像真实网络。 */
 const DEMO_LATENCY_MS = 80
-
-/**
- * 演示站点展示的面板版本号。
- *
- * 由 Pages 部署流程通过 VITE_DEMO_VERSION 注入（值就是发布 tag 去掉前缀 v）。
- * 本地构建时读不到，保持空串——侧边栏是 `v-if="panelVersion"`（MainLayout.vue:189/:283），
- * 空串直接不渲染，不会出现 "vundefined" 这种脏文案。
- *
- * ⚠️ 只有侧边栏走得到这里。登录页的版本号是 login/index.vue:119 那发【裸 fetch】拿的，
- *    不经过 axios，本层拦不住，静态站上它会 404 然后被空 catch 吞掉。
- *    要让登录页也显示版本号，得按 C4 把那处裸 fetch 一起短路（属后续阶段）。
- */
-const DEMO_PANEL_VERSION = String(import.meta.env.VITE_DEMO_VERSION || '')
 
 const DEMO_ACCESS_TOKEN = 'demo-access-token'
 const DEMO_REFRESH_TOKEN = 'demo-refresh-token'
@@ -329,11 +318,12 @@ route('DELETE', '/auth/avatar', () => ({ message: '头像已删除' }))
 // 系统信息 / 面板设置
 // ===========================================================================
 
+// 版本号与面板设置的真值放在 demo/shortcuts.ts —— 登录页的裸 fetch 与 utils/panelSettings.ts
+// 的裸 fetch 都绕过 axios，只能在各自的生产文件里短路，那两处也从同一份常量取值，
+// 免得演示站上出现「侧边栏 v3.0.6、登录页却是另一个号」这种自相矛盾。
 route('GET', '/system/version', () => ({ data: { version: DEMO_PANEL_VERSION } }))
 route('GET', '/system/public-version', () => ({ version: DEMO_PANEL_VERSION }))
-route('GET', '/system/panel-settings', () => ({
-  data: { panel_title: '呆呆面板', panel_icon: '' },
-}))
+route('GET', '/system/panel-settings', () => ({ data: demoPanelSettings() }))
 route('GET', '/system/machine-code', () => ({ data: { machine_code: 'DEMO-0000-0000-0000' } }))
 
 route('GET', '/system/info', () => ({
@@ -436,8 +426,15 @@ route('GET', '/system/check-update', () => ({
 // ---- 危险操作：一律拒绝 + toast ------------------------------------------
 // 这些按钮在真实面板上会动到进程或数据；在演示站上更要命的是「重启 / 更新 / 恢复」
 // 拿到 200 之后页面会开始轮询 fetch('/', {method:'HEAD'})，
-// 而静态站的 / 恒返 200 ⇒ 判定为「服务已回来」⇒ window.location.reload()，
+// 静态站的 / 一旦返 200 就会被判定为「服务已回来」⇒ window.location.reload()，
 // 访客的全部演示数据当场清零。
+//
+// 这条防线是两层的，两层都要在：
+//   1. 这里拒绝，让那些轮询路径根本走不进去；
+//   2. useSettingsOverview / useSettingsSecurity 的 waitForRestart / waitForAvailability
+//      入口处还各有一道 VITE_DEMO 守卫兜底（design C4）——
+//      因为 useSettingsSecurity 的 doRestart() 把 restart 的异常 try/catch 吞掉了，
+//      光靠这里的 403【拦不住它】，它照样会往下调到轮询。
 route('POST', '/system/update', () => blocked())
 route('POST', '/system/restart', () => blocked())
 route('POST', '/system/stop', () => blocked())
@@ -734,6 +731,9 @@ route('DELETE', '/tasks/batch/delete', (ctx) => {
   return { message: `已删除 ${ids.length} 个任务`, count: ids.length }
 })
 
+// 批量运行【刻意】和单个运行不一样：这里直接记一次已完成的执行，不走 startDemoTaskRun。
+// 批量入口不会打开任何实时日志弹窗，没人会去看那几条流；置成运行中只会让仪表盘的
+// 「运行中的任务」瞬间涨一大截，还得靠兜底定时器一条条收回来。
 route('POST', '/tasks/batch/run', (ctx) => {
   const ids = idList(ctx, 'task_ids', 'ids')
   for (const id of ids) {
@@ -833,15 +833,22 @@ route('GET', '/tasks/:id/stats', (ctx) => {
 
 route('PUT', '/tasks/:id/run', (ctx) => {
   const task = requireTask(ctx)
-  // P2 会把这里换成「先落一条 running 日志，假 SSE 流跑完再收尾」。
-  // 现阶段直接落一条已完成的成功日志：仪表盘的今日执行/成功数/趋势图当天那一格
-  // 会立刻跟着 +1，而不会留下一条永远运行中的日志把「运行中的任务」越算越多。
-  appendTaskRunLog(task, 'ok', 2 + Math.random() * 6)
+  // 落一条【运行中】的日志并把任务置为运行中，而不是直接记一次已完成的执行。
+  //
+  // 理由：views/tasks/index.vue:429-433 拿到 200 之后会立刻打开实时日志弹窗。
+  // 如果这里直接给一条已完成的日志，那个弹窗就没有任何东西可滚，
+  // 演示里最有观赏性的一幕（进度条在原地跳动）直接消失。
+  //
+  // 收尾交给 demo/taskRuns.ts：假日志流吐完最后一行会主动收尾，
+  // 访客没打开弹窗时也有兜底定时器兜住，不会留下永远「运行中」的记录。
+  startDemoTaskRun(task)
   return { message: '任务已开始执行' }
 })
 
 route('PUT', '/tasks/:id/stop', (ctx) => {
   const task = requireTask(ctx)
+  // 先撤掉兜底定时器，否则 9 秒后它会把这条刚被终止的记录又翻成成功
+  cancelDemoTaskRun(task.id)
   const running = db().logs.find((row) => row.task_id === task.id && row.status === 2)
   if (running) {
     running.status = 3
@@ -939,6 +946,54 @@ function deleteLogsByIds(ids: number[]) {
 
 route('DELETE', '/logs/batch', (ctx) => ({ message: `已删除 ${deleteLogsByIds(idList(ctx, 'ids'))} 条日志` }))
 route('POST', '/logs/batch-delete', (ctx) => ({ message: `已删除 ${deleteLogsByIds(idList(ctx, 'ids'))} 条日志` }))
+
+/**
+ * 「下载原始日志」的换票端点。
+ *
+ * utils/rawLogDownload.ts 拿到票据之后是用【原生 `<a download>`】去拉的，
+ * 不经过 axios / fetch —— 真实面板靠这条路避免把 10MB 日志读进 JS 堆内存。
+ * 演示环境没有服务端可以签票，但只要把 url 换成一个 `data:` URL，
+ * 那句 `anchor.href = ticket.url; anchor.click()` 就能真的把文件下下来，
+ * 前端一行都不用改（这也是 design C5 说的「靠数据消除，不改代码」）。
+ */
+function rawLogTicket(filename: string, content: string) {
+  const safeName = (filename || 'log').replace(/[\\/:*?"<>|]/g, '_')
+  const now = Date.now()
+  return {
+    // 正文里有裸 \r（进度条）和中文，必须整体 encodeURIComponent，
+    // 否则 data: URL 会在第一个特殊字符处被截断。
+    url: `data:text/plain;charset=utf-8,${encodeURIComponent(content)}`,
+    filename: safeName,
+    size: new Blob([content]).size,
+    // 真实票据 120 秒过期（handler/log_raw_download.go 的 rawLogTicketTTL），照抄口径
+    expires_at: new Date(now + 120 * 1000).toISOString(),
+    expires_in: 120,
+  }
+}
+
+function logFileName(log: DemoTaskLog) {
+  const day = log.started_at.slice(0, 10)
+  return `${log.task_name || `task-${log.task_id}`}-${day}-${log.id}.log`
+}
+
+// 注册顺序在这里不重要：模式正则两端都锚定，`^/logs/([^/]+)$` 匹配不到
+// `/logs/12/raw-ticket`，不会被下面的 `/logs/:id` 抢走。
+route('GET', '/logs/:id/raw-ticket', (ctx) => {
+  const log = db().logs.find((row) => row.id === intVar(ctx))
+  if (!log) return notFound('日志不存在')
+  return rawLogTicket(logFileName(log), buildLogContent(log))
+})
+
+// 演示环境的 `GET /tasks/:id/log-files` 返回空数组，所以这条实际走不到；
+// 铺上是为了「以后 fixture 补了历史日志文件」时不至于掉进空数据兜底
+// —— 那会让 ticket.url 变成 undefined，`<a href="undefined">` 静默失败，
+// 表现是「点了下载没反应」，比报错更难查。
+route('GET', '/tasks/:id/log-files/:filename/raw-ticket', (ctx) => {
+  const task = requireTask(ctx)
+  const filename = ctx.vars['filename'] || `${task.name}.log`
+  const log = db().logs.find((row) => row.task_id === task.id)
+  return rawLogTicket(filename, log ? buildLogContent(log) : '(演示环境没有这个日志文件)')
+})
 
 // 日志详情返回的是【裸的 log 字典】，不是 { data: ... }（handler/log.go:214 直接 Success(result)）
 route('GET', '/logs/:id', (ctx) => {
@@ -1443,8 +1498,13 @@ route('PUT', '/subscriptions/:id/disable', (ctx) => {
   return { message: '已禁用', data: sub }
 })
 
-// 拉取的实时日志流属于 P2（sse.ts 的假流）。这里只负责记一条拉取记录，
-// 让「拉取历史」有东西可看；弹窗里的滚动日志等 P2 落地。
+// 弹窗里滚动的实时日志由 demo/sse.ts 的假流负责；这里只负责落一条拉取记录。
+//
+// ⚠️ 记录必须在【本次请求里立刻】落库，不能等假流跑完再补：
+//    subscriptions/index.vue:710 会在 pull 之前先读一次基线 id，
+//    done 之后再查最新一条比对 —— 没有比基线更大的新记录就判 unknown，
+//    弹窗上那个「成功/失败」的结论就出不来了。
+// 正文与假流最后一行保持同一套说法，免得弹窗里滚的是一句、历史列表里写的是另一句。
 route('PUT', '/subscriptions/:id/pull', (ctx) => {
   const sub = requireSubscription(ctx)
   const current = db()
@@ -1456,8 +1516,10 @@ route('PUT', '/subscriptions/:id/pull', (ctx) => {
     subscription_id: sub.id,
     subscription_name: sub.name,
     status: 0,
-    content: '拉取成功（演示环境不会真的访问远端仓库）',
-    duration: 1.6,
+    content: sub.type === 'single-file'
+      ? '拉取完成，更新 1 个文件'
+      : '拉取完成，更新 3 个文件，新增任务 0 个',
+    duration: sub.type === 'single-file' ? 3.1 : 3.5,
     created_at: pulledAt,
   })
   return { message: '已开始拉取' }

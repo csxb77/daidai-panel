@@ -378,6 +378,18 @@ export function useSettingsSecurity() {
   }
 
   function waitForRestart() {
+    // 在线演示 Demo 分叉：整段短路，一次探针都不能发。
+    //
+    // 下面的轮询是 `fetch('/', { method: 'HEAD', cache: 'no-store' })` → res.ok
+    // → window.location.reload()，而演示站是纯静态站：本地静态预览下 `/` 恒 200，
+    // GitHub Pages 上目前是 404 但只要建了同名根仓库就会变成 200。
+    // 一旦 reload，纯内存的演示数据全部清零。
+    //
+    // 这一处是三处 HEAD 探针里【唯一真的够得着】的：doRestart() 里的
+    // `await systemApi.restart()` 被包在 try/catch 里，演示环境返回 403 也照样往下走，
+    // 直接就调到了这里。另外两处（useSettingsOverview）会被各自的 catch 挡在门外。
+    if (import.meta.env.VITE_DEMO === '1') return
+
     stopRestartProbe()
     let attempts = 0
     restartProbeDelayTimer = setTimeout(() => {

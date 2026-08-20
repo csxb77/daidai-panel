@@ -28,6 +28,52 @@ export function openAuthorizedEventStream(
   handlers: EventStreamHandlers = {},
   requestOptions: EventStreamRequestOptions = {}
 ): EventStreamConnection {
+  // 在线演示 Demo（GitHub Pages 静态站）分叉：没有服务端，下面那发 fetch 必然 404。
+  //
+  // 为什么必须在【这个函数内部】分叉，而不是各调用点自己判断：
+  //   这里是全站唯一的 SSE 传输层，四个调用点（logs/index.vue:268、
+  //   tasks/components/LogViewer.vue:164、deps/index.vue:1555、
+  //   subscriptions/index.vue:758）全部经由它。在这里换掉，四处同时生效且零改动。
+  //   顺带一提：全仓库【没有任何】 `new EventSource`，所以 mock `window.EventSource`
+  //   是无效的，别再往那个方向试。
+  //
+  // 守卫必须保持这个形状（编译期常量 + 动态 import）：
+  //   - `import.meta.env.VITE_DEMO` 在发布版构建里被 define 成 ''（见 vite.config.ts），
+  //     `'' === '1'` 恒假，rollup 会把整个 if 连同 demo chunk 一起剔除；
+  //   - 不能改成运行期判断、也不能抽成返回 boolean 的 isDemo() 再判断（折叠不掉）；
+  //   - 不能静态 import '@/demo/sse'（会把整个 demo 层拖进真实用户的产物）。
+  //
+  // 返回的假连接与真实实现同形状（只有一个 close()），调用方无感知。
+  //
+  // requestOptions 这里刻意不传下去：现有四个调用点都只用 (url, handlers)。
+  // 以后真有调用点开始用 method / body 来区分流的话，要同步把它带给 openDemoEventStream，
+  // 否则演示站会静默地按 GET 的语义放同一条假流。
+  if (import.meta.env.VITE_DEMO === '1') {
+    // 变量名刻意和下面真实实现里的 closed 区分开：这里是块级作用域，
+    // 同名的话读代码时很容易误以为是同一个开关。
+    let demoClosed = false
+    let demoConnection: EventStreamConnection | null = null
+
+    void import('@/demo/sse')
+      .then(({ openDemoEventStream }) => {
+        // chunk 还在路上时调用方就 close() 了（切任务、关弹窗都可能），此刻不能再起流
+        if (demoClosed) return
+        demoConnection = openDemoEventStream(url, handlers)
+      })
+      .catch((error: unknown) => {
+        console.error('[demo] 假日志流加载失败:', error)
+        handlers.onError?.(toError(error))
+      })
+
+    return {
+      close() {
+        demoClosed = true
+        demoConnection?.close()
+        demoConnection = null
+      }
+    }
+  }
+
   const authStore = useAuthStore()
   const controller = new AbortController()
   let closed = false

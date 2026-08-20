@@ -1,19 +1,6 @@
 import { installDemoAdapter } from './adapter'
 import { installDemoBanner } from './banner'
-
-/**
- * 产物门禁哨兵（`.github/workflows/checks.yml` 的两条断言就是靠它判定的）。
- *
- * 为什么必须是一个【字符串字面量】，而不能直接 grep `installDemo` 这类函数名：
- *   Vite 的应用构建开着 esbuild `minifyIdentifiers`，rollup 又对 `es` 格式默认开启
- *   `minifyInternalExports`，所以 `installDemo` 这个导出名在产物里会被压成 `a` 之类的单字母。
- *   拿函数名去 grep，发布版和 Demo 版都是 0 命中——门禁看着是绿的，实际上什么都没守。
- *   字符串字面量不会被改名，是唯一可靠的判据。
- *
- * 它必须被下面 installDemo() 里的活代码引用，否则会被 tree-shaking 掉，
- * Demo 版那条「哨兵必须存在」的断言就会误红。
- */
-const DEMO_BUILD_MARKER = '__DAIDAI_DEMO_MOCK__'
+import { DEMO_BUILD_MARKER } from './marker'
 
 /**
  * 在线演示 Demo 的统一安装入口。
@@ -30,10 +17,16 @@ const DEMO_BUILD_MARKER = '__DAIDAI_DEMO_MOCK__'
  *    - 守卫条件必须是 import.meta.env.VITE_DEMO 这个编译期常量，不能改成运行期判断
  *      （比如读 location.hostname），那样 rollup 无法做死代码消除。
  *
+ * ⚠️ 不是所有 demo 代码都从这里进来。有几处调用【绕过 axios】，adapter 拦不到，
+ *    只能在各自的生产文件里用同样的编译期常量守卫 + 动态 import() 分叉，
+ *    因此它们各自懒加载自己那一块，与 installDemo() 无关：
+ *      web/src/utils/sse.ts        -> demo/sse.ts        假实时日志流（4 个调用点共用）
+ *      web/src/utils/panelSettings.ts、views/login/index.vue -> demo/shortcuts.ts
+ *      web/src/api/script.ts、views/settings/useSettings*.ts -> 就地 return，不取数据
+ *
  * ⚠️ 另一条容易走弯路的事实：全仓库【没有任何】 `new EventSource`，
  *    实时日志走的是 web/src/utils/sse.ts 里手写的 fetch + body.getReader()。
- *    想让假日志流跑起来，mock `window.EventSource` 是无效的，
- *    只能在 sse.ts 内部分叉——这部分属于后续阶段。
+ *    想让假日志流跑起来，mock `window.EventSource` 是无效的，只能在 sse.ts 内部分叉。
  */
 export function installDemo() {
   installDemoAdapter()
@@ -44,6 +37,6 @@ export function installDemo() {
   installDemoBanner()
 
   // 这行日志同时承担两个作用：一是让访客在控制台一眼看出「后端是假的」，
-  // 二是把哨兵字符串钉进产物，供 CI 的两条产物断言使用（见上方常量说明）。
+  // 二是把哨兵字符串钉进产物，供 CI 的两条产物断言使用（见 demo/marker.ts）。
   console.info(`[demo] 演示环境 mock 层已安装 ${DEMO_BUILD_MARKER}`)
 }

@@ -397,6 +397,18 @@ export function useSettingsOverview() {
   }
 
   function waitForRestart() {
+    // 在线演示 Demo 分叉：整段短路，一次探针都不能发。
+    //
+    // 下面的轮询是 `fetch('/', { method: 'HEAD' })` → res.ok → window.location.reload()。
+    // 演示站是纯静态站，它的 `/` 在本地静态预览下恒 200；GitHub Pages 上当前恰好是 404
+    // （实测 https://linzixuanzz.github.io/ 没有根仓库），但只要哪天建了同名根仓库
+    // 就会变成 200 —— 属于会自己引爆的定时地雷。一旦 reload，演示数据（纯内存）全部清零。
+    //
+    // 正常路径其实走不到这里：POST /system/restart 在演示环境是 403，
+    // handleRestartPanel 的 catch 会吞掉它。这条守卫防的是「以后有人改了那条路径」。
+    // 用不着补提示：mock 层拒绝时已经弹过「演示环境不可用」了。
+    if (import.meta.env.VITE_DEMO === '1') return
+
     stopRestartPolling()
     let attempts = 0
     restartDelayTimer = setTimeout(() => {
@@ -421,6 +433,11 @@ export function useSettingsOverview() {
   }
 
   function waitForAvailability() {
+    // 在线演示 Demo 分叉：理由同上面的 waitForRestart —— 这里的探针同样是
+    // `fetch('/', { method: 'HEAD', cache: 'no-store' })` → res.ok → location.reload()。
+    // 演示环境的 POST /system/update 是 403，正常走不到这里；守卫防的是路径变化。
+    if (import.meta.env.VITE_DEMO === '1') return
+
     stopUpdateAvailabilityChecks()
     updateProgressVisible.value = true
     updateProgressStatus.value = 'restarting'

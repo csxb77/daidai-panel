@@ -91,6 +91,12 @@ export interface DemoTaskLog {
   started_at: string
   ended_at: string | null
   kind: DemoLogKind
+  /**
+   * 正文覆盖值，只有「被假日志流滚过的那一次执行」才有（见 demo/taskRuns.ts）。
+   * 其余日志一律留空，正文由 buildLogContent() 按 kind 现算 —— 几千条日志各存一份
+   * 正文会把内存占用撑大一个数量级。
+   */
+  content?: string
 }
 
 export interface DemoEnvVar {

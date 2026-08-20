@@ -116,9 +116,21 @@ onMounted(async () => {
     await loadCaptchaConfig(form.value.username);
   }
   try {
-    const vRes = await fetch("/api/system/public-version");
-    const vData = await vRes.json();
-    if (vData.version) panelVersion.value = vData.version;
+    // 在线演示 Demo 分叉：这一发是【裸 fetch】，不经过 axios，所以 demo 的 mock
+    // adapter 拦不到它，在静态站上会 404 然后被下面那个空 catch 悄悄吞掉
+    // —— 表现就是登录页右下角永远没有版本号。
+    //
+    // 守卫必须保持「编译期常量 + 动态 import」这个形状：发布版里 VITE_DEMO 是 ''，
+    // 整个分支连同 demo chunk 会被 rollup 剔除，真实面板走的还是原来那发 fetch。
+    if (import.meta.env.VITE_DEMO === "1") {
+      const { demoPublicVersion } = await import("@/demo/shortcuts");
+      const version = demoPublicVersion();
+      if (version) panelVersion.value = version;
+    } else {
+      const vRes = await fetch("/api/system/public-version");
+      const vData = await vRes.json();
+      if (vData.version) panelVersion.value = vData.version;
+    }
   } catch {}
 });
 

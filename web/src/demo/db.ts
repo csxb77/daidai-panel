@@ -376,6 +376,12 @@ export function filterTasks(params: Record<string, string>): DemoTask[] {
  * 否则演示时点开一条「失败」看到的是一片成功日志。
  */
 export function buildLogContent(log: DemoTaskLog): string {
+  // 假日志流跑完之后会把「刚刚滚过的那份正文」留在 log.content 上。
+  // LogViewer 收到 done 之后会立刻回查 latest-log 并整体替换渲染内容
+  // （LogViewer.vue:239-241），不认这份正文的话，访客会看到刚看完的日志
+  // 在最后一刻被换成另一套措辞的版本。
+  if (log.content) return log.content
+
   const task = findTask(log.task_id)
   const command = task?.command ?? '(任务已删除)'
   const stamp = (offsetSeconds: number) => {

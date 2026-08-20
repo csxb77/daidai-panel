@@ -107,6 +107,19 @@ export const scriptApi = {
       return false
     }
 
+    // 在线演示 Demo 分叉：静态站没有后端，下面那发请求必然 404。
+    //
+    // 这里【必须保留 fetch 形态】——keepalive 是 fetch 独有的，axios 做不到，
+    // 而这个方法的全部意义就是「页面正在卸载时把停止请求送出去」。
+    // 也正因为它不走 axios，demo 的 mock adapter 拦不到，只能在这里短路。
+    //
+    // 返回 true 是为了保持调用方语义（「停止请求已经发出」）：演示环境里那个调试
+    // 会话本来就只存在于内存中，页面一卸载就没了，没有任何东西需要真的去停。
+    // 守卫是编译期常量，发布版里整段被剔除，真实面板的 keepalive 一行不少。
+    if (import.meta.env.VITE_DEMO === '1') {
+      return true
+    }
+
     try {
       void fetch(`/api/scripts/run/${encodeURIComponent(runId)}/stop`, {
         method: 'PUT',
