@@ -1,5 +1,7 @@
 import { createApp } from "vue";
 import { createPinia } from "pinia";
+import { ElMessageBox, provideGlobalConfig } from "element-plus";
+import zhCn from "element-plus/es/locale/lang/zh-cn";
 import "element-plus/theme-chalk/dark/css-vars.css";
 import "element-plus/theme-chalk/el-loading.css";
 import "element-plus/theme-chalk/el-message.css";
@@ -188,6 +190,38 @@ async function bootstrap() {
   void fetchAndApplyPanelAppearance();
 
   const app = createApp(App);
+
+  // Element Plus 的 locale 走 provide/inject，取不到就回落英文默认包
+  // （es/hooks/use-locale/index.mjs:17-18，`locale.value || en_default`），
+  // 表现为确认框「Cancel / OK」、表格空态「No Data」、分页器「20/page」。
+  //
+  // ① provideGlobalConfig({ locale: zhCn }, app, true) —— 【唯一的真开关】。
+  //    删掉它全站立刻回英文，而且构建全绿、控制台无声，属于典型的静默回归。
+  //    传了 app ⇒ 走 app.provide 做【app 级】provide，组件树里的 el-table /
+  //    el-pagination 才 inject 得到；第三个参数 global=true 另外把这份配置写进
+  //    element-plus 的模块级 globalConfig（es/…/config-provider/src/hooks/use-global-config.mjs:54）。
+  //    它与 app.use(ElementPlus, { locale }) 内部做的是同一件事（es/make-installer.mjs:11），
+  //    但不会把整包组件拉进来，按需引入的体积优化保持不变。
+  //
+  // ② app.use(ElMessageBox) —— 【加固项，不是必需项】。
+  //    别把它读成「缺了确认框就是英文」：ElMessageBox 虽然是命令式 API，用 render()
+  //    脱离组件树挂载、vnode.appContext 默认为 null（es/…/message-box/src/messageBox.mjs:114），
+  //    但它取 locale 的路径是 useGlobalComponentSettings -> useGlobalConfig ->
+  //    inject(configProviderContextKey, globalConfig)（use-global-config.mjs:14）。
+  //    appContext 为 null 时 Vue 的 inject 取不到 provides，会走「有默认值就返回默认值」
+  //    那条分支（runtime-core inject: instance.parent == null -> provides 取自
+  //    vnode.appContext，为 null 则 return defaultValue），返回的正是 ① 写好的
+  //    那个模块级 globalConfig。⇒ 只有 ① 时确认框【已经】是中文。
+  //    保留 ② 的理由：把 _context 指到 app._context，让它走真正的 app 级 provide，
+  //    而不是长期依赖「inject 默认参数兜底」这个 EP 内部实现细节
+  //    （哪天那个默认值变了，靠兜底的写法会静默失效）。
+  //
+  // ⚠️ 想加 CI 门禁守这件事时注意：能被产物断言守住的只有 ①（删了它 zhCn 这个 import
+  //    就没人用，element-plus 的 sideEffects 不含 es/locale/**，rollup 会把整份中文包
+  //    剔掉，产物里就搜不到 `共 {total} 条` 了）。英文包 en.mjs 被 use-locale 静态 import，
+  //    两种情况下都在产物里，所以任何拿英文串做判据的断言都是恒绿的空转门禁。
+  provideGlobalConfig({ locale: zhCn }, app, true);
+  app.use(ElMessageBox);
 
   app.use(createPinia());
   // ↓ 首次导航在这一行触发，此时 demo adapter 已经就位

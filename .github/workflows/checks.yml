@@ -107,6 +107,44 @@ jobs:
           fi
           echo "OK：发布版 robots 保持 noindex，字体自托管且无外部字体域"
 
+      # 全站中文文案的唯一开关，是 web/src/main.ts 里那行
+      # provideGlobalConfig({ locale: zhCn }, app, true)。
+      #
+      # 【为什么必须由机器守】删掉它不会有任何报错：vue-tsc 过、vite build 过、
+      # 页面照常渲染，只是确认框回到 Cancel/OK、表格空态回到 No Data、分页器回到 20/page。
+      # 又一个「改坏了全绿」的静默回归，和上面 robots / 自托管字体是同一类失效方式。
+      #
+      # 【为什么判据是 `共 {total} 条`】它是 el-pagination 的 total 模板，
+      # 带 Element Plus 自己的 {} 插值语法（es/hooks/use-locale/index.mjs 的
+      # translate() 用 /\{(\w+)\}/g 做替换），业务模板只会写 {{ total }}，撞不上。
+      # web/src 下唯一的字面命中在 main.ts 的注释里，esbuild 会剥离注释，不污染产物。
+      #   - ❌ 不能用「暂无数据」：web/src 下有 6 处手写（IPWhitelistCard.vue /
+      #     LoginLogsCard.vue / SessionManagementCard.vue 各 2 处的 empty-text 与
+      #     el-empty description）。locale 被剔掉照样命中 ⇒ 恒绿的空转门禁。
+      #   - ❌ 不能用任何英文串：英文包 en.mjs 被 es/hooks/use-locale/index.mjs:1
+      #     【静态 import】，配没配中文都躺在产物里，同样恒真。
+      #
+      # 【怎么让它失败一次】把 main.ts 里 provideGlobalConfig 那行注释掉再构建：
+      # zhCn 这个 import 就没人使用，而 element-plus 的 sideEffects 不含 es/locale/**，
+      # rollup 会把整份中文包剔掉，产物里再也搜不到这个串 ⇒ 本步骤变红。
+      #
+      # 【为什么不配反向断言】这与 robots 那一对不同。robots 需要配对，是因为 noindex
+      # 同时也是 index.html 里的静态默认值，改写插件失效时两种构建都是 noindex、断言恒真；
+      # 而这条是「必须命中」的正向断言，判据一旦消失就直接变红，本身就自带证伪能力。
+      # 不要照着 robots 的样子给它补一条反向断言，那是画蛇添足。
+      #
+      # grep 用 -F 固定串匹配：判据里的 { } 在 BRE 下有特殊含义，别改回 -r/-E。
+      - name: 断言发布版产物含 Element Plus 中文 locale
+        working-directory: web
+        run: |
+          set -euo pipefail
+          test -d dist/assets
+          if ! grep -rlF '共 {total} 条' dist/assets; then
+            echo "::error::发布版产物里找不到 Element Plus 中文 locale。main.ts 的 provideGlobalConfig({ locale: zhCn }, app, true) 可能被删或被 tree-shake，全站会静默回落英文（Cancel/OK、No Data、20/page）"
+            exit 1
+          fi
+          echo "OK：发布版产物包含 Element Plus 中文 locale"
+
       # Demo 站点的实际部署在 .github/workflows/deploy-demo.yml
       # （发版时由 release.yml 调用，另外也可手动 workflow_dispatch 触发），
       # 但构建放在这里跑：前端改动把 mock 层或子路径构建搞坏时，PR 阶段就能变红，
