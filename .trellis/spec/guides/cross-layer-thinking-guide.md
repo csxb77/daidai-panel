@@ -129,6 +129,86 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
 > 通用原则：**一条永远为真的断言等于没有断言。**
 > 加门禁时顺手问一句「我怎么让它失败一次」，答不上来就说明它没有牙。
 
+### 同一个输出目录被两种构建模式共用
+
+**一旦两条构建往同一个目录写产物，任何「复用已存在产物」的脚本都必须能分辨它是哪一种。**
+
+`web/dist` 现在有两个写入者，产物形状完全不同：
+
+| 构建 | 产物特征 |
+|---|---|
+| `npm run build` | 无 mock 层、`robots=noindex`、资源为根相对路径 |
+| `npm run build:demo` | 浏览器内 mock 顶替层、`robots=index, follow`、资源带 `/daidai-panel/` 前缀 |
+
+而 `Magisk/build.sh` 的逻辑是「`web/dist` 已存在就跳过构建，直接 `cp` 进模块」。
+于是「跑一次 `build:demo` → 打一个 Magisk 包」就会把整套 mock 层打进模块 ZIP，
+装上去的表现是**面板能开、数据全是假的、一个错都不报**——比白屏难查得多。
+
+这和上一条「构建产物 ↔ CI 断言」是同源教训，都是**看起来通过了，其实是错的东西**。
+而且它有一个额外的阴险之处：**CI 够不着**。CI 每次都是全新 runner，
+永远不存在「预先躺在那儿的 dist」，所以这类问题只在本地复现，
+`checks.yml` 里那两条产物门禁再严也守不住这条路径。
+
+所以，新增一条往已有输出目录写东西的构建时要问：
+
+- 谁会**复用**这个目录而不是重建它？（本项目：`Magisk/build.sh` 复用；
+  `Dockerfile*` 在 builder 阶段重建且 `.dockerignore` 已排除 `web/dist/`；
+  `scripts/release-preflight.ps1` 无条件 `npm run build`——这三种要分别确认，不能一概而论）
+- 判据选**压缩不会改动、且目标模式必然含有**的东西，判据要覆盖到「只差 base 前缀、
+  没有 mock 层」这种**半污染**产物——只认 mock 哨兵是漏的。
+- 命中后**直接失败并说清怎么办**，不要"贴心"地替用户重建：
+  那会把一次误操作变成一次用户不知情的几分钟静默构建。
+- 守卫本身要**能被单独跑一次**。`Magisk/build.sh` 的守卫原本排在 `command -v go` 后面，
+  等于「没配 Go 就没法验证这道守卫」——所以它有一个 `--check-dist` 早退路径：
+  `(cd web && npm run build:demo) && bash Magisk/build.sh --check-dist` 必须 exit 1。
+  答不出这条命令，就又回到了上一条说的空转门禁。
+
+> 另一半的解法是让两种构建**互不覆盖**（各写各的 outDir）。
+> 本项目没这么做，是因为 `scripts/copy-monaco-assets.mjs` 把目标写死成 cwd 下的 `dist`。
+> 既然目录必须共用，那分辨的责任就落到每个复用方头上。
+
+### 前端静态目录 ↔ Go 静态白名单 ↔ nginx
+
+在 `web/public/` 下**新增一个子目录、或改一个根级文件的文件名**，是三层要一起动的改动。
+漏改的表现是**静默失效，不是 404**。
+
+`server/main.go` 的 `setupStaticFrontend()` 挂的是**白名单**
+（子目录 `assets` / `fonts` / `monaco` / `sponsor-portal`，外加单文件路由 `favicon-512.webp`）。
+不在名单里的路径会掉进 `NoRoute` 的 SPA fallback，回一份 **200 + `text/html` 的 index.html**：
+
+- 样式表 / 字体：浏览器按 MIME 拒绝使用，整套字体失效，Console 里只有一条不起眼的 MIME 警告；
+- 图片：显示破图，而服务端访问日志里**全是 200**，按状态码排查会一无所获。
+
+而 Docker 部署走 `docker/nginx.conf` 的 `try_files`，**完全不受这条约束**——这才是最坑的地方：
+开发者本地用 Docker 验一遍全是好的，只有内嵌二进制部署（Magisk 模块 / Windows 单机版，无 nginx）
+的用户会中招，且他们报不出这个 bug（界面只是"有点不对"）。
+
+新增静态资源时要一起改：
+
+- `server/main.go`：子目录加进白名单循环；根级单文件加 `engine.StaticFile`
+- `docker/nginx.conf` 末尾的缓存正则：漏了不会坏，只是静默丢掉 `expires/immutable`
+- 换文件名时，`web/index.html` 的引用与 `server/main.go` 的 `StaticFile` 路由是**两处硬编码**，
+  必须同步（favicon 从 `.svg` 换到 `.webp` 时就是这两处）
+
+> 这三处的注释里已经互相点名了对方的位置。看到其中一条时，默认还有另外两条。
+
+### 构建输入是"跑一次脚本、提交进版本库"的产物
+
+`web/public/fonts/*.woff2`（`scripts/fetch-fonts.mjs` 抓取）与
+`web/src/demo/fixtures/*.json`（`server/cmd/gen-demo-fixtures` 生成）都属于这一类：
+**生成器不在构建链上，CI 只跑 `npm ci && vite build`，不联网也不跑 Go**。
+
+于是有两条必须成立，否则干净检出后 CI 必挂或线上静默降级：
+
+- 产物**真的进了版本库**——检查 `.gitignore` 没有 `*.woff2` 之类的规则；
+  二进制另外在 `.gitattributes` 里显式标 `binary`，不要依赖 `* text=auto` 的内容嗅探
+- 缺文件时**构建硬失败**，而不是默默产出残缺结果
+  （字体走 `vite.config.ts` 的 `selfHostedFontsPlugin`；fixture 因为被 `import`，
+  `vue-tsc -b` 直接报错）
+
+反面做法是"构建期现下载"：那等于把刚从运行期去掉的第三方依赖原样搬到构建期，
+每次发版都多一个 `fonts.gstatic.com` 单点。
+
 ### 任务与日志链路
 
 要一起检查：
@@ -158,6 +238,11 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
 - [ ] 靠「装载 / 执行顺序」保证正确性时，触发点的源码我**真的读过**吗？
       有没有哪条路径会提前短路，让它在冒烟测试上不复现？
 - [ ] 新加的 CI 断言，我说得出**怎么让它失败一次**吗？答不上来就是空转门禁
+- [ ] 我这条构建往一个**已有输出目录**里写吗？谁会复用那个目录而不是重建它？
+      它分得出产物是哪种模式吗？（CI 是全新 runner，这类问题只在本地复现）
+- [ ] 往 `web/public/` 加了子目录 / 改了根级文件名？`server/main.go` 的静态白名单同步了吗？
+      （漏了是 200 + index.html 的静默失效，且只在无 nginx 的部署形态下复现）
+- [ ] 新增的"跑一次脚本产出、提交进库"的构建输入，`.gitignore` 放行了吗？缺文件时构建会硬失败吗？
 
 ---
 

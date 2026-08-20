@@ -41,11 +41,11 @@ const panelVersion = ref('')
 const routeCacheMax = 14
 
 // 侧边栏 logo 的兜底图标。
-// 这里不能写死 '/favicon.svg'：:src 是 v-bind 表达式，不经过 Vite 的 transformAssetUrls，
+// 这里不能写死 '/favicon-512.webp'：:src 是 v-bind 表达式，不经过 Vite 的 transformAssetUrls，
 // 构建产物里会原样保留裸绝对路径。面板挂在反代子路径或 GitHub Pages 项目站下时，
 // 这个路径会指到站点根而 404，侧边栏 logo 变破图（这两处 <img> 没有 @error 兜底）。
 // import.meta.env.BASE_URL 结尾恒带 '/'，根路径部署时就是 '/'，行为与改动前一致。
-const defaultPanelIcon = `${import.meta.env.BASE_URL}favicon.svg`
+const defaultPanelIcon = `${import.meta.env.BASE_URL}favicon-512.webp`
 const panelIconSrc = computed(() => panelIcon.value || defaultPanelIcon)
 
 const roleLevel: Record<string, number> = {

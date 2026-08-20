@@ -9,6 +9,54 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
 const localMonacoSourceDir = path.resolve(process.cwd(), 'node_modules/monaco-editor/min')
 
+// 发布版的值，真正生效的那份写在 web/index.html 里；这里留一份只为报错时提示。
+const RELEASE_ROBOTS = 'noindex, nofollow, noarchive, nosnippet'
+const DEMO_ROBOTS = 'index, follow'
+
+/**
+ * robots meta 条件化：只有 Demo 构建改成可索引，其余一切场景保持 noindex。
+ *
+ * 方向是刻意选的——【安全值是 index.html 里的静态默认值，Demo 才是显式改写】，而不是反过来：
+ *   - dev server、发布版构建、以及「这个插件哪天被误删」的情况，拿到的都还是 noindex；
+ *   - 自建面板不该被搜索引擎收录，这条对真实用户是保护，必须 fail-safe。
+ *
+ * 因此没有用 Vite 原生的 `%VITE_ROBOTS%` 占位 + web/.env 提供默认值：那是 fail-open 的。
+ * 一旦 web/.env 被删、变量名拼错或 envPrefix 改动，Vite 对未定义的 `%VITE_XXX%`
+ * 只 warn 不 fail，会把字面量原样留在产物里 —— 等于**静默丢掉 noindex**，
+ * 而且丢的是发布版（真实用户），不是 Demo。用 transformIndexHtml 则最坏情况只是
+ * 「Demo 没被收录」，代价方向正确。
+ *
+ * 另外 404.html 不用单独处理：scripts/copy-spa-fallback.mjs 是在 vite build【之后】
+ * 复制产物 dist/index.html 的，改写结果自动跟着走。
+ */
+function robotsMetaPlugin(isDemoBuild: boolean): Plugin {
+  return {
+    name: 'daidai-robots-meta',
+    transformIndexHtml: {
+      // post：等 Vite 注入完脚本/样式再改，避免与其它 HTML 处理抢同一段文本。
+      order: 'post',
+      handler(html) {
+        if (!isDemoBuild) return html
+
+        // 用正则而不是全等字符串匹配：不假设 Vite 的 HTML 处理会原样保留
+        // 属性顺序、引号风格和自闭合斜杠。只认「name=robots 的 meta」，
+        // 然后整条替换掉，避免因为空格差异而静默不生效。
+        const metaRe = /<meta\b[^>]*\bname=["']robots["'][^>]*>/i
+        if (!metaRe.test(html)) {
+          // 这里必须 throw 而不是 warn。静默失配的后果是「Demo 站带着 noindex 上线」，
+          // 而让 Demo 能被收录正是这段代码存在的唯一理由，失效了却不报错等于白写。
+          throw new Error(
+            '[daidai-robots-meta] 在 index.html 中找不到 name="robots" 的 meta。\n' +
+              `发布版应当保持 content="${RELEASE_ROBOTS}"；删掉这一行会让 Demo 构建失去可索引改写。`
+          )
+        }
+
+        return html.replace(metaRe, `<meta name="robots" content="${DEMO_ROBOTS}" />`)
+      }
+    }
+  }
+}
+
 function normalizeBase(base: string) {
   return base === '/' ? '' : base.replace(/\/$/, '')
 }
@@ -63,6 +111,45 @@ function localMonacoAssetsPlugin(): Plugin {
   }
 }
 
+/**
+ * 自托管字体的落盘校验。
+ *
+ * public/ 是【原样拷贝】的，Vite 根本不解析 public/fonts/fonts.css，
+ * 所以 woff2 缺失时构建会安安静静地通过，直到线上 12 个字体请求全部 404、
+ * 界面退回系统字体 —— 而这正是本次改动要消灭的那种「静默降级」。
+ *
+ * 于是把它变成构建期硬失败。这与仓库既有的约定一致：demo fixture 也是
+ * 「生成产物进版本库、缺文件就让构建失败」，而不是靠人记得。
+ */
+function selfHostedFontsPlugin(): Plugin {
+  return {
+    name: 'daidai-selfhosted-fonts',
+    // 只管构建。dev 时字体缺失最多是本地预览字形不对，不值得把 `npm run dev` 也堵死。
+    apply: 'build',
+    buildStart() {
+      const fontsDir = path.resolve(process.cwd(), 'public/fonts')
+      const cssFile = path.join(fontsDir, 'fonts.css')
+      if (!fs.existsSync(cssFile)) {
+        throw new Error('[daidai-selfhosted-fonts] 缺少 web/public/fonts/fonts.css')
+      }
+
+      const css = fs.readFileSync(cssFile, 'utf8')
+      const referenced = [...css.matchAll(/url\(["']?\.\/([^"')]+\.woff2)["']?\)/g)].map((m) => m[1])
+      const missing = [...new Set(referenced)].filter(
+        (name) => !fs.existsSync(path.join(fontsDir, name))
+      )
+
+      if (missing.length > 0) {
+        throw new Error(
+          `[daidai-selfhosted-fonts] fonts.css 引用的 ${missing.length} 个 woff2 不在磁盘上：\n` +
+            `  ${missing.join('\n  ')}\n` +
+            '这些是进版本库的产物，请先跑一次：node scripts/fetch-fonts.mjs'
+        )
+      }
+    }
+  }
+}
+
 export default defineConfig(({ mode }) => {
   // 只有 `vite build --mode demo`（npm run build:demo）会加载 web/.env.demo，
   // 从而拿到 VITE_DEMO=1；发布版构建走默认的 production 模式，读不到这个变量。
@@ -84,6 +171,8 @@ export default defineConfig(({ mode }) => {
     plugins: [
       vue(),
       localMonacoAssetsPlugin(),
+      robotsMetaPlugin(isDemoBuild),
+      selfHostedFontsPlugin(),
       Components({
         dts: false,
         resolvers: [

@@ -76,6 +76,37 @@ jobs:
           fi
           echo "OK：发布版产物不含 Demo mock 代码"
 
+      # R5 三项跨界修改的产物级门禁。它们的共同点是【改坏了不会有任何报错】：
+      #
+      #   - robots：发布版真正生效的是 web/index.html 里那行静态默认值
+      #     （vite.config.ts 的 robotsMetaPlugin 在非 Demo 构建下直接 return，
+      #     刻意让安全值是静态的）。也就是说把那行改成 index, follow 照样构建通过，
+      #     自建面板从此被搜索引擎收录，没有任何一步会红。
+      #   - 自托管字体：font-display: swap 决定了拉不到字体只会【静默】退回系统字体。
+      #     这正是本次去掉 fonts.loli.net 想消灭的那种失效方式，不能又靠肉眼验收守它。
+      #   - 外部字体域：一旦有人把 <link> 改回第三方 CDN，内网 / NAS / 离线部署
+      #     又会回到静默降级。这里只认带 scheme 的形式，避免误伤 index.html 里
+      #     那句「（原为 fonts.loli.net）」的中文注释。
+      - name: 断言发布版产物的 robots 与自托管字体
+        working-directory: web
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          if ! grep -qE '<meta[^>]+name="robots"[^>]+content="noindex' dist/index.html; then
+            echo "::error::发布版 index.html 的 robots meta 不是 noindex。web/index.html 里那行静态默认值才是发布版生效的那份，不要改动它"
+            exit 1
+          fi
+          test -f dist/fonts/fonts.css
+          if ! ls dist/fonts/*.woff2 >/dev/null 2>&1; then
+            echo "::error::发布版产物里没有 woff2。字体二进制是进版本库的构建输入，缺失时先跑 node web/scripts/fetch-fonts.mjs 再提交"
+            exit 1
+          fi
+          if grep -qE 'https?://fonts\.(loli\.net|googleapis\.com|gstatic\.com)' dist/index.html; then
+            echo "::error::发布版 index.html 又引用了第三方字体 CDN，内网 / 离线部署会静默退回系统字体"
+            exit 1
+          fi
+          echo "OK：发布版 robots 保持 noindex，字体自托管且无外部字体域"
+
       # Demo 站点的实际部署在 .github/workflows/deploy-demo.yml
       # （发版时由 release.yml 调用，另外也可手动 workflow_dispatch 触发），
       # 但构建放在这里跑：前端改动把 mock 层或子路径构建搞坏时，PR 阶段就能变红，
@@ -101,6 +132,36 @@ jobs:
             exit 1
           fi
           echo "OK：Demo 产物包含 mock 哨兵"
+
+      # 与发布版那条 noindex 成对的反向断言，理由和哨兵那一对完全一样：
+      # 哪天 robotsMetaPlugin 被摘掉或改写失配，两条构建的产物都会是 noindex，
+      # 上面那条断言照样通过 —— 门禁静默失效，而「Demo 能被搜索引擎收录」
+      # 正是那段改写代码存在的唯一理由。
+      - name: 断言 Demo 产物 robots 已反转（证明上面的 noindex 门禁没有失效）
+        working-directory: web
+        run: |
+          set -euo pipefail
+          if ! grep -qE '<meta[^>]+name="robots"[^>]+content="index, follow"' dist/index.html; then
+            echo "::error::Demo 产物的 robots meta 没被改写成 index, follow。此时发布版那条 noindex 断言也已经失去意义"
+            exit 1
+          fi
+          echo "OK：Demo 产物 robots 为 index, follow"
+
+      # 子路径部署 × 自托管字体的组合验证。
+      # index.html 里写的是 /fonts/fonts.css，要靠 Vite 按 --base 重写成
+      # /daidai-panel/fonts/fonts.css。漏了重写就会打到 github.io 站点根上 404，
+      # 而 font-display: swap 让这件事【静默】发生：页面不白屏、Console 不报错，
+      # 只是字形不对 —— 一轮人工验收基本发现不了，所以必须由机器守。
+      - name: 断言 Demo 产物的字体引用带 base 前缀
+        working-directory: web
+        run: |
+          set -euo pipefail
+          if ! grep -q '/daidai-panel/fonts/fonts.css' dist/index.html; then
+            echo "::error::Demo 产物 index.html 里的字体样式表没带 /daidai-panel/ 前缀，线上会 404 并静默退回系统字体"
+            exit 1
+          fi
+          test -f dist/fonts/fonts.css
+          echo "OK：Demo 产物字体引用带 base 前缀"
 
       # GitHub Pages 没有 nginx `try_files` 的等价物，深链刷新全靠这份 404.html 兜底。
       # 它由 scripts/copy-spa-fallback.mjs 从构建产物复制而来，缺了就等于深链必 404。

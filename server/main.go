@@ -280,9 +280,20 @@ func setupStaticFrontend(engine *gin.Engine, webDir string) {
 	}
 
 	engine.StaticFile("/", indexPath)
-	engine.StaticFile("/favicon.svg", filepath.Join(absDir, "favicon.svg"))
+	// 面板图标。注意这是单文件白名单，与下面的子目录白名单同理：
+	// 不在这里注册的话会掉进 NoRoute 的 SPA fallback，被当成深链回一份 index.html
+	// （200 + text/html），浏览器拿不到图片但也不报 404 —— 静默失效。
+	// 换文件名（如 .svg -> .webp）时必须同步改这一行和 web/index.html 的 <link rel="icon">。
+	engine.StaticFile("/favicon-512.webp", filepath.Join(absDir, "favicon-512.webp"))
 
-	for _, sub := range []string{"assets", "monaco", "sponsor-portal"} {
+	// 注意这是白名单：不在这个列表里的子目录会掉进下面的 NoRoute，
+	// 被当成 SPA 深链回一份 index.html —— 也就是 200 + text/html，
+	// 而不是 404。对 <link rel="stylesheet"> / woff2 来说这是**静默失效**，
+	// 比 404 更难查。新增前端静态目录时必须同步加到这里。
+	//
+	// "fonts" 是自托管 Web 字体（web/public/fonts/），Docker 部署走 nginx 的
+	// try_files 不受影响，但内嵌二进制部署（无 nginx）依赖这一条。
+	for _, sub := range []string{"assets", "fonts", "monaco", "sponsor-portal"} {
 		subDir := filepath.Join(absDir, sub)
 		if info, err := os.Stat(subDir); err == nil && info.IsDir() {
 			engine.Static("/"+sub, subDir)

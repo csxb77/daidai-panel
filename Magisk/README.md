@@ -407,6 +407,16 @@ bash Magisk/build.sh 3.0.6 arm64 debian
 
 - **Go 1.22+**（静态编译 `CGO_ENABLED=0`）
 - **Node.js 20+**（首次构建自动跑 `npm ci && npm run build`，已有 `web/dist` 会跳过）
+
+> ⚠️ **跑过 `npm run build:demo` 之后别直接打包**：在线演示 Demo 与发布版写的是同一个
+> `web/dist`，Demo 产物里有整套浏览器内 mock 层，还带 `/daidai-panel/` 的 base 前缀。
+> 直接复用它打出来的模块「能开、数据全是假的、一个错都不报」。
+> `build.sh` 在复用已存在 dist 时会校验这三点（mock 哨兵 / robots / 根相对路径）并直接报错退出，
+> 按提示 `rm -rf web/dist` 后重跑即可。它**不会**替你重建 —— 静默重建等于把一次误操作
+> 换成一次你不知情的几分钟构建。
+>
+> 想单独确认手上的 `web/dist` 是哪一种，跑 `bash Magisk/build.sh --check-dist`：
+> 只做这一道校验就退出，不构建、不打包，也不要求 Go 在 PATH 上。
 - `zip` 或 `python3`（Windows Git Bash 下没有 `zip` 时会 fallback 到 Python 打包）
 - 仓库自带的 `Magisk/system/bin/rurima`（~720 KB 静态二进制，打包时会拷进 ZIP）
 

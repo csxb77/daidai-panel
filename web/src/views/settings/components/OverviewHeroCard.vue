@@ -62,7 +62,7 @@ const stopPanelDisabledTip = computed(
 
       <div class="hero-center">
         <div class="hero-logo">
-          <img src="/favicon.svg" alt="呆呆面板" class="hero-logo-img" />
+          <img src="/favicon-512.webp" alt="呆呆面板" class="hero-logo-img" />
         </div>
         <h2 class="hero-name">呆呆面板</h2>
         <p class="hero-desc">轻量级定时任务管理面板</p>
