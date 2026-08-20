@@ -52,3 +52,61 @@ jobs:
       - name: 前端构建（含 vue-tsc 类型检查）
         working-directory: web
         run: npm run build
+
+      # 硬约束：发布版产物必须 0 字节 demo 代码。
+      #
+      # web/src/demo/** 是在线演示 Demo 的浏览器内 mock 层，只允许进入 build:demo 的产物。
+      # 它靠「import.meta.env.VITE_DEMO 编译期常量 + 动态 import()」被 rollup 整段剔除，
+      # 而这种消除很容易被一次「顺手改成静态 import」悄悄破坏——构建照样绿，
+      # 但真实用户会拿到一套 mock，最坏情况是真实面板里某个请求被 mock 顶替。
+      # 所以这里把它做成 CI 门禁，而不是靠人工 grep。
+      #
+      # ⚠️ 判据必须是 web/src/demo/index.ts 里那个【字符串字面量】哨兵，不能用函数名/模块路径：
+      #    应用构建开着 esbuild minifyIdentifiers，rollup 对 es 格式又默认 minifyInternalExports，
+      #    `installDemo` 这种导出名在产物里会被压成单字母；模块路径（如 demo/fixtures）
+      #    则压根不会出现在产物里。拿它们做判据，两种构建都是 0 命中——门禁恒绿、等于没有。
+      - name: 断言发布版产物不含 Demo mock 代码
+        working-directory: web
+        run: |
+          set -euo pipefail
+          test -d dist/assets
+          if grep -rl '__DAIDAI_DEMO_MOCK__' dist/assets; then
+            echo "::error::发布版产物里混进了 Demo mock 代码，请检查 web/src/demo 的引用方式是否仍是动态 import + VITE_DEMO 守卫"
+            exit 1
+          fi
+          echo "OK：发布版产物不含 Demo mock 代码"
+
+      # Demo 站点的实际部署在 .github/workflows/deploy-demo.yml
+      # （发版时由 release.yml 调用，另外也可手动 workflow_dispatch 触发），
+      # 但构建放在这里跑：前端改动把 mock 层或子路径构建搞坏时，PR 阶段就能变红，
+      # 而不是等到发版当场才发现。
+      # 注意 build:demo 会先清空 dist 再重建，所以必须排在上面的发布版断言之后。
+      - name: Demo 站点构建（只构建，不部署）
+        working-directory: web
+        run: npm run build:demo
+
+      # 反向断言：哨兵必须真的出现在 Demo 产物里。
+      #
+      # 没有这一条的话，上面那条「发布版不含 Demo 代码」是无法证伪的——
+      # 哪天哨兵被改名、被 tree-shake 掉，或者 grep 写错了目录，
+      # 两条构建都会 0 命中，门禁静默失效而且没人会发现。
+      # 这一步存在的唯一意义，就是保证上面那条断言确实有牙。
+      - name: 断言 Demo 产物含 mock 哨兵（证明上面的门禁没有失效）
+        working-directory: web
+        run: |
+          set -euo pipefail
+          test -d dist/assets
+          if ! grep -rl '__DAIDAI_DEMO_MOCK__' dist/assets; then
+            echo "::error::Demo 产物里找不到 mock 哨兵。要么 mock 层没被打进去（演示站会真打网络），要么哨兵被改名/被 tree-shake 掉，此时发布版那条门禁也已失效"
+            exit 1
+          fi
+          echo "OK：Demo 产物包含 mock 哨兵"
+
+      # GitHub Pages 没有 nginx `try_files` 的等价物，深链刷新全靠这份 404.html 兜底。
+      # 它由 scripts/copy-spa-fallback.mjs 从构建产物复制而来，缺了就等于深链必 404。
+      - name: 断言 Demo 产物带 SPA fallback
+        working-directory: web
+        run: |
+          set -euo pipefail
+          test -f dist/404.html
+          echo "OK：Demo 产物包含 404.html"

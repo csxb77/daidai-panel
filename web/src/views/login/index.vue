@@ -80,9 +80,16 @@ onUnmounted(() => {
   resetCaptchaProof();
 });
 
+// 在线演示 Demo 构建（npm run build:demo）才为真。
+// VITE_DEMO 是编译期常量，发布版构建里恒为 ''，下面这些分支会被整段消除，
+// 真实面板的登录页不会有任何预填与文案改动。
+const isDemoBuild = import.meta.env.VITE_DEMO === "1";
+
+// 演示站落地页就是这张真实的登录页，账号密码预先填好，
+// 访客只需要点一下按钮即可进入面板（后端由浏览器内 mock 层顶替，密码不做校验）。
 const form = ref({
-  username: "",
-  password: "",
+  username: isDemoBuild ? "demo" : "",
+  password: isDemoBuild ? "demo" : "",
   confirmPassword: "",
   totp_code: "",
 });
@@ -458,7 +465,11 @@ const titleText = computed(() => (isInit.value ? "欢迎回来!" : "初始化管
 const subtitleText = computed(() =>
   isInit.value ? "请输入您的登录信息" : "首次使用，请设置管理员账号",
 );
-const btnText = computed(() => (isInit.value ? "登 录" : "初始化并登录"));
+const btnText = computed(() => {
+  if (!isInit.value) return "初始化并登录";
+  // 演示站把主按钮文案换成「进入演示环境」，让访客一眼看懂这里不需要真的注册账号
+  return isDemoBuild ? "进入演示环境" : "登 录";
+});
 const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 </script>
 
@@ -558,6 +569,11 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
               </el-button>
             </el-form-item>
           </el-form>
+
+          <!-- 演示站说明：先讲清数据只存在访客自己的浏览器里，避免误以为在操作真实实例 -->
+          <p v-if="isDemoBuild" class="login-demo-tip">
+            演示数据仅存于你的浏览器，刷新页面即可恢复初始状态
+          </p>
 
           <div class="login-version">
             呆呆面板{{ panelVersion ? ` v${panelVersion}` : "" }}
@@ -926,6 +942,15 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   &:hover {
     background: #333 !important;
   }
+}
+
+/* 演示站说明文案：与版本号同一档次的辅助信息，直角纯文本，不加任何装饰 */
+.login-demo-tip {
+  text-align: center;
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 
 .login-version {

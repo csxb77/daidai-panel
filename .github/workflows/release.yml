@@ -20,6 +20,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     needs: checks
+    # 暴露给 deploy-demo 那个可复用工作流调用：Demo 横幅要显示的版本号 = tag 去掉前缀 v。
+    # `uses:` 类型的 job 没有 steps，无法自己跑 `${GITHUB_REF_NAME#v}`，
+    # 而 GitHub 表达式里也没有字符串裁剪函数，所以只能由这里透出。
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
     steps:
       - uses: actions/checkout@v5
 
@@ -193,6 +198,37 @@ jobs:
               --title "${{ steps.release_notes.outputs.title }}" \
               --notes-file "$NOTES_FILE"
           fi
+
+  # 在线演示 Demo：把前端单独构建成静态站（后端由浏览器内 mock 层顶替）发到 GitHub Pages。
+  #
+  # 构建与部署的全部步骤在可复用工作流 .github/workflows/deploy-demo.yml 里
+  # （与 checks.yml 同一模式）—— 因为维护者还需要能在【不发版】的情况下手动部署一次，
+  # 那条路径走 deploy-demo.yml 自己的 workflow_dispatch，不会把发版流程也拉起来。
+  #
+  # ⚠️ needs 必须带上 release，不能只 needs: checks。
+  #    release job 的 "Resolve release notes" 在 docs/release-notes/vX.Y.Z.md 缺失时会 exit 1，
+  #    而且它排在编译任何二进制之前 —— 也就是「tag 推早了 / 推错了」的场景，
+  #    那正是最不该让公网 Demo 抢跑的时候。
+  #    同文件里 magisk-module 与 docker-alpine 也都是 needs: [checks, release]。
+  #
+  # ⚠️ 权限只加在 job 级，【不要】动本文件顶层的 permissions: contents: write。
+  #    顶层一旦追加 pages/id-token，其它 job 的权限语义会被整体改写，
+  #    release job 里 gh CLI 创建/上传 Release 的授权会跟着失效。
+  #    job 级 permissions 是「整体替换」而非「叠加」，所以这里要把 checkout 需要的
+  #    contents: read 一并写上。
+  #    另外：被调用的工作流只能【收窄】、不能放大这里授予的权限，
+  #    所以 deploy-demo.yml 里那份 permissions 必须与这三行保持一致，改一边就要改另一边。
+  #
+  # 不需要 secrets: —— 被调用方只用到自动注入的 GITHUB_TOKEN，没有别的密钥。
+  deploy-demo:
+    needs: [checks, release]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/deploy-demo.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
 
   magisk-module:
     runs-on: ubuntu-latest

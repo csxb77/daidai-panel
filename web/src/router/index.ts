@@ -120,7 +120,11 @@ export function preloadPanelRoutes(paths: string[]) {
 }
 
 const router = createRouter({
-  history: createWebHistory(),
+  // 必须把构建期的 base 传进来：面板被挂在反代子路径（如 https://example.com/panel/）
+  // 或 GitHub Pages 项目站（/daidai-panel/）下时，不传 base 会让所有路由匹配失败，
+  // 被下面的 catch-all 打回站点根，表现为「点任何菜单都跳出面板」。
+  // import.meta.env.BASE_URL 由 vite build --base 决定，默认就是 '/'，对根路径部署无影响。
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: '/login',
