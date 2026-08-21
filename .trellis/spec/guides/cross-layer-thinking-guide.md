@@ -61,7 +61,8 @@
 
 - `Magisk/service.sh` 导出的环境变量 ↔ Go 里读它的地方（`DAIDAI_MAGISK_MODULE`、`DAIDAI_MAGISK_SHELL_VERSION`、`DAIDAI_ANDROID_RUNTIME_BIN_DIR`）
 - Go 写出的文件名 / 哨兵 ↔ shell 里判断它的地方（例如升级窗口哨兵 `.updating`）
-- 外壳版本号：改任何 `Magisk/*.sh` 或 rootfs 结构，`requiredMagiskShellVersion` 与 `DAIDAI_MAGISK_SHELL_VERSION` 必须**一起加一**
+- 外壳版本号：改任何 `Magisk/*.sh` 或 rootfs 结构，`DAIDAI_MAGISK_SHELL_VERSION` 与 Go 里的 **`currentMagiskShellVersion`** 必须**一起加一**（后者的定义就是「本仓库 service.sh 当前 export 的值」，`magisk_assets_test.go` 静态断言两者相等）。
+  **`requiredMagiskShellVersion` 不要跟着动** —— 它是「在线升级放行的最低外壳版本」，只有当新面板**无法**在旧外壳上运行时才提。提了就意味着所有还在跑旧外壳的用户必须先手动重刷一次模块 ZIP 才能继续在面板内一键升级。外壳只是多了一项增量能力时，正确做法是保持它不动、由前端按外壳版本 gating 并提示重刷。
 - `server/handler/magisk_assets_test.go` 里的字符串断言（它只能防「整段被删掉」，防不住逻辑写错）
 
 > shell 侧改动**必须真机验证**，静态断言给不了任何保证。详见后端质量规范的「Magisk 模块版的部署类型与在线升级」。

@@ -2513,3 +2513,186 @@ else
   echo "nameserver 223.5.5.5" > $rootfs/etc/resolv.conf
 fi
 ```
+
+## 场景：容器降权（PUID/PGID）与依赖安装的 HOME 契约
+
+### 1. Scope / Trigger
+
+- 触发：改 `docker/entrypoint.sh` 的降权段，或改 `server/service/dependency_*.go` 里
+  与 npm / pip 环境变量相关的逻辑时必须看本节。
+- 症状特征：**面板能开、一装依赖就 `EACCES`**。它与「数据目录整体不可写、面板压根起不来」
+  是两类完全不同的故障，不能共用一次可写性探测。
+
+### 2. Contracts
+
+- **HOME 是唯一落点**：npm 的 cache（`$HOME/.npm`）、`$HOME/.npmrc`，
+  pip 的 `pip.conf` 与 `--user` 落点全都只认 `HOME`。降权只 chown 数据目录是不够的。
+- **`adduser -D -H` / `useradd -M` 都是「不创建家目录」**，但 `/etc/passwd` 里的
+  家目录字段照写。「声明了却从不落盘」正是 EACCES 的直接成因。
+- **su-exec 与 gosu 对 HOME 的处理不一致**：su-exec 按 passwd 无条件覆写；
+  gosu 只在 HOME 为空时才设置，而 Docker 默认已注入 `HOME=/root`。
+  ⇒ 只靠 passwd 字段修不好 gosu 那条路，必须用 `/usr/bin/env "HOME=..."` 显式钉。
+- **必须写绝对路径 `/usr/bin/env`**：entrypoint 导出的 `PATH` 首位是
+  `${DATA_DIR}/deps/nodejs/node_modules/.bin` —— 面板用户可写。
+  裸写 `env` 会被一个同名的 npm bin 劫持，表现成「容器每 2 秒重启、只有一个退出码」。
+- **必须以 `user:group` 形式降权**：只给用户名时两个工具都取 passwd 里的**主组**，
+  用户填的 `PGID` 被静默丢掉（群晖 / OMV 常见 `PUID=1000 PGID=100`）。
+- **跨层契约**：entrypoint 的 `DAIDAI_HOME` 必须与 Go 侧 `resolveWritableHome` 的回落目录
+  是同一个（`${DATA_DIR}/.home`），否则会变成「entrypoint 建在 A、代码写到 B」。
+- **`HOME` 为空时不要重定向**：那时 npm / pip 会按 uid 解析家目录，结果通常是对的
+  （裸机 systemd 以 root 跑、没写 `Environment=HOME`）。重定向会把用户手写在
+  `/root/.npmrc` 里的私有源与 token 静默弄失效。只处理「有值但不可写」。
+- **判据必须是「能不能真的写进去」**：只 `Stat` 判断存在性不够 ——
+  只读挂载、属主不符、NFS `root_squash` 都要真写一次才暴露。
+
+### 3. Validation & Error Matrix
+
+- **UID/GID 撞车是常态不是异常**：群晖的 `users=100`、Debian 镜像
+  （`node:20-bookworm-slim`）自带的 `node=1000`。建组建用户失败时必须**复用**现成账号，
+  且每一行都要带 `|| true` —— entrypoint 顶部有 `set -e`，裸奔一行就把容器带崩。
+- **只设 `PGID` 时 `TARGET_UID` 会取到 0** → 造出 uid=0 的假降权用户。必须显式跳过并说明。
+- **`mkdir` 家目录必须带兜底**：`:ro` 挂载 / `root_squash` 下它会 EACCES，
+  裸写会被 `set -e` 静默带出，用户只看到「容器无限重启且 docker logs 一行都没有」，
+  而后面那道可写性预检本来能给出「数据目录不可写 + 三条原因 + 修复命令」。
+- **非 root 下的 Linux 系统依赖必须提前拦下**：`apt-get` / `apk` 需要 root，这是降权的固有代价。
+  拦截信息要**按部署形态给出路**（容器 / systemd / Magisk），给二进制部署的用户一段
+  `docker exec` 指引等于没给。
+- **卸载路径不能因为构造命令失败就删记录**：那看起来像卸载成功，实际包还在系统里，
+  为此写的中文说明一个字都不会显示。要与 NodeJS / Python 分支一致，标记 failed + 写日志。
+
+### 4. Tests Required
+
+- `docker/test-entrypoint-puid.sh`（已接进 CI）：把 entrypoint 原样跑起来，
+  只桩掉 nginx / find / su-exec / gosu / daidai-server，覆盖八种组合并验到最终 uid、gid、
+  HOME 指向、以及**在 `$HOME/.npm/_cacache` 下真的建出目录**。
+  脚本自己 `unshare --mount` + tmpfs on `/tmp`：entrypoint 有一句 `chown -R ... /tmp`，
+  不隔离会改掉宿主 / runner 的 `/tmp` 属主。
+  **收尾要 userdel，所以本机已存在 `daidai` 账号时必须直接退出**（仓库推荐的 systemd
+  部署就会建这么一个服务账号）。
+- 撞车用例的前提条件要由脚本**自己预置**，并且让现成账号的主组**不等于** `PGID`，
+  否则在某些机器上会静默退化成「无冲突」，把复用逻辑整段删掉也照样绿。
+- `docker_entrypoint_assets_test.go`：静态断言锁住关键行与跨层 HOME 契约。
+  这类断言只能防「被删掉 / 改回旧写法」，防不住逻辑写错。
+- Go 侧的纯逻辑要与「读环境变量 + 看 `runtime.GOOS`」分开
+  （`resolveWritableHome` / `redirectHomeEnv`），否则整块逻辑在 Windows 开发机上零覆盖。
+
+### 5. Wrong vs Correct
+
+#### Wrong
+
+```sh
+# 错误一：声明了家目录却从不创建；错误二：只传用户名，PGID 被丢掉；
+# 错误三：裸写 env，会被 node_modules/.bin 里的同名包劫持。
+adduser -D -H -u "${TARGET_UID}" -G daidai daidai
+su-exec "${RUN_AS_USER}" env "HOME=${DAIDAI_HOME}" /app/daidai-server &
+```
+
+#### Correct
+
+```sh
+# 家目录真的建出来并纳入 chown；带兜底，只读目录下让后面的预检去报错。
+mkdir -p "${DAIDAI_HOME}" 2>/dev/null || true
+chown -R "${TARGET_UID}:${TARGET_GID}" "${DATA_DIR}" /tmp 2>/dev/null || true
+RUN_AS_SPEC="${TARGET_USER}:${TARGET_GID}"
+su-exec "${RUN_AS_SPEC}" /usr/bin/env "HOME=${DAIDAI_HOME}" /app/daidai-server &
+```
+
+## 场景：Magisk 容器内 sshd 的配置托管与可观测性
+
+### 1. Scope / Trigger
+
+- 触发：改 `Magisk/service.sh` / `customize.sh` 里任何与 sshd 相关的逻辑时必须看本节。
+
+### 2. Contracts
+
+- **OpenSSH 是「第一次取到的值胜出」**（与 nginx / Apache 的直觉相反）。
+  Debian 的 `sshd_config` 顶部有未注释的 `Include /etc/ssh/sshd_config.d/*.conf`，
+  被 include 的 snippet 先解析、因而**覆盖**主文件里的一切；Alpine 3.18 没有这一行。
+- **`Match` 块有两个方向的陷阱**：
+  - 无差别删除同名指令会波及 `Match Address ...` 里的作用域限定 —— 那是用户的安全策略；
+  - 追加到文件末尾时，只要尾部有一个生效的 `Match` 块，写入就落进块内，
+    而 **`Port` 在 `Match` 内是非法指令**，`sshd -t` 报错、sshd 直接起不来。
+  - ⇒ 只在**第一个生效的 `Match` 之前**做删除，并把托管指令插在那个位置。
+- **Alpine 的 openssh-server 是 `--without-pam` 构建**（PAM 版是独立包 + 独立
+  `sshd.pam` 二进制），Debian 是 `--with-pam` 且 `UsePAM yes` 默认生效。
+  这是「Alpine 正常、Debian 不通」最干净的结构性解释。
+  Debian 的 `pam_loginuid` 要写 `/proc/self/loginuid`，容器里 `-S` 把宿主 `/proc` bind 了进来，
+  写入失败即 `PAM_SESSION_ERR`，表现为「密码对了、连上立刻断开」。
+  ⇒ 降为 `optional`，**不要用 `UsePAM no`**（Debian 有过「构建时没链上 crypt，
+  `UsePAM=no` 下正确密码也被拒」的先例）。守卫用 `[ -f /etc/pam.d/sshd ]`，
+  Alpine 上天然空操作 —— 比再引入一处 flavor 判断更不容易忘。
+- **容器与宿主共享进程表**：`ruri` 走 chroot 且命令行不带 `-u`，不建任何 namespace。
+  ⇒ `pgrep -x sshd` 会命中整机任何叫 sshd 的进程（含上次安装遗留的孤儿）。
+  进程存活判据要按端口或按 `/proc/<pid>/root` 归属，不能按进程名。
+- **`nc -z` 不可靠**：`PATH` 里的 `nc` 可能解析到 busybox applet，它不认 `-z`。
+  直接读 `/proc/net/tcp{,6}`（`$4 == "0A"` 是 LISTEN）零外部依赖。
+- **`getent shadow` 在 musl 上恒为空**（musl 的 getent 不支持 shadow 数据库），
+  判断密码哈希要用 `awk -F: ... /etc/shadow`。
+- **容器里没有任何 syslogd** ⇒ sshd 必须 `-D -e`：`-e` 才有日志，
+  没有 `-D` 时 sshd 会 `daemon(0,0)` 把 stdio 重定向到 `/dev/null`，
+  `-e` 就只剩 daemonize 之前那几条 fatal 看得到。
+- **日志滚动要放在「确实要重启该进程」的分支里**：进程仍持有 fd 时 `mv`，
+  它会继续往 `.old` 写，新文件永远长不到阈值 —— 滚动再也不会触发。
+
+### 3. Validation & Error Matrix
+
+- 安装期的运行时验证清单**必须包含 sshd**（二进制 / 配置 / 特权分离用户 / host key /
+  root 密码 / `sshd -t`）。`sshd_config` 是 conffile、解包即落盘，
+  `[ -f /etc/ssh/sshd_config ]` 那道守卫在「已解包未配置」时会误判成正常。
+- SSH 自检失败**不中止安装**（面板 Web 不依赖它），但必须 `ui_print` 显式告警。
+- 启动后的端口复检要**重试若干秒**：中低端手机上 sshd 要一两秒才加载完 host key 并 bind，
+  只探一次会打出误导性的「端口未监听」，用户翻日志又什么错都没有。
+
+### 4. Tests Required
+
+- `magisk_assets_test.go` 的静态断言查禁用字面量时要**逐行跳过注释**
+  （`assertNotInExecutableLines`）：脚本里常有注释专门解释「为什么不能再这么写」，
+  整文件 `Contains` 会把它当成违规。
+- 改 `Magisk/*.sh` 必须同步 `DAIDAI_MAGISK_SHELL_VERSION` 与
+  `currentMagiskShellVersion`；`requiredMagiskShellVersion` **只有当新面板无法在旧外壳上
+  运行时**才提 —— 提了就意味着所有老用户必须先重刷 ZIP 才能继续在面板内一键升级。
+- 能离线验的一定要离线验：`sshd_config` 的重写逻辑可以对着 Debian / Alpine 的**真实出厂
+  配置**与带 `Match` 块的加固配置跑，并用真实 `sshd -t` 解析结果。
+
+## 场景：shell 语法门禁的两个盲区（heredoc 与 `-c '...'` 内联脚本）
+
+### 1. Scope / Trigger
+
+- 触发：新增或修改任何「以字符串形式传给别的解释器」的 shell 片段时。
+
+### 2. Contracts
+
+- `bash -n <文件>` **看不到**两类代码：
+  - `cmd -c '<脚本>'` 里的内联脚本 —— 对外层解释器它只是一个普通字符串；
+  - heredoc（`cat << 'EOF' ... EOF`）里的脚本 —— 同理。
+- 这两类恰恰是 Magisk 模块里**每次开机真正执行**的东西（容器启动脚本近 300 行）。
+  少一个 `fi`、多一个引号，`go test` 与 CI 全绿，而用户刷进去之后
+  开机脚本从错误点开始整段不执行，面板与 SSH 一起消失。
+
+### 3. Validation & Error Matrix
+
+- `scripts/check-shell-syntax.sh` 会把这两类单独抽出来检查，并对
+  shebang 是 `/bin/sh` 的脚本额外跑 `dash -n`（Alpine 上真正解析它的是 busybox ash）。
+- 抽取规则必须自带**失配保护**：抽到的段数 / 行数低于预期就直接判失败，
+  否则规则一旦漂移，这道门禁会静默变成空转。
+
+### 4. Tests Required
+
+- 门禁本身要验牙：制造一次真实的语法错误（在 heredoc 里删一个 `fi`、
+  在内联脚本里让引号不配对），确认它会变红。
+
+### 5. Wrong vs Correct
+
+#### Wrong
+
+```sh
+# 错误：只对文件本身做语法检查，heredoc 与 -c 内联脚本完全不在覆盖范围内。
+bash -n Magisk/service.sh
+```
+
+#### Correct
+
+```sh
+# 正确：额外把 heredoc 与内联脚本抽出来，各自再过一遍 bash / dash / busybox ash。
+bash scripts/check-shell-syntax.sh
+```
