@@ -858,6 +858,256 @@ func TestMagiskCustomizeScriptHardensDebianApt(t *testing.T) {
 	}
 }
 
+// assertNotInExecutableLines 只在「真正会被执行的行」里查禁用字面量。
+// 脚本里常常有注释专门解释「为什么不能再这么写」，那些行本身包含被禁的字面量，
+// 用整文件 Contains 会把它们当成违规。
+func assertNotInExecutableLines(t *testing.T, name, text, forbidden, reason string) {
+	t.Helper()
+	for i, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.Contains(trimmed, forbidden) {
+			t.Fatalf("%s:%d %s: %s", name, i+1, reason, trimmed)
+		}
+	}
+}
+
+// ---- SSH 相关断言（v3.0.7）-----------------------------------------------
+//
+// 背景：Debian 版刷完之后 SSH 连不上，Alpine 版正常。四条候选根因分别是
+// 「pgrep -x sshd 跨宿主 /proc 误命中导致 sshd 从没被启动」「openssh-server 没装成
+// 而安装期验证清单不含 sshd」「Debian 的 PAM 会话栈在 chroot 里失败」
+// 「chpasswd 静默失败」。这一组锁住对应的修复与可观测性，同样只是静态字符串断言 ——
+// **防不住 shell 逻辑写错**，真机验证不可省。
+
+// sshd 的启动去重不能再用 pgrep：ruri 走 chroot 且不传 -u，容器与宿主共享进程表，
+// pgrep -x sshd 会命中整机任何叫 sshd 的进程（包括上次安装遗留的孤儿），
+// 一旦命中就跳过启动，表现就是「刷了另一个 flavor 之后 SSH 永远连不上」。
+func TestMagiskServiceScriptStartsSshdWithPortBasedGuard(t *testing.T) {
+	text := readMagiskScript(t, "service.sh")
+
+	// 逐行判断并跳过注释：脚本里专门写了「为什么不能再用 pgrep」的说明，
+	// 那几行本身包含这串字面量，不能被当成违规。
+	assertNotInExecutableLines(t, "service.sh", text, "pgrep -x sshd",
+		"不得再用 pgrep -x sshd 做 sshd 启动去重（容器没有 PID namespace，会命中宿主进程）")
+	assertNotInExecutableLines(t, "service.sh", text, "/usr/sbin/sshd >/dev/null 2>&1",
+		"不得再把 sshd 的启动输出丢进 /dev/null（容器里没有 syslogd，那等于没有任何日志）")
+
+	// 判据也不能退回 nc -z：PATH 里的 nc 可能解析到 busybox applet，它不认 -z，
+	// 会恒定返回「没监听」——每次开机都多起一个注定 Address already in use 的 sshd。
+	assertNotInExecutableLines(t, "service.sh", text, "nc -z",
+		"不得用 nc -z 判断端口（busybox 的 nc applet 不支持 -z，会恒定误判）")
+
+	for _, snippet := range []string{
+		// 端口判据取代进程名判据，且直接读 /proc/net/tcp 不依赖任何外部命令
+		`ssh_port_listening() {`,
+		`{ cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; } | awk -v p="$_hexport" '`,
+		`if ssh_port_listening; then`,
+		// -D -e 缺一不可：-e 才有日志，没有 -D 时 sshd 会 daemon(0,0) 把 stdio 丢掉
+		`nohup /usr/sbin/sshd -D -e >> $DAIDAI_DIR/sshd.log 2>&1 &`,
+		// 启动前配置自检
+		`_sshd_t=$(/usr/sbin/sshd -t 2>&1)`,
+		// sshd_config 不存在时也要留线索，不能整段静默跳过
+		"openssh-server 多半没装成，本次不启动 sshd",
+		// 慢设备上 sshd 要一两秒才 bind，只探一次会打出误导性的假告警
+		`for _ssh_try in 1 2 3 4 5; do`,
+		// 每次开机的状态快照
+		`echo "[ssh] loginuid=$(cat /proc/self/loginuid 2>/dev/null || echo ABSENT)"`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("service.sh 缺少 sshd 启动/可观测性片段: %q", snippet)
+		}
+	}
+
+	// 日志滚动必须在「确实要重新拉起 sshd」的分支里：放在外面的话，
+	// 老 sshd 还开着这个 fd，mv 之后它继续往 .old 写，新文件永远长不到阈值，
+	// 滚动再也不会触发，.old 变成无上限增长。
+	startIdx := strings.Index(text, `if ssh_port_listening; then`)
+	rotateIdx := strings.Index(text, `mv -f $DAIDAI_DIR/sshd.log $DAIDAI_DIR/sshd.log.old`)
+	launchIdx := strings.Index(text, `nohup /usr/sbin/sshd -D -e`)
+	if startIdx < 0 || rotateIdx < 0 || launchIdx < 0 {
+		t.Fatalf("service.sh 找不到定位锚点 (guard=%d rotate=%d launch=%d)", startIdx, rotateIdx, launchIdx)
+	}
+	if rotateIdx < startIdx || rotateIdx > launchIdx {
+		t.Fatal("sshd.log 的滚动必须夹在「端口未监听」判断与拉起 sshd 之间")
+	}
+}
+
+// sshd_config 的写法：OpenSSH 是「第一次取值胜出」，所以必须先删净同名指令再统一追加；
+// Debian 顶部还有一行未注释的 Include，drop-in 会压过主文件，两边要写同一份。
+func TestMagiskServiceScriptWritesAuthoritativeSshdConfig(t *testing.T) {
+	text := readMagiskScript(t, "service.sh")
+
+	for _, snippet := range []string{
+		// awk 一趟完成「删同名指令 + 插入我们的三行」
+		`awk -v port="${SSH_PORT}" '`,
+		`print "PermitRootLogin yes"`,
+		`print "PasswordAuthentication yes"`,
+		// Match 块的识别（大小写不敏感，逐字母字符组，不依赖某个 awk 的忽略大小写扩展）
+		`/^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ {`,
+		// 进了 Match 就不再删任何东西
+		`!inmatch && /^[#[:space:]]*([Pp]ort|[Pp]ermit[Rr]oot[Ll]ogin|[Pp]assword[Aa]uthentication)[[:space:]]+/ { next }`,
+		`mv -f /etc/ssh/sshd_config.daidai-tmp /etc/ssh/sshd_config`,
+		`Include[[:space:]]+/etc/ssh/sshd_config\.d/`,
+		`/etc/ssh/sshd_config.d/00-daidai.conf`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("service.sh 缺少 sshd_config 权威写入片段: %q", snippet)
+		}
+	}
+
+	// 绝不能退回「sed 删净 + 追加到文件末尾」：
+	//   1. 删除会波及 Match 块里的同名指令 —— 那是用户的作用域限定安全策略；
+	//   2. 追加到末尾时，只要文件尾部有一个生效的 Match 块，我们这三行就落进去，
+	//      而 Port 在 Match 内是非法指令，sshd 直接起不来。
+	assertNotInExecutableLines(t, "service.sh", text,
+		`sed -i -E '/^[#[:space:]]*(Port|PermitRootLogin|PasswordAuthentication)[[:space:]]+/d'`,
+		"不得用 sed 无差别删同名指令（会波及 Match 块）")
+	assertNotInExecutableLines(t, "service.sh", text,
+		`} >> /etc/ssh/sshd_config`,
+		"不得把托管指令追加到 sshd_config 末尾（尾部有生效 Match 块时 Port 会非法）")
+}
+
+// Debian 的 sshd 走 PAM（Alpine 的 openssh 是 --without-pam 构建），
+// pam_loginuid 在 chroot 里写 /proc/self/loginuid 失败会让整条会话打开失败，
+// 表现就是「密码验证通过、随即断开」。降为 optional 是容器场景的通行做法。
+//
+// 两处都要有：customize.sh 管新装，service.sh 管每次开机 ——
+// 后者才是「已装用户重刷一次 ZIP 就能修好」的关键。
+func TestMagiskScriptsDowngradePamLoginuid(t *testing.T) {
+	const sedSnippet = `s/^session[[:space:]]+required[[:space:]]+pam_loginuid\.so/session optional pam_loginuid.so/`
+
+	for _, name := range []string{"service.sh", "customize.sh"} {
+		text := readMagiskScript(t, name)
+		if !strings.Contains(text, sedSnippet) {
+			t.Fatalf("%s 必须把 pam_loginuid 从 required 降为 optional", name)
+		}
+		// 守卫必须是文件存在性：Alpine 没有 /etc/pam.d/sshd，这样天然是空操作，
+		// 不需要再引入一处 flavor 判断（多一处就多一处忘了同步的地方）。
+		if !strings.Contains(text, `if [ -f /etc/pam.d/sshd ]; then`) {
+			t.Fatalf("%s 的 PAM 改动必须用 [ -f /etc/pam.d/sshd ] 做守卫", name)
+		}
+	}
+
+	// 刻意不用 UsePAM no：Debian 有过「构建时没链上 crypt，UsePAM=no 下正确密码
+	// 也一律被拒」的先例，风险比降级 pam_loginuid 大。
+	for _, name := range []string{"service.sh", "customize.sh"} {
+		text := readMagiskScript(t, name)
+		for i, line := range strings.Split(text, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.Contains(trimmed, "UsePAM no") {
+				t.Fatalf("%s:%d 不得写 UsePAM no: %s", name, i+1, trimmed)
+			}
+		}
+	}
+}
+
+// chpasswd 在 Debian 上走 PAM，失败时 root 会保持锁定串、密码登录 100% 被拒，
+// 而原来两处都是 2>/dev/null 且不看退出码。必须回读校验。
+func TestMagiskScriptsVerifyPasswordHash(t *testing.T) {
+	for _, name := range []string{"service.sh", "customize.sh"} {
+		text := readMagiskScript(t, name)
+		// 用 awk 直接读文件：musl 的 getent 不支持 shadow 数据库，
+		// 写成 getent shadow 会在 Alpine 上恒为空、把两个 flavor 都误判成失败。
+		if !strings.Contains(text, `awk -F: -v u="${SSH_USER}" '$1==u{print $2}' /etc/shadow`) {
+			t.Fatalf("%s 必须回读 /etc/shadow 确认密码真的写进去了", name)
+		}
+		assertNotInExecutableLines(t, name, text, "getent shadow",
+			"不得用 getent shadow 判断密码（musl 的 getent 不支持 shadow 数据库）")
+		if !strings.Contains(text, `openssl passwd -6`) {
+			t.Fatalf("%s 缺少 chpasswd 失败时的 openssl passwd -6 兜底", name)
+		}
+	}
+}
+
+// 重装时必须按 /proc/<pid>/root 归属把落在旧 rootfs 里的进程清干净。
+// 两条 pkill 是按命令行匹配的，容器里 sshd 的 argv 是 /usr/sbin/sshd，一条都命中不了，
+// 于是 rm -rf 之后它变成根目录已删除的孤儿进程，监听 socket 活到下次重启。
+func TestMagiskCustomizeScriptKillsProcessesRootedInOldRootfs(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		`_rootfs_real=$(readlink -f "$rootfs" 2>/dev/null || echo "$rootfs")`,
+		`_proc_root=$(readlink "$_proc_dir/root" 2>/dev/null) || continue`,
+		`kill -9 "${_proc_dir#/proc/}" 2>/dev/null || true`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("customize.sh 缺少按 chroot 归属清理进程的片段: %q", snippet)
+		}
+	}
+
+	// 必须排在删 rootfs 之前，否则清的是一个已经不存在的目录。
+	killIdx := strings.Index(text, `_rootfs_real=$(readlink -f "$rootfs"`)
+	rmIdx := strings.Index(text, `rm -rf "$rootfs"`)
+	if killIdx < 0 || rmIdx < 0 {
+		t.Fatalf("customize.sh 找不到定位锚点 (kill=%d rm=%d)", killIdx, rmIdx)
+	}
+	if killIdx > rmIdx {
+		t.Fatal("按 chroot 归属清理进程必须排在删除旧 rootfs 之前")
+	}
+}
+
+// 安装期必须验一次 SSH：原来的清单只有 python3/node/npm/git/bash，
+// openssh-server 装没装成完全没人管，用户会看到「安装完成！」然后 SSH 是死的。
+func TestMagiskCustomizeScriptVerifiesSshAfterInstall(t *testing.T) {
+	text := readMagiskCustomizeScript(t)
+
+	for _, snippet := range []string{
+		`for item in sshd-binary sshd-config sshd-privsep-user sshd-hostkey root-password sshd-config-test; do`,
+		`missing_ssh`,
+		// 特权分离用户缺失时 sshd 会直接 fatal，而 fatal 只走 stderr
+		`useradd --system --no-create-home --home-dir /run/sshd --shell /usr/sbin/nologin sshd`,
+		// Debian 的 openssh-server 可能停在「已解包未配置」，conffile 却照样落盘
+		`--reinstall openssh-server`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("customize.sh 缺少 SSH 验收片段: %q", snippet)
+		}
+	}
+
+	// SSH 自检失败【不能】中止安装：SSH 只是排障通道，面板 Web 不依赖它。
+	sshIdx := strings.Index(text, `missing_ssh=""`)
+	if sshIdx < 0 {
+		t.Fatal("customize.sh 找不到 SSH 验收段")
+	}
+	tail := text[sshIdx:]
+	gate := strings.Index(tail, `if [ "$INSTALL_DEPS_OK" != "1" ]; then`)
+	if gate < 0 {
+		t.Fatal("customize.sh 找不到成功提示的开关")
+	}
+	if strings.Contains(tail[:gate], `abort "! 安装已中止`) {
+		t.Fatal("SSH 自检失败不应 abort 整个安装（面板 Web 不依赖 SSH）")
+	}
+
+	// 必须排在装依赖之后，否则验的是空容器。
+	installIdx := strings.Index(text, `"$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" /tmp/daidai-install-deps.sh`)
+	if installIdx < 0 || sshIdx < installIdx {
+		t.Fatalf("SSH 验收必须排在装依赖之后 (install=%d ssh=%d)", installIdx, sshIdx)
+	}
+}
+
+// SSH 不通时用户的第一反应是点动作按钮，那里必须能拿到线索。
+func TestMagiskActionScriptReportsSshStatus(t *testing.T) {
+	text := readMagiskScript(t, "action.sh")
+
+	for _, snippet := range []string{
+		`SSH_PORT_INFO=$(netstat -ltn 2>/dev/null | grep ":${SSH_PORT}\b" | head -n2)`,
+		`ui_print "--- 容器 SSH ---"`,
+		`/usr/sbin/sshd -t 2>&1 | sed "s/^/sshd -t: /"`,
+		`SSHD_LOG="$rootfs/app/Dumb-Panel/sshd.log"`,
+		`CTR_SERVICE_LOG="$rootfs/app/Dumb-Panel/service.log"`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("action.sh 缺少 SSH 状态片段: %q", snippet)
+		}
+	}
+}
+
 // 装依赖失败时的报错必须能区分 DNS / 镜像源 / 下载中断，
 // 且分流只作用于 Debian —— Alpine 的文案与行为要保持原样。
 func TestMagiskCustomizeScriptSplitsDepsFailureHintByFlavor(t *testing.T) {

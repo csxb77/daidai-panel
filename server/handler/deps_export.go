@@ -69,7 +69,10 @@ func resolveNodeDependencyVersions() (map[string]string, error) {
 	}
 
 	depsDir := filepath.Join(config.C.Data.Dir, "deps", "nodejs")
-	out, err := exec.Command("npm", "list", "--prefix", depsDir, "--json", "--depth=0").Output()
+	listCmd := exec.Command("npm", "list", "--prefix", depsDir, "--json", "--depth=0")
+	// 同 NpmList：HOME 不可写时 npm 启动就失败，导出依赖会跟着一起坏。
+	listCmd.Env = service.WritableHomeEnv(os.Environ())
+	out, err := listCmd.Output()
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +106,7 @@ func resolvePythonDependencyVersions(pythonVersion string) (map[string]string, e
 	} else {
 		listCmd = exec.Command(pipBin, "list", "--format=json")
 	}
-	listCmd.Env = service.SanitizePipEnv(os.Environ())
+	listCmd.Env = service.WritableHomeEnv(service.SanitizePipEnv(os.Environ()))
 	out, err := listCmd.Output()
 	if err != nil {
 		return nil, err

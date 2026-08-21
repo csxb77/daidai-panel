@@ -34,7 +34,9 @@ func EffectiveNpmMirror(configured string) string {
 }
 
 func PipInstallEnv(base []string, configured string) []string {
-	env := SanitizePipEnv(base)
+	// homeRedirectEnv 只在 HOME 不可写时才改动 env（容器配了 PUID/PGID 降权后的典型状态）。
+	// pip 的 pip.conf 与 --user 落点都只认 HOME，不修它装依赖必报 EACCES。
+	env := homeRedirectEnv(SanitizePipEnv(base))
 	mirror := EffectivePipMirror(configured)
 	if mirror == "" {
 		return env
@@ -92,7 +94,8 @@ func SanitizePipEnv(base []string) []string {
 }
 
 func NpmInstallEnv(base []string, configured string) []string {
-	env := append([]string{}, base...)
+	// 同 PipInstallEnv：npm 的 cache（$HOME/.npm）与 .npmrc 同样只认 HOME。
+	env := homeRedirectEnv(append([]string{}, base...))
 	mirror := EffectiveNpmMirror(configured)
 	if mirror == "" {
 		return env
@@ -222,18 +225,21 @@ func extractMirrorHost(url string) string {
 	return strings.TrimSpace(hostPort[0])
 }
 
+// 这两处读的必须是 EffectiveHomeDir 而不是裸 HOME：安装时 pip / npm 拿到的是
+// 重定向之后的 HOME，配置要是还写在旧 HOME 下，就会出现「面板里改了镜像源、
+// 装依赖时却读不到」的读写不对称。
 func pipMirrorConfigPath() string {
 	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
 		return filepath.Join(xdg, "pip", "pip.conf")
 	}
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+	if home := EffectiveHomeDir(); home != "" {
 		return filepath.Join(home, ".config", "pip", "pip.conf")
 	}
 	return ""
 }
 
 func npmConfigPath() string {
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+	if home := EffectiveHomeDir(); home != "" {
 		return filepath.Join(home, ".npmrc")
 	}
 	return ""

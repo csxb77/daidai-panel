@@ -24,8 +24,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.0.6` · [更新日志](./docs/release-notes/v3.0.6.md)<br>
-> 本次重点：笔记本小屏下定时任务列表一屏能看的行数翻三倍，订阅终于认得 `.mjs` 脚本、也认得 `// name:` 这类注释头任务名，订阅新增「拉取前指令」，顺带修掉「已锁定」标签换行与操作列按钮错位。<br>
+> 最新稳定版：`v3.0.7` · [更新日志](./docs/release-notes/v3.0.7.md)<br>
+> 本次重点：修掉容器设置 `PUID` / `PGID` 后面板内装依赖必报 `EACCES`（顺带修好 `PUID=1000` 在 Debian 版镜像上直接起不来），重写 Magisk 版的 SSH 启动链并补上全套排障日志。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 在线演示
@@ -278,16 +278,16 @@ docker run -d \
 
 | 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
 |--------------|------------------|----------|--------|----------|----------|
-| `latest` | `3.0.6` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-full` | `3.0.6-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-3.10` | `3.0.6-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
-| `latest-3.11` | `3.0.6-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
-| `latest-all` | `3.0.6-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `3.0.6-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `3.0.6-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `3.0.6-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `3.0.6-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `3.0.6-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `latest` | `3.0.7` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `3.0.7-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `3.0.7-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `3.0.7-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `3.0.7-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `3.0.7-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `3.0.7-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `3.0.7-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `3.0.7-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `3.0.7-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
 
 后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
@@ -311,7 +311,7 @@ docker run -d \
 | `debian3.11` | `debian-3.11` |
 | `debianall` | `debian-all` |
 
-Debian 的旧固定版本格式也保留兼容别名：`3.0.6-debian3.10`、`3.0.6-debian3.11`、`3.0.6-debianall` 分别对应新的 `3.0.6-debian-3.10`、`3.0.6-debian-3.11`、`3.0.6-debian-all`。新部署请直接使用新名称。
+Debian 的旧固定版本格式也保留兼容别名：`3.0.7-debian3.10`、`3.0.7-debian3.11`、`3.0.7-debianall` 分别对应新的 `3.0.7-debian-3.10`、`3.0.7-debian-3.11`、`3.0.7-debian-all`。新部署请直接使用新名称。
 
 #### 切换标签与本地构建
 
@@ -464,7 +464,7 @@ daidai-panel-windows-amd64/
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.0.6 更新日志](./docs/release-notes/v3.0.6.md) |
+| 看这一版改了什么 | [v3.0.7 更新日志](./docs/release-notes/v3.0.7.md) |
 
 ## 端口与反向代理
 
@@ -609,7 +609,7 @@ server {
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
 - **Docker 精简版**：自 `v3.0.0` 起，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
-- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.6-full`、`3.0.6-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
+- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.0.7-full`、`3.0.7-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 - **Magisk 模块版**（自 `v3.0.3`）：下载对应架构的 `daidai-linux-*.tar.gz`，只替换容器内的 `daidai-server`、`ddp` 和前端目录，同时写回模块目录并同步 `module.prop` 版本号，保证重启后不回滚。容器 rootfs、apt/apk 系统包、Python venv 与已装依赖、`config.yaml`、`ports.conf` 一概不动，**不需要重启手机**。
   ⚠️ 在线升级**替换不了模块脚本**（`service.sh` / `customize.sh` / `action.sh`），升完之后是「新面板 + 旧模块外壳」，管理器里的版本号会跟着变成新版。所以由模块脚本实现的新能力需要重刷一次 ZIP 才有 —— 例如 `v3.0.4` 的「停止面板服务」，在线升级上来的用户在面板里会看到该按钮被禁用并提示当前外壳版本。只有当新面板**根本无法**在旧外壳上运行时，面板才会在检查更新阶段直接拒绝升级并要求重刷 ZIP。
@@ -779,6 +779,15 @@ Dumb-Panel/
 | `WATCHTOWER_HTTP_API_URL` | 面板触发 Watchtower 更新的容器内部地址，不需要映射到宿主机 | `http://watchtower:8080`（基础 Compose 的稳定服务名） |
 | `WATCHTOWER_HTTP_API_TOKEN` | 面板与 Watchtower 共用的 HTTP API 令牌 | 基础 Compose 提供内部默认值，正式环境建议自定义 |
 | `WATCHTOWER_HTTP_API_PERIODIC_POLLS` | 是否保留 Watchtower 定时轮询 | `true`（基础 Compose） |
+| `CORS_ORIGINS` | 额外放行的跨域来源，英文逗号分隔。私有 / 局域网 IP 已自动放行，用公网域名或反代域名访问时才需要 | 空 |
+| `PUID` / `PGID` | 让容器以宿主机用户身份运行（NAS 常用，SMB/NFS 共享下文件属主才对得上）。不设则以 root 运行，与历史行为一致 | 空 |
+
+**关于 `PUID` / `PGID`（NAS 用户看这里）**
+
+- **两个都要设**：只设 `PGID` 时 `PUID` 会取到 0，等于没降权，容器会打印说明并继续以 root 跑。宿主机执行 `id` 查看自己的真实取值。
+- **取值与镜像里已有账号撞车不要紧**：Debian 版镜像基于 `node:20-bookworm-slim`，自带一个 uid/gid 都是 1000 的 `node` 用户，而 `PUID=1000` 恰好是最常见的取值 —— 容器会直接复用那个账号（`v3.0.7` 起；更早的版本在这里会直接起不来）。
+- **改完 `PUID` 要重建容器**（`docker compose up -d --force-recreate`）比只 `docker restart` 更保险。
+- **已知限制**：降权之后，面板里的「Linux 系统依赖」（`apt-get` / `apk`）装不了 —— 系统包管理器需要 root。面板会给出明确说明而不是报一串 `Permission denied`。**Node.js / Python 依赖不受影响**，降权下照常安装。
 
 `DAIDAI_PANEL_IMAGE` 是宿主机上的 Compose 变量，不是容器内变量。两份基础 Compose 都用它同时设置 `image` 和 `IMAGE_NAME`。
 

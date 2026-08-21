@@ -44,6 +44,37 @@ jobs:
         working-directory: server
         run: go test ./...
 
+      # 仓库里的 shell（docker/entrypoint.sh + Magisk/*.sh）加起来上千行，
+      # 而它们一行都不进 go test —— 少一个 fi、多一个引号，go test 与 CI 照样全绿，
+      # 用户刷进去之后开机脚本从错误点开始整段不执行。
+      # 这一步还会把 `ruri ... -c '<脚本>'` 这类【以字符串传进容器执行】的内联脚本
+      # 单独抽出来检查：它们对整文件的 bash -n 是透明的，写错只会被 2>/dev/null 吞掉。
+      - name: Shell 语法门禁（bash -n / dash -n / 内联脚本）
+        run: bash scripts/check-shell-syntax.sh
+
+      # docker/entrypoint.sh 此前【零测试零 CI 覆盖】：改坏了 go test 照样全绿，
+      # 而它坏掉的表现是「容器起不来」或「面板能开但装依赖必报 EACCES」——
+      # 两种都只有真实用户会遇到。server/service/docker_entrypoint_assets_test.go
+      # 里那些静态字符串断言只能防住关键行被删掉，防不住 shell 逻辑写错。
+      #
+      # 这一步把 entrypoint.sh 原样跑起来（只桩掉 nginx / find / su-exec / gosu /
+      # daidai-server），验证八种 PUID/PGID 组合下的最终 uid、gid、HOME 指向、
+      # 「HOME 到底能不能写」，以及只读数据目录下有没有给出友好诊断。
+      # 需要 root：要建用户、chown、用 setpriv 降权。
+      #
+      # 脚本自己会 unshare --mount 并给 /tmp 挂私有 tmpfs —— entrypoint 有一句
+      # chown -R ... /tmp（容器里无害），不隔离会把 runner 的 /tmp 属主改掉。
+      #
+      # 【怎么让它失败一次】用 ENTRYPOINT_SRC 指向一个被改坏的 entrypoint 即可：
+      #   ENTRYPOINT_SRC=<文件> sudo -E bash docker/test-entrypoint-puid.sh
+      # 已实测的三个变异都会变红，且都是被对应那条断言抓到的：
+      #   - 把 su-exec/gosu 的 user:group 退回只传用户名 -> 「gid 取自 PGID」变红
+      #   - 去掉 mkdir 家目录的 || true                  -> 「友好诊断」两条变红
+      #   - 去掉 env 钉 HOME                             -> 「npm cache 可写」变红
+      # 换回 v3.0.6 那版 entrypoint 则会红掉绝大多数断言。
+      - name: entrypoint PUID/PGID 降权回归（真跑一遍 shell 逻辑）
+        run: sudo bash docker/test-entrypoint-puid.sh
+
       - name: 安装前端依赖
         working-directory: web
         run: npm ci

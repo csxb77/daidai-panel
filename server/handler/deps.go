@@ -528,7 +528,7 @@ func (h *DepsHandler) PipList(c *gin.Context) {
 		response.BadRequest(c, err.Error())
 		return
 	}
-	pipEnv := service.SanitizePipEnv(os.Environ())
+	pipEnv := service.WritableHomeEnv(service.SanitizePipEnv(os.Environ()))
 	listCmd, err := service.NewPipCommandForPythonVersion(pythonVersion, []string{"list", "--format=json"})
 	if err != nil {
 		response.BadRequest(c, err.Error())
@@ -614,7 +614,11 @@ func (h *DepsHandler) SetDefaultPythonRuntime(c *gin.Context) {
 }
 
 func (h *DepsHandler) NpmList(c *gin.Context) {
-	out, err := exec.Command("npm", "list", "-g", "--json", "--depth=0").Output()
+	// 与安装路径共用同一份 HOME 判定：HOME 不可写时 npm 连 list 都跑不起来
+	// （启动即初始化 $HOME/.npm 的 cache），会变成「装得上却看不到」。
+	listCmd := exec.Command("npm", "list", "-g", "--json", "--depth=0")
+	listCmd.Env = service.WritableHomeEnv(os.Environ())
+	out, err := listCmd.Output()
 	if err != nil {
 		response.InternalError(c, "npm 不可用")
 		return
@@ -1013,7 +1017,15 @@ func uninstallDependency(id uint, depType, name, pythonVersion string) {
 
 		cmd, err = buildLinuxPackageCommand(manager, "remove", name, false)
 		if err != nil {
-			database.DB.Delete(&model.Dependency{}, id)
+			// 这里【不能】删记录。容器配了 PUID/PGID 降权之后，这条路会因为
+			// 「apk/apt 需要 root」直接返回错误；删掉记录的话前端看到行消失，
+			// 等同于「卸载成功」，而包其实还在系统里，那段专门写的中文说明
+			// 也一个字都不会显示出来。改成与上面 NodeJS / Python 两个分支一致：
+			// 标记 failed 并把原因写进日志。
+			database.DB.Model(&model.Dependency{}).Where("id = ?", id).Updates(map[string]interface{}{
+				"status": model.DepStatusFailed,
+				"log":    err.Error(),
+			})
 			return
 		}
 	default:

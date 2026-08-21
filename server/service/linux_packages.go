@@ -2,8 +2,10 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -121,7 +123,46 @@ func LinuxRemoveCommandSpec(manager LinuxPackageManager, packageName string, for
 	}
 }
 
+// EnsureLinuxPackageManagerPrivilege 在非 root 时提前拦下并说清楚原因。
+//
+// 背景（v3.0.7）：容器配了 PUID/PGID 之后面板以普通用户跑，而 apt-get / apk 这类
+// 系统包管理器必须 root 才能写 /usr、/var/lib/dpkg 以及包管理器自己的锁。
+// 原来这条路会一路跑到包管理器自己报一串英文 Permission denied / 锁失败，
+// 用户很容易当成面板的 bug。Node.js / Python 依赖不受影响 —— 它们装在数据目录里，
+// 那个目录 entrypoint 已经 chown 给运行用户了。
+func EnsureLinuxPackageManagerPrivilege() error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	if os.Geteuid() == 0 {
+		return nil
+	}
+	// 出路要按部署形态给，不能一律写 Docker：仓库自己也推荐二进制部署用
+	// packaging/linux/daidai-panel.service 的 User=daidai 非 root 跑，
+	// 给那类用户一段 docker exec 的指引等于没给。
+	hint := "去掉降权配置改回 root 运行，或以 root 身份手动安装该软件包"
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		hint = "在宿主机执行 docker exec -u 0 <容器名> apk add <包名>" +
+			"（Debian 版镜像用 apt-get install -y <包名>），" +
+			"或去掉 compose 里的 PUID/PGID 让容器回到 root 运行"
+	} else if strings.TrimSpace(os.Getenv("DAIDAI_MAGISK_MODULE")) != "" {
+		hint = "进容器后以 root 手动安装：参考模块 README 的「进入容器」命令"
+	} else {
+		hint = "以 root 手动安装该软件包，或去掉 systemd 单元里的 User= / Group= 让面板回到 root 运行"
+	}
+
+	return fmt.Errorf("当前面板以非 root 用户（uid=%d）运行，无法安装或卸载 Linux 系统依赖 —— "+
+		"apt-get / apk 需要 root 权限才能写 /usr 与包管理器的锁，这是降权运行的固有限制。"+
+		"可选做法：%s。"+
+		"注意 Node.js / Python 依赖不受此限制，降权下仍可在面板里正常安装", os.Geteuid(), hint)
+}
+
 func BuildLinuxPackageCommand(manager LinuxPackageManager, action, packageName string, force bool, distribution string, ensureMirror func(LinuxPackageManager, string) error) (*exec.Cmd, error) {
+	// 装和卸都要写系统目录，两条路都得先过这道闸。
+	if err := EnsureLinuxPackageManagerPrivilege(); err != nil {
+		return nil, err
+	}
+
 	switch action {
 	case "install":
 		refreshApt := manager.Name == "apt" && ShouldRefreshAptPackageLists()

@@ -358,6 +358,31 @@ if [ -d "$rootfs" ]; then
   "$RURIMA" ruri -w -U "$rootfs" 2>/dev/null || true
   pkill -f daidai-server 2>/dev/null || true
   pkill -f "ruri.*$rootfs" 2>/dev/null || true
+
+  # 按 /proc/<pid>/root 归属再清一遍，上面两条 pkill 不够。
+  #
+  # 为什么必须补这一段：ruri 走的是 chroot，命令行里没有 -u，**不建任何 namespace**，
+  # 所以容器进程既没有独立 PID 空间也不会随 `ruri -U` 卸载而退出（-U 只卸载挂载点）。
+  # 而 pkill 是按命令行字符串匹配的：容器里 sshd 的 argv 是 `/usr/sbin/sshd`，
+  # 两条模式一条都命中不了 —— 于是 rm -rf 之后旧 sshd 变成一个「根目录已被删除」的
+  # 孤儿进程，它的监听 socket 会一直活到下次重启。
+  #
+  # 后果正是「刷了 Debian 版 SSH 连不上」的一条主因：service.sh 里的启动去重判据是
+  # `pgrep -x sshd`，因为没有 PID namespace，它会命中整机任何叫 sshd 的进程，
+  # 包括这个孤儿，于是新容器的 sshd 永远不会被拉起。
+  #
+  # 按 /proc/<pid>/root 判归属是这里唯一可靠的判据：宿主侧根目录是 /，
+  # readlink 拿到的就是容器 rootfs 的真实路径（已删除时还会带 " (deleted)" 后缀）。
+  _rootfs_real=$(readlink -f "$rootfs" 2>/dev/null || echo "$rootfs")
+  for _proc_dir in /proc/[0-9]*; do
+    _proc_root=$(readlink "$_proc_dir/root" 2>/dev/null) || continue
+    case "$_proc_root" in
+      "$_rootfs_real"|"$_rootfs_real "*|"$_rootfs_real/"*)
+        kill -9 "${_proc_dir#/proc/}" 2>/dev/null || true
+        ;;
+    esac
+  done
+
   sleep 1
   cat /proc/mounts 2>/dev/null | awk -v r="$rootfs" '$2 ~ r {print $2}' | sort -r | \
     while read -r mp; do
@@ -692,6 +717,19 @@ apt-get install -y --no-install-recommends \
   passwd tzdata procps netcat-openbsd \
   ca-certificates
 
+# openssh-server 单独复核一次。上面那一批有 25 个包、约 300MB，在手机上跨镜像源下载，
+# 单个包 404 / 中途断网 / dpkg 停在 unpacked 未 configure，都不会让那条命令返回非 0
+# （脚本刻意不加 set -e，理由见文件上方注释）。
+# 而 openssh-server 一旦停在「已解包未配置」，/etc/ssh/sshd_config 这个 conffile 照样落盘，
+# 于是 service.sh 里 `[ -f /etc/ssh/sshd_config ]` 那道守卫会以为一切正常，
+# 实际上 postinst 里的「建 sshd 特权分离用户」和「ssh-keygen -A」根本没跑过 ——
+# 表现就是 SSH 端口压根没人监听，而安装界面一路打印「安装完成」。
+if ! dpkg-query -W -f='${db:Status-Abbrev}' openssh-server 2>/dev/null | grep -q '^ii'; then
+  echo "[daidai] openssh-server 未安装完整，正在重试"
+  apt-get install -y --no-install-recommends --reinstall openssh-server || true
+  dpkg --configure -a || true
+fi
+
 rm -f /usr/sbin/policy-rc.d
 
 # 缓存留着只会白占几百 MB，手机内部存储很贵。
@@ -739,6 +777,23 @@ usermod -a -G aid_3001,aid_3002,aid_3003,aid_3004,aid_3005 root 2>/dev/null || t
 SSH_USER="${SSH_USER:-root}"
 SSH_PASSWORD="${SSH_PASSWORD:-123456}"
 echo "${SSH_USER}:${SSH_PASSWORD}" | chpasswd 2>/dev/null
+# 回读 /etc/shadow 确认密码真的写进去了。
+# 原来这句是 2>/dev/null 且不看退出码：Debian 的 chpasswd 走 PAM
+# （/etc/pam.d/chpasswd -> common-password），只要 passwd / libpam-modules 里有一个
+# 停在半装状态它就会失败，root 于是保持 rootfs 自带的锁定串（* 或 !），
+# 密码登录 100% 被拒，而且完全没有线索。
+# 用 awk 直接读文件而不是 getent shadow：musl 的 getent 不支持 shadow 数据库，
+# 那条命令在 Alpine 上恒为空，会把两个 flavor 都误判成「没写进去」。
+case "$(awk -F: -v u="${SSH_USER}" '$1==u{print $2}' /etc/shadow 2>/dev/null)" in
+  '$'*) ;;
+  *)
+    _pw_hash=$(openssl passwd -6 "${SSH_PASSWORD}" 2>/dev/null)
+    if [ -n "$_pw_hash" ]; then
+      echo "[daidai] chpasswd 未写入密码哈希，改用 usermod -p 兜底"
+      usermod -p "$_pw_hash" "${SSH_USER}" 2>/dev/null || true
+    fi
+    ;;
+esac
 # Alpine 是 busybox chsh（密码走 stdin），Debian 是 shadow 的 chsh（root 经 pam_rootok 免密），
 # 两边都吃得下这个参数顺序；再用 usermod 兜一次底，保证 root 的登录 shell 一定是 bash。
 echo '123456' | chsh root -s /bin/bash 2>/dev/null
@@ -746,10 +801,47 @@ usermod -s /bin/bash root 2>/dev/null || true
 cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime 2>/dev/null
 
 # SSH 基础配置
-sed -i -e 's/^#PermitRootLogin.*/PermitRootLogin yes/' \
-       -e 's/^#PasswordAuthentication/PasswordAuthentication/' \
-       /etc/ssh/sshd_config 2>/dev/null
+#
+# 注意这里【不再】改 sshd_config 的 Port / PermitRootLogin / PasswordAuthentication ——
+# 那三项统一交给 service.sh 每次开机重写。理由：rootfs 里的 /etc/ssh 是持久的，
+# 配置写在这里就只有「重装整个 rootfs」才能更新；写在 service.sh 里，
+# 用户重刷一次模块 ZIP 再重启就能修好已经装好的容器，不必重下 300MB 依赖。
 ssh-keygen -A 2>/dev/null
+
+# sshd 的特权分离用户与目录。
+# Debian 是靠 openssh-server 的 postinst 现场 adduser --system 创建这个用户的，
+# 那一步一旦没跑到（apt 半装、dpkg 停在 unpacked），sshd 启动时会直接
+# fatal: Privilege separation user sshd does not exist —— 而 fatal 只走 stderr，
+# 容器里没有任何 syslogd，等于什么都看不到。这里无条件补一次，已存在就是空操作。
+if ! id sshd >/dev/null 2>&1; then
+  useradd --system --no-create-home --home-dir /run/sshd --shell /usr/sbin/nologin sshd 2>/dev/null || \
+    adduser -S -H -h /run/sshd -s /sbin/nologin sshd 2>/dev/null || true
+fi
+mkdir -p /run/sshd
+chmod 0755 /run/sshd
+
+# PAM：这是 Debian 版 SSH 连不上最可能的根因，也是两个 flavor 之间最大的结构差异。
+#
+# Debian 的 openssh-server 是 --with-pam 构建，且用 debian-config.patch 把
+# UsePAM yes 取消了注释；Alpine 的 openssh-server 则是 --without-pam 构建
+# （PAM 版是独立的 openssh-server-pam 包 + 独立的 sshd.pam 二进制），
+# 所以 Alpine 压根不走 PAM —— 这就是「Alpine 正常、Debian 不通」最干净的解释。
+#
+# 而 Debian 的 /etc/pam.d/sshd 里有 `session required pam_loginuid.so`，
+# 它要写 /proc/self/loginuid。ruri 的 -S 会把宿主 /proc 直接 bind 进容器，
+# Android 内核又必然 CONFIG_AUDIT=y（SELinux 依赖 audit），所以这个文件通常是存在的，
+# 走不到「文件不存在就返回 PAM_IGNORE」那条安全路径；写入一旦返回 EPERM
+# 就是 PAM_SESSION_ERR，required 之下整条 pam_open_session 失败，
+# 表现正是「密码验证通过、随即 Connection closed by remote host」。
+#
+# 降成 optional 是容器场景的通行做法（GitLab 官方镜像同款）。
+# 刻意不用 UsePAM no：Debian 有过「构建时没链上 crypt，UsePAM=no 下正确密码
+# 也一律被拒」的先例（Debian bug #1142354），风险比这条大。
+# Alpine 没有 /etc/pam.d/sshd，这段天然是空操作，不需要额外的 flavor 判断。
+if [ -f /etc/pam.d/sshd ]; then
+  sed -i -E 's/^session[[:space:]]+required[[:space:]]+pam_loginuid\.so/session optional pam_loginuid.so/' \
+    /etc/pam.d/sshd 2>/dev/null || true
+fi
 
 # 常用镜像源
 npm config set registry https://registry.npmmirror.com 2>/dev/null
@@ -940,6 +1032,51 @@ fi
 
 INSTALL_DEPS_OK=1
 ui_print "- 容器运行时验证通过 (python3 / node / npm / git / bash)"
+
+# ---- SSH 自检 --------------------------------------------------------------
+# 上面那份清单只有 python3/node/npm/git/bash，openssh-server 装没装成完全没人管 ——
+# 于是「安装完成！」照常打印，用户重启后才发现 SSH 是死的，而且拿不到任何线索。
+#
+# 这里失败【不中止安装】：SSH 只是排障通道，面板 Web 不依赖它，
+# 为了它把一次成功的安装整个 abort 掉是过度反应。但必须显式告警。
+ui_print "- 正在验证容器 SSH..."
+SSH_REPORT="$TMPDIR/ssh-verify.txt"
+: > "$SSH_REPORT"
+"$RURIMA" ruri -p -N -S -A "$rootfs" "$CTR_SHELL" -c '
+  [ -x /usr/sbin/sshd ] && echo "OK sshd-binary" || echo "MISSING sshd-binary"
+  [ -f /etc/ssh/sshd_config ] && echo "OK sshd-config" || echo "MISSING sshd-config"
+  id sshd >/dev/null 2>&1 && echo "OK sshd-privsep-user" || echo "MISSING sshd-privsep-user"
+  ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 && echo "OK sshd-hostkey" || echo "MISSING sshd-hostkey"
+  case "$(grep "^root:" /etc/shadow 2>/dev/null | cut -d: -f2)" in
+    \$*) echo "OK root-password" ;;
+    *)   echo "MISSING root-password" ;;
+  esac
+  mkdir -p /run/sshd
+  if /usr/sbin/sshd -t >/dev/null 2>&1; then
+    echo "OK sshd-config-test"
+  else
+    echo "MISSING sshd-config-test"
+    /usr/sbin/sshd -t 2>&1 | sed "s/^/SSHDT /"
+  fi
+' > "$SSH_REPORT" 2>/dev/null
+
+missing_ssh=""
+for item in sshd-binary sshd-config sshd-privsep-user sshd-hostkey root-password sshd-config-test; do
+  if ! grep -q "^OK $item$" "$SSH_REPORT" 2>/dev/null; then
+    missing_ssh="$missing_ssh $item"
+  fi
+done
+
+if [ -n "$missing_ssh" ]; then
+  ui_print "! SSH 自检未通过:$missing_ssh"
+  grep '^SSHDT ' "$SSH_REPORT" 2>/dev/null | while IFS= read -r line; do
+    ui_print "!   $line"
+  done
+  ui_print "! 面板本身不受影响，但容器内 SSH 多半连不上。"
+  ui_print "! 重启后可点管理器的「运行 / Action」按钮查看 SSH 状态与 sshd.log。"
+else
+  ui_print "- 容器 SSH 验证通过 (二进制 / 配置 / 特权分离用户 / host key / root 密码)"
+fi
 
 # 容器里补一份默认 bashrc。
 # 路径两个 flavor 不一样：Alpine 的 bash 包读 /etc/bash/bashrc，

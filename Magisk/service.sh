@@ -259,13 +259,29 @@ export DAIDAI_MAGISK_MODULE=1
 #   options single-request-reopen）、apt 加固（Sandbox::User / 重试 / 超时 / ForceIPv4）、
 #   镜像源四级回退，并在装依赖前加了 root / _apt 双身份的 DNS 判别探测。
 #   这些只在刷 ZIP 时执行，所以 requiredMagiskShellVersion 保持 1，在线升级照常放行。
-export DAIDAI_MAGISK_SHELL_VERSION=3
+# v4（v3.0.7）重写 SSH 段：sshd 启动去重改用端口判据（原来的 pgrep -x sshd 因为容器
+#   没有 PID namespace 会命中整机任何 sshd，包括上次安装遗留的孤儿进程）、
+#   sshd_config 改成先删净再统一追加并同步写 drop-in、Debian 的 pam_loginuid 降为
+#   optional、chpasswd 回读校验、sshd 改用 -D -e 把日志落到 sshd.log，
+#   并每次开机写一份 SSH 状态快照。同样只影响外壳自身，requiredMagiskShellVersion 保持 1。
+export DAIDAI_MAGISK_SHELL_VERSION=4
 export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
 export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app
 export NODE_PATH=/usr/local/lib/node_modules
 
 mkdir -p $DAIDAI_DIR/scripts $DAIDAI_DIR/logs $DAIDAI_DIR/deps/nodejs $DAIDAI_DIR/deps/python $DAIDAI_DIR/backups
 chmod 777 $DAIDAI_DIR
+
+# 容器内 service.log 的滚动。宿主侧那份（$PERSIST_DIR/service.log）本来就有滚动，
+# 这一份一直没有 —— 而面板起不来时守护每 ~6 分钟就会重跑一次本脚本，
+# 每次都要往里写十几行（v3.0.7 起还多了一份 SSH 状态快照）。
+# 手机内部存储很贵，脚本里其它地方（apt 缓存、sshd.log）都专门为此做过处理。
+if [ -f $DAIDAI_DIR/service.log ]; then
+  _svc_log_size=$(stat -c%s $DAIDAI_DIR/service.log 2>/dev/null || echo 0)
+  if [ "${_svc_log_size:-0}" -gt 1048576 ]; then
+    mv -f $DAIDAI_DIR/service.log $DAIDAI_DIR/service.log.old 2>/dev/null
+  fi
+fi
 
 # Python 虚拟环境（第一次进入时创建）
 # 模块版当前通常只有一个系统 python3，不保证真的同时有 3.10 / 3.11 / 3.12。
@@ -336,19 +352,182 @@ if [ -n "${SSH_USER}" ] && [ -n "${SSH_PASSWORD}" ]; then
     fi
   fi
   echo "${SSH_USER}:${SSH_PASSWORD}" | chpasswd 2>/dev/null
+  # 回读 /etc/shadow 确认密码真写进去了。
+  # 原来这句是 2>/dev/null 且不看退出码：Debian 的 chpasswd 走 PAM，
+  # 只要 passwd / libpam-modules 里有一个停在半装状态它就会失败，
+  # root 于是保持 rootfs 自带的锁定串（* 或 !），密码登录 100% 被拒且零线索。
+  # 用 awk 直接读文件而不是 getent shadow：musl 的 getent 不支持 shadow 数据库。
+  case "$(awk -F: -v u="${SSH_USER}" '$1==u{print $2}' /etc/shadow 2>/dev/null)" in
+    '$'*) ;;
+    *)
+      _pw_hash=$(openssl passwd -6 "${SSH_PASSWORD}" 2>/dev/null)
+      if [ -n "$_pw_hash" ] && usermod -p "$_pw_hash" "${SSH_USER}" 2>/dev/null; then
+        echo "[ssh] chpasswd 未生效，已改用 usermod -p 写入密码" >> $DAIDAI_DIR/service.log
+      else
+        echo "[ssh] 警告: ${SSH_USER} 的密码哈希仍是锁定态，密码登录必然失败" >> $DAIDAI_DIR/service.log
+      fi
+      ;;
+  esac
 fi
 
-if [ -f /etc/ssh/sshd_config ]; then
-  # 清除已有 Port 行（包括注释的），再追加当前端口
-  sed -i -E '/^[#[:space:]]*Port[[:space:]]+/d' /etc/ssh/sshd_config
-  echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
-  # 没有 host key 的话先生成一下
-  [ -f /etc/ssh/ssh_host_rsa_key ] || ssh-keygen -A >/dev/null 2>&1
-  # 启动 sshd（已在跑就跳过）
-  if ! pgrep -x sshd >/dev/null 2>&1; then
-    mkdir -p /run/sshd
-    /usr/sbin/sshd >/dev/null 2>&1 || true
+if [ ! -f /etc/ssh/sshd_config ]; then
+  # 原来这里是「文件不在就整段静默跳过」，于是 openssh-server 没装成时
+  # 用户既看不到 SSH，也看不到任何一行说明。至少留个线索。
+  echo "[ssh] /etc/ssh/sshd_config 不存在，openssh-server 多半没装成，本次不启动 sshd" >> $DAIDAI_DIR/service.log
+else
+  # 重写三个模块托管的指令：Port / PermitRootLogin / PasswordAuthentication。
+  #
+  # 为什么要用 awk 而不是「sed 删干净 + 追加到文件末尾」：
+  #   1. OpenSSH 的取值规则是【第一次出现的值胜出】（跟 nginx / Apache 的直觉相反），
+  #      所以同名指令必须先删净，否则靠前的那一行会把我们写的压住；
+  #   2. 但删除【不能】波及 Match 块 —— 用户可能写了
+  #      `Match Address 192.168.1.0/24` + `PasswordAuthentication yes`
+  #      这类作用域限定，把它删掉是在动用户的安全策略；
+  #   3. 追加到文件末尾同样危险 —— 只要文件尾部有一个生效的 Match 块，
+  #      我们这三行就落进那个块里，而 Port 在 Match 内是非法指令，
+  #      sshd -t 直接报错、sshd 起不来，SSH 从「能连」变成「端口无人监听」。
+  # 所以：只在【第一个生效的 Match 之前】做删除，并把我们的三行插在那个位置。
+  # 没有 Match 块时行为与追加到末尾等价。
+  #
+  # 刻意不碰 KbdInteractiveAuthentication：Debian 默认 no，密码认证走的是
+  # password 方法而不是它，多改一项只会多一个变量。
+  #
+  # 指令名与 Match 都是大小写不敏感的，这里把 Match 逐字母写成字符组，
+  # 避免依赖某个 awk 实现的忽略大小写扩展（busybox awk 与 mawk 都没有）。
+  awk -v port="${SSH_PORT}" '
+    function emit() {
+      print "Port " port
+      print "PermitRootLogin yes"
+      print "PasswordAuthentication yes"
+    }
+    /^[[:space:]]*[Mm][Aa][Tt][Cc][Hh][[:space:]]/ {
+      if (!inserted) { emit(); inserted = 1 }
+      inmatch = 1
+    }
+    !inmatch && /^[#[:space:]]*([Pp]ort|[Pp]ermit[Rr]oot[Ll]ogin|[Pp]assword[Aa]uthentication)[[:space:]]+/ { next }
+    { print }
+    END { if (!inserted) emit() }
+  ' /etc/ssh/sshd_config > /etc/ssh/sshd_config.daidai-tmp &&
+    mv -f /etc/ssh/sshd_config.daidai-tmp /etc/ssh/sshd_config
+
+  # Debian 的 sshd_config 顶部有一行未注释的 Include /etc/ssh/sshd_config.d/*.conf，
+  # Include 进来的内容先被解析，按「第一次胜出」会压过主文件里的一切。
+  # 该目录默认是空的，所以上面那段目前有效；但只要以后有任何 .conf 落进去，
+  # 我们写的就会被静默覆盖，且完全没有报错。同一份指令再写一份 drop-in，两条路结论一致。
+  # Alpine 3.18 的 sshd_config 没有 Include 行，这段在 Alpine 上不会执行。
+  if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
+    mkdir -p /etc/ssh/sshd_config.d
+    {
+      echo "Port ${SSH_PORT}"
+      echo "PermitRootLogin yes"
+      echo "PasswordAuthentication yes"
+    } > /etc/ssh/sshd_config.d/00-daidai.conf
   fi
+
+  # 没有 host key 就补一次（安装期已经跑过，这里是兜底）
+  ls /etc/ssh/ssh_host_*_key >/dev/null 2>&1 || ssh-keygen -A >/dev/null 2>&1
+
+  # 特权分离用户与目录：Debian 是靠 openssh-server 的 postinst 现场建这个用户的，
+  # 那一步没跑到时 sshd 启动会直接 fatal: Privilege separation user sshd does not exist。
+  if ! id sshd >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /run/sshd --shell /usr/sbin/nologin sshd 2>/dev/null || \
+      adduser -S -H -h /run/sshd -s /sbin/nologin sshd 2>/dev/null || true
+  fi
+  mkdir -p /run/sshd
+  chmod 0755 /run/sshd
+
+  # PAM：这是 Debian 版 SSH 连不上最可能的根因。
+  # Debian 的 openssh-server 是 --with-pam 构建且 UsePAM yes 默认生效，
+  # /etc/pam.d/sshd 里的 `session required pam_loginuid.so` 要写 /proc/self/loginuid；
+  # ruri 的 -S 把宿主 /proc 直接 bind 进了容器，Android 内核又必然 CONFIG_AUDIT=y
+  # （SELinux 依赖 audit），所以这个文件通常存在，走不到「不存在就 PAM_IGNORE」
+  # 那条安全路径 —— 写入返回 EPERM 即 PAM_SESSION_ERR，required 之下整条
+  # pam_open_session 失败，表现正是「密码验证通过、随即 Connection closed」。
+  # Alpine 的 openssh 是 --without-pam 构建，没有这个文件，这段恒为空操作。
+  # 放在 service.sh（每次开机执行）而不只是 customize.sh：这样用户重刷一次模块 ZIP
+  # 就能修好已经装好的容器，不必重下几百 MB 依赖重装 rootfs。
+  if [ -f /etc/pam.d/sshd ]; then
+    sed -i -E 's/^session[[:space:]]+required[[:space:]]+pam_loginuid\.so/session optional pam_loginuid.so/' \
+      /etc/pam.d/sshd 2>/dev/null || true
+  fi
+
+  # 启动前自检配置：sshd -t 一次性查出语法错误、host key 不可读、
+  # 特权分离用户/目录缺失这三类问题。原来这些全部会变成「起不来且没日志」。
+  _sshd_t=$(/usr/sbin/sshd -t 2>&1)
+  if [ -n "$_sshd_t" ]; then
+    echo "[ssh] sshd -t: $_sshd_t" >> $DAIDAI_DIR/service.log
+  fi
+
+  # 去重判据从 `pgrep -x sshd` 换成「本容器的 SSH 端口有没有在监听」。
+  # 原因：ruri 走 chroot 且命令行里没有 -u，【不建任何 namespace】，容器与宿主
+  # 共享同一张进程表 —— pgrep -x sshd 会命中整机任何叫 sshd 的进程，包括上一次
+  # 安装遗留、根目录已被删除的孤儿 sshd。一旦命中就跳过启动，表现就是
+  # 「刷了另一个 flavor 之后 SSH 永远连不上」。
+  #
+  # 判据【不用 nc -z】：PATH 里的 nc 有可能解析到 busybox 的 applet，它不认 -z，
+  # 会恒定返回「没在监听」—— 于是每次开机都多起一个注定 Address already in use
+  # 的 sshd，并在日志里留下一句假告警。直接读 /proc/net/tcp{,6} 零外部依赖，
+  # 两个 flavor 都成立（容器与宿主共享 /proc 和网络栈，读到的就是真实监听状态）。
+  # $4 == "0A" 是 TCP_LISTEN，$2 是 十六进制的 本地地址:端口。
+  ssh_port_listening() {
+    _hexport=$(printf '%04X' "${SSH_PORT}" 2>/dev/null)
+    [ -n "$_hexport" ] || return 1
+    { cat /proc/net/tcp /proc/net/tcp6 2>/dev/null; } | awk -v p="$_hexport" '
+      $4 == "0A" { split($2, a, ":"); if (a[2] == p) { found = 1; exit } }
+      END { exit(found ? 0 : 1) }
+    '
+  }
+
+  if ssh_port_listening; then
+    echo "[ssh] 端口 ${SSH_PORT} 已在监听，跳过启动 sshd" >> $DAIDAI_DIR/service.log
+  else
+    # sshd.log 滚动只在「确实要重新拉起 sshd」时做。
+    # 放在外面的话会踩到这个坑：老 sshd 还开着这个 fd，mv 之后它继续往 .old 写，
+    # 新的 sshd.log 永远长不到阈值 —— 滚动再也不会触发，.old 无上限增长。
+    if [ -f $DAIDAI_DIR/sshd.log ]; then
+      _ssh_log_size=$(stat -c%s $DAIDAI_DIR/sshd.log 2>/dev/null || echo 0)
+      if [ "${_ssh_log_size:-0}" -gt 1048576 ]; then
+        mv -f $DAIDAI_DIR/sshd.log $DAIDAI_DIR/sshd.log.old 2>/dev/null
+      fi
+    fi
+
+    # 必须带 -D -e：
+    #   -e 把日志打到 stderr —— 容器里没有任何 syslogd，不加它 sshd 的 syslog()
+    #      会被静默丢弃，每次连接的 PAM 报错也一起没了。
+    #   -D 不 daemonize —— 不加 -D 时 sshd 会 daemon(0,0) 把 stdio 重定向到 /dev/null，
+    #      -e 就只剩「daemonize 之前」那几条 fatal 还看得到。
+    # 用 nohup + & 交给 init 收养，与 daidai-server 的拉起方式一致（chroot 无 PID namespace，
+    # 父进程退出后子进程照活）。
+    nohup /usr/sbin/sshd -D -e >> $DAIDAI_DIR/sshd.log 2>&1 &
+    echo "[ssh] 已拉起 sshd PID=$! port=${SSH_PORT}" >> $DAIDAI_DIR/service.log
+
+    # 探 5 次而不是只探一次：中低端手机开机时 sshd 要 1~2 秒才加载完 host key 并 bind，
+    # 只 sleep 1 就判定的话，SSH 明明可用却每次开机都写一句「端口未监听」，
+    # 用户照着去翻 sshd.log 又什么错都没有，得到一个自相矛盾的诊断。
+    _ssh_ok=0
+    for _ssh_try in 1 2 3 4 5; do
+      sleep 1
+      if ssh_port_listening; then _ssh_ok=1; break; fi
+    done
+    if [ "$_ssh_ok" = "1" ]; then
+      echo "[ssh] 端口 ${SSH_PORT} 监听正常" >> $DAIDAI_DIR/service.log
+    else
+      echo "[ssh] 警告: 等待 5 秒后端口 ${SSH_PORT} 仍未监听，详见 $DAIDAI_DIR/sshd.log" >> $DAIDAI_DIR/service.log
+    fi
+  fi
+
+  # 每次开机留一份 SSH 状态快照。八行、成本极低，但足以在事后一次性区分
+  # 「包没装成 / 特权分离用户缺失 / 密码没写进去 / PAM 会话失败 / 配置被 drop-in 覆盖」。
+  {
+    echo "[ssh] sshd=$(command -v sshd || echo NONE)"
+    echo "[ssh] privsep_user=$(id -u sshd 2>/dev/null || echo NONE) run_sshd=$([ -d /run/sshd ] && echo yes || echo no)"
+    echo "[ssh] hostkeys=$(ls /etc/ssh/ssh_host_*_key 2>/dev/null | wc -l | tr -d ' ')"
+    echo "[ssh] shadow=$(awk -F: -v u="${SSH_USER}" '$1==u{print substr($2,1,4)}' /etc/shadow 2>/dev/null)"
+    echo "[ssh] usepam=$(grep -cE '^[[:space:]]*UsePAM[[:space:]]+yes' /etc/ssh/sshd_config 2>/dev/null)"
+    echo "[ssh] pam_loginuid=$(grep -E 'pam_loginuid' /etc/pam.d/sshd 2>/dev/null | tr -s ' ' | head -n1)"
+    echo "[ssh] dropins=$(ls /etc/ssh/sshd_config.d/ 2>/dev/null | tr '\n' ' ')"
+    echo "[ssh] loginuid=$(cat /proc/self/loginuid 2>/dev/null || echo ABSENT)"
+  } >> $DAIDAI_DIR/service.log
 fi
 
 # 避免重复拉起 daidai-server
@@ -366,7 +545,9 @@ chmod +x "$STARTUP" 2>/dev/null
 
 log "进入容器启动 daidai-server (flavor=$FLAVOR, panel=$PANEL_PORT, ssh=$SSH_PORT)..."
 
-"$RURIMA" ruri -p -N -S -A $rootfs "$CTR_SHELL" /tmp/daidai-startup.sh
+# 输出重定向进宿主 service.log：容器启动脚本里任何没被显式重定向的报错
+# （ruri 自身的错误、脚本里漏掉重定向的命令）原来是直接丢掉的。
+"$RURIMA" ruri -p -N -S -A $rootfs "$CTR_SHELL" /tmp/daidai-startup.sh >> "$LOG_FILE" 2>&1
 
 sleep 2
 

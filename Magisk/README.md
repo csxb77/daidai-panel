@@ -199,10 +199,12 @@ npm 默认镜像源两边都已切到 `npmmirror.com`；apk / apt 源都指向 `
 - 当前容器基础系统（`alpine` / `debian`）——忘了自己装的哪个版本时看这一行
 - 当前端口配置（`PANEL_PORT` / `SSH_PORT` / `EXTRA_CORS_ORIGINS`）
 - 面板进程状态 + PID（动作执行**之后**的实际状态）
-- 宿主侧 `PANEL_PORT` 的实际监听情况
+- 宿主侧 `PANEL_PORT` 与 `SSH_PORT` 的实际监听情况
 - 容器运行时自检（`python3` / `node` / `npm` / `git` / `curl` / `bash` 的路径与版本）
+- 容器 SSH 自检（`sshd` 版本、`sshd_config`、特权分离用户、host key 数量、root 密码是否已设置、`sshd -t` 结果）
 - `service.log`（宿主侧启动日志）最近 60 行
 - `daidai.log`（容器内后端日志）最近 60 行
+- 容器内 `service.log` 最近 30 行（含每次开机写的 SSH 状态快照）与 `sshd.log` 最近 30 行
 
 排障的第一步永远是先点这个按钮看输出，不用 adb 连线。
 
@@ -296,6 +298,17 @@ EXTRA_CORS_ORIGINS="https://panel.example.com,https://xx.trycloudflare.com"
 
 > `service.sh` 启动时会自动校验端口合法性（必须是 1-65535 的整数），非法值会回退到默认并写入 `service.log`。
 
+> **模块每次开机会按 `ports.conf` 重写容器里的 SSH 配置**（自 v3.0.7 起）：`sshd_config` 中的
+> `Port` / `PermitRootLogin` / `PasswordAuthentication` 三项会被删净后重新写入，
+> Debian 容器还会同步写一份 `/etc/ssh/sshd_config.d/00-daidai.conf`
+> （它的 `sshd_config` 顶部有未注释的 `Include`，而 OpenSSH 是「**第一次取到的值胜出**」，
+> 不写这份 drop-in 的话主文件里的配置随时可能被静默覆盖）。
+>
+> 这与面板的 `config.yaml` 是同一套逻辑：**由 `ports.conf` 单向决定，不保留手改**。
+> 所以如果你把容器里的 SSH 改成了密钥登录、或手动关掉了密码认证，
+> 下次开机会被改回来。其余指令（`AuthorizedKeysFile`、`AllowUsers`、host key 配置等）不受影响，
+> 只有上面这三项是模块托管的。
+
 **生效方式**（任选其一）：
 
 - 方式 1：重启手机，`service.sh` 开机自动重跑
@@ -322,7 +335,11 @@ su -c "sh /data/adb/modules/daidai-panel/action.sh"
 | 网络监听 | ⚠️ | 绑定 `0.0.0.0:PANEL_PORT`（默认 5700）+ 容器内 `sshd` 监听 `0.0.0.0:SSH_PORT`（默认 22），局域网任何人都能尝试连接 |
 | 写入位置 | ✅ | 三处：`/data/adb/modules/daidai-panel/`（模块本体）、`/data/daidai/` 或 `/data/local/daidai/`（容器 rootfs + 所有用户数据，占大空间）、`/data/adb/daidai-panel/`（端口配置 + 启动日志 + 停止开关） |
 
-> **局域网可见性**：面板后端默认对局域网开放。家里 / 自己 WiFi 没问题；公共网络（咖啡馆、公司 Guest Wi-Fi）建议把 `SSH_PORT` 换掉或进容器 `rc-service sshd stop`，并在路由器 / 防火墙层面限制面板端口。
+> **局域网可见性**：面板后端默认对局域网开放。家里 / 自己 WiFi 没问题；公共网络（咖啡馆、公司 Guest Wi-Fi）建议把 `SSH_PORT` 与默认密码都换掉，并在路由器 / 防火墙层面限制面板端口。
+>
+> 想临时停掉容器内的 `sshd`：`su -c "pkill -x sshd"`（容器里没有 openrc / systemd，`rc-service` 与 `systemctl` 都不可用）。
+>
+> 下次开机 `service.sh` 会重新拉起它 —— **但前提是面板不处于「已停止」状态**：点过动作按钮停面板之后，`service.sh` 会在停止开关那里早退，SSH 也不会被拉起。要在停止状态下恢复 SSH，得先点一次动作按钮把面板启动起来。
 
 > **禁用 ≠ 停服**：在管理器里「禁用」模块只阻止下次开机加载，**不会 kill 当前的容器进程**（`daidai-server` 是 `rurima` 启的独立进程树）。想立即停：**点模块卡片的「运行 / Action」按钮**（面板在跑时这一次点击就是停止），或在面板里点「设置 → 概览 → 停止面板服务」。
 >
@@ -376,16 +393,16 @@ ddp backup create --name before-uninstall
 
 ```bash
 # 默认只打 arm64 + alpine（CI 发布用的也是这个）
-bash Magisk/build.sh 3.0.6
+bash Magisk/build.sh 3.0.7
 
 # 只打 amd64
-bash Magisk/build.sh 3.0.6 amd64
+bash Magisk/build.sh 3.0.7 amd64
 
 # 同时打 arm64 + amd64
-bash Magisk/build.sh 3.0.6 all
+bash Magisk/build.sh 3.0.7 all
 
 # Debian flavor（第 3 个参数；不传就是 alpine）
-bash Magisk/build.sh 3.0.6 arm64 debian
+bash Magisk/build.sh 3.0.7 arm64 debian
 ```
 
 > `amd64` / `all` 保留的是**构建能力**，不代表模块支持 x86_64：容器运行时 `rurima` 只有 aarch64 构建，`customize.sh` 会在 x86_64 设备上直接拦截。这两个参数是为「将来拿到 x86_64 的 rurima」留的口子，日常发布请用默认的 `arm64`。
