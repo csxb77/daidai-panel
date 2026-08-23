@@ -946,7 +946,10 @@ function rerunLog(log: any) {
             <tr v-if="filteredLogs.length === 0">
               <td colspan="7" class="empty-cell">暂无记录</td>
             </tr>
-            <tr v-for="(log, rowIndex) in filteredLogs" :key="log.id" :style="{ animationDelay: `${Number(rowIndex) * 36}ms` }" class="log-table__row-cinematic">
+            <!-- 这里刻意【不】给每一行做 stagger 入场，见 design-system.md「入场动画」一条：
+                 行数一多逐行动画就会卡，而且这张表是轮询刷新的，每次刷新都会整表重放，
+                 表现为规律性闪烁。整块入场由外层 .panel 的 dd-panel-in 负责，一次就够。 -->
+            <tr v-for="log in filteredLogs" :key="log.id">
               <td>
                 <span class="log-cell-name">{{
                   log.task_name || "未命名任务"
@@ -1619,10 +1622,6 @@ function rerunLog(log: any) {
   }
 }
 
-.log-table__row-cinematic {
-  animation: dd-table-row-in 320ms var(--dd-ease-emphasized) both;
-}
-
 .log-table td {
   padding: 12px 16px;
   border-bottom: 1px solid var(--el-border-color-lighter);
@@ -2027,21 +2026,9 @@ function rerunLog(log: any) {
   }
 }
 
-@keyframes dd-table-row-in {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 10px, 0);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .stat-card--cinematic,
-  .panel,
-  .log-table__row-cinematic {
+  .panel {
     animation: none;
   }
 }

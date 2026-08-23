@@ -212,6 +212,19 @@ const router = createRouter({
           name: 'ApiDocs',
           component: routeComponents.apiDocs,
           meta: { title: '接口文档', icon: 'Connection', minRole: 'viewer' }
+        },
+        {
+          // 动效组件预览页（内部验收用）。
+          //
+          // 刻意【不】加进 MainLayout 的 workspaceItems / adminItems，所以侧栏看不到它，
+          // 也刻意【不】加进上面的 routePreloaders —— 那份表驱动空闲预加载，
+          // 登进面板就会把里面每个页面的 chunk 都拉下来。预览页只有输入 URL 才会加载。
+          //
+          // minRole 给 viewer：它不读任何业务数据，纯组件展示，没有需要保护的东西。
+          path: 'dev/motion',
+          name: 'DevMotion',
+          component: () => import('@/views/dev-motion/index.vue'),
+          meta: { title: '动效组件预览', minRole: 'viewer' }
         }
       ]
     },

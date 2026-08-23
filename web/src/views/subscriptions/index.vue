@@ -11,6 +11,8 @@ import {
 import { useResponsive } from "@/composables/useResponsive";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
 import { formatDuration } from "@/utils/duration";
+import DdSplitButton from "@/components/ui/DdSplitButton.vue";
+import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
 
 const subList = ref<any[]>([]);
 const loading = ref(false);
@@ -588,6 +590,30 @@ async function handleToggle(row: any) {
     if (err === "cancel" || err?.toString?.() === "cancel") return;
     ElMessage.error(err?.response?.data?.error || "操作失败");
   }
+}
+
+/**
+ * 操作列 Split Button 的菜单项。
+ *
+ * 主体是「拉取」：列表里最高频的操作，而且 handlePull 进去还有一道 ElMessageBox
+ * 确认框兜底（正在拉取同一条时只是重连 SSE），点错了代价最小。
+ * 删除不可撤销，只能待在菜单里并加 divided + danger——「点了就执行」的主体位置
+ * 绝不能放这种一击致命的操作。
+ *
+ * 这几项都不随行状态变化：订阅的「启用/禁用」是独立的「启用」列上的 el-switch，
+ * 不在本操作列里，所以这里没有需要 visible 联动的互斥项；「停止拉取」也只挂在
+ * 拉取日志弹窗的 footer（handleStopPull），本来就不属于这一列。
+ */
+const subActionItems: SplitButtonItem[] = [
+  { key: "logs", label: "拉取日志" },
+  { key: "edit", label: "编辑" },
+  { key: "delete", label: "删除", danger: true, divided: true },
+];
+
+function onSubAction(key: string, row: any) {
+  if (key === "logs") openLogs(row.id);
+  else if (key === "edit") openEdit(row);
+  else if (key === "delete") handleDelete(row.id);
 }
 
 async function fetchLatestSubLog(subId: number) {
@@ -1208,34 +1234,26 @@ function viewLogDetail(log: any) {
           </template>
         </el-table-column>
         <!--
-          列宽 220：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24。
-          清掉 EP 的按钮相邻外边距后这四个按钮实测需要 172px，220 留出 24px 余量。
-          原来的 200（可用 176）配上那份外边距要 208px，「拉取」和「删除」两头都会被裁掉一截。
+          原来是「拉取 / 日志 / 编辑 / 删除」四个 text 按钮平铺，吃掉 220px 列宽；
+          而且「删除」和「拉取」同字号并排，误点的代价却天差地别。
+          改成 Split Button：主体是最高频、且还有一道确认框兜底的「拉取」，
+          其余收进菜单，删除标红并用分隔线隔开。
+
+          列宽 220 → 130：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，
+          可用内容宽 = 列宽 - 24。主体「拉取」2 字 ≈ 24px + 按钮左右内边距 16px = 40px，
+          加 caret 半边 24px 共 64px，130 给出 106px 可用宽，余量充足；
+          按钮组一旦超出可用宽，.cell 会变成可滚动容器，点右侧 caret 时整行会被滚偏且不复位。
         -->
-        <el-table-column label="操作" width="220" fixed="right" align="center">
+        <el-table-column label="操作" width="130" fixed="right" align="center">
           <template #default="{ row }">
-            <div class="action-btns">
-              <el-button
-                size="small"
-                type="success"
-                text
-                @click="handlePull(row)"
-                >拉取</el-button
-              >
-              <el-button size="small" text @click="openLogs(row.id)"
-                >日志</el-button
-              >
-              <el-button size="small" text type="primary" @click="openEdit(row)"
-                >编辑</el-button
-              >
-              <el-button
-                size="small"
-                text
-                type="danger"
-                @click="handleDelete(row.id)"
-                >删除</el-button
-              >
-            </div>
+            <DdSplitButton
+              label="拉取"
+              type="success"
+              size="small"
+              :items="subActionItems"
+              @click="handlePull(row)"
+              @command="(key: string) => onSubAction(key, row)"
+            />
           </template>
         </el-table-column>
       </el-table>

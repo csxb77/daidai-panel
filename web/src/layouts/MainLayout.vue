@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
+import { useBadgesStore } from '@/stores/badges'
+import DdBadge from '@/components/ui/DdBadge.vue'
 import { systemApi } from '@/api/system'
 import { loadPanelSettings as loadCachedPanelSettings } from '@/utils/panelSettings'
 import { useResponsive } from '@/composables/useResponsive'
@@ -32,6 +34,7 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
+const badgesStore = useBadgesStore()
 const { isMobile } = useResponsive()
 const isCollapsed = ref(false)
 const drawerVisible = ref(false)
@@ -107,6 +110,19 @@ const breadcrumb = computed(() => {
 
 const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
 
+/**
+ * 侧栏菜单角标。
+ *
+ * 只挂在「有事要处理」的菜单上：运行中的任务、今天失败的日志、拉取失败的订阅、
+ * 装失败或正在装的依赖、以及有新版本时的系统设置。数据由 stores/badges.ts 轮询，
+ * 服务端已按角色裁剪，看不到某个菜单的用户拿到的就是 0，这里不必再判权限。
+ *
+ * 刻意【不】给每个菜单都挂数字：角标是打断，全挂满等于全不挂，用户会直接学会忽略它。
+ */
+function badgeOf(path: string) {
+  return badgesStore.menuBadges[path]
+}
+
 onMounted(() => {
   loadPanelSettings()
   loadVersion()
@@ -114,6 +130,14 @@ onMounted(() => {
     authStore.fetchUser()
   }
   scheduleMenuPreload()
+  // 只在布局挂上之后才开始轮询：登录页不该去打受保护的接口
+  badgesStore.start()
+})
+
+onBeforeUnmount(() => {
+  // 退出登录会卸载整个布局。不停表的话定时器会继续打 /system/badges，
+  // 每次都 401，把用户刚跳到的登录页反复推一遍。
+  badgesStore.stop()
 })
 
 watch(isMobile, (mobile) => {
@@ -207,8 +231,27 @@ async function loadVersion() {
             @mouseenter="preloadPage(item.index)"
             @focusin="preloadPage(item.index)"
           >
-            <el-icon><component :is="item.icon" /></el-icon>
-            <template #title>{{ item.title }}</template>
+            <el-icon>
+              <component :is="item.icon" />
+              <!-- 折叠态的角标：#title 插槽整体不渲染，数字没地方放，退化成图标右上角一个方点。
+                   显隐纯靠 CSS 的 .el-menu--collapse 祖先判断，不用 isCollapsed —— 移动端
+                   isCollapsed 恒为 true，但抽屉里的菜单没传 :collapse，实际是展开的，用 JS 状态会误判。 -->
+              <span
+                v-if="badgeOf(item.index)"
+                class="menu-collapsed-dot"
+                :class="`is-${badgeOf(item.index)!.level}`"
+              />
+            </el-icon>
+            <template #title>
+              <span class="menu-title-text">{{ item.title }}</span>
+              <DdBadge
+                v-if="badgeOf(item.index)"
+                :value="badgeOf(item.index)!.count"
+                :dot="badgeOf(item.index)!.dot"
+                :level="badgeOf(item.index)!.level"
+                :title="item.title"
+              />
+            </template>
           </el-menu-item>
         </el-menu>
 
@@ -230,8 +273,24 @@ async function loadVersion() {
               @mouseenter="preloadPage(item.index)"
               @focusin="preloadPage(item.index)"
             >
-              <el-icon><component :is="item.icon" /></el-icon>
-              <template #title>{{ item.title }}</template>
+              <el-icon>
+                <component :is="item.icon" />
+                <span
+                  v-if="badgeOf(item.index)"
+                  class="menu-collapsed-dot"
+                  :class="`is-${badgeOf(item.index)!.level}`"
+                />
+              </el-icon>
+              <template #title>
+                <span class="menu-title-text">{{ item.title }}</span>
+                <DdBadge
+                  v-if="badgeOf(item.index)"
+                  :value="badgeOf(item.index)!.count"
+                  :dot="badgeOf(item.index)!.dot"
+                  :level="badgeOf(item.index)!.level"
+                  :title="item.title"
+                />
+              </template>
             </el-menu-item>
           </el-menu>
         </template>
@@ -297,8 +356,27 @@ async function loadVersion() {
             @mouseenter="preloadPage(item.index)"
             @focusin="preloadPage(item.index)"
           >
-            <el-icon><component :is="item.icon" /></el-icon>
-            <template #title>{{ item.title }}</template>
+            <el-icon>
+              <component :is="item.icon" />
+              <!-- 折叠态的角标：#title 插槽整体不渲染，数字没地方放，退化成图标右上角一个方点。
+                   显隐纯靠 CSS 的 .el-menu--collapse 祖先判断，不用 isCollapsed —— 移动端
+                   isCollapsed 恒为 true，但抽屉里的菜单没传 :collapse，实际是展开的，用 JS 状态会误判。 -->
+              <span
+                v-if="badgeOf(item.index)"
+                class="menu-collapsed-dot"
+                :class="`is-${badgeOf(item.index)!.level}`"
+              />
+            </el-icon>
+            <template #title>
+              <span class="menu-title-text">{{ item.title }}</span>
+              <DdBadge
+                v-if="badgeOf(item.index)"
+                :value="badgeOf(item.index)!.count"
+                :dot="badgeOf(item.index)!.dot"
+                :level="badgeOf(item.index)!.level"
+                :title="item.title"
+              />
+            </template>
           </el-menu-item>
         </el-menu>
 
@@ -316,8 +394,24 @@ async function loadVersion() {
               @mouseenter="preloadPage(item.index)"
               @focusin="preloadPage(item.index)"
             >
-              <el-icon><component :is="item.icon" /></el-icon>
-              <template #title>{{ item.title }}</template>
+              <el-icon>
+                <component :is="item.icon" />
+                <span
+                  v-if="badgeOf(item.index)"
+                  class="menu-collapsed-dot"
+                  :class="`is-${badgeOf(item.index)!.level}`"
+                />
+              </el-icon>
+              <template #title>
+                <span class="menu-title-text">{{ item.title }}</span>
+                <DdBadge
+                  v-if="badgeOf(item.index)"
+                  :value="badgeOf(item.index)!.count"
+                  :dot="badgeOf(item.index)!.dot"
+                  :level="badgeOf(item.index)!.level"
+                  :title="item.title"
+                />
+              </template>
             </el-menu-item>
           </el-menu>
         </template>
@@ -548,6 +642,55 @@ async function loadVersion() {
   padding-left: 0;
   padding-right: 0;
   justify-content: center;
+}
+
+// ==================== 菜单角标 ====================
+// 展开态：标题占满剩余宽度，把角标顶到菜单项最右侧对齐成一列。
+// .el-menu-item 本身就是 flex 容器（EP 的默认样式），这里只需要给标题 flex: 1。
+.menu-title-text {
+  flex: 1;
+  min-width: 0;
+  // 菜单标题都很短，正常不会溢出；但面板标题可被用户改，留一手省略而不是撑破侧栏
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// 收起态：#title 插槽整体不渲染，数字角标跟着消失，只在图标右上角留一个方点。
+// 定位上下文用 el-icon 自己（下面给它 position: relative），
+// 而不是依赖 .el-menu-tooltip__trigger —— 那是 EP 的内部实现，位置和定位属性都可能变。
+.sidebar-nav :deep(.el-menu-item .el-icon) {
+  position: relative;
+}
+
+.menu-collapsed-dot {
+  // 默认不显示：只有菜单真的处于收起态（EP 给 ul 挂 .el-menu--collapse）才亮出来。
+  // 用 CSS 祖先判断而不是 v-if="isCollapsed"：移动端 isCollapsed 恒为 true，
+  // 但抽屉里的 el-menu 没传 :collapse，实际是展开的——用 JS 状态会在移动端多冒一个点。
+  display: none;
+}
+
+.sidebar-nav :deep(.el-menu--collapse) .menu-collapsed-dot {
+  display: block;
+  position: absolute;
+  // el-icon 是 18px 字号的 24px 方框，贴右上角但留 1px 不要压到图标笔画上
+  top: -1px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 0;
+  background: var(--el-color-danger);
+  // 描边取侧栏底色，让方点从图标上"浮"出来又不用阴影。
+  // 侧栏底色是 --el-bg-color（见 .layout-aside），暗色下自动跟着变。
+  border: 1.5px solid var(--el-bg-color);
+}
+
+.sidebar-nav :deep(.el-menu--collapse) .menu-collapsed-dot.is-primary {
+  background: var(--el-color-primary);
+}
+
+.sidebar-nav :deep(.el-menu--collapse) .menu-collapsed-dot.is-warning {
+  background: var(--el-color-warning);
 }
 
 .nav-section-label {
@@ -926,16 +1069,9 @@ async function loadVersion() {
 
 // 主题切换按钮的 hover 反馈与其他 header 图标按钮一致（换底色），不再额外做上浮 + 放大
 
-.notification-dot {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  width: 7px;
-  height: 7px;
-  border-radius: 0;
-  background: #f56c6c;
-  border: 1.5px solid var(--el-bg-color);
-}
+// `.notification-dot` 已删除：它是零引用的死代码（全库只有这一处样式定义，
+// 模板里从来没用过），而且背景写死 #f56c6c，暗色下不跟随令牌。
+// 菜单角标现在由上面的 .menu-collapsed-dot 承担，取色走 --el-color-danger。
 
 .header-user {
   display: flex;

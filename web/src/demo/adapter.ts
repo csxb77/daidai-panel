@@ -9,6 +9,7 @@ import {
   buildLogContent,
   buildScriptList,
   buildScriptTree,
+  buildSystemBadges,
   buildSystemStats,
   db,
   filterEnvs,
@@ -350,6 +351,8 @@ route('GET', '/system/info', () => ({
 // 这里不再写死任何常量，详见 db.ts 的 buildDashboard / buildSystemStats。
 route('GET', '/system/dashboard', (ctx) => ({ data: buildDashboard(ctx.params) }))
 route('GET', '/system/stats', () => ({ data: buildSystemStats() }))
+// 侧栏角标：同样是现算的，访客运行任务后运行中角标会真的跳动
+route('GET', '/system/badges', () => ({ data: buildSystemBadges() }))
 
 // 类型是 SystemHealthSnapshot，页面直接读 .items，走兜底体会拿到 undefined
 function healthSnapshot() {

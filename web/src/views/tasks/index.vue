@@ -12,6 +12,8 @@ import LogFileBrowser from './components/LogFileBrowser.vue'
 import ViewManager from './components/ViewManager.vue'
 import TaskCronList from './components/TaskCronList.vue'
 import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
+import DdSplitButton from '@/components/ui/DdSplitButton.vue'
+import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 import { getDisplayTaskLabels } from './taskLabels'
 import { splitTaskCommandDisplay } from './taskCommand'
 import { usePageActivity } from '@/composables/usePageActivity'
@@ -533,6 +535,49 @@ async function handlePin(task: any) {
   } catch { /* ignore */ }
 }
 
+/**
+ * 桌面表格「操作」列 Split Button 的菜单项。
+ *
+ * 按行生成而不是写成无参 computed：它要读 row.status / row.is_pinned，每行的结果都不一样。
+ * 在模板里调用等于跑在渲染 effect 内，row 的响应式字段（handleRun 里会把 status 改成 2）
+ * 与 canOperateTasks 都会被正常追踪。
+ *
+ * 「运行 / 停止」互斥且已由主体承担：空闲时主体是「运行」，运行中主体整个换成「停止」，
+ * 所以这两项在菜单里【一个都不挂】——既不会出现「停止 ▾」里还有「停止」，
+ * 也不会出现空闲状态下点得到「停止」。
+ *
+ * visible 兜的是权限：观察者（canOperateTasks=false）改造前顶层只有「实时日志」、
+ * ⋯ 里只有「详情 / 日志文件」，这里必须一模一样。观察者那一支主体已经是「实时日志」，
+ * 所以它在菜单里也要一起隐掉，否则同一个操作在一个按钮上出现两次。
+ *
+ * 「删除」不可撤销，只能待在菜单里，并且 danger + divided，绝不上主体。
+ */
+function taskActionItems(row: any): SplitButtonItem[] {
+  const op = canOperateTasks.value
+  return [
+    { key: 'toggle', label: row.status === 0 ? '启用' : '禁用', visible: op },
+    { key: 'liveLog', label: '实时日志', visible: op },
+    { key: 'edit', label: '编辑', visible: op },
+    { key: 'detail', label: '详情' },
+    { key: 'logFiles', label: '日志文件' },
+    { key: 'copy', label: '复制', visible: op },
+    { key: 'pin', label: row.is_pinned ? '取消置顶' : '置顶', visible: op },
+    { key: 'delete', label: '删除', danger: true, divided: true, visible: op },
+  ]
+}
+
+// 只是把原来每个按钮的 @click 原样接过来，逻辑不动
+function onTaskAction(key: string, row: any) {
+  if (key === 'toggle') handleToggle(row)
+  else if (key === 'liveLog') openLogViewer(row)
+  else if (key === 'edit') openEdit(row)
+  else if (key === 'detail') openDetail(row)
+  else if (key === 'logFiles') openLogFiles(row)
+  else if (key === 'copy') handleCopy(row)
+  else if (key === 'pin') handlePin(row)
+  else if (key === 'delete') handleDelete(row)
+}
+
 function handleSelectionChange(rows: any[]) {
   selectedIds.value = rows.map(r => r.id)
 }
@@ -1026,39 +1071,49 @@ async function handleImport(event: Event) {
           </template>
         </el-table-column>
         <!--
-          列宽 270：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24。
-          清掉 EP 的按钮外边距后这五个按钮实测需要 228px，270 留出 18px 余量（旧的 260 只剩 8px，太紧）。
-          按钮组一旦超出可用宽，.cell 就会变成可滚动容器，点 ⋯ 时整行按钮会被滚偏，详见下方 .action-btns 注释。
+          列宽 140：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24。
+          五个按钮 + ⋯ 收成一个 Split Button 后，最宽的形态是【观察者】那一支：
+          主体「实时日志」= 4×12px 文字 + 22px 内边距 + 2px 边框 = 72px，caret 半边 32px，合计 104px；
+          140 - 24 = 116，余量 12px。有操作权限那一支主体只有「运行 / 停止」两个字，合计 80px，余量 36px。
+          caret 是 32px 不是 24px：EP 2.13 的 el-dropdown 根节点只挂 `el-dropdown` + `is-disabled`，
+          不带 size 修饰类，所以 `.el-dropdown--small .el-dropdown__caret-button{width:24px}` 根本匹配不上，
+          size="small" 的 split button 也是 32px 的 caret —— 估宽时别按 24px 算。
+          按钮组一旦超出可用宽，.cell 就会变成可滚动容器，点 caret 时整行会被滚偏，详见下方 .action-btns 注释。
+          窄桌面（<1600px）与常规桌面按钮形态完全一致，因此两种模式共用这一个宽度。
         -->
-        <el-table-column label="操作" width="270" fixed="right" align="center">
+        <el-table-column label="操作" width="140" fixed="right" align="center">
           <template #default="{ row }">
             <div class="action-btns">
-              <el-button v-if="canOperateTasks && row.status !== 2" type="primary" text size="small" @click="handleRun(row)">运行</el-button>
-              <el-button v-else-if="canOperateTasks" type="warning" text size="small" @click="handleStop(row)">停止</el-button>
-              <el-button v-if="canOperateTasks" :type="row.status === 0 ? 'success' : 'danger'" text size="small" @click="handleToggle(row)">
-                {{ row.status === 0 ? '启用' : '禁用' }}
-              </el-button>
-              <el-button text size="small" @click="openLogViewer(row)">实时日志</el-button>
-              <el-button v-if="canOperateTasks" text size="small" @click="openEdit(row)">编辑</el-button>
-              <!-- 触发器贴在表格最右侧，默认的 bottom 是居中对齐，菜单右半边会探出表格。
-                   bottom-end 让菜单右对齐触发器，正常情况下整块都落在表格内。
-                   注意 EP 在 dropdown.vue 里写死了 fallback-placements: ['bottom','top']，
-                   靠近视口底部、bottom-end 放不下时仍会退回居中的 top —— 这属于 EP 限制，
-                   但配合上面收窄后的按钮组，那种情况下菜单也只是略微探出表格，不会再被顶到窗口边。 -->
-              <el-dropdown trigger="click" placement="bottom-end">
-                <el-button text size="small"><el-icon><More /></el-icon></el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item @click="openDetail(row)">详情</el-dropdown-item>
-                    <el-dropdown-item @click="openLogFiles(row)">日志文件</el-dropdown-item>
-                    <el-dropdown-item v-if="canOperateTasks" @click="handleCopy(row)">复制</el-dropdown-item>
-                    <el-dropdown-item v-if="canOperateTasks" @click="handlePin(row)">{{ row.is_pinned ? '取消置顶' : '置顶' }}</el-dropdown-item>
-                    <el-dropdown-item v-if="canOperateTasks" divided @click="handleDelete(row)">
-                      <span style="color: var(--el-color-danger)">删除</span>
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+              <!-- 主体是「运行」，任务运行中（status===2）整个换成「停止」：两者互斥，谁上了主体谁就不在
+                   菜单里出现，不会有「停止 ▾」点开还挂着「停止」这种事。
+                   主体敢放运行/停止，是因为 handleRun / handleStop 各自都带 ElMessageBox 二次确认，
+                   点错的代价是按一下 Esc；删除不可撤销，所以它只能待在菜单里（danger + divided）。
+
+                   触发器贴在表格最右侧，DdSplitButton 默认 placement="bottom-end" 让菜单右对齐触发器。
+                   EP 在 dropdown.vue 里把 fallback-placements 写死成 ['bottom','top']（2.13.5 仍是如此，
+                   props 覆盖不掉），靠近视口底部放不下时仍会退回居中的 top —— 这属于 EP 限制；
+                   但按钮组已从 228px 收到 80px，就算退回居中，菜单也只在表格内挪一点，不会被顶到窗口边。 -->
+              <DdSplitButton
+                v-if="canOperateTasks"
+                :label="row.status === 2 ? '停止' : '运行'"
+                :type="row.status === 2 ? 'warning' : 'primary'"
+                size="small"
+                :items="taskActionItems(row)"
+                @click="row.status === 2 ? handleStop(row) : handleRun(row)"
+                @command="(key: string) => onTaskAction(key, row)"
+              />
+              <!-- 观察者：运行/停止/启用/编辑/复制/置顶/删除全部无权（handler 里 ensureCanOperate 会直接拦下），
+                   主体只能给只读操作。改造前这一档顶层唯一的按钮就是「实时日志」，层级原样保留；
+                   菜单里剩下的也仍然只有「详情 / 日志文件」，由 taskActionItems 的 visible 联动。 -->
+              <DdSplitButton
+                v-else
+                label="实时日志"
+                type="default"
+                size="small"
+                :items="taskActionItems(row)"
+                @click="openLogViewer(row)"
+                @command="(key: string) => onTaskAction(key, row)"
+              />
             </div>
           </template>
         </el-table-column>
@@ -1360,12 +1415,16 @@ async function handleImport(event: Event) {
   // 于是 .cell（EP 给的 overflow:hidden）变成可滚动容器 —— 点最右边的 ⋯ 时浏览器会把获得焦点的
   // 按钮滚进可视区，整行按钮左移、最左边的「运行」被裁掉且不会自动复位。
   // 间距统一交给 gap，这里把这份外边距清零；顺带修掉「前四个按钮间距 16px、编辑与 ⋯ 之间只有 4px」的不一致。
+  //
+  // 这五个按钮 + ⋯ 现在收成了一个 DdSplitButton，这条规则对它是空转（EP 的 el-button-group
+  // 本来就把组内相邻按钮的 margin-left 归零）。保留的理由有两条：上面这段是「操作列为什么会自己
+  // 横向滚起来」的唯一记录；以及哪天又往这一格里塞第二个按钮时，这个坑不用重新踩一遍。
+  //
+  // 原来这里还有一条 `:deep(.el-button) { padding: 4px 8px }`，是当年硬挤五个文字按钮才加的。
+  // 现在只剩一个实心 Split Button，压内边距只会让它显得局促，已经去掉，改回 EP small 档默认的
+  // 5px 11px —— 与 Open API 页的同款按钮保持一致，列宽估算也按这个默认值算。
   :deep(.el-button + .el-button) {
     margin-left: 0;
-  }
-
-  :deep(.el-button) {
-    padding: 4px 8px;
   }
 }
 

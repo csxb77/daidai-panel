@@ -82,11 +82,34 @@ export interface ConfigScriptPayload {
   path: string
 }
 
+/**
+ * 侧栏菜单角标的计数来源（GET /system/badges）。
+ *
+ * 服务端按角色裁剪：viewer 拿不到 subs_*，operator 拿不到 deps_*，
+ * 无权项一律返回 0 而不是缺字段，所以这里全部声明为必填。
+ *
+ * 注意这里【没有】「有新版本」——检查更新每次都要打一发 GitHub 外网请求且无缓存，
+ * 不能放进轮询接口。面板更新角标由 store 复用已发生的 checkUpdate 结果，见 stores/badges.ts。
+ */
+export interface SystemBadges {
+  /** 正在运行的任务数 */
+  tasks_running: number
+  /** 今日失败的执行日志数 */
+  logs_failed_today: number
+  /** 最近一次拉取失败的订阅数 */
+  subs_failed: number
+  /** 安装失败的依赖数 */
+  deps_failed: number
+  /** 排队中 / 安装中 / 卸载中的依赖数合计 */
+  deps_installing: number
+}
+
 export const systemApi = {
   info: () => request.get('/system/info'),
   machineCode: () => request.get('/system/machine-code'),
   dashboard: (range?: number) => request.get('/system/dashboard', { params: range ? { range } : undefined }),
   stats: () => request.get('/system/stats'),
+  badges: () => request.get('/system/badges') as Promise<{ data: SystemBadges }>,
   version: () => request.get('/system/version'),
   publicVersion: () => request.get('/system/public-version'),
   panelSettings: () => request.get('/system/panel-settings'),

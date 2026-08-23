@@ -4,6 +4,8 @@ import { notificationApi, type NotifyChannelDefinition, type NotifyFieldDefiniti
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Bell, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
+import { extractError, isCancel } from '@/utils/error'
+import { toast } from '@/utils/toast'
 
 const { isMobile, dialogFullscreen } = useResponsive()
 
@@ -305,7 +307,14 @@ async function handleDeleteChannel(id: number) {
     await notificationApi.delete(id)
     ElMessage.success('删除成功')
     loadChannels()
-  } catch { /* cancelled */ }
+  } catch (err) {
+    // 这里原来是裸 `catch { /* cancelled */ }`，把两件完全不同的事混成了一件：
+    // 用户在确认框点「取消」，和「点了确定但删除接口真的失败了」，走的是同一个分支。
+    // 后果是删除失败时界面上一点反馈都没有，渠道还在列表里，用户只会以为自己没点到。
+    // 必须先用 isCancel() 摘掉取消，剩下的才是真错误。
+    if (isCancel(err)) return
+    ElMessage.error(extractError(err, '删除失败'))
+  }
 }
 
 async function handleToggleChannel(row: any) {
@@ -325,9 +334,11 @@ async function handleToggleChannel(row: any) {
     }
     ElMessage.success(row.enabled ? '已禁用' : '已启用')
     loadChannels()
-  } catch (err: any) {
-    if (err === 'cancel' || err?.toString?.() === 'cancel') return
-    ElMessage.error(err?.response?.data?.error || '操作失败')
+  } catch (err) {
+    // 手写的 `err === 'cancel'` 漏了 'close'（点右上角 × 关闭确认框时 EP reject 的是它），
+    // 那种情况下会弹一条没有意义的「操作失败」。统一走 isCancel()。
+    if (isCancel(err)) return
+    ElMessage.error(extractError(err, '操作失败'))
   }
 }
 
@@ -340,11 +351,22 @@ async function handleTestChannel(id: number) {
     const data = e?.response?.data
     const mainError = data?.error || '测试发送失败'
     const detail = data?.detail || data?.message || e?.message
+
     if (detail && detail !== mainError) {
-      ElMessageBox.alert(String(detail), mainError, {
-        confirmButtonText: '知道了',
-        type: 'error',
-      }).catch(() => {})
+      // 这里原来直接弹 ElMessageBox.alert：一次「测试」失败就把整个界面挡住、
+      // 必须点「知道了」才能继续。测试渠道往往要连着试好几个，很打断。
+      // 改成带操作的轻提示——一眼看到失败原因，想看服务端返回的长详情再点开。
+      toast.error(mainError, {
+        action: {
+          text: '查看详情',
+          handler: () => {
+            ElMessageBox.alert(String(detail), mainError, {
+              confirmButtonText: '知道了',
+              type: 'error',
+            }).catch(() => {})
+          },
+        },
+      })
     } else {
       ElMessage.error(mainError)
     }
@@ -869,6 +891,11 @@ function getChannelConfigSummary(row: any): string[] {
 
 .action-btns {
   display: flex; align-items: center; justify-content: center; gap: 2px;
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在上面的 gap 上，
+  // 实际间距变成 14px 而不是设计的 2px。间距统一交给 gap
+  // （与 tasks / deps / subscriptions 三页一致）。
+  :deep(.el-button + .el-button) { margin-left: 0; }
 }
 
 // 分页条：与定时任务页/订阅管理页一致的间距收敛

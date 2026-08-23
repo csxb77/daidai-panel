@@ -511,6 +511,21 @@ export function filterLogs(params: Record<string, string>): DemoTaskLog[] {
     })
   }
 
+  // 执行时间范围，对齐 server/handler/log.go 的 start_time / end_time（RFC3339，闭区间）。
+  // 服务端筛的是 created_at；Demo 这边 created_at 就等于 started_at（见 toLogDict 的注释），
+  // 所以直接拿 started_at 比就行，语义一致。
+  //
+  // 演示站必须真的能筛：一个点了没反应的日期选择器比没有这个功能更糟——
+  // 访客会以为面板本身有问题。
+  const startTime = Date.parse((params['start_time'] ?? '').trim())
+  if (Number.isFinite(startTime)) {
+    rows = rows.filter((log) => new Date(log.started_at).getTime() >= startTime)
+  }
+  const endTime = Date.parse((params['end_time'] ?? '').trim())
+  if (Number.isFinite(endTime)) {
+    rows = rows.filter((log) => new Date(log.started_at).getTime() <= endTime)
+  }
+
   // 服务端是 started_at DESC；state.logs 本身就按这个顺序存，这里只在过滤后保持它
   return rows
 }
@@ -659,6 +674,34 @@ export function buildSystemStats(): Record<string, unknown> {
     scripts: {
       total: current.scriptFiles.length,
     },
+  }
+}
+
+/**
+ * GET /system/badges 的响应体（不含外层 `data`）。
+ * 字段清单对齐 server/handler/system_badges.go。
+ *
+ * 同样遵守本文件「只算不写死」的规矩：五个数字全部从 tasks / logs / subscriptions / deps
+ * 现算。演示站的角标必须跟着 Demo 数据走 —— 访客点「运行任务」之后，侧栏的运行中角标
+ * 要真的 +1，写死常量就演不出这个联动。
+ *
+ * 服务端会按角色裁剪（viewer 看不到订阅/依赖），Demo 的账号恒为管理员，所以这里全量返回。
+ */
+export function buildSystemBadges(): Record<string, number> {
+  const current = db()
+  const todayStart = startOfLocalDay(Date.now())
+
+  return {
+    tasks_running: current.tasks.filter((task) => task.status === TASK_STATUS_RUNNING).length,
+    logs_failed_today: current.logs.filter(
+      (log) => log.status === LOG_STATUS_FAILED && new Date(log.started_at).getTime() >= todayStart
+    ).length,
+    // 订阅 status：0 成功 / 1 失败，与 server/service/subscription.go 的写入一致
+    subs_failed: current.subscriptions.filter((sub) => sub.status === 1).length,
+    deps_failed: current.deps.filter((dep) => dep.status === 'failed').length,
+    deps_installing: current.deps.filter((dep) =>
+      dep.status === 'queued' || dep.status === 'installing' || dep.status === 'removing'
+    ).length,
   }
 }
 

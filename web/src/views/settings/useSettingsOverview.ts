@@ -1,10 +1,16 @@
 import { onBeforeUnmount, ref } from 'vue'
 import { configApi, systemApi, type PanelUpdateStatus } from '@/api/system'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useBadgesStore } from '@/stores/badges'
+import { toast } from '@/utils/toast'
 
 type UpdateVisualStatus = 'idle' | 'running' | 'restarting' | 'completed' | 'failed' | 'timeout'
 
 export function useSettingsOverview() {
+  // 「有新版本」这一项刻意不放进 /system/badges：检查更新每次都要打一发 GitHub
+  // 外网请求且服务端没有缓存，挂进 30s 轮询等于替用户持续刷 GitHub。
+  // 改由本页在真正调用过 checkUpdate 之后把结果回填给 store，侧栏角标随之亮起。
+  const badgesStore = useBadgesStore()
   const systemInfo = ref<any>({})
   const systemStats = ref<any>(null)
   const currentVersion = ref('')
@@ -88,6 +94,9 @@ export function useSettingsOverview() {
     try {
       const res = await systemApi.checkUpdate()
       updateInfo.value = res.data
+      // 回填侧栏角标。放在拿到结果之后、任何分支之前，
+      // 「已是最新」也要回填（false），否则更新完角标会一直亮着。
+      badgesStore.noteUpdateAvailable(Boolean(res.data?.has_update))
       const now = new Date().toISOString()
       lastCheckTime.value = now
       void configApi.set({ key: 'auto_update_last_checked_at', value: now }).catch(() => {})
@@ -426,7 +435,11 @@ export function useSettingsOverview() {
         }
         if (attempts >= 60) {
           stopRestartPolling()
-          ElMessage.warning('重启超时，请手动刷新页面')
+          // 原来是一条「请手动刷新页面」的纯文本提示：把动作说出来了，却要用户自己去按 F5。
+          // 面板重启后大概率已经好了，只是探针没赶上——直接给一个按钮。
+          toast.warning('重启超时，面板可能已经起来了', {
+            action: { text: '立即刷新', handler: () => window.location.reload() },
+          })
         }
       }, 2000)
     }, 3000)
@@ -463,7 +476,9 @@ export function useSettingsOverview() {
           updateProgressStatus.value = 'timeout'
           updateProgressError.value = '等待新版本启动超时，请稍后手动刷新页面检查'
           updatingPanel.value = false
-          ElMessage.warning('等待新版本启动超时，请手动刷新页面检查')
+          toast.warning('等待新版本启动超时', {
+            action: { text: '立即刷新', handler: () => window.location.reload() },
+          })
           return
         }
 

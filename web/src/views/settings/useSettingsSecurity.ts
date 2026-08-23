@@ -6,6 +6,7 @@ import { authApi } from '@/api/auth'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { createQrCodeDataUrl } from '@/utils/qrcode'
+import { toast } from '@/utils/toast'
 
 const backupUploadMaxSize = 512 * 1024 * 1024
 
@@ -411,7 +412,11 @@ export function useSettingsSecurity() {
           restoreProgressStatus.value = 'restart-timeout'
           restoreProgressMessage.value = '恢复已经完成，但暂时还没有检测到面板重新上线。'
           restoreProgressError.value = '重启等待超时，请稍后手动刷新页面，或检查容器/反向代理是否仍在重建。'
-          ElMessage.warning('重启超时，请稍后手动刷新页面')
+          // 与 useSettingsOverview 的两处超时保持一致：把「请手动刷新」变成一个能点的按钮。
+          // 恢复完成后面板往往已经起来了，只是探针没赶上，用户不该还要自己去按 F5。
+          toast.warning('重启超时，面板可能已经起来了', {
+            action: { text: '立即刷新', handler: () => window.location.reload() },
+          })
         }
       }, 2000)
     }, 3000)

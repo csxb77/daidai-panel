@@ -23,6 +23,36 @@ func NewLogHandler() *LogHandler {
 	return &LogHandler{}
 }
 
+// parseQueryTime 解析 query string 里的 RFC3339 时间，解析不出来就返回 ok=false。
+//
+// 【为什么要把空格换回加号再试一次】
+// RFC3339 的东八区偏移写作 `+08:00`，而 `+` 在 application/x-www-form-urlencoded
+// 的 query string 里是【空格的转义】。调用方只要没把参数 percent-encode（手写 curl、
+// 拼 URL 的脚本、Open API 的第三方调用方都很容易这样），服务端 c.Query 拿到的就是
+// `2026-08-17T00:00:00 08:00`，time.Parse 直接失败，筛选条件被静默忽略——
+// 接口照样 200、照样返回数据，只是过滤没生效，排查起来毫无线索。
+//
+// 前端走 axios 的 params，会正确编码成 %2B，不依赖这条容错；
+// 它是给手工调用方兜底的。UTC 的 `Z` 后缀不受影响。
+//
+// 解析失败一律返回 ok=false 而不是报 400：日期筛选是附加能力，
+// 因为一个畸形参数就让整个日志页打不开，代价不对等。
+func parseQueryTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	if strings.Contains(raw, " ") {
+		if t, err := time.Parse(time.RFC3339, strings.ReplaceAll(raw, " ", "+")); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
 func (h *LogHandler) List(c *gin.Context) {
 	taskIDStr := c.Query("task_id")
 	statusStr := c.Query("status")
@@ -52,6 +82,24 @@ func (h *LogHandler) List(c *gin.Context) {
 	}
 	if keyword != "" {
 		query = query.Where("tasks.name LIKE ?", "%"+keyword+"%")
+	}
+
+	// 执行时间范围筛选。前端传 RFC3339（web/src/utils/datetime.ts 的 toDateRangeParams），
+	// 两端都已经在前端收拢到「当天 00:00:00.000 ~ 23:59:59.999」，这里直接闭区间比较。
+	//
+	// 【为什么筛 created_at 而不是 started_at】
+	// 列表里给用户看的那一列就是 created_at（web/src/views/logs/index.vue 的时间列），
+	// 侧栏「今日失败」角标数的也是 created_at。筛选口径必须跟用户看到的东西一致，
+	// 否则会出现「明明列表里写着 8-23，按 8-23 筛却少了几条」这种没法解释的现象。
+	// 排序仍沿用 started_at DESC，不在本次改动范围内。
+	//
+	// 解析失败一律忽略该条件，不报 400：日期筛选是锦上添花的能力，
+	// 因为一个畸形参数就让整个日志页打不开，代价不对等。
+	if t, ok := parseQueryTime(c.Query("start_time")); ok {
+		query = query.Where("task_logs.created_at >= ?", t)
+	}
+	if t, ok := parseQueryTime(c.Query("end_time")); ok {
+		query = query.Where("task_logs.created_at <= ?", t)
 	}
 
 	var total int64

@@ -197,32 +197,23 @@
 
     <div class="toolbar">
       <div class="toolbar__left">
-        <el-button
+        <!-- 原来这里平铺 5 个按钮（新增依赖 / 刷新 / 批量重装 / 导出清单 / 镜像源设置），
+             主次不分、横着吃掉半条工具条。改成 Split Button：
+             主体是「新增依赖」——它只打开一个弹窗，是这 5 个里点错代价最小的一个；
+             其余 4 项收进菜单。原按钮的 :loading 在菜单项里没有对应表达，
+             降级成 disabled（见 toolbarActionItems），避免刷新/导出进行中被重复点。 -->
+        <DdSplitButton
+          label="新增依赖"
+          :icon="Plus"
           type="primary"
+          size="default"
+          :items="toolbarActionItems"
           @click="
             createType = activeTab;
             showCreateDialog = true;
           "
-        >
-          <el-icon><Plus /></el-icon> 新增依赖
-        </el-button>
-        <el-button @click="loadData" :loading="loading">
-          <el-icon><Refresh /></el-icon> 刷新
-        </el-button>
-        <el-button
-          type="warning"
-          plain
-          @click="handleBatchReinstall"
-          :disabled="batchReinstallIds.length === 0"
-        >
-          <el-icon><RefreshRight /></el-icon> 批量重装
-        </el-button>
-        <el-button @click="handleExport" :loading="exporting">
-          <el-icon><Download /></el-icon> 导出清单
-        </el-button>
-        <el-button @click="openMirrorDialog">
-          <el-icon><Setting /></el-icon> 镜像源设置
-        </el-button>
+          @command="onToolbarAction"
+        />
       </div>
       <div class="toolbar__right">
         <el-select
@@ -483,50 +474,31 @@
             }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="176" fixed="right" align="center">
+        <!-- 原来是「详情 + 取消/重装 + 更多▾」的手工版 split button：三个 text 按钮
+             靠 .action-btns 的 gap 拼出来，还得把按钮压到 26px 才塞得进 176px。
+             换成真正的 DdSplitButton 后只剩一个按钮组。
+             宽度是【浏览器实测】的，不是估的（估算口诀在 caret 那一项上会算小）：
+               主体「详情」42px（2×12 文字 + 本页 .action-btns 覆盖的 8px×2 内边距 + 2px 边框）
+               caret     32px  ← 不是 24px。EP 的 `.el-dropdown--small .el-dropdown__caret-button
+                                { width: 24px }` 命中不了：el-dropdown 根节点只挂
+                                `el-dropdown` + `is-disabled`，不带 size 修饰类，
+                                所以 size="small" 的 caret 实际吃的是基础档 32px。
+               合计 42 + 32 − 1（button-group 的 -1px 负边距）= 73px
+             .el-table .cell 是 padding:0 12px，可用内容宽 = 列宽 − 24。
+             列宽 176 → 110（可用 86px，余量 13px，与环境变量页同口径）。
+             最初改成 100 时余量只剩 3px，够是够，但把「详情」改成任何 3 字标签就会溢出，
+             而 .cell 一溢出就会变成可滚动容器、点按钮时整行左移且不复位。 -->
+        <el-table-column label="操作" width="110" fixed="right" align="center">
           <template #default="{ row }">
             <div class="action-btns">
-              <el-button type="primary" text size="small" @click="viewLog(row)"
-                >详情</el-button
-              >
-              <el-button
-                v-if="row.status === 'installing' || row.status === 'removing'"
-                type="warning"
-                text
+              <DdSplitButton
+                label="详情"
+                type="primary"
                 size="small"
-                @click="handleCancel(row)"
-                >取消</el-button
-              >
-              <el-button
-                v-else
-                type="warning"
-                text
-                size="small"
-                @click="handleReinstall(row)"
-                :disabled="isProcessing(row.status)"
-                >重装</el-button
-              >
-              <el-dropdown trigger="click" placement="bottom-end">
-                <el-button text size="small" class="action-more-btn">
-                  更多
-                  <el-icon><ArrowDown /></el-icon>
-                </el-button>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item
-                      @click="handleDelete(row)"
-                      :disabled="isProcessing(row.status)"
-                      >卸载</el-dropdown-item
-                    >
-                    <el-dropdown-item
-                      @click="handleForceDelete(row)"
-                      :disabled="isProcessing(row.status)"
-                    >
-                      <span class="danger-dropdown-text">强制卸载</span>
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
+                :items="depActionItems(row)"
+                @click="viewLog(row)"
+                @command="(key: string) => onDepAction(key, row)"
+              />
             </div>
           </template>
         </el-table-column>
@@ -824,7 +796,6 @@ import {
 } from "@/api/androidRuntime";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
-  ArrowDown,
   Box,
   Cpu,
   Delete,
@@ -835,6 +806,8 @@ import {
   Search,
   Setting,
 } from "@element-plus/icons-vue";
+import DdSplitButton from "@/components/ui/DdSplitButton.vue";
+import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
 import {
   openAuthorizedEventStream,
   type EventStreamConnection,
@@ -997,6 +970,85 @@ const batchReinstallRows = computed(() =>
 const batchReinstallIds = computed(() =>
   batchReinstallRows.value.map((dep) => dep.id),
 );
+
+/**
+ * 工具栏 Split Button 的菜单项。
+ *
+ * 主体是「新增依赖」（写在模板上），它只打开弹窗，点错了不产生任何副作用。
+ * 「批量重装」是这一组里唯一会立刻对多行下手的写操作，用 divided 与三个
+ * 只读/设置类操作隔开；它不是不可撤销操作，所以不标 danger。
+ * 必须是 computed：刷新/导出的进行中状态和「有没有可重装的选中项」都会变。
+ */
+const toolbarActionItems = computed<SplitButtonItem[]>(() => [
+  { key: "refresh", label: "刷新", icon: Refresh, disabled: loading.value },
+  {
+    key: "export",
+    label: "导出清单",
+    icon: Download,
+    disabled: exporting.value,
+  },
+  { key: "mirror", label: "镜像源设置", icon: Setting },
+  {
+    key: "batch-reinstall",
+    label: "批量重装",
+    icon: RefreshRight,
+    divided: true,
+    disabled: batchReinstallIds.value.length === 0,
+  },
+]);
+
+function onToolbarAction(key: string) {
+  if (key === "refresh") loadData();
+  else if (key === "export") handleExport();
+  else if (key === "mirror") openMirrorDialog();
+  else if (key === "batch-reinstall") handleBatchReinstall();
+}
+
+/**
+ * 操作列 Split Button 的菜单项，按行状态生成。
+ *
+ * 主体固定是「详情」——只打开日志弹窗，六种状态下都可用、点错零代价。
+ * 「取消 / 重装」互斥：只有 installing / removing 能取消（服务端对 queued 的
+ * Cancel 直接返回 400），所以用 visible 联动，绝不会出现「安装中的行菜单里
+ * 同时挂着取消和重装」。queued 行仍然显示重装但禁用，与改造前一致。
+ * 「卸载 / 强制卸载」不可撤销，只能待在菜单里并标红；divided 只加在危险组的
+ * 第一项，用一条分隔线把这两项整体隔开——两项都加会在它们中间再画一条线，
+ * 反而把同一组危险操作拆散。
+ */
+function depActionItems(row: any): SplitButtonItem[] {
+  const cancellable = row.status === "installing" || row.status === "removing";
+  const processing = isProcessing(row.status);
+  return [
+    { key: "cancel", label: "取消", visible: cancellable },
+    {
+      key: "reinstall",
+      label: "重装",
+      visible: !cancellable,
+      disabled: processing,
+    },
+    {
+      key: "delete",
+      label: "卸载",
+      danger: true,
+      divided: true,
+      disabled: processing,
+    },
+    {
+      key: "force-delete",
+      label: "强制卸载",
+      danger: true,
+      disabled: processing,
+    },
+  ];
+}
+
+function onDepAction(key: string, row: any) {
+  if (key === "cancel") handleCancel(row);
+  else if (key === "reinstall") handleReinstall(row);
+  else if (key === "delete") handleDelete(row);
+  else if (key === "force-delete") handleForceDelete(row);
+}
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 const { isMobile, dialogFullscreen } = useResponsive();
 const { isPageActive } = usePageActivity();
@@ -1914,6 +1966,13 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--el-text-color-regular);
 }
+// 操作列按钮组。
+// 尺寸口径变更：原来这里把按钮压到 height:26px / padding:0 5px / font-size:12px，
+// 比全站其它页（定时任务页/执行日志页/订阅页的 padding:4px 8px）更紧一档——那是为了在
+// 176px 列宽里硬塞下「详情 + 取消/重装 + 更多▾」三个按钮。现在整列只剩一个 Split Button，
+// 不需要再压，统一回其它页的 padding: 4px 8px；列宽估算（详情 40px + caret 24px）也按这个口径算。
+// .action-more-btn（手写 caret 的 gap）和 .danger-dropdown-text（手写红色强制卸载）
+// 随手工版一起删除：前者由 DdSplitButton 自带的 caret 半边取代，后者由 item.danger 取代。
 .action-btns {
   display: flex;
   align-items: center;
@@ -1921,26 +1980,17 @@ onBeforeUnmount(() => {
   gap: 4px;
   min-width: 0;
 
-  :deep(.el-button) {
-    height: 26px;
-    padding: 0 5px;
-    margin-left: 0;
-    font-size: 12px;
+  // caret 半边保持 EP 自己的窄内边距（--small 档约 24px 宽），
+  // 一起套 8px 会把它撑宽，列宽余量随之失准。
+  :deep(.el-button:not(.el-dropdown__caret-button)) {
+    padding: 4px 8px;
   }
 
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }`，split button 的两个半边
+  // 正是相邻的 el-button，不清零会在按钮组中间裂开一道 12px。
   :deep(.el-button + .el-button) {
     margin-left: 0;
   }
-}
-
-.action-more-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-}
-
-.danger-dropdown-text {
-  color: var(--el-color-danger);
 }
 
 // ---------- Pagination ----------
@@ -2085,16 +2135,13 @@ onBeforeUnmount(() => {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
+    // 原来是「5 个按钮排两列网格 + 每个按钮 width:100%」。现在左区只剩一个 Split Button，
+    // 两列网格会把它压成半行宽；而 `:deep(.el-button){width:100%}` 会让它的主体与 caret
+    // 两个半边各自撑到按钮组的 100%，直接溢出。改回单行 flex，按钮取自身自然宽度。
     &__left {
       width: 100%;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      display: flex;
       gap: 8px;
-
-      :deep(.el-button) {
-        width: 100%;
-        margin-left: 0;
-      }
     }
     &__right {
       flex-direction: column;

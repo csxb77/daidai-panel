@@ -429,7 +429,14 @@ function getRoleName(role: string) {
 .user-name-text { font-weight: 500; color: var(--el-text-color-primary); }
 .text-secondary { color: var(--el-text-color-secondary); }
 .time-text { font-family: var(--dd-font-mono); font-size: 12px; color: var(--el-text-color-regular); }
-.action-btns { display: flex; align-items: center; justify-content: center; gap: 2px; }
+.action-btns {
+  display: flex; align-items: center; justify-content: center; gap: 2px;
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在上面的 gap 上，
+  // 实际间距变成 14px 而不是设计的 2px。间距统一交给 gap
+  // （与 tasks / deps / subscriptions 三页一致）。
+  :deep(.el-button + .el-button) { margin-left: 0; }
+}
 .user-card__actions > * { flex: 1 1 calc(50% - 4px); }
 
 // 分页条：与定时任务页/订阅管理页一致的间距收敛

@@ -11,6 +11,11 @@ import { useResponsive } from '@/composables/useResponsive'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
 import { formatDuration } from '@/utils/duration'
+import { toDateRangeParams } from '@/utils/datetime'
+import { Download } from '@element-plus/icons-vue'
+import DdDateRangePicker from '@/components/ui/DdDateRangePicker.vue'
+import DdSplitButton from '@/components/ui/DdSplitButton.vue'
+import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE, type TerminalLineBuffer } from '@/utils/ansi'
 import { downloadTextAsFile, foldedLogDownloadName, startRawLogDownload } from '@/utils/rawLogDownload'
 
@@ -22,6 +27,13 @@ const page = ref(1)
 const pageSize = ref(20)
 const statusFilter = ref<string>('')
 const keyword = ref('')
+/**
+ * 执行时间范围筛选。
+ * 两端的时分秒由 toDateRangeParams 统一收拢到「起始日 00:00:00 ~ 结束日 23:59:59.999」，
+ * 服务端按 created_at 闭区间过滤——与表格里那一列显示的字段是同一个，
+ * 不会出现「列表写着 8-23，按 8-23 筛却少几条」。
+ */
+const dateRange = ref<[Date, Date] | null>(null)
 const loading = ref(false)
 const detailVisible = ref(false)
 const detailLog = ref<any>(null)
@@ -148,6 +160,7 @@ async function loadLogs() {
     if (routeTaskId.value) params.task_id = routeTaskId.value
     if (statusFilter.value !== '') params.status = statusFilter.value
     if (keyword.value) params.keyword = keyword.value
+    Object.assign(params, toDateRangeParams(dateRange.value))
     const res = await logApi.list(params)
     logs.value = res.data
     total.value = res.total
@@ -379,6 +392,42 @@ async function downloadCurrentRawLogFile() {
   }
 }
 
+/**
+ * 详情弹窗底部的「下载 ▾」菜单。
+ *
+ * 主体是 downloadCurrentLog（折叠后）——它对任何一条日志都可用，内容与页面所见一致，
+ * 而且只落一份前端已有的文本，点错了代价最小。
+ * 「下载原始日志」进菜单：它只对落盘的日志有效，且是服务端直传磁盘全文，
+ * 误点可能凭空拉一个几百 MB 的下载。
+ *
+ * 不可用的原因原本写在按钮 title 里（要悬停才看得见），收进菜单后改写进 label——
+ * 菜单项没有 title，禁用又不给理由等于没给。
+ */
+const detailDownloadItems = computed<SplitButtonItem[]>(() => [
+  {
+    key: 'raw',
+    label: detailHasRawFile.value ? '下载原始日志' : '下载原始日志（无原始文件）',
+    disabled: !detailHasRawFile.value || rawDownloading.value,
+  },
+])
+
+function onDetailDownload(key: string) {
+  if (key === 'raw') void downloadCurrentRawLog()
+}
+
+// 日志文件预览弹窗底部的「下载 ▾」，与详情弹窗同构：主体折叠后，原始字节进菜单
+const fileDownloadItems = computed<SplitButtonItem[]>(() => [
+  {
+    key: 'raw',
+    label: '下载原始文件',
+    disabled: !fileContentSource.value || rawDownloading.value,
+  },
+])
+
+function onFileDownload(key: string) {
+  if (key === 'raw') void downloadCurrentRawLogFile()
+}
+
 async function copyCurrentLog() {
   if (!detailHasContent.value) {
     ElMessage.warning('暂无内容可复制')
@@ -587,6 +636,18 @@ onBeforeUnmount(() => {
         <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
           <template #prefix><el-icon><Search /></el-icon></template>
         </el-input>
+        <!-- 执行时间范围。inline 模式让快捷项与选择器同排，不把工具栏撑成两行。
+             disableFuture：日志是已经发生过的事，选到明天必然是空结果，
+             与其让用户以为筛选坏了，不如直接禁掉未来日期。 -->
+        <DdDateRangePicker
+          v-model="dateRange"
+          inline
+          size="default"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          class="toolbar__date"
+          @change="handleSearch"
+        />
       </div>
       <div class="toolbar__right">
         <el-button
@@ -797,22 +858,24 @@ onBeforeUnmount(() => {
             <el-icon><DocumentCopy /></el-icon>
             <span>复制</span>
           </el-button>
-          <el-button
+          <!-- 原来「下载（折叠后）」与「下载原始日志」并排、同图标、同字号、都以「下载」开头，
+               唯一的区别写在 title 里——不悬停就分不清，点错的概率极高。
+               合成 Split Button：主体是折叠后（与页面所见一致、任何日志都可用），原始日志进菜单。
+               整体 disabled 只在【两种都下不了】时才给：EP 的 split-button 会把主按钮和 caret
+               一起禁用，若绑成 !detailHasContent，主体不可用时会连菜单里的原始日志一起塌掉。
+               主体自身「无内容」的守卫本来就在 downloadCurrentLog 里，行为不变。
+               placement 用 top-end：footer 贴着弹窗底边，往下弹必然触发 flip。 -->
+          <DdSplitButton
+            label="下载"
+            type="default"
+            size="default"
+            :icon="Download"
+            placement="top-end"
+            :items="detailDownloadItems"
+            :disabled="!detailHasContent && !detailHasRawFile"
             @click="downloadCurrentLog"
-            :disabled="!detailHasContent"
-            title="下载当前看到的内容：进度条帧的回车符已折叠成单行，与页面显示一致"
-          >
-            <el-icon><Download /></el-icon>
-            <span>下载（折叠后）</span>
-          </el-button>
-          <el-button
-            @click="downloadCurrentRawLog"
-            :disabled="!detailHasRawFile || rawDownloading"
-            :title="detailHasRawFile ? '由服务端直传磁盘上的原始日志文件，逐字节保留回车符与终端控制序列' : '这条日志的内容存在数据库里，没有独立的原始日志文件'"
-          >
-            <el-icon><Download /></el-icon>
-            <span>下载原始日志</span>
-          </el-button>
+            @command="onDetailDownload"
+          />
           <el-button type="primary" @click="detailVisible = false">关闭</el-button>
         </div>
       </template>
@@ -862,22 +925,18 @@ onBeforeUnmount(() => {
 
       <template #footer>
         <div class="detail-footer">
-          <el-button
+          <!-- 与详情弹窗同一处病灶：两个「下载…」并排。同样合成 Split Button，主体折叠后 -->
+          <DdSplitButton
+            label="下载"
+            type="default"
+            size="default"
+            :icon="Download"
+            placement="top-end"
+            :items="fileDownloadItems"
+            :disabled="!fileHasContent && !fileContentSource"
             @click="downloadCurrentLogFile"
-            :disabled="!fileHasContent"
-            title="下载当前看到的内容：进度条帧的回车符已折叠成单行，与页面显示一致"
-          >
-            <el-icon><Download /></el-icon>
-            <span>下载（折叠后）</span>
-          </el-button>
-          <el-button
-            @click="downloadCurrentRawLogFile"
-            :disabled="!fileContentSource || rawDownloading"
-            title="由服务端直传这个日志文件的原始字节，回车符与终端控制序列一个不少"
-          >
-            <el-icon><Download /></el-icon>
-            <span>下载原始文件</span>
-          </el-button>
+            @command="onFileDownload"
+          />
           <el-button type="primary" @click="showFileContent = false">关闭</el-button>
         </div>
       </template>
@@ -1045,6 +1104,15 @@ onBeforeUnmount(() => {
 
   :deep(.el-button) {
     padding: 4px 8px;
+  }
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在上面的 flex gap 上，
+  // 三个按钮凭空多吃 24px，一旦超过「操作」列的可用内容宽（列宽 − .cell 的 24px 内边距），
+  // .cell 的 overflow:hidden 就变成可滚动容器：点右侧按钮时浏览器把它 scrollIntoView，
+  // 整行左移、最左的按钮被裁掉，而且不会自动复位。间距统一交给 gap
+  // （与 tasks / deps / subscriptions 三页一致）。
+  :deep(.el-button + .el-button) {
+    margin-left: 0;
   }
 }
 

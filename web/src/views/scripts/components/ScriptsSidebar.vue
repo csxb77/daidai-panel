@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import {
-  ArrowDown,
   DocumentAdd,
   FolderAdd,
   Refresh,
@@ -10,9 +9,11 @@ import {
   VideoPlay
 } from '@element-plus/icons-vue'
 import ScriptTreeNode from './ScriptTreeNode.vue'
+import DdSplitButton from '@/components/ui/DdSplitButton.vue'
+import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 import type { TreeNode } from '../types'
 
-defineProps<{
+const props = defineProps<{
   isMobile: boolean
   mobileShowEditor: boolean
   treeLoading: boolean
@@ -33,6 +34,23 @@ defineProps<{
 
 const treeRef = ref()
 const searchKeyword = ref('')
+
+/**
+ * 「新建」Split Button 的菜单项。
+ *
+ * 主体是「新建文件」——侧边栏这三个入口里最高频的一个，而且点错了只是弹出一个
+ * 创建表单，可以直接关掉，代价最小。「上传文件」会带来外部文件落盘，语义比前两个重，
+ * 沿用原下拉里的 divided 与前两项分开。这三项都不是不可逆操作，因此没有 danger 项。
+ */
+const newActionItems: SplitButtonItem[] = [
+  { key: 'dir', label: '新建目录', icon: FolderAdd },
+  { key: 'upload', label: '上传文件', icon: Upload, divided: true }
+]
+
+function onNewAction(key: string) {
+  if (key === 'dir') props.onOpenCreateDir()
+  else if (key === 'upload') props.onOpenUpload()
+}
 
 function filterNode(value: string, data: TreeNode) {
   if (!value) return true
@@ -62,26 +80,19 @@ watch(searchKeyword, (val) => {
           <span class="label-main">脚本文件</span>
         </div>
         <div class="sidebar-toolbar-actions">
-          <el-dropdown trigger="click" placement="bottom-end">
-            <el-button class="primary-new-btn" type="primary" plain>
-              <el-icon><DocumentAdd /></el-icon>
-              <span>新建</span>
-              <el-icon class="chevron"><ArrowDown /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item @click="onOpenCreateFile">
-                  <el-icon><DocumentAdd /></el-icon>新建文件
-                </el-dropdown-item>
-                <el-dropdown-item @click="onOpenCreateDir">
-                  <el-icon><FolderAdd /></el-icon>新建目录
-                </el-dropdown-item>
-                <el-dropdown-item divided @click="onOpenUpload">
-                  <el-icon><Upload /></el-icon>上传文件
-                </el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <!-- 原来是「新建 ▾」：主体点了只是展开菜单，最常用的「新建文件」还要再点一次，
+               chevron 也是手写的。改成真正的 Split Button——主体直接新建文件，
+               另外两项收进 caret 菜单。 -->
+          <DdSplitButton
+            class="new-split-button"
+            label="新建文件"
+            :icon="DocumentAdd"
+            type="primary"
+            size="small"
+            :items="newActionItems"
+            @click="onOpenCreateFile"
+            @command="onNewAction"
+          />
 
           <el-tooltip content="刷新" placement="bottom">
             <button class="icon-btn" aria-label="刷新" @click="onRefresh">
@@ -208,21 +219,17 @@ watch(searchKeyword, (val) => {
   gap: 6px;
 }
 
-.primary-new-btn {
-  height: 30px;
-  transition: border-color 0.18s ease;
-  padding: 0 10px;
-  border-radius: 0;
-  font-size: 12.5px;
-  font-weight: 500;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-
-  .chevron {
-    font-size: 10px;
-    margin-left: 2px;
-    opacity: 0.7;
+/* class 落到 DdSplitButton 的根节点（EP 的 div.el-dropdown）上。
+   EP small 档按钮高 24px，会比右边 30px 的 .icon-btn 矮一截，工具条看着参差不齐，
+   所以这里只把两半按钮的高度和字号拉回原先「新建」按钮的 30px / 12.5px。
+   圆角归零与 caret 中缝的可见度由 global.scss 的 Split Button 一节统一负责，
+   chevron 也由组件自带，不需要再手写。 */
+.new-split-button {
+  :deep(.el-button) {
+    height: 30px;
+    border-radius: 0;
+    font-size: 12.5px;
+    font-weight: 500;
   }
 }
 

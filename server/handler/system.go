@@ -765,6 +765,8 @@ func (h *SystemHandler) RegisterRoutes(r *gin.RouterGroup) {
 		sys.GET("/machine-code", middleware.OpenAPIAccess("system"), middleware.RequireRole("viewer"), h.MachineCode)
 		sys.GET("/dashboard", middleware.OpenAPIAccess("system"), middleware.RequireRole("viewer"), h.Dashboard)
 		sys.GET("/stats", middleware.OpenAPIAccess("system"), middleware.RequireRole("viewer"), h.Stats)
+		// 侧栏角标计数：只做 COUNT、按角色裁剪、不打外网，专为高频轮询设计（见 system_badges.go）
+		sys.GET("/badges", middleware.OpenAPIAccess("system"), middleware.RequireRole("viewer"), h.Badges)
 		sys.GET("/version", middleware.OpenAPIAccess("system"), middleware.RequireRole("viewer"), h.Version)
 		sys.GET("/check-update", middleware.OpenAPIAccess("system"), middleware.RequireRole("viewer"), h.CheckUpdate)
 		sys.GET("/health-check", middleware.RequireRole("viewer"), h.HealthCheck)

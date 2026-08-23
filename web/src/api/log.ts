@@ -2,7 +2,21 @@ import request from './request'
 import type { RawLogDownloadTicket } from '@/utils/rawLogDownload'
 
 export const logApi = {
-  list(params?: { task_id?: number; status?: number; keyword?: string; page?: number; page_size?: number }) {
+  list(params?: {
+    task_id?: number
+    status?: number
+    keyword?: string
+    page?: number
+    page_size?: number
+    /**
+     * 执行时间范围，RFC3339 串。用 utils/datetime.ts 的 toDateRangeParams 生成——
+     * 它会把 el-date-picker 给回来的两个 00:00:00 的 Date 收拢成
+     * 「起始日 00:00:00.000 ~ 结束日 23:59:59.999」，避免结束日当天整天被漏掉。
+     * 服务端按 created_at 闭区间过滤（见 server/handler/log.go 的 List）。
+     */
+    start_time?: string
+    end_time?: string
+  }) {
     return request.get('/logs', { params }) as Promise<{ data: any[]; total: number; page: number; page_size: number }>
   },
 

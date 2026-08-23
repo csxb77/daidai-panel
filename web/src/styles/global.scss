@@ -162,9 +162,25 @@ body {
   // v3.0.0 起统一为纯扁平直角（青龙同款观感），所有圆角刻度归零。
   // 保留这些令牌是为了让 Element Plus 内部引用（它到处用 --el-border-radius-*）也一并方化，
   // 不要为了「看起来更干净」把令牌删掉，否则 EP 会退回自带的 4px/8px。
-  --el-border-radius-base: 0;
-  --el-border-radius-small: 0;
-  --el-border-radius-round: 0;
+  //
+  // ⚠️ 这三条【必须带 !important】，2026-08-24 浏览器实测才发现的静默失效：
+  //    EP 在 theme-chalk/base.css 与 el-var.css 里也写了 `:root{--el-border-radius-base:4px}`，
+  //    与这里【特异性完全相同】(0,1,0)。而 ElementPlusResolver 的 importStyle:'css'
+  //    让组件样式随 SFC 懒注入，必然排在入口包的 global.scss 之后 —— 同特异性后来者赢，
+  //    于是这三行一直是死的，运行时 --el-border-radius-base 实际是 4px。
+  //
+  //    后果比看上去大，因为凡是【没有被单独写死 border-radius:0】的地方都在吃这个令牌：
+  //      - `.el-button--small{border-radius:calc(var(--el-border-radius-base) - 1px)}`
+  //        → 全站 size="small" 的按钮一直是 3px 圆角（它与 global 里那条 `.el-button` 打平，也压不住）
+  //      - `.el-select-dropdown` / `.el-dropdown-menu` / `.el-date-editor` → 4px
+  //    实测一个普通页面上能数出 39 处非零圆角。
+  //
+  //    `!important` 对自定义属性声明是有效的，且与加载顺序无关（同 --el-dialog-margin-top
+  //    那一处的处理方式），所以这是唯一能钉死结果的写法。
+  //    注意：--el-border-radius-circle 属白名单，刻意不动（见下方注释）。
+  --el-border-radius-base: 0 !important;
+  --el-border-radius-small: 0 !important;
+  --el-border-radius-round: 0 !important;
   // 浮层（tooltip / dropdown / select 下拉 / date-picker 面板）的圆角是另一条独立链：
   //   .el-popper 的 --el-popper-border-radius 取自 --el-popover-border-radius（缺省回退 4px）
   // 它同样绕开 --el-border-radius-base，不归零的话所有浮层会保留 4px 圆角。
@@ -273,8 +289,11 @@ a {
 
 .el-dialog {
   --el-dialog-margin-top: clamp(16px, 4vh, 40px) !important;
-  animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized);
-  transform-origin: center top;
+  // ⚠️ 这里原来有一条 `animation: dd-dialog-surface-in ...`，已移除。
+  //    .el-dialog 不是 <transition> 的作用元素，它上面的 animation 只在【元素首次创建】
+  //    时跑一次；EP 的 el-dialog 默认 destroy-on-close=false，同一个弹窗第二次打开
+  //    DOM 被复用，动画不会重放。实测过：第 2、3 次打开时 getAnimations() 返回空数组。
+  //    进场位移已改挂到 `.dialog-fade-enter-active .el-overlay-dialog`，见下方浮层动画段。
   border-radius: 0;
   overflow: hidden;
   // 注意：这条 margin-bottom 不能删。Element Plus 原生写的是
@@ -358,7 +377,43 @@ a {
     backdrop-filter var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-// 统一接管 Element Plus 浮层动画，让弹窗、抽屉、遮罩的镜头感一致
+// ============================================================================
+// Element Plus 浮层动画接管
+// ----------------------------------------------------------------------------
+// ⚠️ 2026-08-23 修复的静默失效，改这一段前务必读完。
+//
+// 这里原本引用了四个关键帧：dd-dialog-surface-in / -out、dd-dialog-overlay-in / -out，
+// 但【全仓一个 @keyframes dd-dialog-* 都没有】。CSS 里 animation-name 指向不存在的
+// 关键帧是完全合法的——不报错、不告警、构建全绿，只是什么都不发生。
+// 而这几条又都带 !important，把 EP 原生的 modal-fade-in / dialog-fade-in 一并压掉了，
+// 于是全站 48 个弹窗【既没有自己的动画，也没有 EP 的动画】，一直是瞬现瞬消。
+//
+// 教训：给 animation 写一个新名字时，必须同时确认 @keyframes 真的落了地。
+// 这类失效连 vue-tsc 和 vite build 都发现不了，只能靠肉眼看或者浏览器实测。
+//
+// 【两个动画各自挂在哪个元素上，为什么必须是 transition 元素】
+// EP 的 DOM 是 .el-overlay > .el-overlay-dialog > .el-dialog，
+// <transition name="dialog-fade"> 包的是最外层的 .el-overlay，所以：
+//   .dialog-fade-*-active                     → 遮罩层本身
+//   .dialog-fade-*-active .el-overlay-dialog  → 弹窗的定位容器
+//
+// 原来的命名把这两者【写反了】（surface 挂遮罩、overlay 挂容器），这次一并摆正：
+//   遮罩淡入淡出  → .dialog-fade-*-active                     （dd-dialog-overlay-in/-out，纯 opacity）
+//   弹窗进出位移  → .dialog-fade-*-active .el-overlay-dialog  （dd-dialog-surface-in/-out）
+//
+// ⚠️ 位移【不能】挂在 .el-dialog 上（第一版就是这么写的，浏览器实测才发现）：
+//    .el-dialog 不是 transition 元素，它上面的 animation 只在【元素首次创建】时跑一次。
+//    EP 的 el-dialog 默认 destroy-on-close=false，同一个弹窗第二次打开时 DOM 被复用，
+//    animation 不会重放——表现为「第一次打开有动效，之后就只剩遮罩淡入」。
+//    实测确认：第 2、3 次打开时 .el-dialog.getAnimations() 是空数组。
+//    挂在 .el-overlay-dialog 上才每次 enter 都重放，因为它在 transition 的作用域里。
+//
+// 【为什么进场不写 both、离场写 both】
+// 进场不写：动画收尾后 transform 自然清空。残留的 transform 会让 .el-overlay-dialog
+// 成为内部 position:fixed 元素的包含块，Monaco 的补全/悬浮浮层会飘到错误位置
+// （脚本调试弹窗踩过这个坑）。离场写 both 是安全的——元素紧接着就被卸载了。
+// ============================================================================
+
 .el-overlay-dialog,
 .v-modal,
 .el-drawer-fade-enter-active,
@@ -369,20 +424,65 @@ a {
   animation-timing-function: var(--dd-ease-emphasized) !important;
 }
 
-.dialog-fade-enter-active .el-overlay-dialog {
+// 遮罩：只做透明度。它上面已经有 backdrop-filter，再叠位移会让整屏跟着晃。
+.dialog-fade-enter-active {
   animation: dd-dialog-overlay-in var(--dd-motion-fast) var(--dd-ease-standard) both !important;
 }
 
-.dialog-fade-leave-active .el-overlay-dialog {
-  animation: dd-dialog-overlay-out 180ms var(--dd-ease-standard) both !important;
-}
-
-.dialog-fade-enter-active {
-  animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized) both !important;
-}
-
 .dialog-fade-leave-active {
-  animation: dd-dialog-surface-out 180ms var(--dd-ease-standard) both !important;
+  animation: dd-dialog-overlay-out var(--dd-motion-fast) var(--dd-ease-standard) both !important;
+}
+
+// 弹窗本体的进场位移。挂在这里而不是 .el-dialog 上的原因见上方大段说明
+// （.el-dialog 的 animation 只在首次创建时跑一次，第二次打开就没了）。
+// 刻意不写 both，让 transform 在动画收尾后自然清空。
+.dialog-fade-enter-active .el-overlay-dialog {
+  animation: dd-dialog-surface-in var(--dd-motion-normal) var(--dd-ease-emphasized) !important;
+}
+
+.dialog-fade-leave-active .el-overlay-dialog {
+  animation: dd-dialog-surface-out var(--dd-motion-fast) var(--dd-ease-standard) both !important;
+}
+
+// —— 关键帧定义。位移方向与全站 dd-*-rise-in 一致：从下方轻微升起、向下退出。——
+@keyframes dd-dialog-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dd-dialog-overlay-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes dd-dialog-surface-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes dd-dialog-surface-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 
 .el-drawer-fade-enter-from .rtl,
@@ -492,6 +592,133 @@ a {
 .el-select {
   .el-select__wrapper {
     border-radius: 0;
+    // EP 只给了 `transition: var(--el-transition-duration)`（= all 0.3s）。
+    // all 会把 inset 描边、字色、背景一起过渡，而且 0.3s 不吃项目令牌。
+    // 这里按属性收紧：inset box-shadow 是 EP 用来画输入框边框的功能性描边，
+    // 不属于被禁的悬浮阴影（同 .el-input__wrapper 的处理）。
+    transition:
+      box-shadow var(--dd-motion-fast) var(--dd-ease-standard),
+      background-color var(--dd-motion-fast) var(--dd-ease-standard);
+  }
+
+  // 展开时箭头翻转。EP 自己就有 `.is-reverse{transform:rotate(-180deg)}`，
+  // 但过渡走的是 all 0.3s，这里换成只过渡 transform 并吃令牌。
+  .el-select__caret {
+    transition: transform var(--dd-motion-fast) var(--dd-ease-emphasized);
+  }
+}
+
+// ============================================================================
+// 下拉面板的展开 / 收起
+// ----------------------------------------------------------------------------
+// EP 给 select / dropdown / date-picker 三类浮层统一用了 `el-zoom-in-top` 过渡，
+// 做的是 `transform: scaleY(0) -> scaleY(1)`（transform-origin: top）——卷帘式展开。
+// 它在 enter/leave 过渡里并不违反扁平规则（R3-c 只禁 hover/active 态形变），
+// 但 scaleY 会把面板里的文字先压扁再拉开，与全站「淡入 + 轻微上移」的语汇不是一路。
+//
+// 【为什么用 popper class 限定，而不是直接改 .el-zoom-in-top-*】
+// 那组类是全局共享的：cascader、autocomplete、color-picker、el-menu 的子菜单，
+// 以及【el-form-item 的字段校验错误提示】都吃同一份。改全局会顺手改掉表单报错的动效，
+// 影响面远超本次意图。这里用 `.el-zoom-in-top-enter-active.el-select-dropdown`
+// 这种两段式选择器把范围钉死在三类下拉面板上。
+//
+// 特异性 (0,2,0) 高于 EP 的 (0,1,0)，与 CSS 加载顺序无关，因此不需要 !important
+// ——这是本文件里少数几个可以不靠 !important 就压住 EP 的地方。
+// ============================================================================
+
+.el-zoom-in-top-enter-active.el-select-dropdown,
+.el-zoom-in-top-leave-active.el-select-dropdown,
+.el-zoom-in-top-enter-active.el-dropdown__popper,
+.el-zoom-in-top-leave-active.el-dropdown__popper,
+.el-zoom-in-top-enter-active.el-picker__popper,
+.el-zoom-in-top-leave-active.el-picker__popper {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--dd-motion-fast) var(--dd-ease-decelerate),
+    transform var(--dd-motion-fast) var(--dd-ease-decelerate);
+}
+
+// 起止态。注意 leave-active 同时出现在上下两组里：上面给它 opacity:1 作为过渡起点，
+// 这里再把它设为 0 作为终点——这是 EP 原本的写法，靠同特异性下「后写的赢」生效，
+// 两组规则的先后顺序不能调换。
+.el-zoom-in-top-enter-from.el-select-dropdown,
+.el-zoom-in-top-leave-active.el-select-dropdown,
+.el-zoom-in-top-enter-from.el-dropdown__popper,
+.el-zoom-in-top-leave-active.el-dropdown__popper,
+.el-zoom-in-top-enter-from.el-picker__popper,
+.el-zoom-in-top-leave-active.el-picker__popper {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+// 朝上弹出时位移要反向，否则面板会「从触发器里钻出来」再往回走，方向拧着。
+// EP 对应的做法是把 transform-origin 从 top 换成 bottom。
+.el-zoom-in-top-enter-from.el-select-dropdown[data-popper-placement^="top"],
+.el-zoom-in-top-leave-active.el-select-dropdown[data-popper-placement^="top"],
+.el-zoom-in-top-enter-from.el-dropdown__popper[data-popper-placement^="top"],
+.el-zoom-in-top-leave-active.el-dropdown__popper[data-popper-placement^="top"],
+.el-zoom-in-top-enter-from.el-picker__popper[data-popper-placement^="top"],
+.el-zoom-in-top-leave-active.el-picker__popper[data-popper-placement^="top"] {
+  transform: translateY(6px);
+}
+
+// 选项 hover / 选中态：EP 用 `transition: var(--el-transition-duration)`（all 0.3s），
+// 收紧成按属性 + 令牌，让 hover 反馈跟手。扁平规则下这里只允许改颜色。
+//
+// 要 !important：EP 那两条也是单类选择器（0,1,0），与这里【特异性打平】，
+// 而 EP 组件 CSS 是随 SFC 懒注入的、必然排在入口包里的 global.scss 之后，
+// 打平时后加载者赢 —— 不加就是一条静默失效的死样式。
+.el-select-dropdown__item,
+.el-dropdown-menu__item {
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard) !important;
+}
+
+// ============================================================================
+// Split Button（components/ui/DdSplitButton.vue 用的 el-dropdown split-button）
+// ----------------------------------------------------------------------------
+// 圆角不用管：EP 的 split-button 内部是 el-button-group，它那一组圆角规则全部
+// 取自 --el-border-radius-base，已被 :root 归零；主体与 caret 之间的 -1px 负边距
+// 也由 el-button-group 自己处理，不需要额外方化。
+//
+// 唯一要补的是【中缝的可见度】。EP 用一个 1px 的 ::before 伪元素画中缝
+// （而不是 border-left，因为 border 会被 button-group 的负边距压掉），
+// 但取色是 `var(--el-border-color)` 再乘 opacity: .5 —— 那是一条很淡的灰线，
+// 叠在 primary 这类实心底色上基本看不见，两半会糊成一个长条按钮，
+// 用户看不出「右边这一截是可以单独点开的」，Split Button 也就白做了。
+// ============================================================================
+
+// EP 那条规则是 `.el-dropdown .el-dropdown__caret-button.el-button:before`（0,3,1），
+// 与这里特异性打平；EP 组件 CSS 又是懒注入、排在本文件之后，不加 !important 会被它赢掉。
+.el-dropdown .el-dropdown__caret-button.el-button::before {
+  opacity: 1 !important;
+}
+
+// 实心按钮（非 plain）上改用 EP 自带的分隔线令牌 #ffffff80，
+// 它本来就是给 button-group 在实心底色上画分隔用的，明暗两套都合适。
+// plain / 默认按钮是浅底，继续用上面那条灰线，白线在它们身上等于没有。
+.el-dropdown .el-dropdown__caret-button.el-button--primary:not(.is-plain)::before,
+.el-dropdown .el-dropdown__caret-button.el-button--success:not(.is-plain)::before,
+.el-dropdown .el-dropdown__caret-button.el-button--warning:not(.is-plain)::before,
+.el-dropdown .el-dropdown__caret-button.el-button--danger:not(.is-plain)::before,
+.el-dropdown .el-dropdown__caret-button.el-button--info:not(.is-plain)::before {
+  background: var(--el-button-divide-border-color) !important;
+}
+
+// 菜单里的危险项（删除 / 卸载 / 清空）。
+// 这类操作【不允许】出现在 Split Button 的主体上——主体是点了就执行的，
+// 把删除放在那里等于给用户一个一击致命的按钮。统一进菜单、标红、上方加分隔线。
+//
+// 菜单被 teleport 到 body，带不上 scoped 的 data-v 属性，所以只能写在全局块里。
+.dd-split-button__popper .dd-split-button__item--danger {
+  color: var(--el-color-danger);
+
+  &:not(.is-disabled):hover,
+  &:not(.is-disabled):focus {
+    color: var(--el-color-danger);
+    background-color: var(--el-color-danger-light-9);
   }
 }
 
@@ -565,6 +792,103 @@ a {
   border: 1px solid var(--el-border-color-lighter);
 }
 
+// ============================================================================
+// 轻提示（el-message）
+// ----------------------------------------------------------------------------
+// 这里是【全站几百处 ElMessage 调用的唯一观感来源】。之前本文件对 .el-message
+// 一条覆盖都没有，它一直吃 EP 裸默认样式。改这一段等于同时改掉所有调用点，
+// 不需要去各页面逐个替换 —— 也正因为如此，改动要克制。
+// ============================================================================
+
+.el-message {
+  border-radius: 0;
+
+  // EP 把 transform / top / bottom 的时长【写死成 .4s】（见 theme-chalk/el-message.css），
+  // 不走任何 CSS 变量。后果有二：
+  //   1. 它是全站唯一一个在 prefers-reduced-motion 下仍会滑 400ms 的动效——
+  //      文件末尾那段 reduce 补丁只压 animation，压不到写死的 transition。
+  //   2. 400ms 比全站的 240ms 慢一档，多条提示堆叠上移时明显拖沓。
+  // 必须用 !important：EP 组件 CSS 是懒注入的，位置排在 global.scss 之后，
+  // 同特异性的覆盖会被后加载者赢掉（同 el-switch / el-tag / el-pagination 三处的成因）。
+  transition:
+    opacity var(--dd-motion-normal) var(--dd-ease-decelerate),
+    transform var(--dd-motion-normal) var(--dd-ease-decelerate),
+    top var(--dd-motion-normal) var(--dd-ease-standard),
+    bottom var(--dd-motion-normal) var(--dd-ease-standard) !important;
+
+  // 左缘语义色实心条。
+  // 扁平方案下不能用阴影或圆角做层次，而 EP 默认只靠「浅一档的底色 + 同色图标」
+  // 区分成功/失败，在明色下两者差别很小。加一条 3px 实心边把语义拉到可扫读的强度。
+  // --el-message-text-color 由 .el-message--success/error/... 各自声明，缺省回落中性色。
+  //
+  // 要 !important：EP 在同一个 `.el-message`（0,1,0）上写了 border-width / -style / -color
+  // 三个长手属性，其中 border-*-width 与这里的 border-left 简写落在同一个具体属性上，
+  // 特异性打平 + EP 后加载 = 这条色条会静默消失。
+  border-left: 3px solid var(--el-message-text-color, var(--el-color-info)) !important;
+}
+
+// EP 写死 .el-message__content{line-height:1}。单行没问题，但后端报错动辄二三十字，
+// 一旦换行两行文字就会贴在一起几乎糊成一团。
+// 同样是单类打平，同样需要 !important。
+.el-message__content {
+  line-height: 1.5 !important;
+}
+
+// grouping 计数徽标默认贴在右上角外侧（top:-8px;right:-8px），
+// 在直角提示条上会显得脱离。收进条内，与左缘色条形成呼应。
+// EP 那条是 `.el-message .el-message__badge`（0,2,0），与这里打平，同样要 !important。
+.el-message .el-message__badge {
+  top: 50% !important;
+  right: 8px !important;
+  transform: translateY(-50%) !important;
+}
+
+// ===== 带操作的轻提示 =====
+// 结构由 utils/toast.ts 用 h() 渲出：.dd-toast > .dd-toast__text + .dd-toast__action。
+// 必须写在全局块里 —— toast.ts 不是 SFC，没有 scoped 作用域可挂。
+.dd-toast {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dd-toast__text {
+  flex: 1 1 auto;
+}
+
+.dd-toast__action {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  // 边框与文字都取提示条的语义色：成功提示上是绿框，失败提示上是红框，自动成套。
+  // 这里刻意【不用 currentcolor】——见下面 hover 的说明。
+  border: 1px solid var(--el-message-text-color, var(--el-color-info));
+  border-radius: 0;
+  background: transparent;
+  color: var(--el-message-text-color, var(--el-color-info));
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  cursor: pointer;
+  // 扁平规则：hover 只允许改颜色，不做位移与缩放
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  // hover 反色：底填语义色，文字取提示条自身的浅底色。
+  // ⚠️ 不能写 `background-color: currentcolor` —— currentcolor 解析的是该元素 color 的
+  //    【计算值】，而同一条规则里 color 也被改了，两者会一起变成同一个颜色，
+  //    结果是「深底 + 同色文字」，按钮 hover 时直接读不出字。必须两边都写具体令牌。
+  &:hover {
+    background-color: var(--el-message-text-color, var(--el-color-info));
+    color: var(--el-message-bg-color, var(--el-bg-color));
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--el-message-text-color, var(--el-color-info));
+    outline-offset: 1px;
+  }
+}
+
 .el-drawer {
   .el-drawer__header {
     margin-bottom: 0;
@@ -626,7 +950,12 @@ a {
 //   （无 :filters）与必填表头红点；el-upload 的 picture / picture-card；
 //   el-button 的 is-circle（模板里的 circle 属性已全部移除）；
 //   以及 el-slider / el-carousel / el-timeline / el-steps / el-tour / el-rate /
-//   el-cascader / el-segmented / el-avatar / el-badge / el-date-picker 等未引入的组件。
+//   el-cascader / el-segmented / el-avatar 等未引入的组件。
+//
+// ⚠️ el-badge 与 el-date-picker 曾在上面这份名单里，v3.0.8 起【已经引入】
+//    （侧栏角标 + 日期范围筛选），它们的圆角覆盖见本块末尾单独的一段。
+//    引入一个新 EP 组件时，请照那一段的做法先去 theme-chalk 里 grep 一遍 border-radius，
+//    而不是假设 :root 的基础令牌能兜住——这三类机制里有两类是兜不住的。
 // ============================================================================
 
 // —— 机制 A：组件私有令牌，在组件根元素上就地归零 ——
@@ -714,6 +1043,63 @@ a {
 
 // el-tabs：键盘焦点环 3px（settings / api-docs / TaskForm 的标签页都可键盘切换）。
 .el-tabs__item:focus-visible {
+  border-radius: 0 !important;
+}
+
+// ---------------------------------------------------------------------------
+// v3.0.8 动效交互升级新引入的两个组件，圆角一并在此兜底。
+//
+// ⚠️ 本块上方那段长注释里，曾把 el-badge 与 el-date-picker 列进「项目未使用、
+//    故意不覆盖」的名单。它们现在都用上了（角标 + 日期范围筛选），所以名单已过时——
+//    别再照那份旧名单判断「这个组件不用管」。
+// ---------------------------------------------------------------------------
+
+// —— el-badge ——
+// 机制 A：--el-badge-radius(10px) 声明在 .el-badge{} 上，:root 补 0 无效，必须就地覆盖。
+// 命中范围不止我们自己写的角标：ElMessage 的 grouping 计数徽标（.el-message__badge）
+// 内部渲染的就是一个 el-badge，不压它的话「同一条提示 ×3」那个小圆点会是胶囊形。
+.el-badge {
+  --el-badge-radius: 0 !important;
+}
+
+// 机制 B：dot 模式硬编码 50%，与上面的私有令牌是两条独立的链，压一条不够。
+.el-badge__content.is-dot {
+  border-radius: 0 !important;
+}
+
+// —— el-date-picker / el-time-picker ——
+// 这一组全是机制 B 的硬编码像素/百分比，按令牌名去枚举一个都扫不到。
+// 不覆盖的话，日期面板会在一片直角界面里冒出一格一格的圆形日期，非常突兀。
+//
+// 面板自身（.el-picker-panel）走 --el-popper-border-radius，已被 :root 归零，不在此列。
+.el-date-table td .el-date-table-cell .el-date-table-cell__text,
+.el-date-table td.selected .el-date-table-cell,
+.el-date-table td.selected .el-date-table-cell__text,
+.el-month-table td .el-date-table-cell__text,
+.el-month-table td.current:not(.disabled) .el-date-table-cell,
+.el-year-table td .el-date-table-cell__text {
+  border-radius: 0 !important;
+}
+
+// 范围选择（daterange / monthrange）的起止端另有一套【分角】圆角，
+// 与上面那组 selected 是不同的选择器，容易漏：
+//   .el-date-table td.start-date .el-date-table-cell { border-top-left-radius: 15px; ... }
+// EP 靠「起止端做成半个胶囊 + 中间格填浅底」拼出一条药丸形的范围条。
+// 直角体系下药丸没有意义，而两端各 5px 的外边距会让范围条在首尾缩进一截、
+// 看起来像断了两个口子，所以圆角和外边距要一起清掉，范围才是一条连贯的实心条带。
+.el-date-table td.start-date .el-date-table-cell,
+.el-date-table td.end-date .el-date-table-cell,
+.el-month-table td.start-date .el-date-table-cell,
+.el-month-table td.end-date .el-date-table-cell {
+  border-radius: 0 !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+
+// 日期面板底部的「此刻 / 确定」按钮 2px，以及时间面板与时间范围面板的 2px。
+.el-picker-panel__btn,
+.el-time-panel,
+.el-time-range-picker__body {
   border-radius: 0 !important;
 }
 
@@ -1344,7 +1730,12 @@ html.dark {
   border-radius: 0;
   cursor: pointer;
   color: var(--el-text-color-secondary);
-  transition: all 0.18s;
+  // 按属性列而不是 all：扁平方案下这里只会变颜色，用 all 会把将来任何新增属性
+  // （尺寸、间距）也一起过渡，出现意料外的位移。时长走令牌才吃得到 reduced-motion 降级。
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard);
   font-weight: 500;
 
   &:hover {
@@ -1788,5 +2179,15 @@ html.dark {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
     scroll-behavior: auto !important;
+
+    // delay 必须一起压掉，只压 duration 是不够的 —— 而且会适得其反。
+    //
+    // 错落入场普遍写成 `animation: xxx 240ms ... both` + `animation-delay: 100ms`：
+    // fill-mode 的 `both` 会让元素在 delay 期间就套用 from 帧（opacity: 0）。
+    // 只把 duration 压到 1ms 的话，元素仍要先隐身整整 100ms，然后「啪」地出现——
+    // 对要求减少动态效果的用户来说，这比原来的平滑淡入更刺眼。
+    // 把 delay 也归零，元素才是真正的「直接就在那儿」。
+    animation-delay: 0ms !important;
+    transition-delay: 0ms !important;
   }
 }

@@ -8,6 +8,8 @@ import EnvBatchRenameDialog from './components/EnvBatchRenameDialog.vue'
 import EnvEditDialog from './components/EnvEditDialog.vue'
 import EnvImportDialog from './components/EnvImportDialog.vue'
 import { useResponsive } from '@/composables/useResponsive'
+import DdSplitButton from '@/components/ui/DdSplitButton.vue'
+import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 
 const envTableDensityStorageKey = 'daidai-env-table-density'
 const envPageSizeStorageKey = 'daidai-env-page-size'
@@ -639,6 +641,30 @@ async function handleToggle(row: any) {
   }
 }
 
+/**
+ * 操作列 Split Button 的菜单项（按行生成）。
+ *
+ * 主体是「编辑」——最常用，且点错了只是打开一个弹窗，代价最小。
+ * 「删除」不可撤销，必须留在菜单里并加 divided + danger，绝不能占主体位置。
+ * 「置顶 / 取消置顶」是同一个 handleToggleTop 的两面，用 visible 按 row 状态互斥，
+ * 避免出现「已置顶的行菜单里还挂着置顶」。
+ */
+function buildEnvActionItems(row: any): SplitButtonItem[] {
+  const pinned = isTopPinned(row)
+  return [
+    { key: 'duplicate', label: '复制同名变量' },
+    { key: 'top', label: '置顶', visible: !pinned },
+    { key: 'cancel-top', label: '取消置顶', visible: pinned },
+    { key: 'delete', label: '删除', danger: true, divided: true }
+  ]
+}
+
+function onEnvAction(key: string, row: any) {
+  if (key === 'duplicate') openDuplicate(row)
+  else if (key === 'top' || key === 'cancel-top') void handleToggleTop(row)
+  else if (key === 'delete') void handleDelete(row.id)
+}
+
 async function handleBatchDelete() {
   if (selectedIds.value.length === 0) return
   try {
@@ -758,6 +784,30 @@ async function handleExportFiles() {
   }
 }
 
+/**
+ * 工具条「导出」Split Button 的菜单项。
+ *
+ * 主体走 JSON（handleExportAll）：它是与「导入」配对的往返格式，原下拉里也排在第一位，
+ * 且不依赖 exportFormat 这个 ref，点错的代价只是多下载一个文件。
+ * Shell / JS / Python 三种只是打开预览弹窗，收进菜单；「导入」是反方向的操作，
+ * 沿用原来的 divided 分隔线与其余项隔开。
+ */
+const exportActionItems: SplitButtonItem[] = [
+  { key: 'shell', label: '导出 Shell' },
+  { key: 'js', label: '导出 JS' },
+  { key: 'python', label: '导出 Python' },
+  { key: 'import', label: '导入', divided: true }
+]
+
+function onExportAction(key: string) {
+  if (key === 'import') {
+    showImportDialog.value = true
+    return
+  }
+  exportFormat.value = key
+  void handleExportFiles()
+}
+
 async function refreshExport() {
   try {
     const exportIds = selectedIds.value.length > 0 ? [...selectedIds.value] : undefined
@@ -837,18 +887,17 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         </el-select>
       </div>
       <div class="toolbar__right">
-        <el-dropdown trigger="click">
-          <el-button><el-icon><More /></el-icon></el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item @click="handleExportAll">导出 JSON</el-dropdown-item>
-              <el-dropdown-item @click="exportFormat = 'shell'; handleExportFiles()">导出 Shell</el-dropdown-item>
-              <el-dropdown-item @click="exportFormat = 'js'; handleExportFiles()">导出 JS</el-dropdown-item>
-              <el-dropdown-item @click="exportFormat = 'python'; handleExportFiles()">导出 Python</el-dropdown-item>
-              <el-dropdown-item divided @click="showImportDialog = true">导入</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <!-- 原来是一个「…」更多下拉：主体只能展开菜单，最常用的导出永远要点两次，
+             按钮上也看不出这里能干什么。改成真正的 Split Button：
+             主体「导出」直接下载 JSON（默认/往返格式），其余格式与导入留在菜单里。 -->
+        <DdSplitButton
+          label="导出"
+          type="default"
+          size="default"
+          :items="exportActionItems"
+          @click="handleExportAll"
+          @command="onExportAction"
+        />
         <div v-if="selectedIds.length > 0" class="batch-actions">
           <el-button @click="handleBatchRename">批量改名</el-button>
           <el-button @click="handleBatchEnable">批量启用</el-button>
@@ -1061,35 +1110,21 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
             <span class="time-text">{{ formatDateTime(row.updated_at) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="176" align="center">
+        <!-- 原来是 4 个纯图标按钮，每个各套一层 el-tooltip：图标本身不自解释，
+             而且「删除」和「编辑」同尺寸并排、误点代价完全不同。
+             改成 Split Button：主体是最常用且可逆的「编辑」，其余收进菜单，
+             删除标红并用分隔线隔开，置顶/取消置顶靠 visible 互斥。列宽 176 → 110。 -->
+        <el-table-column label="操作" width="110" align="center">
           <template #default="{ row }">
             <div class="action-group">
-              <el-tooltip content="编辑" placement="top">
-                <el-button size="small" type="primary" plain @click="openEdit(row)">
-                  <el-icon><Edit /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="复制同名变量" placement="top">
-                <el-button size="small" plain @click="openDuplicate(row)">
-                  <el-icon><CopyDocument /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip :content="isTopPinned(row) ? '取消置顶' : '置顶'" placement="top">
-                <el-button
-                  size="small"
-                  :type="isTopPinned(row) ? 'info' : 'warning'"
-                  :class="{ 'top-action-active': isTopPinned(row) }"
-                  plain
-                  @click="handleToggleTop(row)"
-                >
-                  <el-icon><Top /></el-icon>
-                </el-button>
-              </el-tooltip>
-              <el-tooltip content="删除" placement="top">
-                <el-button size="small" type="danger" plain @click="handleDelete(row.id)">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </el-tooltip>
+              <DdSplitButton
+                label="编辑"
+                type="primary"
+                size="small"
+                :items="buildEnvActionItems(row)"
+                @click="openEdit(row)"
+                @command="(key: string) => onEnvAction(key, row)"
+              />
             </div>
           </template>
         </el-table-column>
@@ -1514,15 +1549,31 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 /* ---- Cell Styles ---- */
 // 表格操作列：对齐定时任务页/依赖管理页 .action-btns 的写法——
-// 居中排布 + 4px 间隙 + 紧凑内边距，方形图标按钮（不再用 circle）。
+// 居中排布 + 4px 间隙 + 紧凑内边距。现在列里只剩一个 DdSplitButton（编辑 ▾），
+// gap 对单个子元素不生效，保留是为了与其余三页写法一致、日后加第二个按钮不用再补。
 .action-group {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
 
+  // 这条 padding 收窄同时作用于 split button 的主体与 caret：
+  // 主体「编辑」= 24px 字 + 16px 内边距 + 2px 描边 ≈ 42px，
+  // caret 由 `.el-dropdown--small .el-dropdown__caret-button` 固定成 24px（padding 不参与，
+  // .el-button 是 border-box），合计约 66px，落在 110px 列宽的 86px 可用区里。
   :deep(.el-button) {
     padding: 4px 8px;
+  }
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在上面的 flex gap 上。
+  // 撑破列宽后 .cell 的 overflow:hidden 变成可滚动容器，点右侧按钮会触发 scrollIntoView
+  // 让整行左移且不复位——这是本列最容易踩的坑，所以间距统一交给 gap
+  //（与 tasks / deps / subscriptions 三页一致）。
+  //
+  // Split Button 内部就是相邻的两个 .el-button（主体 + caret），这条选择器照样命中；
+  // EP 的 el-button-group 自己也置 0，两处一致，任何一处改动都不会让 caret 被推开。
+  :deep(.el-button + .el-button) {
+    margin-left: 0;
   }
 }
 
@@ -1692,11 +1743,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 :deep(.env-drag-col) {
   padding: 0 !important;
-}
-
-// 已置顶按钮：用边框颜色标记，不再叠加外描边阴影
-.top-action-active {
-  border-color: rgba(245, 166, 35, 0.55);
 }
 
 /* ---- Pinned Row ---- */

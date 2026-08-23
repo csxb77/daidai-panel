@@ -287,24 +287,24 @@
             }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="180" align="center">
+        <!-- 原来是 4 个 link 按钮平铺、没有容器，间距全靠 EP 自带的
+             `.el-button + .el-button { margin-left: 12px }`，占掉 180px 列宽，
+             而且「删除」和「编辑」并排、字号一样大，误点的代价却完全不同。
+             改成 Split Button：主体是最常用的「编辑」，其余收进菜单，
+             删除标红并用分隔线隔开。列宽 180 → 130。 -->
+        <!-- fixed="right"：这张表列多（应用名/Key/Secret/权限/调用数/状态/创建时间），
+             1249px 视口下实测横向溢出 323px，不固定的话操作列整个被挤出可视区，
+             用户得先横向滚动才点得到。收窄列宽只是把溢出从 373 减到 323，治不了根。 -->
+        <el-table-column label="操作" width="130" align="center" fixed="right">
           <template #default="{ row }">
-            <el-button type="primary" link size="small" @click="editApp(row)"
-              >编辑</el-button
-            >
-            <el-button
-              type="warning"
-              link
+            <DdSplitButton
+              label="编辑"
+              type="primary"
               size="small"
-              @click="resetSecret(row)"
-              >重置</el-button
-            >
-            <el-button type="info" link size="small" @click="showLogs(row)"
-              >日志</el-button
-            >
-            <el-button type="danger" link size="small" @click="deleteApp(row)"
-              >删除</el-button
-            >
+              :items="appActionItems"
+              @click="editApp(row)"
+              @command="(key: string) => onAppAction(key, row)"
+            />
           </template>
         </el-table-column>
       </el-table>
@@ -512,6 +512,9 @@ import {
   View,
 } from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
+import { formatDateTime } from "@/utils/datetime";
+import DdSplitButton from "@/components/ui/DdSplitButton.vue";
+import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
 
 const apps = ref<any[]>([]);
 const loading = ref(false);
@@ -606,10 +609,26 @@ const maskKey = (key: string): string => {
   return key.substring(0, 3) + "***" + key.substring(key.length - 5);
 };
 
-function formatDateTime(value?: string | null) {
-  // 统一输出中文时间，避免不同浏览器环境下格式漂移
-  if (!value) return "-";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+// 时间格式化已收编到 utils/datetime.ts（全站曾有 8 种写法，同一个「创建时间」在不同
+// 页面长得不一样）。这里保留一个同名薄封装是为了不动模板里的 4 处调用点。
+
+/**
+ * 操作列 Split Button 的菜单项。
+ *
+ * 主体是「编辑」——最常用、且点错了也只是打开一个弹窗，代价最小。
+ * 删除必须留在菜单里并加 divided + danger：它是不可撤销操作，
+ * 绝不能出现在「点了就执行」的主体位置上。
+ */
+const appActionItems: SplitButtonItem[] = [
+  { key: "reset", label: "重置密钥" },
+  { key: "logs", label: "调用日志" },
+  { key: "delete", label: "删除", danger: true, divided: true },
+];
+
+function onAppAction(key: string, row: any) {
+  if (key === "reset") resetSecret(row);
+  else if (key === "logs") showLogs(row);
+  else if (key === "delete") deleteApp(row);
 }
 
 const filteredApps = computed(() => {

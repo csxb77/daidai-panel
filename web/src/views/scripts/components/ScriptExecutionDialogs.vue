@@ -313,17 +313,27 @@ function markDebugCodeChanged() {
 
 /*
   打开时整屏工作区从底部滑入升起，比默认缩放更有"工作台升起"的高级感。
-  用 .el-dialog.script-execution-fullscreen-dialog 双 class 提高特异性，
-  覆盖全局 .el-dialog / .dialog-fade-enter-active 的默认进场动画。
+
+  ⚠️ 必须挂在 .el-overlay-dialog 上，不能挂在 .el-dialog 上。
+     原来写的是 `.el-dialog.script-execution-fullscreen-dialog`，那条只在【元素首次创建】
+     时跑一次：.el-dialog 不是 <transition> 的作用元素，而 EP 的 el-dialog 默认
+     destroy-on-close=false，第二次打开同一个弹窗 DOM 被复用，animation 不会重放
+     ——表现为「第一次打开有升起动效，之后就没有了」。浏览器实测确认过
+     （第 2、3 次打开时 .el-dialog.getAnimations() 返回空数组）。
+     .el-overlay-dialog 在 transition 的作用域里，每次 enter 都会重放。
+
+  用 :has() 从容器层反选「里面装的是脚本工作区弹窗」的那一个。
+  特异性 (0,3,0) 高于 global.scss 通用规则的 (0,2,0)，两条都带 !important 时按特异性判胜负。
+  本 style 块是非 scoped 的（见文件顶部说明），选择器不带 data-v，能命中 teleport 出去的节点。
 */
-.el-dialog.script-execution-fullscreen-dialog {
+.dialog-fade-enter-active .el-overlay-dialog:has(.script-execution-fullscreen-dialog) {
   animation: dd-script-sheet-up var(--dd-motion-page) var(--dd-ease-decelerate) !important;
   transform-origin: center bottom;
 }
 
 /*
   不加 both / forwards：动画收尾后 transform 自然清空。
-  否则全屏 dialog 残留 transform 会成为 Monaco 内部 position:fixed 浮层
+  否则残留 transform 会让 .el-overlay-dialog 成为 Monaco 内部 position:fixed 浮层
   （补全/悬浮提示）的包含块，导致弹层错位。to 为单位变换，视觉无跳变。
 */
 @keyframes dd-script-sheet-up {
