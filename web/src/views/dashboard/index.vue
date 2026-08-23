@@ -37,6 +37,7 @@ import {
 import { useResponsive } from "@/composables/useResponsive";
 import { canAdminister, hasRequiredRole } from "@/utils/roles";
 import { formatDuration } from "@/utils/duration";
+import { formatDateTime } from "@/utils/datetime";
 
 const ExecutionTrendChart = defineAsyncComponent(
   () => import("./components/ExecutionTrendChart.vue"),
@@ -394,11 +395,6 @@ function formatBytes(bytes: number) {
     i++;
   }
   return val.toFixed(1) + " " + units[i];
-}
-
-function formatTime(t: string) {
-  if (!t) return "-";
-  return new Date(t).toLocaleString("zh-CN", { hour12: false });
 }
 
 function lastUpdatedText() {
@@ -914,7 +910,7 @@ function rerunLog(log: any) {
               </span>
             </div>
             <div class="log-mobile-card__meta">
-              <span>{{ formatTime(log.created_at) }}</span>
+              <span>{{ formatDateTime(log.created_at) }}</span>
               <span v-if="log.duration != null"
                 >耗时 {{ formatDuration(log.duration) }}</span
               >
@@ -965,7 +961,7 @@ function rerunLog(log: any) {
               </td>
               <td>
                 <span class="log-cell-time">{{
-                  formatTime(log.created_at)
+                  formatDateTime(log.created_at)
                 }}</span>
               </td>
               <td class="col-center">

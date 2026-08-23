@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { systemApi } from '@/api/system'
 import { copyText } from '@/utils/clipboard'
+import { formatDateTime } from '@/utils/datetime'
 import { usePageActivity } from '@/composables/usePageActivity'
 
 export type PanelLogLevel = '' | 'debug' | 'info' | 'warn' | 'error'
@@ -94,7 +95,7 @@ export function usePanelLogViewer() {
       })
       logs.value = res.data?.logs || []
       total.value = Number(res.data?.total || 0)
-      lastLoadedAt.value = new Date().toLocaleString()
+      lastLoadedAt.value = formatDateTime(new Date())
     } catch (err: any) {
       if (showError) {
         ElMessage.error(err?.response?.data?.error || err?.message || '加载面板日志失败')

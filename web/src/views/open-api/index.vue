@@ -16,24 +16,46 @@
 
     <div class="toolbar">
       <div class="toolbar__left">
+        <!-- 状态分段控件带计数：不用切过去也知道各状态下有几个应用。
+             计数是「统计型」而非「提醒型」，所以开 show-zero ——「已禁用 0」是有信息量的
+             （告诉你确实一个都没有），角标直接消失反而像是没加载出来。
+             level 用 info（描边不实心）：中性计数，不该和真正需要处理的红色角标抢注意力。 -->
         <div class="status-tabs">
           <button
             :class="['status-tab', { active: statusFilter === '' }]"
             @click="statusFilter = ''"
           >
-            全部
+            <span>全部</span>
+            <DdBadge
+              :value="statusCounts.all"
+              level="info"
+              show-zero
+              title="全部应用"
+            />
           </button>
           <button
             :class="['status-tab', { active: statusFilter === 'enabled' }]"
             @click="statusFilter = 'enabled'"
           >
-            已启用
+            <span>已启用</span>
+            <DdBadge
+              :value="statusCounts.enabled"
+              level="info"
+              show-zero
+              title="已启用应用"
+            />
           </button>
           <button
             :class="['status-tab', { active: statusFilter === 'disabled' }]"
             @click="statusFilter = 'disabled'"
           >
-            已禁用
+            <span>已禁用</span>
+            <DdBadge
+              :value="statusCounts.disabled"
+              level="info"
+              show-zero
+              title="已禁用应用"
+            />
           </button>
         </div>
         <el-input
@@ -513,6 +535,7 @@ import {
 } from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
 import { formatDateTime } from "@/utils/datetime";
+import DdBadge from "@/components/ui/DdBadge.vue";
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
 
@@ -631,22 +654,38 @@ function onAppAction(key: string, row: any) {
   else if (key === "delete") deleteApp(row);
 }
 
+// 只应用搜索词、不应用状态筛选的中间层。
+//
+// 拆出这一层是为了让「状态分段控件上的计数」和「切过去之后真正看到的条数」永远一致：
+// 计数的基数必须排除状态筛选自身（否则选中「已启用」时「已禁用」永远显示 0），
+// 但必须保留搜索词（搜完再看计数会和实际条数对不上）。
+// 两个筛选是交集关系，先筛哪个结果都一样，这次调换顺序不改变 filteredApps 的输出。
+const appsMatchingKeyword = computed(() => {
+  const kw = searchKeyword.value.trim().toLowerCase();
+  if (!kw) return apps.value;
+  return apps.value.filter(
+    (a) =>
+      (a.name || "").toLowerCase().includes(kw) ||
+      (a.app_key || "").toLowerCase().includes(kw),
+  );
+});
+
 const filteredApps = computed(() => {
-  let list = apps.value;
-  if (statusFilter.value === "enabled") {
-    list = list.filter((a) => a.enabled);
-  } else if (statusFilter.value === "disabled") {
-    list = list.filter((a) => !a.enabled);
-  }
-  if (searchKeyword.value.trim()) {
-    const kw = searchKeyword.value.trim().toLowerCase();
-    list = list.filter(
-      (a) =>
-        (a.name || "").toLowerCase().includes(kw) ||
-        (a.app_key || "").toLowerCase().includes(kw),
-    );
-  }
+  const list = appsMatchingKeyword.value;
+  if (statusFilter.value === "enabled") return list.filter((a) => a.enabled);
+  if (statusFilter.value === "disabled") return list.filter((a) => !a.enabled);
   return list;
+});
+
+// 状态标签页的计数。
+//
+// 能这么算的前提：本页是【客户端筛选】——openApiApi.list() 一次性把全量应用拿回 apps.value，
+// 状态/搜索/分页全在 computed 里做，点标签只改 statusFilter，不会重新发请求。
+// 所以这里数出来的是真实总数，不是拿当前页冒充。
+const statusCounts = computed(() => {
+  const list = appsMatchingKeyword.value;
+  const enabled = list.filter((a) => a.enabled).length;
+  return { all: list.length, enabled, disabled: list.length - enabled };
 });
 
 const pagedApps = computed(() => {
@@ -917,6 +956,11 @@ onMounted(loadApps);
 }
 
 .status-tab {
+  // inline-flex + gap：标签文字与计数角标并排，间距交给 gap，不用 margin 拼。
+  // 角标高 18px，与 13px 文字的行盒高度基本齐平，加上去不会把分段控件顶高。
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 14px;
   border-radius: 0;
   border: none;
@@ -1254,16 +1298,21 @@ onMounted(loadApps);
   }
 }
 
+// .info-cards 是本页唯一还没入场的卡片级容器（安全建议 / 开发者文档两张说明卡）。
+// 它跟表格卡是同一层级的内容块，漏掉它会让页面下半截显得是「另一张页面拼上来的」。
 .toolbar,
 .table-card,
-.dd-mobile-list {
+.dd-mobile-list,
+.info-cards {
   animation: dd-openapi-rise-in var(--dd-motion-page) var(--dd-ease-decelerate)
     both;
 }
 
-// 轻微错落：工具条先入，表格卡/移动列表略晚
+// 轻微错落：工具条先入，表格卡/移动列表/说明卡略晚。
+// 只分两档、间隔 60ms —— 不给表格每一行做 stagger（行多会卡，且是设计系统硬约束）。
 .table-card,
-.dd-mobile-list {
+.dd-mobile-list,
+.info-cards {
   animation-delay: 60ms;
 }
 </style>

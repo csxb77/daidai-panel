@@ -791,15 +791,22 @@ async function handleImport(event: Event) {
           </template>
         </el-dropdown>
         <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="handleImport" />
-        <div v-if="canOperateTasks && selectedIds.length > 0" class="batch-actions">
-          <el-button size="small" @click="handleBatchAction('enable')">批量启用</el-button>
-          <el-button size="small" @click="handleBatchAction('disable')">批量禁用</el-button>
-          <el-button size="small" @click="handleBatchAction('run')">批量运行</el-button>
-          <el-button size="small" type="warning" plain @click="handleBatchAction('stop')">批量停止</el-button>
-          <el-button size="small" @click="openBatchAddLabel">添加标签</el-button>
-          <el-button size="small" @click="handleBatchPin">批量置顶</el-button>
-          <el-button size="small" type="danger" @click="handleBatchAction('delete')">批量删除</el-button>
-        </div>
+        <!-- 勾选第一行时这七个按钮凭空插进工具栏右区，会把「新建任务」整个推走、看着像抖了一下。
+             淡入淡出让它有个出现/消失的过程，位置变化就不再显得是闪现。
+             只做 opacity：宽度/高度动画会让 .toolbar 每一帧重新算换行，整页跟着重排。
+             （淡出期间元素仍占位，所以按钮消失时右区只重排一次，这是 opacity 方案的固有代价，
+             比逐帧重排划算得多。） -->
+        <Transition name="dd-batch-actions">
+          <div v-if="canOperateTasks && selectedIds.length > 0" class="batch-actions">
+            <el-button size="small" @click="handleBatchAction('enable')">批量启用</el-button>
+            <el-button size="small" @click="handleBatchAction('disable')">批量禁用</el-button>
+            <el-button size="small" @click="handleBatchAction('run')">批量运行</el-button>
+            <el-button size="small" type="warning" plain @click="handleBatchAction('stop')">批量停止</el-button>
+            <el-button size="small" @click="openBatchAddLabel">添加标签</el-button>
+            <el-button size="small" @click="handleBatchPin">批量置顶</el-button>
+            <el-button size="small" type="danger" @click="handleBatchAction('delete')">批量删除</el-button>
+          </div>
+        </Transition>
         <el-button v-if="canOperateTasks" type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon> 新建任务
         </el-button>
@@ -831,10 +838,13 @@ async function handleImport(event: Event) {
                   </div>
                 </div>
               </div>
-              <el-tag :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
-                <span v-if="row.status === 2" class="pulse-dot"></span>
-                {{ getStatusText(row.status) }}
-              </el-tag>
+              <!-- 与桌面表格同一套 out-in 过渡：轮询把状态换掉时先淡出旧值再淡入新值。 -->
+              <Transition name="dd-status-switch" mode="out-in">
+                <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
+                  <span v-if="row.status === 2" class="pulse-dot"></span>
+                  {{ getStatusText(row.status) }}
+                </el-tag>
+              </Transition>
             </div>
 
             <div class="dd-mobile-card__badges task-name-inline">
@@ -895,9 +905,11 @@ async function handleImport(event: Event) {
               <span class="dd-mobile-card__label">上次结果</span>
               <div class="dd-mobile-card__value">
                 <div class="last-run-result">
-                  <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
-                    {{ getRunStatusText(row.last_run_status) }}
-                  </el-tag>
+                  <Transition name="dd-status-switch" mode="out-in">
+                    <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" size="small">
+                      {{ getRunStatusText(row.last_run_status) }}
+                    </el-tag>
+                  </Transition>
                 </div>
               </div>
             </div>
@@ -1035,10 +1047,17 @@ async function handleImport(event: Event) {
              名称/命令/定时规则三个弹性列，让 cron 表达式尽量不被省略号截断 -->
         <el-table-column label="状态" :width="isNarrowDesktop ? 90 : 110" align="center">
           <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
-              <span v-if="row.status === 2" class="pulse-dot"></span>
-              {{ getStatusText(row.status) }}
-            </el-tag>
+            <!-- 3 秒一轮的状态轮询会让这枚 tag 在 禁用中/排队中/运行中/空闲中 之间来回跳，
+                 硬切时用户只看到文字忽然变了、不确定是自己看花眼还是真的变了。
+                 out-in 让旧状态先淡出、新状态再淡入，变化本身有了可见的过程。
+                 key 必须绑【状态值】：绑 row.id 的话同一行永远是同一个 key，节点被原地复用，
+                 过渡一次都不会触发。 -->
+            <Transition name="dd-status-switch" mode="out-in">
+              <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
+                <span v-if="row.status === 2" class="pulse-dot"></span>
+                {{ getStatusText(row.status) }}
+              </el-tag>
+            </Transition>
           </template>
         </el-table-column>
         <!-- 窄桌面隐藏「最后运行」「耗时」：这两列固定占 250px，是把弹性列压到下限的主因。
@@ -1058,9 +1077,14 @@ async function handleImport(event: Event) {
         <el-table-column label="上次结果" :width="isNarrowDesktop ? 84 : 100" align="center">
           <template #default="{ row }">
             <div class="last-run-result">
-              <el-tag :type="getRunStatusType(row.last_run_status)" size="small">
-                {{ getRunStatusText(row.last_run_status) }}
-              </el-tag>
+              <!-- 同一轮轮询里，任务跑完的那一刻这里会从「未运行」翻成「成功 / 失败 / 已终止」，
+                   是全表最值得被看见的一次变化。key 走 String()：last_run_status 为 null（未运行）时
+                   直接绑 null 会被 Vue 当成「没有 key」，和有 key 的节点比较时行为不稳定。 -->
+              <Transition name="dd-status-switch" mode="out-in">
+                <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" size="small">
+                  {{ getRunStatusText(row.last_run_status) }}
+                </el-tag>
+              </Transition>
             </div>
           </template>
         </el-table-column>
@@ -1277,6 +1301,21 @@ async function handleImport(event: Event) {
   gap: 8px;
 }
 
+// 批量操作条进出场：只改 opacity。
+// 不做高度/宽度过渡 —— .toolbar 是 flex-wrap 容器，尺寸每帧变一次就要重新算一遍换行，整页跟着重排。
+.dd-batch-actions-enter-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
+}
+
+.dd-batch-actions-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-batch-actions-enter-from,
+.dd-batch-actions-leave-to {
+  opacity: 0;
+}
+
 // 快捷排序触发按钮：图标与文案留出间距，文案过长时不撑破工具栏
 .sort-dropdown__text {
   margin-left: 4px;
@@ -1287,6 +1326,19 @@ async function handleImport(event: Event) {
   display: inline-flex !important;
   align-items: center;
   gap: 5px;
+}
+
+// 状态 tag 的 out-in 切换：只用 opacity。
+// 表格行里禁止位移——tag 一动，同一格的基线跟着抖，视觉上整行都在晃。
+// 这里的选择器要落到 el-tag 的根元素上：子组件根节点会继承父作用域的 data-v，scoped 下能命中。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
 }
 
 // 表格卡：直角无阴影，仅靠 1px 边框与页面底色区分（dd-fixed-page 下的 flex:1 + 内部滚动由全局规则接管）
@@ -1340,7 +1392,10 @@ async function handleImport(event: Event) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transition: color 0.15s ease, text-decoration-color 0.15s ease;
+  // 时长/缓动只能取令牌：写死毫秒会绕过 prefers-reduced-motion 下把令牌压到 1ms 的降级
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    text-decoration-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     color: var(--el-color-primary-dark-2);
@@ -1402,6 +1457,10 @@ async function handleImport(event: Event) {
   flex-direction: column;
   align-items: center;
   gap: 4px;
+  // out-in 有一段「旧的已走、新的未来」的空档，这一格会瞬间没有内容。
+  // 撑住 el-tag small 的高度，免得移动端网格里这一格塌成 0、把同行其它字段拽着抖一下。
+  // 桌面表格的行高由定时规则/操作列撑着，这里只是顺带保险。
+  min-height: 20px;
 }
 
 .action-btns {

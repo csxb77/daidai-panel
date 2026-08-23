@@ -6,6 +6,8 @@ import { Bell, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { extractError, isCancel } from '@/utils/error'
 import { toast } from '@/utils/toast'
+import DdBadge from '@/components/ui/DdBadge.vue'
+import { formatDateTime } from '@/utils/datetime'
 
 const { isMobile, dialogFullscreen } = useResponsive()
 
@@ -59,7 +61,10 @@ const channelPage = ref(1)
 const channelPageSize = ref(10)
 
 // --- Filtered channels ---
-const filteredChannels = computed(() => {
+// 拆成「状态筛选之前」和「最终结果」两层，是为了让状态下拉里的计数与切过去看到的条数一致：
+// 计数的基数必须排除状态筛选自身（否则选中「启用」后「禁用」永远显示 0），
+// 但必须保留搜索词与类型（否则搜完再看计数会和实际条数对不上）。
+const channelsBeforeStatusFilter = computed(() => {
   let list = channels.value
   if (searchKeyword.value) {
     const kw = searchKeyword.value.toLowerCase()
@@ -68,14 +73,25 @@ const filteredChannels = computed(() => {
   if (filterType.value) {
     list = list.filter(c => c.type === filterType.value)
   }
-  if (filterStatus.value) {
-    if (filterStatus.value === 'enabled') {
-      list = list.filter(c => c.enabled)
-    } else if (filterStatus.value === 'disabled') {
-      list = list.filter(c => !c.enabled)
-    }
-  }
   return list
+})
+
+const filteredChannels = computed(() => {
+  const list = channelsBeforeStatusFilter.value
+  if (filterStatus.value === 'enabled') return list.filter(c => c.enabled)
+  if (filterStatus.value === 'disabled') return list.filter(c => !c.enabled)
+  return list
+})
+
+// 状态下拉里的计数。
+//
+// 能这么算的前提：本页是【客户端筛选】——notificationApi.list() 一次性把全量渠道拿回
+// channels.value，搜索/类型/状态/分页全在 computed 里做，改筛选只会走 handleChannelSearch()
+// （把页码归 1），不会重新发请求。所以数出来的是真实总数，不是拿当前页冒充。
+const statusCounts = computed(() => {
+  const list = channelsBeforeStatusFilter.value
+  const enabled = list.filter(c => c.enabled).length
+  return { all: list.length, enabled, disabled: list.length - enabled }
 })
 
 const pagedChannels = computed(() => {
@@ -380,6 +396,32 @@ function getTypeName(type: string) {
   return found?.name || type
 }
 
+// --- 「最近测试」结果的展示三件套 ---
+// 从模板里的两串嵌套三元原样搬出来，判定分支逐字对齐（success / error|failed / 其余），
+// 只为让下面那格能包进 Transition 之后还看得清。不要在这里加新分支：
+// last_test_status 的取值由服务端写入，Web 只做渲染。
+// 返回值刻意不标注成 string —— 让 TS 推成字面量联合，才能直接喂给 el-tag 的 type。
+
+function getTestStatusTagType(status: unknown) {
+  if (status === 'success') return 'success'
+  if (status === 'error' || status === 'failed') return 'danger'
+  return 'warning'
+}
+
+function getTestStatusText(status: unknown) {
+  if (status === 'success') return '测试通过'
+  if (status === 'error' || status === 'failed') return '测试未通过'
+  return '未测试'
+}
+
+// 过渡 key 必须绑【状态值】而不是 row.id：绑 row.id 的话同一行永远是同一个 key，
+// 节点被原地复用，测完之后过渡一次都不会触发。
+// 没测过时固定给 'none'，这样「未测试 → 测试通过」这次首测也能被演出来。
+function getTestStatusKey(row: any): string {
+  if (!row?.last_test_at) return 'none'
+  return String(row.last_test_status ?? 'unknown')
+}
+
 function parseChannelConfig(configText: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(configText || '{}')
@@ -501,19 +543,26 @@ function getChannelConfigSummary(row: any): string[] {
           没有任何「默认推送」渠道时的警示。
           只列举仓库里真实存在的三处广播调用点，不要扩写成「所有系统通知」之类的模糊说法。
         -->
-        <el-alert
-          v-if="showNoDefaultChannelAlert"
-          type="warning"
-          show-icon
-          :closable="false"
-          class="no-default-alert"
-          title="当前没有启用中的「默认推送」渠道"
-        >
-          <template #default>
-            资源告警、登录通知、静默更新结果这三类系统通知将不会发送（面板不做兜底，也不会退回其它渠道）。
-            如需接收，请把至少一个已启用的渠道改为「默认推送」。
-          </template>
-        </el-alert>
+        <!--
+          这条警示是「凭空冒出」的：把最后一个默认推送渠道禁掉的那一刻它就出现，
+          把整个工具条和表格往下顶。淡入淡出至少让这次出现有个过程，而不是硬闪。
+          刻意只做 opacity，不做高度过渡——高度动画会把下面整张表反复重排。
+        -->
+        <Transition name="dd-alert-fade">
+          <el-alert
+            v-if="showNoDefaultChannelAlert"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="no-default-alert"
+            title="当前没有启用中的「默认推送」渠道"
+          >
+            <template #default>
+              资源告警、登录通知、静默更新结果这三类系统通知将不会发送（面板不做兜底，也不会退回其它渠道）。
+              如需接收，请把至少一个已启用的渠道改为「默认推送」。
+            </template>
+          </el-alert>
+        </Transition>
 
         <!-- Toolbar -->
         <div class="toolbar">
@@ -533,11 +582,33 @@ function getChannelConfigSummary(row: any): string[] {
               <el-option label="全部" value="" />
               <el-option v-for="t in channelTypes" :key="t.type" :label="t.name" :value="t.type" />
             </el-select>
+            <!--
+              状态筛选带计数：本页没有 .status-tabs 分段控件，状态筛选就是这个下拉，
+              所以计数挂在选项上——展开时就能看到「启用 5 / 禁用 2」，不必逐个切过去数。
+              计数是「统计型」，开 show-zero：「禁用 0」是有信息量的，消失了反而像没加载出来。
+              level=info（描边不实心）：中性计数，不该和需要处理的红色角标抢注意力。
+              注意 label 属性要保留：选中后输入框里显示的是 label，默认插槽只管下拉项。
+            -->
             <el-select v-model="filterStatus" placeholder="状态" clearable class="toolbar__filter" @change="handleChannelSearch">
               <template #prefix>状态</template>
-              <el-option label="全部" value="" />
-              <el-option label="启用" value="enabled" />
-              <el-option label="禁用" value="disabled" />
+              <el-option label="全部" value="">
+                <span class="filter-option">
+                  <span>全部</span>
+                  <DdBadge :value="statusCounts.all" level="info" show-zero title="全部渠道" />
+                </span>
+              </el-option>
+              <el-option label="启用" value="enabled">
+                <span class="filter-option">
+                  <span>启用</span>
+                  <DdBadge :value="statusCounts.enabled" level="info" show-zero title="已启用渠道" />
+                </span>
+              </el-option>
+              <el-option label="禁用" value="disabled">
+                <span class="filter-option">
+                  <span>禁用</span>
+                  <DdBadge :value="statusCounts.disabled" level="info" show-zero title="已禁用渠道" />
+                </span>
+              </el-option>
             </el-select>
             <el-button @click="resetFilters">
               <el-icon><Refresh /></el-icon> 重置
@@ -577,7 +648,7 @@ function getChannelConfigSummary(row: any): string[] {
                 </div>
                 <div class="dd-mobile-card__field">
                   <span class="dd-mobile-card__label">创建时间</span>
-                  <span class="dd-mobile-card__value">{{ new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
+                  <span class="dd-mobile-card__value">{{ formatDateTime(row.created_at) }}</span>
                 </div>
               </div>
               <div class="dd-mobile-card__actions notification-card__actions">
@@ -647,24 +718,34 @@ function getChannelConfigSummary(row: any): string[] {
             </el-table-column>
             <el-table-column label="最近测试" width="160">
               <template #default="{ row }">
-                <div v-if="row.last_test_at" class="test-status">
-                  <el-tag
-                    size="small"
-                    :type="row.last_test_status === 'success' ? 'success' : row.last_test_status === 'error' || row.last_test_status === 'failed' ? 'danger' : 'warning'"
-                    effect="plain"
-                    round
-                  >
-                    {{ row.last_test_status === 'success' ? '测试通过' : row.last_test_status === 'error' || row.last_test_status === 'failed' ? '测试未通过' : '未测试' }}
-                  </el-tag>
-                  <span class="time-text">{{ new Date(row.last_test_at).toLocaleDateString('zh-CN') }}</span>
-                </div>
-                <span v-else class="text-muted">未测试</span>
+                <!-- 点「测试」后 handleTestChannel 会重拉列表，这一格从「未测试」翻成
+                     「测试通过 / 测试未通过」——是本页最值得被看见的一次变化，硬切会被眼睛错过。
+                     out-in 让旧结果先淡出、新结果再淡入，给出一次明确的交接。
+                     key 走 getTestStatusKey(row)（状态值），绝不能绑 row.id。
+                     只做 opacity：表格行里任何位移都会连带整行抖。
+                     外层 .test-status-slot 撑住最小高度，out-in 中间那一帧内容被移除时行高不塌。 -->
+                <span class="test-status-slot">
+                  <Transition name="dd-status-switch" mode="out-in">
+                    <div v-if="row.last_test_at" :key="getTestStatusKey(row)" class="test-status">
+                      <el-tag
+                        size="small"
+                        :type="getTestStatusTagType(row.last_test_status)"
+                        effect="plain"
+                        round
+                      >
+                        {{ getTestStatusText(row.last_test_status) }}
+                      </el-tag>
+                      <span class="time-text">{{ formatDateTime(row.last_test_at) }}</span>
+                    </div>
+                    <span v-else key="none" class="text-muted">未测试</span>
+                  </Transition>
+                </span>
               </template>
             </el-table-column>
             <el-table-column prop="created_at" label="创建时间" width="170">
               <template #default="{ row }">
                 <div class="time-cell">
-                  <span class="time-text">{{ new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
+                  <span class="time-text">{{ formatDateTime(row.created_at) }}</span>
                 </div>
               </template>
             </el-table-column>
@@ -870,6 +951,20 @@ function getChannelConfigSummary(row: any): string[] {
   gap: 2px;
 }
 
+// 「最近测试」这一格的占位槽。
+//
+// out-in 中间有一帧「旧的已移除、新的还没进来」，没有最小高度的话整行会在测试完成的
+// 那一刻塌一次再弹回来 —— 恰好发生在我们想让用户看清的那个瞬间，得不偿失。
+// 42px = el-tag small(24px) + gap(2px) + 日期行(约 16px)，即「已测过」那一档的高度。
+// 代价是「未测试」的行也被撑到同一高度（比原来高约 6px）；换来的是全表行高统一、
+// 且测试完成时零跳动，这笔买卖划算。
+// 用 block 级 flex 而不是 inline-flex：单元格里的行内盒会带基线余白，块级则严丝合缝。
+.test-status-slot {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+}
+
 .time-cell {
   display: flex;
   flex-direction: column;
@@ -896,6 +991,42 @@ function getChannelConfigSummary(row: any): string[] {
   // 实际间距变成 14px 而不是设计的 2px。间距统一交给 gap
   // （与 tasks / deps / subscriptions 三页一致）。
   :deep(.el-button + .el-button) { margin-left: 0; }
+}
+
+// 下拉选项里「文字 + 计数角标」的排布。
+// 这段样式虽然写在 scoped 里，但命中的是被 teleport 到 body 的下拉面板 ——
+// 能命中是因为 .filter-option 这个 span 是本组件模板里写的、带 data-v 标记，
+// scoped 编译出来的是普通属性选择器，与元素挂在 DOM 哪个位置无关。
+// 用 inline-flex 而不是 block：EP 的 .el-select-dropdown__item 靠自身 line-height 撑高，
+// 换成块级子元素会让选项高度塌到角标那 18px。
+.filter-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  vertical-align: middle;
+}
+
+// 状态标签切换：只做透明度，禁止位移/缩放——表格行里任何位移都会连带整行。
+// 时长与缓动走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
+}
+
+// 顶部警示条的进出场：同样只做透明度，不碰高度。
+.dd-alert-fade-enter-active,
+.dd-alert-fade-leave-active {
+  transition: opacity var(--dd-motion-normal) var(--dd-ease-standard);
+}
+
+.dd-alert-fade-enter-from,
+.dd-alert-fade-leave-to {
+  opacity: 0;
 }
 
 // 分页条：与定时任务页/订阅管理页一致的间距收敛

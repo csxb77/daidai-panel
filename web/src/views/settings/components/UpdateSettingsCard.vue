@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { formatDateTime } from "@/utils/datetime";
 
 const props = defineProps<{
   version: string;
@@ -11,17 +12,16 @@ const emit = defineEmits<{
   "update:autoUpdateEnabled": [value: boolean];
 }>();
 
-const lastCheckDisplay = computed(() => {
-  if (!props.lastCheckTime) return "从未检查";
-  return new Date(props.lastCheckTime).toLocaleString();
-});
+// 空值文案沿用「从未检查」，比统一的 "-" 更能说明是「一次都没查过」而不是「查了但没记下来」
+const lastCheckDisplay = computed(() =>
+  formatDateTime(props.lastCheckTime, "从未检查"),
+);
 
+// 下次检查是【未来时间】，只能用绝对时间：formatRelativeTime 只描述过去
 const nextCheckDisplay = computed(() => {
   if (!props.lastCheckTime) return "-";
-  const next = new Date(
-    new Date(props.lastCheckTime).getTime() + 24 * 60 * 60 * 1000,
-  );
-  return next.toLocaleString();
+  const next = new Date(props.lastCheckTime).getTime() + 24 * 60 * 60 * 1000;
+  return formatDateTime(next);
 });
 
 const statusText = computed(() => {

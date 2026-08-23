@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { MAGISK_STOP_SUPPORTED_SHELL_VERSION, type PanelUpdateStatus } from '@/api/system'
+import { formatDateTime } from '@/utils/datetime'
 import UpdateProgressDialog from './UpdateProgressDialog.vue'
 
 const props = defineProps<{
@@ -120,7 +121,7 @@ const stopPanelDisabledTip = computed(
           :closable="false"
         >
           <div v-if="updateInfo.has_update">
-            <p>发布时间: {{ new Date(updateInfo.published_at).toLocaleString() }}</p>
+            <p>发布时间: {{ formatDateTime(updateInfo.published_at) }}</p>
             <p v-if="updateInfo.update_target?.deployment_type === 'magisk'" class="hero-meta">更新方式：Magisk 模块版在线升级（只更新面板程序与前端，容器与已装依赖不动）</p>
             <p v-if="updateInfo.update_target?.deployment_type === 'binary'" class="hero-meta">更新方式：二进制后台更新</p>
             <p v-if="updateInfo.update_target?.update_manager === 'watchtower' || updateInfo.update_target?.watchtower_managed" class="hero-meta">更新方式：Watchtower 托管更新</p>
@@ -183,7 +184,7 @@ const stopPanelDisabledTip = computed(
       <div class="release-notes-meta">
         <strong>版本：v{{ updateInfo.latest }}</strong>
         <span v-if="updateInfo.release_name">{{ updateInfo.release_name }}</span>
-        <span v-if="updateInfo.published_at">发布时间：{{ new Date(updateInfo.published_at).toLocaleString() }}</span>
+        <span v-if="updateInfo.published_at">发布时间：{{ formatDateTime(updateInfo.published_at) }}</span>
       </div>
       <pre class="release-notes-content">{{ updateInfo.release_notes || '当前版本未提供更新日志。' }}</pre>
     </div>

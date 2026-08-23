@@ -67,7 +67,14 @@ import router from "./router";
 import { fetchAndApplyPanelAppearance } from "./utils/panelAppearance";
 import "./styles/global.scss";
 import "./styles/animations.css";
-import "./styles/visual-enhancements.css";
+// visual-enhancements.css 已删除（v3.0.8）：209 行 / 22 个工具类【全部零引用】，
+// 逐个 grep 确认过。唯一看似有引用的 `.status-dot` 是 api-docs 页自己在 scoped 里
+// 定义的同名类（且属性更全、取色走令牌），删掉全局那份不影响它。
+//
+// 删掉的另一个理由是它在留着当隐患：里面还有 `backdrop-filter: blur(10px)` 的玻璃拟态
+// （.glass-card / .btn-glass）、`transition: all 0.3s ease` 这种写死时长的过渡，
+// 以及 #67c23a / #f56c6c 这类硬编码语义色（暗色下不跟随）——
+// 全都违反「全屏纯扁平直角」的硬规则，谁顺手复用一个类名就等于引入一处违规。
 
 // Edge / Chromium 在窗口最小化后，如果弹窗、编辑器或第三方组件延迟调用 focus()，
 // 可能会把已经最小化的浏览器窗口重新拉回前台。面板后台不可见时不需要抢焦点，

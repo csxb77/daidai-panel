@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import { taskApi } from '@/api/task'
+import { formatDateTime } from '@/utils/datetime'
 
 type StopRuleState = {
   id: number
@@ -165,7 +166,7 @@ function handleKeyDown(event: KeyboardEvent) {
             <div v-if="rule.parseResult.next_run_times?.length" class="next-times">
               <el-icon class="time-icon"><Clock /></el-icon>
               <span class="label">下次停止</span>
-              <span class="time-value">{{ new Date(rule.parseResult.next_run_times[0]).toLocaleString() }}</span>
+              <span class="time-value">{{ formatDateTime(rule.parseResult.next_run_times[0]) }}</span>
             </div>
           </div>
         </template>

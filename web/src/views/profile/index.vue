@@ -23,6 +23,7 @@ import {
 } from "@/api/sponsor";
 import { useAuthStore } from "@/stores/auth";
 import { createQrCodeDataUrl } from "@/utils/qrcode";
+import { formatDateTime } from "@/utils/datetime";
 import { useResponsive } from "@/composables/useResponsive";
 import SponsorWall from "./components/SponsorWall.vue";
 
@@ -69,9 +70,10 @@ const roleTagType = computed(() => {
   return "info";
 });
 
+// 薄封装转调 utils/datetime：注册时间/最近登录/赞助同步时间共用一套口径，
+// 空值与无效值由 formatDateTime 统一兜底成 "-"。
 function formatTime(value?: string | null) {
-  if (!value) return "-";
-  return new Date(value).toLocaleString();
+  return formatDateTime(value);
 }
 
 function buildEmptySponsorSummary(unavailable = false): SponsorSummary {
@@ -566,8 +568,13 @@ onUnmounted(() => {
 
       <!-- Right content area -->
       <div class="profile-content">
+        <!-- 三个 sidebar-tab 原本是整块硬替换，切换时旧面板凭空消失。
+             这里包一层 out-in 过渡：旧面板先淡出，新面板再淡入上移。
+             key 绑当前 tab 标识（不是索引），保证任意方向切换都会触发。
+             mode="out-in" 也避免了新旧两块内容同时占位把页面撑高一倍。 -->
+        <Transition name="dd-profile-panel" mode="out-in">
         <!-- ===== 基本资料 ===== -->
-        <template v-if="activeTab === 'profile'">
+        <div v-if="activeTab === 'profile'" key="profile" class="profile-panel">
           <section class="profile-card">
             <header class="profile-card-header">
               <span class="card-title">
@@ -663,10 +670,10 @@ onUnmounted(() => {
               </li>
             </ul>
           </section>
-        </template>
+        </div>
 
         <!-- ===== 安全设置 ===== -->
-        <template v-if="activeTab === 'security'">
+        <div v-else-if="activeTab === 'security'" key="security" class="profile-panel">
           <section class="profile-card">
             <header class="profile-card-header">
               <span class="card-title">
@@ -766,10 +773,10 @@ onUnmounted(() => {
               </el-button>
             </div>
           </section>
-        </template>
+        </div>
 
         <!-- ===== 赞助信息 ===== -->
-        <template v-if="activeTab === 'sponsors'">
+        <div v-else key="sponsors" class="profile-panel">
           <section class="sponsor-panel">
             <div class="sponsor-toolbar">
               <div class="sponsor-toolbar-copy">
@@ -797,7 +804,8 @@ onUnmounted(() => {
               :loading="sponsorLoading && sponsors.length === 0"
             />
           </section>
-        </template>
+        </div>
+        </Transition>
       </div>
     </div>
 
@@ -909,27 +917,47 @@ onUnmounted(() => {
   }
 }
 
+/* 只对三个卡片级容器做，各自只播一次：
+   hero / 侧栏 / 内容区都是挂载后不再重建的稳定容器。
+   ——不再逐张卡片挂 rise-in：Tab 切换已经由下面的 .dd-profile-panel 过渡接管，
+   两者都是「opacity + translateY」，同时跑会叠加位移、且透明度相乘导致内容发灰。 */
 .profile-hero,
 .profile-sidebar,
-.profile-content > .profile-card,
-.profile-content > .sponsor-panel {
+.profile-content {
   animation: dd-profile-rise-in var(--dd-motion-page) var(--dd-ease-decelerate)
     both;
 }
 
-/* 轻微错落：侧栏稍晚于 hero，内容卡片依次再延后；
-   切换 Tab 时卡片由 v-if 重新挂载，会再次播放进入动画 */
+/* 轻微错落：侧栏稍晚于 hero，内容区再略晚（增量均 ≤60ms） */
 .profile-sidebar {
   animation-delay: 50ms;
 }
 
-.profile-content > .profile-card:nth-child(1),
-.profile-content > .sponsor-panel {
+.profile-content {
   animation-delay: 90ms;
 }
 
-.profile-content > .profile-card:nth-child(2) {
-  animation-delay: 140ms;
+/* ================= Tab 面板切换过渡 =================
+   Transition 没有写 appear，所以首屏不播这段，只有真正点 Tab 才会触发，
+   与上面那次入场动画不会撞车。
+   进入用 decelerate（内容落位），离场用更短的 standard（尽快让位），
+   方向统一为「向下」，与全站 dd-*-rise-in 的语汇一致。 */
+.dd-profile-panel-enter-active {
+  transition:
+    opacity var(--dd-motion-normal) var(--dd-ease-decelerate),
+    transform var(--dd-motion-normal) var(--dd-ease-decelerate);
+}
+
+.dd-profile-panel-leave-active {
+  transition:
+    opacity var(--dd-motion-fast) var(--dd-ease-standard),
+    transform var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-profile-panel-enter-from,
+.dd-profile-panel-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
 }
 
 /* ================= Hero ================= */
@@ -1020,7 +1048,8 @@ onUnmounted(() => {
   background: rgba(0, 0, 0, 0.4);
   border-radius: 0;
   opacity: 0;
-  transition: opacity 0.2s;
+  // 时长/缓动走令牌：写死毫秒会绕过 prefers-reduced-motion 的降级
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
   color: #fff;
 }
 
@@ -1045,9 +1074,9 @@ onUnmounted(() => {
   color: var(--el-text-color-secondary);
   cursor: pointer;
   transition:
-    color 0.2s,
-    border-color 0.2s,
-    background-color 0.2s;
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     color: var(--profile-accent);
@@ -1215,7 +1244,12 @@ onUnmounted(() => {
   font-size: 13.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.2s;
+  // 原为 `all 0.2s`：写死毫秒会绕过 prefers-reduced-motion，
+  // `all` 还会把 font-weight 这类不该动的属性也带进来。按设计系统只过渡颜色三件套。
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   white-space: nowrap;
   text-align: left;
 
@@ -1238,6 +1272,15 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+/* Transition 需要单根节点，所以每个 Tab 的内容包了一层。
+   卡片之间的间距从 .profile-content 移到这里（out-in 下 .profile-content 永远只有一个子节点）。 */
+.profile-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
 }
 
 /* ================= Cards ================= */

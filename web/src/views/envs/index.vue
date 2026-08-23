@@ -898,13 +898,26 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
           @click="handleExportAll"
           @command="onExportAction"
         />
-        <div v-if="selectedIds.length > 0" class="batch-actions">
-          <el-button @click="handleBatchRename">批量改名</el-button>
-          <el-button @click="handleBatchEnable">批量启用</el-button>
-          <el-button @click="handleBatchDisable">批量禁用</el-button>
-          <el-button @click="handleBatchGroup">批量分组</el-button>
-          <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
-        </div>
+        <!-- 批量操作条：勾一下就凭空插进来五个按钮，会把整条工具栏往左顶一下。
+             包一层 opacity 过渡让它淡进淡出。刻意不做宽度/高度过渡——这排按钮处在
+             .toolbar__right 的横向 flex 里，动尺寸会每帧推着右边的「新建变量」走、
+             带着整行反复重排；opacity 完全不参与布局计算。 -->
+        <Transition name="dd-batch-bar">
+          <div v-if="selectedCountInCurrentPage > 0" class="batch-actions">
+            <!-- 勾选数只按「当前列表里真实存在的行」算（selectedCountInCurrentPage 拿
+                 selectedIdSet 过 envList），不是 selectedIds.length 这个可能含已失效 id 的原始数组。
+                 selectionScopeText 已经按分页模式区分过「全部 / 仅当前页」的措辞，
+                 挂成 title：动手前就该知道这几个按钮到底作用在哪些数据上。 -->
+            <span class="batch-actions__count" :title="selectionScopeText">
+              已选 {{ selectedCountInCurrentPage }} 项
+            </span>
+            <el-button @click="handleBatchRename">批量改名</el-button>
+            <el-button @click="handleBatchEnable">批量启用</el-button>
+            <el-button @click="handleBatchDisable">批量禁用</el-button>
+            <el-button @click="handleBatchGroup">批量分组</el-button>
+            <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
+          </div>
+        </Transition>
         <el-button type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon> 新建变量
         </el-button>
@@ -978,9 +991,16 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                 <span class="dd-mobile-card__label">状态</span>
                 <div class="dd-mobile-card__value env-status-inline">
                   <el-switch :model-value="row.enabled" size="small" @change="handleToggle(row)" />
-                  <span class="env-status-text" :class="{ enabled: row.enabled }">
-                    {{ row.enabled ? '启用' : '禁用' }}
-                  </span>
+                  <!-- 与桌面状态列同一套过渡，key 同样绑状态值 -->
+                  <Transition name="dd-status-switch" mode="out-in">
+                    <span
+                      :key="row.enabled ? 'enabled' : 'disabled'"
+                      class="env-status-text"
+                      :class="{ enabled: row.enabled }"
+                    >
+                      {{ row.enabled ? '启用' : '禁用' }}
+                    </span>
+                  </Transition>
                 </div>
               </div>
               <div class="dd-mobile-card__field">
@@ -1099,9 +1119,18 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                 size="small"
                 @change="handleToggle(row)"
               />
-              <span class="env-status-text" :class="{ enabled: row.enabled }">
-                {{ row.enabled ? '启用' : '禁用' }}
-              </span>
+              <!-- 启用 ⇄ 禁用 之间隔着「确认框 → 请求 → 整表重载」，硬切之后用户不确定
+                   这一行到底改没改。out-in 淡出淡入给一次明确的「它变了」。
+                   key 必须绑状态值（不是 row.id），绑 id 的话行不变、过渡永远不触发。 -->
+              <Transition name="dd-status-switch" mode="out-in">
+                <span
+                  :key="row.enabled ? 'enabled' : 'disabled'"
+                  class="env-status-text"
+                  :class="{ enabled: row.enabled }"
+                >
+                  {{ row.enabled ? '启用' : '禁用' }}
+                </span>
+              </Transition>
             </div>
           </template>
         </el-table-column>
@@ -1131,7 +1160,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
       </el-table>
     </div>
 
-    <div class="pagination-bar">
+    <!-- showFooterBar = 有数据，或者虽然列表空了但还留着勾选。
+         一条数据都没有（且没勾选）时这条底栏只剩「共 0 条数据」和一个作用不到任何数据的
+         每页条数选择器，正下方还压着空态自己的指路文案，纯属噪声——直接不渲染。
+         .dd-fixed-page 下 .table-card 是 flex:1 1 0，少一条底栏只是把高度让给表格，不会塌。 -->
+    <div v-if="showFooterBar" class="pagination-bar">
       <span class="pagination-total">共 {{ total }} 条数据</span>
       <div class="pagination-actions">
         <div class="page-size-picker">
@@ -1316,7 +1349,47 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 .batch-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+// 勾选数：纯文字级提示，用次级色，不跟旁边那排实体按钮抢视觉重量
+.batch-actions__count {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  cursor: default;
+}
+
+// 批量操作条进出场：只做 opacity。
+// 宽度/高度过渡会让这排按钮每帧推着右侧「新建变量」移动、整行反复重排；
+// opacity 不参与布局，位置一次到位，只是内容淡进淡出。
+// 时长走令牌，prefers-reduced-motion 下自动降为 1ms 即等效关闭。
+.dd-batch-bar-enter-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
+}
+
+.dd-batch-bar-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-batch-bar-enter-from,
+.dd-batch-bar-leave-to {
+  opacity: 0;
+}
+
+// 状态文字切换（桌面状态列 + 移动卡片同用）：
+// 严格只动 opacity，一个像素的位移都不能有——本页表格行由 Sortable.js 拖拽，
+// 行上的内联 translate3d 与任何自写的 transform/transition 冲突会直接毁掉跟手；
+// 且单元格内的位移在表格里看起来就是整行在晃。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
 }
 
 /* ---- Table Card ---- */
@@ -1633,7 +1706,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 .env-copy-btn {
   flex-shrink: 0;
   opacity: 0;
-  transition: opacity 0.2s;
+  // 原来写死 0.2s：写死的毫秒数绕过 prefers-reduced-motion 降级，
+  // 令牌在降级媒体查询里会被压到 1ms，写死的不会。统一吃令牌。
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
   color: var(--el-text-color-secondary);
   padding: 2px;
 }

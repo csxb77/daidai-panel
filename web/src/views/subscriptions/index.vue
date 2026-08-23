@@ -11,6 +11,7 @@ import {
 import { useResponsive } from "@/composables/useResponsive";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
 import { formatDuration } from "@/utils/duration";
+import { formatDateTime } from "@/utils/datetime";
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
 
@@ -1059,15 +1060,21 @@ function viewLogDetail(log: any) {
         <el-button @click="handleOpenSettings" title="订阅设置">
           <el-icon><Setting /></el-icon>
         </el-button>
-        <el-button
-          v-if="selectedIds.length > 0"
-          type="danger"
-          plain
-          size="small"
-          @click="handleBatchDelete"
-        >
-          <el-icon><Delete /></el-icon> 批量删除
-        </el-button>
+        <!-- 批量操作条：勾选后凭空插进来一个按钮，会把右边的「新建订阅」顶着往左跳一下。
+             包一层 opacity 过渡淡进淡出。刻意不做宽度/高度过渡——它在 .toolbar__right
+             的横向 flex 里，动尺寸会每帧推着相邻按钮走、带整行重排；opacity 不参与布局。 -->
+        <Transition name="dd-batch-bar">
+          <el-button
+            v-if="selectedIds.length > 0"
+            type="danger"
+            plain
+            size="small"
+            :title="`批量删除已勾选的 ${selectedIds.length} 条订阅`"
+            @click="handleBatchDelete"
+          >
+            <el-icon><Delete /></el-icon> 批量删除
+          </el-button>
+        </Transition>
         <el-button type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon> 新建订阅
         </el-button>
@@ -1106,9 +1113,15 @@ function viewLogDetail(log: any) {
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">状态</span>
               <div class="dd-mobile-card__value">
-                <el-tag size="small" :type="getStatusTag(row.status)">{{
-                  getStatusText(row.status)
-                }}</el-tag>
+                <!-- 与桌面状态列同一套过渡，key 同样绑状态值 -->
+                <Transition name="dd-status-switch" mode="out-in">
+                  <el-tag
+                    :key="row.status"
+                    size="small"
+                    :type="getStatusTag(row.status)"
+                    >{{ getStatusText(row.status) }}</el-tag
+                  >
+                </Transition>
               </div>
             </div>
             <div class="dd-mobile-card__field">
@@ -1130,9 +1143,7 @@ function viewLogDetail(log: any) {
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">最后拉取</span>
               <span class="dd-mobile-card__value">{{
-                row.last_pull_at
-                  ? new Date(row.last_pull_at).toLocaleString()
-                  : "-"
+                formatDateTime(row.last_pull_at)
               }}</span>
             </div>
           </div>
@@ -1211,9 +1222,23 @@ function viewLogDetail(log: any) {
         </el-table-column>
         <el-table-column label="状态" width="70" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="getStatusTag(row.status)" round>{{
-              getStatusText(row.status)
-            }}</el-tag>
+            <!--
+              这一列是全页流转最频繁的状态：拉取的 SSE 收到 done 后会直接 loadData()，
+              正常 ⇄ 失败 就地翻牌。硬切的话用户正盯着日志弹窗，回到列表根本看不出哪一行变了。
+              out-in 淡出淡入补一次「它刚刚变了」的提示。
+
+              key 必须绑 row.status（状态值本身）——绑 row.id 的话行没换、key 不变，
+              过渡永远不会触发，等于白写。
+            -->
+            <Transition name="dd-status-switch" mode="out-in">
+              <el-tag
+                :key="row.status"
+                size="small"
+                :type="getStatusTag(row.status)"
+                round
+                >{{ getStatusText(row.status) }}</el-tag
+              >
+            </Transition>
           </template>
         </el-table-column>
         <el-table-column label="启用" width="60" align="center">
@@ -1228,7 +1253,7 @@ function viewLogDetail(log: any) {
         <el-table-column prop="last_pull_at" label="最后拉取" width="150">
           <template #default="{ row }">
             <span v-if="row.last_pull_at" class="time-text">{{
-              new Date(row.last_pull_at).toLocaleString()
+              formatDateTime(row.last_pull_at)
             }}</span>
             <span v-else class="text-muted">-</span>
           </template>
@@ -1559,7 +1584,7 @@ function viewLogDetail(log: any) {
         </el-table-column>
         <el-table-column prop="created_at" label="时间" width="170">
           <template #default="{ row }">{{
-            new Date(row.created_at).toLocaleString()
+            formatDateTime(row.created_at)
           }}</template>
         </el-table-column>
         <el-table-column label="操作" width="80" fixed="right" align="center">
@@ -1751,9 +1776,7 @@ function viewLogDetail(log: any) {
         <el-table-column prop="name" label="名称" min-width="180" />
         <el-table-column prop="created_at" label="创建时间" width="170">
           <template #default="{ row }">
-            <span class="time-text">{{
-              new Date(row.created_at).toLocaleString()
-            }}</span>
+            <span class="time-text">{{ formatDateTime(row.created_at) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right" align="center">
@@ -2076,6 +2099,36 @@ function viewLogDetail(log: any) {
   font-size: 12px;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+// 状态标签切换（桌面状态列 + 移动卡片同用）：
+// 只动 opacity。这枚标签坐在表格单元格里，任何位移都会让整行看起来在晃；
+// 位移还会在 out-in 的两段之间产生方向不一致的漂移，比硬切更难读。
+// 时长/缓动走令牌，prefers-reduced-motion 下自动降为 1ms 即等效关闭。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
+}
+
+// 批量操作条进出场：只做 opacity。
+// 宽度/高度过渡会让这个按钮每帧推着右侧「新建订阅」移动、整行反复重排；
+// opacity 不参与布局计算，位置一次到位，只是内容淡进淡出。
+.dd-batch-bar-enter-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
+}
+
+.dd-batch-bar-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-batch-bar-enter-from,
+.dd-batch-bar-leave-to {
+  opacity: 0;
 }
 
 // ===== 新建 / 编辑订阅弹窗：桌面端双列 =====

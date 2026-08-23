@@ -83,21 +83,34 @@ async function copyConfigScript() {
           集中维护 <code>config.sh</code>，脚本运行前会自动加载这里的共享配置。
         </p>
       </div>
-      <div class="header-actions">
-        <el-tag v-if="hasChanged" type="warning" effect="plain">有未保存修改</el-tag>
-        <el-tag v-else type="success" effect="plain">
-          <el-icon><Check /></el-icon>
-          已保存
-        </el-tag>
-      </div>
     </div>
 
     <div class="config-layout">
       <el-card class="editor-card" shadow="never" v-loading="loading">
         <template #header>
           <div class="editor-card__header">
-            <div>
-              <div class="editor-card__title">{{ configPath }}</div>
+            <div class="editor-card__intro">
+              <div class="editor-card__title-row">
+                <span class="editor-card__title">{{ configPath }}</span>
+                <!--
+                  保存状态是本页唯一的状态叙事，原来放在 .page-header 里，
+                  而 .dd-page-hide-heading 把整个页头 display:none 了 —— 实际永远看不见。
+                  这里挪到工具栏标题行；out-in 淡切的 key 必须绑「状态值」，
+                  绑其它稳定值（如文件路径）永远不会触发过渡。
+                -->
+                <Transition name="dd-status-switch" mode="out-in">
+                  <el-tag
+                    :key="hasChanged ? 'changed' : 'saved'"
+                    class="editor-card__status"
+                    :type="hasChanged ? 'warning' : 'success'"
+                    effect="plain"
+                    size="small"
+                  >
+                    <el-icon v-if="!hasChanged"><Check /></el-icon>
+                    {{ hasChanged ? '有未保存修改' : '已保存' }}
+                  </el-tag>
+                </Transition>
+              </div>
               <div class="editor-card__desc">按 Shell 语法编辑，每行一个变量或注释。</div>
             </div>
             <div class="editor-card__actions">
@@ -200,13 +213,6 @@ async function copyConfigScript() {
     font-size: 13px;
     color: var(--el-text-color-secondary);
   }
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
-  }
 }
 
 .config-layout {
@@ -244,10 +250,40 @@ async function copyConfigScript() {
   flex-wrap: wrap;
 }
 
+.editor-card__intro {
+  min-width: 0;
+}
+
+.editor-card__title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .editor-card__title {
   font-size: 16px;
   font-weight: 700;
   color: var(--el-text-color-primary);
+}
+
+// 标签不参与压缩：窄屏由 .editor-card__title-row 的 flex-wrap 把它整体换行，
+// 而不是把「有未保存修改」挤成半截
+.editor-card__status {
+  flex-shrink: 0;
+}
+
+// 「有未保存修改 ↔ 已保存」是本页唯一的状态叙事，切换时做一次极短的 out-in 淡切，
+// 避免文案硬跳导致用户看不出状态变过。
+// 只动 opacity：标签宽度在两个状态下不同，位移/缩放会让整行标题跟着晃。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
 }
 
 .editor-card__desc {
@@ -425,5 +461,44 @@ code {
   .side-panel {
     grid-template-columns: 1fr;
   }
+}
+
+// ===== 入场动画 =====
+// 与全站 dd-*-rise-in 同一语汇：只对卡片级容器（编辑器卡 / 说明卡 / 提示卡）做淡入上移，
+// ≤60ms 轻微错落；时长与缓动全部走令牌，prefers-reduced-motion 下令牌降为 1ms、
+// delay 被全局补丁归零，等效关闭。
+//
+// fill-mode 用 backwards 而不是列表页惯用的 both：
+// 编辑器卡里装着 Monaco，both 会把 `transform: translateY(0)` 永久留在 .editor-card 上，
+// 让它成为 Monaco 内部 position:fixed 浮层（右键菜单 / 补全 / 悬浮提示）的包含块 → 弹层错位，
+// 与 ScriptExecutionDialogs.vue 里那条「不加 both」的注释是同一个坑。
+// backwards 只在 delay 期间铺 from 帧，动画结束后回到自然样式（opacity 1、无 transform），
+// 末态与 to 帧完全一致，视觉上没有区别。
+// 只动 opacity + translateY、不碰 height：容器高度全程稳定，Monaco 的首次 layout 不受影响。
+@keyframes dd-configfile-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.editor-card,
+.info-card,
+.tips-card {
+  animation: dd-configfile-rise-in var(--dd-motion-page)
+    var(--dd-ease-decelerate) backwards;
+}
+
+// 轻微错落：编辑器卡先入，右侧说明卡依次略晚
+.info-card {
+  animation-delay: 30ms;
+}
+
+.tips-card {
+  animation-delay: 60ms;
 }
 </style>

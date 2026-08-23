@@ -134,8 +134,20 @@ onMounted(async () => {
   } catch {}
 });
 
+/**
+ * 卡通形象跟随鼠标。
+ *
+ * 系统开启「减少动态效果」时直接不更新位移 —— 插画保持在中位不动。
+ * CSS 那边的 transition 时长虽然会被令牌降到 1ms，但那只是让位移【瞬间完成】，
+ * 插画仍然会跟着鼠标跳；对明确要求减少动效的用户来说，这比平滑跟随更难受。
+ * 真正要关掉的是位移本身，只能在 JS 层判断。
+ *
+ * 每次移动都读一次 matchMedia 而不是缓存：用户可能在页面开着的时候改系统设置，
+ * 而这个判断本身很便宜（浏览器内部有缓存），不值得为它挂一个 change 监听。
+ */
 function handleMouseMove(e: MouseEvent) {
   if (!containerRef.value) return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
   const rect = containerRef.value.getBoundingClientRect();
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
@@ -736,7 +748,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   color: var(--el-text-color-secondary);
   min-height: 18px;
   line-height: 1.4;
-  transition: color 0.2s;
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &--error {
     color: var(--el-color-danger);
@@ -778,7 +790,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   padding: 24px;
   overflow: hidden;
   position: relative;
-  transition: background 0.4s ease;
+  transition: background var(--dd-motion-slow) var(--dd-ease-standard);
 }
 
 .theme-toggle {
@@ -818,7 +830,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   border-radius: 0;
   overflow: hidden;
   border: 1px solid var(--el-border-color-lighter);
-  animation: loginSlideUp 0.6s ease-out;
+  // 时长/缓动改吃令牌：原来写死 0.6s ease-out，是全站少数几个绕过
+  // prefers-reduced-motion 降级的动效之一（那段补丁压不到写死的值）。
+  animation: loginSlideUp var(--dd-motion-slow) var(--dd-ease-decelerate);
 }
 
 @keyframes loginSlideUp {
@@ -843,13 +857,19 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   overflow: hidden;
   padding: 32px 24px 0;
   cursor: default;
-  transition: background 0.4s ease;
+  transition: background var(--dd-motion-slow) var(--dd-ease-standard);
 }
 
 .characters-wrap {
   width: 100%;
   max-width: 360px;
-  transition: transform 0.1s ease-out;
+  // 卡通形象跟随鼠标的位移。这是【插画元素】，不属于被禁的 hover 形变
+  // （design-system 的圆形白名单里也单独放行了登录页插画）。
+  // 时长改吃令牌：原来写死 0.1s 会绕过 prefers-reduced-motion 降级，
+  // 是全站少数几个「用户明确要求减少动效、它却照动不误」的地方。
+  // 令牌降到 1ms 后跟随变成瞬时，配合下面 JS 层的 matchMedia 守卫（不再更新位移），
+  // 减少动效模式下这个插画就是静止的。
+  transition: transform var(--dd-motion-fast) var(--dd-ease-decelerate);
 }
 
 .login-right {
@@ -859,7 +879,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   flex-direction: column;
   justify-content: center;
   padding: 52px 44px;
-  transition: background 0.4s ease;
+  transition: background var(--dd-motion-slow) var(--dd-ease-standard);
 }
 
 .login-loading {
@@ -871,9 +891,28 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   font-size: 14px;
 }
 
+// 「检查初始化状态」的 loading 结束后，表单是【硬替换】出现的（v-if / v-else 切换），
+// 这是访客看到面板的第一眼，却是全站唯一一处连淡入都没有的主内容切换。
+// 这里给出现的两块内容各补一次入场：只用 opacity + translateY，走令牌，
+// header 先、form 后错开 60ms（与全站列表页 rise-in 的错落口径一致）。
+//
+// 不用 <Transition mode="out-in"> 是因为 v-else 那一支是 <template>（多个根节点），
+// Transition 要单根；为它包一层 div 会插进 .login-right 的 flex 链，得不偿失。
+@keyframes dd-login-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .login-header {
   text-align: center;
   margin-bottom: 36px;
+  animation: dd-login-content-in var(--dd-motion-normal) var(--dd-ease-decelerate) both;
 
   .login-logo {
     width: 48px;
@@ -893,18 +932,24 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
     font-weight: 700;
     color: #1f1f1f;
     margin: 0 0 8px;
-    transition: color 0.4s;
+    transition: color var(--dd-motion-slow) var(--dd-ease-standard);
   }
 
   p {
     font-size: 14px;
     color: #8c8c8c;
     margin: 0;
-    transition: color 0.4s;
+    transition: color var(--dd-motion-slow) var(--dd-ease-standard);
   }
 }
 
 .login-form {
+  // 比 header 晚 60ms 出现，形成轻微错落（与全站列表页 rise-in 同一口径）。
+  // 60ms 是范式允许的错落延迟上限，reduced-motion 下 global.scss 的补丁会把
+  // animation-delay 一并归零，不会出现「先隐身 60ms 再瞬现」的闪烁。
+  animation: dd-login-content-in var(--dd-motion-normal) var(--dd-ease-decelerate) both;
+  animation-delay: 60ms;
+
   :deep(.el-form-item) {
     margin-bottom: 18px;
   }
@@ -915,7 +960,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
     border-radius: 0;
     height: 46px;
     box-shadow: 0 0 0 1px #e0e0e0 inset;
-    transition: box-shadow 0.3s;
+    transition: box-shadow var(--dd-motion-normal) var(--dd-ease-standard);
 
     &:hover {
       box-shadow: 0 0 0 1px #1890ff inset;
@@ -930,7 +975,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 .pwd-toggle {
   cursor: pointer;
   color: #8c8c8c;
-  transition: color 0.3s;
+  transition: color var(--dd-motion-normal) var(--dd-ease-standard);
 
   &:hover {
     color: #1890ff;
@@ -970,7 +1015,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   margin-top: 16px;
   font-size: 12px;
   color: #bfbfbf;
-  transition: color 0.4s;
+  transition: color var(--dd-motion-slow) var(--dd-ease-standard);
 }
 
 @media (max-width: 768px) {

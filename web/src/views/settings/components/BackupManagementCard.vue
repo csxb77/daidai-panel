@@ -3,6 +3,7 @@ import { Clock, Connection, Delete, Document, Download, Files, Setting, Timer, U
 import { ref } from 'vue'
 import type { BackupSelection } from '@/api/system'
 import { useResponsive } from '@/composables/useResponsive'
+import { formatDateTime } from '@/utils/datetime'
 import RestoreProgressDialog from './RestoreProgressDialog.vue'
 
 const showBackupDialog = defineModel<boolean>('showBackupDialog', { required: true })
@@ -165,7 +166,7 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
         <div class="dd-mobile-card__header">
           <div class="dd-mobile-card__title-wrap">
             <span class="dd-mobile-card__title">{{ row.name }}</span>
-            <span class="dd-mobile-card__subtitle">{{ new Date(row.created_at).toLocaleString() }}</span>
+            <span class="dd-mobile-card__subtitle">{{ formatDateTime(row.created_at) }}</span>
           </div>
         </div>
         <div class="dd-mobile-card__body">
@@ -191,7 +192,7 @@ function updateBackupScheduleSelection(key: keyof BackupSelection, value: boolea
         <template #default="{ row }">{{ formatSize(row.size) }}</template>
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="170">
-        <template #default="{ row }">{{ new Date(row.created_at).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="260" fixed="right" align="center">
         <template #default="{ row }">

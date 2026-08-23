@@ -4,6 +4,10 @@ import { userApi } from '@/api/security'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
+import { copyText } from '@/utils/clipboard'
+import { toast } from '@/utils/toast'
+import DdBadge from '@/components/ui/DdBadge.vue'
+import { formatDateTime } from '@/utils/datetime'
 
 const authStore = useAuthStore()
 const { isMobile, dialogFullscreen } = useResponsive()
@@ -22,17 +26,39 @@ const resetPwdForm = ref({ id: 0, username: '', password: '' })
 
 const roleFilter = ref('')
 
-const filteredUsers = computed(() => {
-  let list = users.value
-  if (roleFilter.value) {
-    list = list.filter(u => u.role === roleFilter.value)
-  }
+// 只应用搜索词、不应用角色筛选的中间层。
+//
+// 拆出这一层是为了让「角色分段控件上的计数」和「切过去之后真正看到的条数」永远一致：
+// 计数的基数必须排除角色筛选自身（否则选中「管理员」时其它三个角标全变 0），
+// 但必须保留搜索词（搜「abc」时，各角色标签该告诉你「abc 在这个角色下有几个」，
+// 拿全量去数就会出现「角标写 5、点进去只有 1 条」）。
+const usersMatchingKeyword = computed(() => {
   const k = keyword.value.trim().toLowerCase()
-  if (!k) return list
-  return list.filter(u =>
+  if (!k) return users.value
+  return users.value.filter(u =>
     (u.username || '').toLowerCase().includes(k) ||
     (u.role || '').toLowerCase().includes(k)
   )
+})
+
+const filteredUsers = computed(() => {
+  if (!roleFilter.value) return usersMatchingKeyword.value
+  return usersMatchingKeyword.value.filter(u => u.role === roleFilter.value)
+})
+
+// 角色标签页的计数。
+//
+// 能这么算的前提：本页是【客户端筛选】——userApi.list() 一次性把全量用户拿回 users.value，
+// roleFilter / keyword / 分页全在上面的 computed 里做，点标签只会走 handleSearch()（把页码归 1），
+// 不会重新发请求。所以这里数出来的是真实总数，不是拿当前页冒充。
+const roleCounts = computed(() => {
+  const list = usersMatchingKeyword.value
+  return {
+    all: list.length,
+    admin: list.filter(u => u.role === 'admin').length,
+    operator: list.filter(u => u.role === 'operator').length,
+    viewer: list.filter(u => u.role === 'viewer').length,
+  }
 })
 
 const pagedUsers = computed(() => {
@@ -161,10 +187,27 @@ async function handleResetPassword() {
     ElMessage.warning(pwdErr)
     return
   }
+  // 弹窗一关，这个新密码在界面上就再也找不到了（下次打开弹窗会被清空，
+  // 服务端也只存哈希、查不回来）。管理员重置完的下一步必然是把它发给本人，
+  // 所以这里先把值抓进闭包，再在提示里挂一个「复制密码」出口，省掉「忘了记 → 再重置一次」。
+  const newPassword = resetPwdForm.value.password
+  const targetUser = resetPwdForm.value.username
   try {
-    await userApi.resetPassword(resetPwdForm.value.id, resetPwdForm.value.password)
-    ElMessage.success('密码重置成功')
+    await userApi.resetPassword(resetPwdForm.value.id, newPassword)
     showResetPwdDialog.value = false
+    toast.success(`已重置「${targetUser}」的密码`, {
+      action: {
+        text: '复制密码',
+        handler: async () => {
+          try {
+            await copyText(newPassword)
+            ElMessage.success('新密码已复制到剪贴板')
+          } catch {
+            ElMessage.error('复制失败，请手动记录新密码')
+          }
+        },
+      },
+    })
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '重置失败')
   }
@@ -205,11 +248,27 @@ function getRoleName(role: string) {
 
     <div class="toolbar">
       <div class="toolbar__left">
+        <!-- 角色分段控件带计数：不用切过去也知道每个角色下有几个人。
+             计数是「统计型」而非「提醒型」，所以开 show-zero ——「观察者 0」是有信息量的
+             （告诉你确实一个都没有），角标直接消失反而像是没加载出来。
+             level 用 info（描边不实心）：它只是中性计数，不该和真正需要处理的红色角标抢注意力。 -->
         <div class="status-tabs">
-          <button :class="['status-tab', { active: roleFilter === '' }]" @click="roleFilter = ''; handleSearch()">全部</button>
-          <button :class="['status-tab', { active: roleFilter === 'admin' }]" @click="roleFilter = 'admin'; handleSearch()">管理员</button>
-          <button :class="['status-tab', { active: roleFilter === 'operator' }]" @click="roleFilter = 'operator'; handleSearch()">操作员</button>
-          <button :class="['status-tab', { active: roleFilter === 'viewer' }]" @click="roleFilter = 'viewer'; handleSearch()">观察者</button>
+          <button :class="['status-tab', { active: roleFilter === '' }]" @click="roleFilter = ''; handleSearch()">
+            <span>全部</span>
+            <DdBadge :value="roleCounts.all" level="info" show-zero title="全部用户" />
+          </button>
+          <button :class="['status-tab', { active: roleFilter === 'admin' }]" @click="roleFilter = 'admin'; handleSearch()">
+            <span>管理员</span>
+            <DdBadge :value="roleCounts.admin" level="info" show-zero title="管理员" />
+          </button>
+          <button :class="['status-tab', { active: roleFilter === 'operator' }]" @click="roleFilter = 'operator'; handleSearch()">
+            <span>操作员</span>
+            <DdBadge :value="roleCounts.operator" level="info" show-zero title="操作员" />
+          </button>
+          <button :class="['status-tab', { active: roleFilter === 'viewer' }]" @click="roleFilter = 'viewer'; handleSearch()">
+            <span>观察者</span>
+            <DdBadge :value="roleCounts.viewer" level="info" show-zero title="观察者" />
+          </button>
         </div>
         <el-input v-model="keyword" placeholder="搜索用户名/角色" clearable class="toolbar__search" @input="handleSearch">
           <template #prefix><el-icon><Search /></el-icon></template>
@@ -228,7 +287,14 @@ function getRoleName(role: string) {
           <div class="dd-mobile-card__title-wrap">
             <span class="dd-mobile-card__title">{{ row.username }}</span>
             <div class="dd-mobile-card__badges">
-              <el-tag size="small" :type="getRoleTag(row.role)">{{ getRoleName(row.role) }}</el-tag>
+              <!-- 改完角色会重新拉列表、这枚标签跟着翻。硬切时用户不确定「是我改成功了，还是我看错了」，
+                   out-in 让旧角色先淡出、新角色再淡入，把「生效了」这件事显式演出来。
+                   key 必须绑【角色值】：绑 row.id 的话同一行永远是同一个 key，节点原地复用，过渡一次都不会触发。 -->
+              <span class="role-tag-slot">
+                <Transition name="dd-status-switch" mode="out-in">
+                  <el-tag :key="row.role" size="small" :type="getRoleTag(row.role)">{{ getRoleName(row.role) }}</el-tag>
+                </Transition>
+              </span>
               <el-tag v-if="row.two_factor_enabled" size="small" type="success" effect="plain">2FA</el-tag>
             </div>
           </div>
@@ -248,11 +314,11 @@ function getRoleName(role: string) {
             </div>
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">最后登录</span>
-              <span class="dd-mobile-card__value">{{ row.last_login_at ? new Date(row.last_login_at).toLocaleString() : '-' }}</span>
+              <span class="dd-mobile-card__value">{{ formatDateTime(row.last_login_at) }}</span>
             </div>
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">创建时间</span>
-              <span class="dd-mobile-card__value">{{ new Date(row.created_at).toLocaleString() }}</span>
+              <span class="dd-mobile-card__value">{{ formatDateTime(row.created_at) }}</span>
             </div>
           </div>
           <div class="dd-mobile-card__actions user-card__actions">
@@ -273,7 +339,14 @@ function getRoleName(role: string) {
               <div class="user-avatar">{{ (row.username || '?')[0].toUpperCase() }}</div>
               <div class="user-name-info">
                 <span class="user-name-text">{{ row.username }}</span>
-                <el-tag size="small" :type="getRoleTag(row.role)" round>{{ getRoleName(row.role) }}</el-tag>
+                <!-- 同上：角色改完后由 loadUsers() 刷新，这里 out-in 一次淡出淡入。
+                     只做 opacity，不做位移——表格行里任何位移都会连带整行抖。
+                     外层 .role-tag-slot 撑住最小高度，out-in 中间那一帧标签被移除时不塌。 -->
+                <span class="role-tag-slot">
+                  <Transition name="dd-status-switch" mode="out-in">
+                    <el-tag :key="row.role" size="small" :type="getRoleTag(row.role)" round>{{ getRoleName(row.role) }}</el-tag>
+                  </Transition>
+                </span>
               </div>
             </div>
           </template>
@@ -300,13 +373,13 @@ function getRoleName(role: string) {
         </el-table-column>
         <el-table-column label="最后登录" width="170">
           <template #default="{ row }">
-            <span v-if="row.last_login_at" class="time-text">{{ new Date(row.last_login_at).toLocaleString() }}</span>
+            <span v-if="row.last_login_at" class="time-text">{{ formatDateTime(row.last_login_at) }}</span>
             <span v-else class="text-secondary">-</span>
           </template>
         </el-table-column>
         <el-table-column label="创建时间" width="170">
           <template #default="{ row }">
-            <span class="time-text">{{ new Date(row.created_at).toLocaleString() }}</span>
+            <span class="time-text">{{ formatDateTime(row.created_at) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="160" fixed="right" align="center">
@@ -401,6 +474,9 @@ function getRoleName(role: string) {
 }
 
 .status-tab {
+  // inline-flex + gap：标签文字与计数角标并排，间距交给 gap，不用 margin 拼。
+  // 角标高 18px，与 13px 文字的行盒高度基本齐平，加上去不会把分段控件顶高。
+  display: inline-flex; align-items: center; gap: 6px;
   padding: 6px 14px; border-radius: 0; border: none; background: transparent;
   color: var(--el-text-color-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
   transition:
@@ -427,6 +503,27 @@ function getRoleName(role: string) {
 }
 .user-name-info { display: flex; align-items: center; gap: 8px; }
 .user-name-text { font-weight: 500; color: var(--el-text-color-primary); }
+
+// 角色标签的占位槽：out-in 过渡中间有一帧「旧的已移除、新的还没进来」，
+// 没有这个最小高度的话，移动端卡片里那一行会瞬间塌一次高度。
+// 24px = el-tag small 的高度。
+.role-tag-slot {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
+
+// 角色标签切换：只做透明度，禁止位移/缩放——表格行与移动卡里任何位移都会带动整行。
+// 时长与缓动走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
+}
 .text-secondary { color: var(--el-text-color-secondary); }
 .time-text { font-family: var(--dd-font-mono); font-size: 12px; color: var(--el-text-color-regular); }
 .action-btns {

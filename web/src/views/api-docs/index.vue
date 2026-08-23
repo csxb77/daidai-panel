@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { Search } from '@element-plus/icons-vue'
+import DdBadge from '@/components/ui/DdBadge.vue'
 import type { ApiCategory, ApiEndpoint } from './apiData'
 
 type ApiDocsModule = typeof import('./apiData')
@@ -155,7 +156,15 @@ function methodClass(method: string) {
       </div>
       <div class="sider-menu">
         <template v-for="cat in filteredCategories" :key="cat.key">
-          <div class="menu-group-title">{{ cat.label }} ({{ cat.endpoints.length }})</div>
+          <div class="menu-group-title">
+            <span class="menu-group-label">{{ cat.label }}</span>
+            <DdBadge
+              :value="cat.endpoints.length"
+              level="info"
+              show-zero
+              :title="`${cat.label} 接口数`"
+            />
+          </div>
           <div
             v-for="ep in cat.endpoints" :key="ep.id"
             class="menu-item" :class="{ active: selectedId === ep.id }"
@@ -176,7 +185,15 @@ function methodClass(method: string) {
         </div>
         <div class="sider-menu">
           <template v-for="cat in filteredCategories" :key="cat.key">
-            <div class="menu-group-title">{{ cat.label }} ({{ cat.endpoints.length }})</div>
+            <div class="menu-group-title">
+              <span class="menu-group-label">{{ cat.label }}</span>
+              <DdBadge
+                :value="cat.endpoints.length"
+                level="info"
+                show-zero
+                :title="`${cat.label} 接口数`"
+              />
+            </div>
             <div
               v-for="ep in cat.endpoints" :key="ep.id"
               class="menu-item" :class="{ active: selectedId === ep.id }"
@@ -190,7 +207,15 @@ function methodClass(method: string) {
       </div>
 
       <div class="api-content">
-        <template v-if="!apiLoading && currentEndpoint && currentCategory">
+        <!-- 切换左侧接口时右侧整块内容是硬替换的，看不出「换了一篇」。
+             这里只做纯淡入淡出：本页正文很长，一旦带位移，滚动容器里的长内容会跟着抖。
+             key 绑 selectedId —— 绑分类或索引都不会在同分类内切换时触发。 -->
+        <Transition name="dd-apidocs-switch" mode="out-in">
+          <div
+            v-if="!apiLoading && currentEndpoint && currentCategory"
+            :key="selectedId"
+            class="api-doc-body"
+          >
           <div class="api-breadcrumb">{{ currentCategory.label }} / {{ currentEndpoint.title }}</div>
           <h2 class="api-endpoint-title">{{ currentEndpoint.title }}</h2>
 
@@ -399,8 +424,9 @@ function methodClass(method: string) {
             </div>
           </div>
         </el-card>
-        </template>
-        <el-empty v-else description="正在加载接口文档..." />
+          </div>
+          <el-empty v-else description="正在加载接口文档..." />
+        </Transition>
       </div>
     </div>
   </div>
@@ -469,13 +495,27 @@ function methodClass(method: string) {
   flex: 1;
 }
 
+// 分类计数从「分类名 (N)」的括号写法换成右对齐的 DdBadge（中性计数，描边不实心）。
+// text-transform / letter-spacing 只留给标题文字：留在容器上会连角标数字一起加字距，
+// 让等宽数字看起来偏散。
 .menu-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 12px 20px 4px;
   font-weight: 600;
   font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.menu-group-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  color: var(--el-text-color-secondary);
 }
 
 .menu-item {
@@ -753,7 +793,8 @@ function methodClass(method: string) {
   right: 10px;
   z-index: 2;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  // 时长/缓动走令牌：写死毫秒会绕过 prefers-reduced-motion 的降级
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
 .response-status {
@@ -871,5 +912,24 @@ function methodClass(method: string) {
 // 轻微错落：侧栏先入，右侧文档区略晚
 .api-content {
   animation-delay: 60ms;
+}
+
+// ===== 接口切换过渡 =====
+// 只做 opacity，**不带任何位移**：本页正文长达数屏、外层 .api-content 自己是滚动容器，
+// 位移会让滚动条与长代码块一起抖。out-in 保证不会出现新旧两篇文档同时占位、
+// 把容器高度顶成两倍的情况。
+// 进入的容器（.api-content）自身带 dd-apidocs-rise-in，而 Transition 没有 appear，
+// 所以首屏只播一次入场动画，不会和这里的淡入叠加。
+.dd-apidocs-switch-enter-active {
+  transition: opacity var(--dd-motion-normal) var(--dd-ease-decelerate);
+}
+
+.dd-apidocs-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-apidocs-switch-enter-from,
+.dd-apidocs-switch-leave-to {
+  opacity: 0;
 }
 </style>

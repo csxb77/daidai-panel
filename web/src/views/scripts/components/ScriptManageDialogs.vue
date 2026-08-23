@@ -2,6 +2,7 @@
 import { Upload } from '@element-plus/icons-vue'
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import type { ScriptVersionRecord } from '../types'
+import { formatDateTime } from '@/utils/datetime'
 
 const MonacoDiffEditor = defineAsyncComponent(() => import('@/components/MonacoDiffEditor.vue'))
 
@@ -186,7 +187,7 @@ watch(showVersionDiffDialog, (visible) => {
         <template #default="{ row }">{{ (row.content_length / 1024).toFixed(1) }} KB</template>
       </el-table-column>
       <el-table-column prop="created_at" label="时间" width="188">
-        <template #default="{ row }">{{ new Date(row.created_at).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="156" fixed="right">
         <template #default="{ row }">

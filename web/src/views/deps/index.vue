@@ -158,6 +158,10 @@
           Linux
         </button>
       </div>
+      <!-- 状态筛选是【纯前端】的：点这三个按钮只改 statusFilter + 复位页码，不重新请求
+           （对比左边的 Node/Python/Linux 组，那一组每次都 loadData()）。
+           depsApi.list() 一次就把当前运行时的全量依赖拉回来，分页也是前端 slice，
+           所以角标里的数字是真实总数，不是拿当前页凑的。 -->
       <div class="status-tabs status-tabs--filter">
         <button
           :class="['status-tab', { active: statusFilter === '' }]"
@@ -167,6 +171,12 @@
           "
         >
           全部
+          <DdBadge
+            :value="allCount"
+            level="info"
+            show-zero
+            title="当前列表的依赖总数"
+          />
         </button>
         <button
           :class="[
@@ -178,7 +188,13 @@
             depsPage = 1;
           "
         >
-          已安装 <span class="status-tab__count">{{ installedCount }}</span>
+          已安装
+          <DdBadge
+            :value="installedCount"
+            level="info"
+            show-zero
+            title="已安装的依赖数"
+          />
         </button>
         <button
           :class="[
@@ -190,7 +206,13 @@
             depsPage = 1;
           "
         >
-          失败 <span class="status-tab__count">{{ failedCount }}</span>
+          失败
+          <DdBadge
+            :value="failedCount"
+            level="info"
+            show-zero
+            title="安装失败的依赖数"
+          />
         </button>
       </div>
     </div>
@@ -275,14 +297,19 @@
           <el-option label="已取消" value="cancelled" />
           <el-option label="卸载中" value="removing" />
         </el-select>
-        <el-button
-          v-if="selectedIds.length > 0"
-          type="danger"
-          plain
-          @click="handleBatchDelete"
-        >
-          <el-icon><Delete /></el-icon> 批量卸载
-        </el-button>
+        <!-- 勾选后凭空冒出一个红按钮会把工具条右区顶一下。淡入淡出让它「浮现」出来，
+             而不是瞬间插进去。只做 opacity：按钮的宽度仍是即时占位的，
+             如果连宽度/高度一起过渡，工具条会在动画期间持续重排，整页跟着抖。 -->
+        <Transition name="dd-batch-fade">
+          <el-button
+            v-if="selectedIds.length > 0"
+            type="danger"
+            plain
+            @click="handleBatchDelete"
+          >
+            <el-icon><Delete /></el-icon> 批量卸载
+          </el-button>
+        </Transition>
       </div>
     </div>
 
@@ -341,18 +368,22 @@
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">状态</span>
               <div class="dd-mobile-card__value">
-                <el-tag
-                  :type="statusType(row.status)"
-                  size="small"
-                  effect="light"
-                  >{{ statusLabel(row.status) }}</el-tag
-                >
+                <!-- 与桌面表格同一套过渡：key 绑状态值，只做 opacity -->
+                <Transition name="dd-status-switch" mode="out-in">
+                  <el-tag
+                    :key="row.status"
+                    :type="statusType(row.status)"
+                    size="small"
+                    effect="light"
+                    >{{ statusLabel(row.status) }}</el-tag
+                  >
+                </Transition>
               </div>
             </div>
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">创建时间</span>
               <span class="dd-mobile-card__value">{{
-                new Date(row.created_at).toLocaleString("zh-CN")
+                formatDateTime(row.created_at)
               }}</span>
             </div>
             <div v-if="activeTab === 'python'" class="dd-mobile-card__field">
@@ -456,22 +487,30 @@
             }}</el-tag>
           </template>
         </el-table-column>
+        <!-- 依赖状态是全站流转最密集的一处：排队中 → 安装中 → 已安装/失败，
+             卸载时还会走 卸载中 → 行消失，全靠 3s 轮询推进。硬切换时用户只会看到
+             文字突然变了，分不清是自己看漏了还是真的变了。out-in 让旧标签先淡出、
+             新标签再淡入，交接过程本身就是「状态更新了」的信号。
+             key 必须绑 row.status（状态值）：绑 row.id 的话同一行的 key 永远不变，
+             过渡一次也不会触发。
+             只做 opacity，不做位移——表格行里的位移会带着整行一起晃。 -->
         <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
-            <el-tag
-              :type="statusType(row.status)"
-              size="small"
-              effect="light"
-              round
-              >{{ statusLabel(row.status) }}</el-tag
-            >
+            <Transition name="dd-status-switch" mode="out-in">
+              <el-tag
+                :key="row.status"
+                :type="statusType(row.status)"
+                size="small"
+                effect="light"
+                round
+                >{{ statusLabel(row.status) }}</el-tag
+              >
+            </Transition>
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="180">
           <template #default="{ row }">
-            <span class="time-text">{{
-              new Date(row.created_at).toLocaleString("zh-CN")
-            }}</span>
+            <span class="time-text">{{ formatDateTime(row.created_at) }}</span>
           </template>
         </el-table-column>
         <!-- 原来是「详情 + 取消/重装 + 更多▾」的手工版 split button：三个 text 按钮
@@ -575,29 +614,39 @@
           <!-- 这个标签必须读依赖行的真实 status，不能读「日志流是否结束」。
                以前用 logDone 判定，导致日志流断开（例如长时间无输出）时明明还在装，
                却显示成绿色的「已完成」。 -->
-          <el-tag v-if="logRowRemoved" type="success" size="small"
-            >已卸载</el-tag
-          >
-          <el-tag
-            v-else-if="currentLogRow && isProcessing(currentLogRow.status)"
-            type="warning"
-            size="small"
-            class="running-tag"
-          >
-            <LoadingMotion
-              variant="dots"
-              size="sm"
-              tone="warning"
-              :stacked="false"
-            />
-            <span>{{ statusLabel(currentLogRow.status) }}</span>
-          </el-tag>
-          <el-tag
-            v-else-if="currentLogRow"
-            :type="statusType(currentLogRow.status)"
-            size="small"
-            >{{ statusLabel(currentLogRow.status) }}</el-tag
-          >
+          <!-- 弹窗开着的时候状态是由 SSE / 轮询实时推进的，这里是用户盯得最紧的一处，
+               同样包 out-in。key 绑的是状态值而不是分支：
+                 - 前两个分支之间（安装中 → 失败）跨分支切，会触发；
+                 - 分支内部（排队中 → 安装中，两者都算 isProcessing）状态值变了也会触发，
+                   靠分支切换的隐式 key 反而漏掉这一档。
+               「已卸载」分支没有对应的 status（行已被后端删掉），单独给个静态 key。 -->
+          <Transition name="dd-status-switch" mode="out-in">
+            <el-tag v-if="logRowRemoved" key="removed" type="success" size="small"
+              >已卸载</el-tag
+            >
+            <el-tag
+              v-else-if="currentLogRow && isProcessing(currentLogRow.status)"
+              :key="currentLogRow.status"
+              type="warning"
+              size="small"
+              class="running-tag"
+            >
+              <LoadingMotion
+                variant="dots"
+                size="sm"
+                tone="warning"
+                :stacked="false"
+              />
+              <span>{{ statusLabel(currentLogRow.status) }}</span>
+            </el-tag>
+            <el-tag
+              v-else-if="currentLogRow"
+              :key="currentLogRow.status"
+              :type="statusType(currentLogRow.status)"
+              size="small"
+              >{{ statusLabel(currentLogRow.status) }}</el-tag
+            >
+          </Transition>
           <el-tag v-if="logStreamNotice" type="info" size="small">{{
             logStreamNotice
           }}</el-tag>
@@ -808,6 +857,7 @@ import {
 } from "@element-plus/icons-vue";
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
+import DdBadge from "@/components/ui/DdBadge.vue";
 import {
   openAuthorizedEventStream,
   type EventStreamConnection,
@@ -815,6 +865,7 @@ import {
 import { usePageActivity } from "@/composables/usePageActivity";
 import { useResponsive } from "@/composables/useResponsive";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
+import { formatDateTime } from "@/utils/datetime";
 
 // ---------- Android 面具版脚本运行时 ----------
 const androidStatus = ref<AndroidRuntimeStatus | null>(null);
@@ -1072,23 +1123,33 @@ let mounted = false;
 const searchKeyword = ref("");
 const statusFilter = ref("");
 
+/**
+ * 只套了搜索词、还没套状态筛选的列表。
+ *
+ * 状态标签页上的角标要数的就是它：点某个状态标签 = 在这份列表上再加一层状态过滤，
+ * 所以角标数字和点进去看到的条数天然一致。
+ * 如果角标改成直接数 depsList（无视搜索词），搜索状态下就会出现
+ * 「失败 3」点进去却是空列表的自相矛盾。
+ */
+const searchScopedDeps = computed(() => {
+  if (!searchKeyword.value) return depsList.value;
+  const kw = searchKeyword.value.toLowerCase();
+  return depsList.value.filter((dep) => dep.name?.toLowerCase().includes(kw));
+});
+
+const allCount = computed(() => searchScopedDeps.value.length);
 const failedCount = computed(
-  () => depsList.value.filter((dep) => dep.status === "failed").length,
+  () => searchScopedDeps.value.filter((dep) => dep.status === "failed").length,
 );
 const installedCount = computed(
-  () => depsList.value.filter((dep) => dep.status === "installed").length,
+  () =>
+    searchScopedDeps.value.filter((dep) => dep.status === "installed").length,
 );
 
 const filteredDepsList = computed(() => {
-  let list = depsList.value;
-  if (searchKeyword.value) {
-    const kw = searchKeyword.value.toLowerCase();
-    list = list.filter((dep) => dep.name?.toLowerCase().includes(kw));
-  }
-  if (statusFilter.value) {
-    list = list.filter((dep) => dep.status === statusFilter.value);
-  }
-  return list;
+  const list = searchScopedDeps.value;
+  if (!statusFilter.value) return list;
+  return list.filter((dep) => dep.status === statusFilter.value);
 });
 
 const paginatedDepsList = computed(() => {
@@ -1916,7 +1977,8 @@ onBeforeUnmount(() => {
     border-color: var(--el-border-color-lighter);
     font-weight: 600;
   }
-  // 成功/失败筛选选中态用语义色，与计数徽标协调
+  // 成功/失败筛选选中态用语义色，标出「这一档筛的是哪类结果」。
+  // 语义色只上在标签文字上，角标本身保持中性——见下方说明。
   &--success.active {
     color: var(--el-color-success);
   }
@@ -1924,30 +1986,13 @@ onBeforeUnmount(() => {
     color: var(--el-color-danger);
   }
 }
-// 计数徽标：默认次级底色；选中态跟随分段控件语义色（已安装=success / 失败=danger）反白
-.status-tab__count {
-  font-size: 11px;
-  font-weight: 700;
-  min-width: 18px;
-  height: 18px;
-  line-height: 18px;
-  text-align: center;
-  border-radius: 0;
-  background: var(--el-fill-color);
-  color: var(--el-text-color-secondary);
-  display: inline-block;
-  transition:
-    color var(--dd-motion-fast) var(--dd-ease-standard),
-    background-color var(--dd-motion-fast) var(--dd-ease-standard);
-  .status-tab--success.active & {
-    background: var(--el-color-success);
-    color: #fff;
-  }
-  .status-tab--danger.active & {
-    background: var(--el-color-danger);
-    color: #fff;
-  }
-}
+// 计数徽标改用 DdBadge（level="info" + show-zero），原来手写的 .status-tab__count 删除。
+// 两点变化，都是有意的：
+//  1. 统一到全站唯一的角标实现，顺带白拿翻牌动效——本页角标会随 3s 轮询跳字
+//     （安装完成时「已安装」+1、「失败」可能同时 +1），跳字比静默换数字更能被注意到。
+//  2. 放弃原来「选中态反白成 success/danger 实心」的处理。设计系统里 danger 实心是
+//     留给「需要用户处理」的，这三个角标只是中性计数；一个实心红的「失败 0」会和
+//     真正要处理的告警抢注意力。现在筛选态由标签文字的语义色表达，角标始终中性描边。
 .dep-name-text {
   min-width: 0;
   overflow: hidden;
@@ -2080,6 +2125,33 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+// ===== 状态标签切换过渡 =====
+// 表格状态列 / 移动卡片 / 日志弹窗共用。
+// 只过渡 opacity：状态标签在表格行里，做位移会连带整行一起晃；
+// 做缩放又违反「hover/active 禁 transform 位移或缩放」的同一条扁平约束。
+// 时长/缓动全走令牌，prefers-reduced-motion 下令牌自动降到 1ms，等效关闭。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
+}
+
+// ===== 批量操作按钮进出场 =====
+// 同样只做 opacity，不碰宽高——工具条是 flex 行，尺寸类过渡会让整条工具条持续重排。
+.dd-batch-fade-enter-active,
+.dd-batch-fade-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-batch-fade-enter-from,
+.dd-batch-fade-leave-to {
+  opacity: 0;
 }
 
 // ---------- Responsive ----------
@@ -2246,7 +2318,8 @@ onBeforeUnmount(() => {
 }
 
 // ===== 入场动画 =====
-// 与定时任务页/执行日志页/订阅页/环境变量页统一：只对卡片级容器（状态标签区 / 工具条 / 表格卡 / 移动列表）
+// 与定时任务页/执行日志页/订阅页/环境变量页统一：只对卡片级容器
+// （Android 运行时卡 / 状态标签区 / 工具条 / 表格卡 / 移动列表）
 // 做克制的淡入上移 + 轻微错落；不给表格每一行或每张移动卡做 stagger。
 // 时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
 @keyframes dd-deps-rise-in {
@@ -2260,6 +2333,10 @@ onBeforeUnmount(() => {
   }
 }
 
+// android-runtime-card 也是卡片级容器，而且是页面最上面那一块：原来它不参与入场，
+// 下面几块却都在淡入上移，视觉上像是「上半页没加载完」。
+// 它是异步的（loadAndroidStatus 返回后才 v-if 成立），补上入场后从「突然弹出」变成淡入。
+.android-runtime-card,
 .deps-tabs,
 .toolbar,
 .table-card,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Connection, Plus, Refresh } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
+import { formatDateTime } from '@/utils/datetime'
 
 const showAddIPDialog = defineModel<boolean>('showAddIPDialog', { required: true })
 const newIP = defineModel<string>('newIP', { required: true })
@@ -50,7 +51,7 @@ const { isMobile, dialogFullscreen } = useResponsive()
           <div class="dd-mobile-card__grid">
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">创建时间</span>
-              <span class="dd-mobile-card__value">{{ new Date(row.created_at).toLocaleString() }}</span>
+              <span class="dd-mobile-card__value">{{ formatDateTime(row.created_at) }}</span>
             </div>
           </div>
           <div class="dd-mobile-card__actions ip-card__actions">
@@ -70,7 +71,7 @@ const { isMobile, dialogFullscreen } = useResponsive()
         </template>
       </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="170">
-        <template #default="{ row }">{{ new Date(row.created_at).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="100" fixed="right">
         <template #default="{ row }">

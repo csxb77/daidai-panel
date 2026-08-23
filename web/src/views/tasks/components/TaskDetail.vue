@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { getDisplayTaskLabels } from '../taskLabels'
 import { useResponsive } from '@/composables/useResponsive'
 import { formatDuration } from '@/utils/duration'
+import { formatDateTime } from '@/utils/datetime'
 import TaskCronList from './TaskCronList.vue'
 
 const props = defineProps<{
@@ -38,10 +39,9 @@ const displayLabels = computed(() => {
   return getDisplayTaskLabels(props.task?.labels || [])
 })
 
-const formatTime = (t: string) => {
-  if (!t) return '-'
-  return new Date(t).toLocaleString('zh-CN')
-}
+// 薄封装转调 utils/datetime，模板里的多处调用点不用改。
+// 空值/无效值由 formatDateTime 统一兜底成 '-'，本地不再自己判空。
+const formatTime = (t: string) => formatDateTime(t)
 
 const taskTypeText = computed(() => {
   if (props.task?.task_type === 'manual') return '手动运行'

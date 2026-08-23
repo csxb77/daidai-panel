@@ -11,7 +11,7 @@ import { useResponsive } from '@/composables/useResponsive'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
 import { formatDuration } from '@/utils/duration'
-import { toDateRangeParams } from '@/utils/datetime'
+import { formatDateTime, toDateRangeParams } from '@/utils/datetime'
 import { Download } from '@element-plus/icons-vue'
 import DdDateRangePicker from '@/components/ui/DdDateRangePicker.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
@@ -261,12 +261,6 @@ function getStatusText(status: number | null) {
   if (status === 0) return '成功'
   if (status === 1) return '失败'
   return '未知'
-}
-
-function formatTime(t: string | null) {
-  // 日志时间统一输出中文格式，避免浏览器按本地语言各自发挥
-  if (!t) return '-'
-  return new Date(t).toLocaleString('zh-CN', { hour12: false })
 }
 
 async function viewDetail(log: any) {
@@ -661,10 +655,15 @@ onBeforeUnmount(() => {
           <el-icon><Delete /></el-icon>
           <span>清理日志</span>
         </el-button>
-        <div v-if="canOperateLogs && selectedIds.length > 0" class="batch-actions">
-          <el-button size="small" @click="clearSelection">取消选择</el-button>
-          <el-button size="small" type="danger" @click="handleBatchDelete">批量删除</el-button>
-        </div>
+        <!-- 勾选第一条时这两个按钮凭空出现，硬切会让整条工具栏「跳」一下。
+             只做 opacity 淡入淡出：高度/宽度过渡会一路把工具栏、表格、分页条全部重排，
+             代价远大于收益（工具栏是 flex-wrap，宽度动画还会把整排按钮甩到第二行再甩回来）。 -->
+        <Transition name="dd-batch-fade">
+          <div v-if="canOperateLogs && selectedIds.length > 0" class="batch-actions">
+            <el-button size="small" @click="clearSelection">取消选择</el-button>
+            <el-button size="small" type="danger" @click="handleBatchDelete">批量删除</el-button>
+          </div>
+        </Transition>
       </div>
     </div>
 
@@ -681,10 +680,16 @@ onBeforeUnmount(() => {
               <el-checkbox v-if="canOperateLogs" :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
               <span class="dd-mobile-card__title">{{ row.task_name || `任务#${row.task_id}` }}</span>
             </div>
-            <el-tag :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
-              <span v-if="row.status === 2" class="pulse-dot"></span>
-              {{ getStatusText(row.status) }}
-            </el-tag>
+            <!-- 与桌面表格同一处理。这里不能再套一层 span 包裹：
+                 .dd-mobile-card__title-wrap 是纵向 flex 且 align-items 取默认 stretch，
+                 el-tag 是直接子项才会被拉满整行宽；包一层会把它压回内容宽，白白改了版式。
+                 Transition 自身不产生 DOM 节点，所以直接包住 el-tag 不影响这条继承关系。 -->
+            <Transition name="dd-status-switch" mode="out-in">
+              <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
+                <span v-if="row.status === 2" class="pulse-dot"></span>
+                {{ getStatusText(row.status) }}
+              </el-tag>
+            </Transition>
           </div>
         </div>
 
@@ -696,11 +701,11 @@ onBeforeUnmount(() => {
             </div>
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">开始时间</span>
-              <span class="dd-mobile-card__value time-text">{{ formatTime(row.started_at) }}</span>
+              <span class="dd-mobile-card__value time-text">{{ formatDateTime(row.started_at) }}</span>
             </div>
             <div class="dd-mobile-card__field" v-if="row.ended_at">
               <span class="dd-mobile-card__label">结束时间</span>
-              <span class="dd-mobile-card__value time-text">{{ formatTime(row.ended_at) }}</span>
+              <span class="dd-mobile-card__value time-text">{{ formatDateTime(row.ended_at) }}</span>
             </div>
           </div>
 
@@ -739,10 +744,19 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)" size="small" round :class="row.status === 2 ? 'tag-with-dot' : ''">
-              <span v-if="row.status === 2" class="pulse-dot"></span>
-              {{ getStatusText(row.status) }}
-            </el-tag>
+            <!-- autoRefresh 每 5s 重拉一次列表，运行中→成功/失败 是硬切，眼睛捕捉不到「变了」。
+                 out-in 让旧状态先淡出、新状态再淡入，给出一次明确的交接。
+                 key 必须绑 row.status（状态值）——绑 row.id 的话同一行永远是同一个 key，
+                 状态怎么变都不会触发过渡。
+                 只做 opacity：表格行里任何位移都会连带整行一起抖。
+                 out-in 的「移除旧节点 → 插入新节点」发生在同一次同步 patch 里，中间不会有一帧空布局，
+                 所以不需要额外包一层占位容器来撑行高。 -->
+            <Transition name="dd-status-switch" mode="out-in">
+              <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" round :class="row.status === 2 ? 'tag-with-dot' : ''">
+                <span v-if="row.status === 2" class="pulse-dot"></span>
+                {{ getStatusText(row.status) }}
+              </el-tag>
+            </Transition>
           </template>
         </el-table-column>
         <el-table-column label="耗时" width="100" align="center">
@@ -752,7 +766,7 @@ onBeforeUnmount(() => {
         </el-table-column>
         <el-table-column label="执行时间" width="180" align="center">
           <template #default="{ row }">
-            <span class="time-text">{{ formatTime(row.started_at) }}</span>
+            <span class="time-text">{{ formatDateTime(row.started_at) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="180" fixed="right" align="center">
@@ -815,8 +829,8 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="detailLog" class="detail-hero-meta">
               <span class="detail-hero-meta-item">耗时 {{ formatDuration(detailLog.duration) }}</span>
-              <span class="detail-hero-meta-item">开始 {{ formatTime(detailLog.started_at) }}</span>
-              <span class="detail-hero-meta-item" v-if="detailLog.ended_at">结束 {{ formatTime(detailLog.ended_at) }}</span>
+              <span class="detail-hero-meta-item">开始 {{ formatDateTime(detailLog.started_at) }}</span>
+              <span class="detail-hero-meta-item" v-if="detailLog.ended_at">结束 {{ formatDateTime(detailLog.ended_at) }}</span>
             </div>
           </div>
           <button class="detail-hero-close" @click="detailVisible = false" aria-label="关闭">
@@ -895,7 +909,7 @@ onBeforeUnmount(() => {
           <template #default="{ row }">{{ formatFileSize(row.size) }}</template>
         </el-table-column>
         <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ new Date(row.created_at).toLocaleString('zh-CN', { hour12: false }) }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="120" fixed="right">
           <template #default="{ row }">
@@ -1052,6 +1066,31 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+// 批量操作条的进出场：只淡不移、不改尺寸。
+// 不加 mode，离场与入场可以重叠——反正整段就是同一块区域的透明度变化，
+// 加 out-in 反而会在中途留一段完全空白的等待期。
+.dd-batch-fade-enter-active,
+.dd-batch-fade-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-batch-fade-enter-from,
+.dd-batch-fade-leave-to {
+  opacity: 0;
+}
+
+// 状态 tag 的 out-in 交接。位移一律禁掉：
+// 表格行内的 transform 会带着整行一起动，移动端卡片里则会顶动下面的字段网格。
+.dd-status-switch-enter-active,
+.dd-status-switch-leave-active {
+  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
+}
+
+.dd-status-switch-enter-from,
+.dd-status-switch-leave-to {
+  opacity: 0;
+}
+
 /* =============== Table Card =============== */
 // 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
@@ -1132,7 +1171,9 @@ onBeforeUnmount(() => {
 
   .el-table__row td {
     border-bottom: 1px solid var(--el-border-color-lighter);
-    transition: background-color 0.18s ease;
+    // 时长/缓动走令牌：原来写死的 0.18s ease 既不在动效档位上，
+    // 也让这一页的行 hover 比全站其他表格慢半拍
+    transition: background-color var(--dd-motion-fast) var(--dd-ease-standard);
   }
 
   .el-table__body tr:hover > td {
@@ -1303,7 +1344,10 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   position: relative;
   overflow: hidden;
-  transition: color 0.25s, background-color 0.25s, border-color 0.25s;
+  transition:
+    color var(--dd-motion-normal) var(--dd-ease-standard),
+    background-color var(--dd-motion-normal) var(--dd-ease-standard),
+    border-color var(--dd-motion-normal) var(--dd-ease-standard);
 
   .el-icon {
     position: relative;
@@ -1370,7 +1414,10 @@ onBeforeUnmount(() => {
   white-space: normal;
   word-break: normal;
   cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     color: var(--dd-log-text-color, #e2e8f0);

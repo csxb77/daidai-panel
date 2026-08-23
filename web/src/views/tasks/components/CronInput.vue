@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { taskApi } from '@/api/task'
 import { useResponsive } from '@/composables/useResponsive'
+import { formatDateTime } from '@/utils/datetime'
 
 type CronRuleState = {
   id: number
@@ -220,7 +221,7 @@ const groupedTemplates = computed(() => {
           <div v-if="rules[0].parseResult.next_run_times?.length" class="next-times">
             <el-icon class="time-icon"><Clock /></el-icon>
             <span class="label">下次执行</span>
-            <span class="time-value">{{ new Date(rules[0].parseResult.next_run_times[0]).toLocaleString() }}</span>
+            <span class="time-value">{{ formatDateTime(rules[0].parseResult.next_run_times[0]) }}</span>
           </div>
           <el-button text size="small" @click="openTemplateDialog(0)">常用规则</el-button>
         </div>

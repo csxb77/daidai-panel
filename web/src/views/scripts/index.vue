@@ -432,4 +432,42 @@ async function handleCancelEdit() {
     }
   }
 }
+
+// ===== 入场动画 =====
+// 与全站 dd-*-rise-in 同一语汇：只对两张卡片级容器（目录树卡 / 编辑器卡）做淡入上移，
+// ≤60ms 轻微错落；时长与缓动全部走令牌，prefers-reduced-motion 下令牌降为 1ms、
+// delay 被全局补丁归零，等效关闭。目录树里的文件节点属于列表行，绝不逐行 stagger。
+//
+// 只动 opacity + translateY，不碰 height / flex：
+// .scripts-workspace 的 `flex + min-height: 0 + height: 0` 内嵌滚动链完全不受影响。
+//
+// fill-mode 用 backwards 而不是列表页惯用的 both：
+// 编辑器卡里装着 Monaco，both 会把 `transform: translateY(0)` 永久留在 .scripts-editor 上，
+// 让它成为 Monaco 内部 position:fixed 浮层（右键菜单 / 补全 / 悬浮提示）的包含块 → 弹层错位，
+// 与 ScriptExecutionDialogs.vue 里那条「不加 both」的注释是同一个坑。
+// backwards 只在 delay 期间铺 from 帧，动画结束后回到自然样式（opacity 1、无 transform），
+// 末态与 to 帧完全一致，视觉上没有区别。
+@keyframes dd-scripts-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+:deep(.scripts-sidebar),
+:deep(.scripts-editor) {
+  animation: dd-scripts-rise-in var(--dd-motion-page) var(--dd-ease-decelerate)
+    backwards;
+}
+
+// 轻微错落：目录树卡先入，编辑器卡略晚。
+// 移动端两卡是 display 切换（sidebar / editor 互斥），切换时动画会重放一次，
+// 正好充当「文件列表 ↔ 编辑器」的页面级进场，属于预期行为。
+:deep(.scripts-editor) {
+  animation-delay: 60ms;
+}
 </style>
