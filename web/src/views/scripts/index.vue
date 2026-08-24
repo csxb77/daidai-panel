@@ -17,6 +17,8 @@ const {
   isMobile,
   isCompactLayout,
   mobileShowEditor,
+  isSidebarCollapsed,
+  toggleSidebarCollapsed,
   fileTree,
   selectedFile,
   fileContent,
@@ -151,10 +153,17 @@ async function handleCancelEdit() {
       </div>
     </div>
 
-    <div class="scripts-workspace" :class="{ 'mobile-show-editor': isCompactLayout && mobileShowEditor }">
+    <div
+      class="scripts-workspace"
+      :class="{
+        'mobile-show-editor': isCompactLayout && mobileShowEditor,
+        'sidebar-collapsed': isSidebarCollapsed
+      }"
+    >
       <ScriptsSidebar
         :is-mobile="isCompactLayout"
         :mobile-show-editor="mobileShowEditor"
+        :on-toggle-collapse="toggleSidebarCollapsed"
         :tree-loading="treeLoading"
         :file-tree="fileTree"
         :allow-drag="allowDrag"
@@ -176,6 +185,8 @@ async function handleCancelEdit() {
         v-model:is-editing="isEditing"
         :is-mobile="isCompactLayout"
         :mobile-show-editor="mobileShowEditor"
+        :sidebar-collapsed="isSidebarCollapsed"
+        :on-expand-sidebar="toggleSidebarCollapsed"
         :selected-file="selectedFile"
         :is-binary="isBinary"
         :has-changes="hasChanges"
@@ -298,6 +309,11 @@ async function handleCancelEdit() {
 
 /* ---- Workspace（两卡容器：透明 flex，卡片间留间隙）---- */
 .scripts-workspace {
+  /* 目录树卡宽度的【单一真源】。
+     以前这个 300px 被两处同时钉死（这里的 flex-basis + ScriptsSidebar.vue 的 width/min-width），
+     只改一处会被另一处压住、卡片根本收不起来，所以收敛成这一个变量，两边都来消费它。 */
+  --scripts-sidebar-width: 300px;
+
   display: flex;
   flex: 1 1 auto;
   width: 100%;
@@ -306,18 +322,42 @@ async function handleCancelEdit() {
   min-height: 0;
   /* 目录树卡与编辑器卡之间的间隙 */
   gap: 14px;
+  /* 折叠时 gap 要一起收掉，否则编辑器卡左边会凭空留 14px 空档；
+     只有两个不换行的子项，逐帧重算 gap 不会引起整页重排 */
+  transition: gap var(--dd-motion-normal) var(--dd-ease-standard);
   /* 容器本身透明，边框下放到两张子卡 */
   background: transparent;
 }
 
 /* ---- 目录树卡（直角面板，靠 1px 边框划分层次）---- */
 :deep(.scripts-sidebar) {
-  flex: 0 0 300px;
+  flex: 0 0 var(--scripts-sidebar-width);
   min-height: 0;
   overflow: hidden; /* 裁切内部溢出内容 */
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 0;
+  /* 折叠动画只动宽度，【绝不能用 transform】：
+     残留 transform 会让这张卡成为 Monaco 内部 position:fixed 浮层（补全 / 右键菜单 /
+     悬浮提示）的包含块，弹层会飘位 —— 与文末入场动画那条「只能 backwards」是同一个坑。
+     border-width 也要一起过渡：box-sizing 是 border-box，1px 边框压不掉，
+     只收 flex-basis 的话完全折叠后会留下一条 2px 竖线。 */
+  transition:
+    flex-basis var(--dd-motion-normal) var(--dd-ease-standard),
+    border-width var(--dd-motion-normal) var(--dd-ease-standard);
+}
+
+/* ---- 目录树折叠态（只在桌面宽屏出现，见 useScriptWorkspaceBrowser 的 isSidebarCollapsed）---- */
+.scripts-workspace.sidebar-collapsed {
+  --scripts-sidebar-width: 0px;
+  gap: 0;
+
+  :deep(.scripts-sidebar) {
+    border-width: 0;
+    /* 收到 0 宽后卡片仍留在 DOM 里（留着才有宽度过渡），
+       这里禁掉命中，避免鼠标点到看不见的搜索框/按钮上 */
+    pointer-events: none;
+  }
 }
 
 /* ---- 编辑器卡（直角面板，靠 1px 边框划分层次）---- */

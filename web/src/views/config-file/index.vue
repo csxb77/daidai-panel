@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Check, CopyDocument, Document, Refresh } from '@element-plus/icons-vue'
+import { Check, CopyDocument, Document, Refresh, Switch } from '@element-plus/icons-vue'
 import { configScriptApi } from '@/api/system'
-import MonacoEditor from '@/components/MonacoEditor.vue'
+import MonacoEditor, { persistEditorWordWrap, readStoredEditorWordWrap } from '@/components/MonacoEditor.vue'
 import { copyText } from '@/utils/clipboard'
 
 const content = ref('')
@@ -12,6 +12,22 @@ const configPath = ref('config.sh')
 const loading = ref(false)
 const saving = ref(false)
 const copying = ref(false)
+
+// 自动换行开关必须活在页面级 ref 里：下面的 MonacoEditor 挂在 v-if="!loading" 上，
+// 点一次「刷新」编辑器实例就整个重建，状态若只活在编辑器内部会被一起丢掉。
+// 这份记忆与脚本页共享（同一个 dd:editor:word_wrap），所以读写走 MonacoEditor 导出的那两个函数。
+const wordWrap = ref(readStoredEditorWordWrap())
+
+function toggleWordWrap() {
+  wordWrap.value = wordWrap.value === 'on' ? 'off' : 'on'
+  persistEditorWordWrap(wordWrap.value)
+}
+
+// 本页被 keep-alive 缓存，第二次进来只触发 onActivated 不触发 onMounted。
+// 不在这里补读一次的话，「在脚本页改了开关、切回本页却没变」——两页共享就名存实亡了。
+onActivated(() => {
+  wordWrap.value = readStoredEditorWordWrap()
+})
 
 const hasChanged = computed(() => content.value !== savedContent.value)
 const lineCount = computed(() => content.value === '' ? 0 : content.value.split(/\r\n|\n|\r/).length)
@@ -114,6 +130,19 @@ async function copyConfigScript() {
               <div class="editor-card__desc">按 Shell 语法编辑，每行一个变量或注释。</div>
             </div>
             <div class="editor-card__actions">
+              <!-- 状态类按钮排在动作类按钮之前。配色沿用本仓工具栏切换按钮的既有写法
+                   （tasks 页快捷排序：开启时 primary + plain），不另造一套语汇；
+                   与「保存」的实心 primary 靠 plain 区分，不会抢主操作的注意力。 -->
+              <el-tooltip :content="wordWrap === 'on' ? '关闭自动换行' : '开启自动换行'" placement="bottom">
+                <el-button
+                  :type="wordWrap === 'on' ? 'primary' : 'default'"
+                  :plain="wordWrap === 'on'"
+                  @click="toggleWordWrap"
+                >
+                  <el-icon><Switch /></el-icon>
+                  Wrap
+                </el-button>
+              </el-tooltip>
               <el-button :loading="loading" @click="loadConfigScript(true)">
                 <el-icon><Refresh /></el-icon>
                 刷新
@@ -142,6 +171,7 @@ async function copyConfigScript() {
           v-model="content"
           language="shell"
           :fill-height="true"
+          :word-wrap="wordWrap"
         />
         <div v-else class="editor-placeholder">
           正在读取配置文件...
@@ -450,6 +480,10 @@ code {
     align-items: stretch;
   }
 
+  // 四个按钮（Wrap / 刷新 / 复制 / 保存）等分一行。
+  // `flex: 1` 的 min-width 仍是 auto，所以每个按钮不会被压到比文字还窄；
+  // 375px 及以上四个正好排得下，再窄（如 320px）由 .editor-card__actions 自身的
+  // flex-wrap 折成 2×2 两行，不会挤出横向滚动条。
   .editor-card__actions {
     width: 100%;
 

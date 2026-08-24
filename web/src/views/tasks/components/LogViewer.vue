@@ -28,6 +28,35 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
+// 「自动跟随」偏好：以前每次打开弹窗都被强制重置成暂停，用户每看一次实时日志就要重新点一下开关。
+// 默认值仍是 '0'（暂停），保证没设置过的老用户升级后第一眼观感不变。
+const LOG_FOLLOW_STORAGE_KEY = 'dd:tasks:log_follow'
+
+function readStoredAutoScroll(): boolean {
+  if (typeof window === 'undefined') {
+    return false
+  }
+  try {
+    // 只认字面量 '1'，其余（null / 手改坏的值）一律回落默认的暂停态
+    return window.localStorage.getItem(LOG_FOLLOW_STORAGE_KEY) === '1'
+  } catch {
+    // 隐私模式下访问 localStorage 会直接抛错，这里必须吞掉：
+    // 这个函数是在 setup 顶层同步调用的，漏出去会让整个弹窗组件初始化失败。
+    return false
+  }
+}
+
+function persistAutoScroll(enabled: boolean) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  try {
+    window.localStorage.setItem(LOG_FOLLOW_STORAGE_KEY, enabled ? '1' : '0')
+  } catch {
+    // 隐私模式 / 存储配额满：记不住偏好不影响当前这次查看，静默忽略
+  }
+}
+
 // 日志正文改成「按行 + 按块」增量渲染。
 // 历史行一旦落定就不会再变，块 HTML 只解析一次并缓存；
 // 每次 SSE flush 只需重算「最后一个未写满的块」和「正在刷新的当前行」，
@@ -40,7 +69,7 @@ const error = ref<string | null>(null)
 const emptyMessage = ref<string | null>(null)
 const loading = ref(false)
 const logContainerRef = ref<HTMLElement>()
-const autoScroll = ref(false)
+const autoScroll = ref(readStoredAutoScroll())
 const fontSize = ref<'sm' | 'md' | 'lg'>('md')
 const wrap = ref(true)
 // 渲染窗口封顶：默认只渲染最后 5000 行，避免超长日志把 DOM 撑到几十万节点，
@@ -134,6 +163,12 @@ watch(() => props.taskId, (taskId, previousTaskId) => {
 })
 
 watch(autoScroll, (enabled) => {
+  // 写回必须放在 if (enabled) 外面，否则只存得住「开」、存不住「关」。
+  // 只有 live 模式的切换才算用户偏好：latest 分支会程序性地强制关掉跟随（见 loadLatestOnly），
+  // 那不是用户的选择，写回去会把已经存好的「跟随」抹成「暂停」。
+  if (props.mode !== 'latest') {
+    persistAutoScroll(enabled)
+  }
   if (enabled) {
     scheduleScrollToBottom()
   }
@@ -151,8 +186,14 @@ async function startStream(isReconnect = false) {
   if (!isReconnect) {
     // 用户主动打开/切换任务重新起流：清零重连计数，确保熔断只针对一次会话内的连续空重连。
     reconnectAttempts = 0
-    autoScroll.value = false
-    scheduleScrollToTop()
+    // 这里刻意不再重置 autoScroll —— 跟随开关已经是持久化偏好，重开弹窗/刷新页面都要沿用上次的选择。
+    // 初始视口方向随之二选一：以前无条件滚顶的前提是「打开一定是暂停态、从头看」，
+    // 恢复成跟随后仍滚顶会出现「开关显示跟随、内容却停在顶部」的割裂。
+    if (autoScroll.value) {
+      scheduleScrollToBottom()
+    } else {
+      scheduleScrollToTop()
+    }
   }
 
   if (!props.taskId) {
@@ -216,6 +257,8 @@ async function loadLatestOnly() {
   error.value = null
   emptyMessage.value = null
   loading.value = true
+  // latest 是一次性拉取的「最近结果」，后面没有 SSE 续流，跟随开关点了也没有实质作用，
+  // 所以这一支仍然强制暂停 + 从头看；持久化的跟随偏好只在 live 模式恢复（见 startStream）。
   autoScroll.value = false
   scheduleScrollToTop()
 
@@ -333,6 +376,16 @@ function flushBufferedLogs() {
 
 function scheduleScrollToBottom() {
   void nextTick(() => {
+    // el-dialog 带 destroy-on-close，关闭后 logContainerRef 会被置空；
+    // 重新打开时 startStream 是在 watch(props.visible) 里同步调用的，
+    // 这一拍弹窗内容不一定已经挂上，只靠 scrollToBottom 内部的空值守卫会静默失效（表现为停在顶部）。
+    // 补一次 rAF 重试兜底：下一帧 DOM 必然已经渲染。
+    if (!logContainerRef.value) {
+      requestAnimationFrame(() => {
+        scrollToBottom()
+      })
+      return
+    }
     scrollToBottom()
   })
 }

@@ -857,34 +857,62 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 <template>
   <div class="envs-page dd-fixed-page dd-page-hide-heading">
     <div class="toolbar">
+      <!-- 左槽是恒在的容器（flex:1 + 固定高度下限），内部用 out-in 在「筛选区」与「批量区」之间互切：
+           勾一下就让批量按钮就地占用左槽、筛选控件让位。左槽自身的 flex 尺寸全程不变，
+           右区不会被 space-between 甩位，也不会因为凭空插进来一排按钮把工具栏顶成两行。
+           mode="out-in" 是关键：同一时刻左槽里只有一个分支，两边不会同时占位。
+           切到批量区的条件只按「当前列表里真实存在的行」算（selectedCountInCurrentPage 拿
+           selectedIdSet 过 envList），不是 selectedIds.length 这个可能含已失效 id 的原始数组。 -->
       <div class="toolbar__left">
-        <div class="status-tabs">
-          <button :class="['status-tab', { active: statusFilter === '' }]" @click="handleStatusFilter('')">全部变量</button>
-          <button :class="['status-tab', { active: statusFilter === 'enabled' }]" @click="handleStatusFilter('enabled')">已启用</button>
-          <button :class="['status-tab', { active: statusFilter === 'disabled' }]" @click="handleStatusFilter('disabled')">已禁用</button>
-        </div>
-        <el-input
-          v-model="keyword"
-          placeholder="搜索变量名、值、备注或分组"
-          clearable
-          class="toolbar__search"
-          @keyup.enter="handleSearch"
-          @clear="handleSearch"
-        >
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <el-select
-          v-model="groupFilters"
-          placeholder="分组筛选"
-          multiple
-          collapse-tags
-          collapse-tags-tooltip
-          clearable
-          class="toolbar__group-filter"
-          @change="handleGroupSelect"
-        >
-          <el-option v-for="g in groups" :key="g" :label="g" :value="g" />
-        </el-select>
+        <Transition name="dd-toolbar-swap" mode="out-in">
+          <div v-if="selectedCountInCurrentPage > 0" key="batch" class="batch-actions">
+            <!-- selectionScopeText 已经按分页模式区分过「全部 / 仅当前页」的措辞，挂成 title：
+                 动手前就该知道这几个按钮到底作用在哪些数据上。 -->
+            <span class="batch-actions__count" :title="selectionScopeText">
+              已选 {{ selectedCountInCurrentPage }} 项
+            </span>
+            <el-button @click="handleBatchEnable">批量启用</el-button>
+            <!-- 禁用会让变量在脚本里直接取不到值，属于破坏性变更，用 danger plain 与中性按钮区分；
+                 又刻意排在「批量删除」前面隔着改名/分组两个中性按钮，避免两个红按钮挨在一起被误点。 -->
+            <el-button type="danger" plain @click="handleBatchDisable">批量禁用</el-button>
+            <el-button @click="handleBatchRename">批量改名</el-button>
+            <el-button @click="handleBatchGroup">批量分组</el-button>
+            <!-- 删除是不可逆的，用实心 danger 压过 plain 的「批量禁用」，也与 tasks / logs 两页的
+                 「批量删除」保持同一形态：三页里最醒目的永远是删除。 -->
+            <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
+            <!-- 批量区占用左槽期间搜索框/分组筛选都不在 DOM 里，这里是退出多选态的唯一出口，不能省 -->
+            <el-button @click="clearTableSelection">取消选择</el-button>
+          </div>
+          <div v-else key="filters" class="toolbar__filters">
+            <div class="status-tabs">
+              <button :class="['status-tab', { active: statusFilter === '' }]" @click="handleStatusFilter('')">全部变量</button>
+              <button :class="['status-tab', { active: statusFilter === 'enabled' }]" @click="handleStatusFilter('enabled')">已启用</button>
+              <button :class="['status-tab', { active: statusFilter === 'disabled' }]" @click="handleStatusFilter('disabled')">已禁用</button>
+            </div>
+            <el-input
+              v-model="keyword"
+              placeholder="搜索变量名、值、备注或分组"
+              clearable
+              class="toolbar__search"
+              @keyup.enter="handleSearch"
+              @clear="handleSearch"
+            >
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+            <el-select
+              v-model="groupFilters"
+              placeholder="分组筛选"
+              multiple
+              collapse-tags
+              collapse-tags-tooltip
+              clearable
+              class="toolbar__group-filter"
+              @change="handleGroupSelect"
+            >
+              <el-option v-for="g in groups" :key="g" :label="g" :value="g" />
+            </el-select>
+          </div>
+        </Transition>
       </div>
       <div class="toolbar__right">
         <!-- 原来是一个「…」更多下拉：主体只能展开菜单，最常用的导出永远要点两次，
@@ -898,26 +926,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
           @click="handleExportAll"
           @command="onExportAction"
         />
-        <!-- 批量操作条：勾一下就凭空插进来五个按钮，会把整条工具栏往左顶一下。
-             包一层 opacity 过渡让它淡进淡出。刻意不做宽度/高度过渡——这排按钮处在
-             .toolbar__right 的横向 flex 里，动尺寸会每帧推着右边的「新建变量」走、
-             带着整行反复重排；opacity 完全不参与布局计算。 -->
-        <Transition name="dd-batch-bar">
-          <div v-if="selectedCountInCurrentPage > 0" class="batch-actions">
-            <!-- 勾选数只按「当前列表里真实存在的行」算（selectedCountInCurrentPage 拿
-                 selectedIdSet 过 envList），不是 selectedIds.length 这个可能含已失效 id 的原始数组。
-                 selectionScopeText 已经按分页模式区分过「全部 / 仅当前页」的措辞，
-                 挂成 title：动手前就该知道这几个按钮到底作用在哪些数据上。 -->
-            <span class="batch-actions__count" :title="selectionScopeText">
-              已选 {{ selectedCountInCurrentPage }} 项
-            </span>
-            <el-button @click="handleBatchRename">批量改名</el-button>
-            <el-button @click="handleBatchEnable">批量启用</el-button>
-            <el-button @click="handleBatchDisable">批量禁用</el-button>
-            <el-button @click="handleBatchGroup">批量分组</el-button>
-            <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
-          </div>
-        </Transition>
         <el-button type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon> 新建变量
         </el-button>
@@ -1286,7 +1294,20 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 12px;
   flex-wrap: wrap;
 
+  // 左槽：恒在的定尺容器，内部靠 Transition 在筛选区/批量区之间换内容。
+  // min-height 取 status-tabs 的实测高度 39px——批量按钮只有 32px，没有这个下限的话
+  // 一勾选整条工具栏就会塌 7px、表格跟着上跳一下。
   &__left {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    min-height: 39px;
+  }
+
+  // 筛选区：原来直接挂在 __left 上的那套横排（状态分段 + 搜索框 + 分组筛选），
+  // 现在下沉一层给 Transition 当分支，间距/换行规则原样搬过来。
+  &__filters {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1347,10 +1368,16 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
+// 批量操作条：搬进左槽后可用宽度由左槽给（右边还站着导出/新建），窄窗口下这六个按钮排不下时
+// 必须允许换行，否则会横向溢出被裁掉；桌面常规宽度下只占一行，工具栏高度由左槽的 min-height 兜住。
+// 移动端竖排也吃这条 flex-wrap，不再在 768px 断点里重复写一遍。
 .batch-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
 }
 
 // 勾选数：纯文字级提示，用次级色，不跟旁边那排实体按钮抢视觉重量
@@ -1361,20 +1388,20 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   cursor: default;
 }
 
-// 批量操作条进出场：只做 opacity。
-// 宽度/高度过渡会让这排按钮每帧推着右侧「新建变量」移动、整行反复重排；
-// opacity 不参与布局，位置一次到位，只是内容淡进淡出。
+// 左槽内容互切（筛选区 ↔ 批量区）：只做 opacity。
+// 两个分支宽度差得远，一旦做宽度/高度过渡，左槽每帧变尺寸就会推着右侧的导出/新建来回移动，
+// 而筛选区本身是 flex-wrap 容器、每帧还要重算换行，整行会持续重排；opacity 不参与布局计算。
 // 时长走令牌，prefers-reduced-motion 下自动降为 1ms 即等效关闭。
-.dd-batch-bar-enter-active {
+.dd-toolbar-swap-enter-active {
   transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
 }
 
-.dd-batch-bar-leave-active {
+.dd-toolbar-swap-leave-active {
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-.dd-batch-bar-enter-from,
-.dd-batch-bar-leave-to {
+.dd-toolbar-swap-enter-from,
+.dd-toolbar-swap-leave-to {
   opacity: 0;
 }
 
@@ -1879,7 +1906,15 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     align-items: stretch;
     gap: 10px;
 
+    // 竖排下左槽由内容自然撑高：桌面那条 39px 下限是为了对齐单行工具栏，
+    // 这里筛选控件本来就要堆三行，留着只会在批量区那一支下面多出一截空白。
+    // align-items 改 stretch 让唯一的子分支吃满整行宽度。
     &__left {
+      align-items: stretch;
+      min-height: 0;
+    }
+
+    &__filters {
       flex-direction: column;
       gap: 10px;
     }
@@ -1900,10 +1935,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   .status-tabs {
     width: 100%;
     overflow-x: auto;
-  }
-
-  .batch-actions {
-    flex-wrap: wrap;
   }
 
   .pagination-bar {

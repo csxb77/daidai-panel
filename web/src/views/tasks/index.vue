@@ -14,7 +14,7 @@ import TaskCronList from './components/TaskCronList.vue'
 import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
-import { getDisplayTaskLabels } from './taskLabels'
+import { getDisplayTaskLabels, classifyDisplayTaskLabels } from './taskLabels'
 import { splitTaskCommandDisplay } from './taskCommand'
 import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
@@ -43,16 +43,70 @@ function readStoredTaskPageSize() {
     return 20
   }
 
-  const raw = window.localStorage.getItem(TASK_PAGE_SIZE_STORAGE_KEY)
-  const parsed = Number(raw)
-  return supportedTaskPageSizes.includes(parsed) ? parsed : 20
+  // 隐私模式 / 禁用站点存储时访问 localStorage 会直接抛错。这两个函数一个跑在 setup 里、
+  // 一个跑在 watch 里，任何一处漏兜都会让整页白掉，所以和下面的显示设置一样统一包住。
+  try {
+    const raw = window.localStorage.getItem(TASK_PAGE_SIZE_STORAGE_KEY)
+    const parsed = Number(raw)
+    return supportedTaskPageSizes.includes(parsed) ? parsed : 20
+  } catch {
+    return 20
+  }
 }
 
 function persistTaskPageSize(value: number) {
   if (typeof window === 'undefined') {
     return
   }
-  window.localStorage.setItem(TASK_PAGE_SIZE_STORAGE_KEY, String(value))
+  try {
+    window.localStorage.setItem(TASK_PAGE_SIZE_STORAGE_KEY, String(value))
+  } catch {
+    // 写不进去只影响「下次进来还记不记得」，本次会话内照常生效，不打扰用户
+  }
+}
+
+// 任务名后面那一排标签的分项显隐偏好（工具栏「显示设置」下拉）。
+// 四项默认全 true = 与改造前完全一致，老用户升级后第一眼一个标签都不会少。
+const TASK_NAME_LABELS_STORAGE_KEY = 'dd:tasks:name_labels'
+
+type TaskNameLabelPrefs = { subscription: boolean; group: boolean; custom: boolean; type: boolean }
+
+const TASK_NAME_LABEL_KEYS = ['subscription', 'group', 'custom', 'type'] as const
+
+function defaultTaskNameLabelPrefs(): TaskNameLabelPrefs {
+  return { subscription: true, group: true, custom: true, type: true }
+}
+
+function readStoredTaskNameLabelPrefs(): TaskNameLabelPrefs {
+  const prefs = defaultTaskNameLabelPrefs()
+  if (typeof window === 'undefined') {
+    return prefs
+  }
+  // 隐私模式 / 禁用站点存储时 localStorage 会直接抛错，不兜住会让整个 setup 挂掉、页面白掉。
+  try {
+    const raw = window.localStorage.getItem(TASK_NAME_LABELS_STORAGE_KEY)
+    if (!raw) return prefs
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return prefs
+    // 逐项校验、只认布尔值：手改坏的 JSON 或以后新增的键都各自回落到默认的 true，不会整份作废
+    for (const key of TASK_NAME_LABEL_KEYS) {
+      if (typeof parsed[key] === 'boolean') prefs[key] = parsed[key]
+    }
+  } catch {
+    return defaultTaskNameLabelPrefs()
+  }
+  return prefs
+}
+
+function persistTaskNameLabelPrefs(value: TaskNameLabelPrefs) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  try {
+    window.localStorage.setItem(TASK_NAME_LABELS_STORAGE_KEY, JSON.stringify(value))
+  } catch {
+    // 写不进去只影响「下次进来还记不记得」，本次会话内的显示效果照常生效，不打扰用户
+  }
 }
 
 const tasks = ref<any[]>([])
@@ -64,6 +118,9 @@ const statusFilter = ref<string>('')
 const loading = ref(false)
 const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
+// 桌面表格实例：勾选状态存在 el-table 内部，「取消选择」只清 selectedIds 复选框不会回弹
+const taskTableRef = ref<any>(null)
+const nameLabelPrefs = ref<TaskNameLabelPrefs>(readStoredTaskNameLabelPrefs())
 const batchLabelVisible = ref(false)
 // push_scope 由 GET /tasks/notification-channels 下发：'bound' 表示该渠道不参与广播，
 // 任务不在表单里显式选中它，它就一条通知都收不到 —— 表单需要据此打标。
@@ -153,6 +210,11 @@ function handleQuickSortSelect(value: { field: string; direction: 'asc' | 'desc'
 
 watch(pageSize, (value) => {
   persistTaskPageSize(value)
+})
+
+// 显示设置集中在这里写回：toggleNameLabelPref 每次都整体换一个新对象，所以不需要 deep
+watch(nameLabelPrefs, (value) => {
+  persistTaskNameLabelPrefs(value)
 })
 
 watch(canPollTaskStatus, () => {
@@ -370,6 +432,41 @@ function displayTaskLabels(task: any) {
   return getDisplayTaskLabels(task?.labels || [])
 }
 
+// 「显示设置」下拉的四个可勾选项。「已锁定」（订阅锁）刻意不在里面：
+// 它是状态而不是分类标签，且是「这个任务手改过、订阅同步不会覆盖」的关键提示，藏掉会让人以为订阅坏了。
+const nameLabelOptions: { key: keyof TaskNameLabelPrefs; label: string }[] = [
+  { key: 'subscription', label: '订阅标签' },
+  { key: 'group', label: '分组标签' },
+  { key: 'custom', label: '自定义标签' },
+  { key: 'type', label: '类型标签' },
+]
+
+// 点一下只翻转一项；整体换一个新对象，所以上面的 watch 不用开 deep。
+// 菜单靠 hide-on-click=false 保持展开，方便连着调好几项。
+function toggleNameLabelPref(key: keyof TaskNameLabelPrefs) {
+  const next = { ...nameLabelPrefs.value }
+  next[key] = !next[key]
+  nameLabelPrefs.value = next
+}
+
+// 按「显示设置」过滤后的名称标签。用 filter 而不是把分类结果拼回去，是为了保住后端下发的原始顺序
+// （分组在最前、订阅名在最后），否则关掉一类再打开，剩下标签的先后会莫名其妙地变。
+// 三类全开时直接短路返回，绝大多数用户走的都是这条路，不做任何多余计算。
+function visibleTaskLabels(task: any) {
+  const all = displayTaskLabels(task)
+  const prefs = nameLabelPrefs.value
+  if (prefs.subscription && prefs.group && prefs.custom) return all
+
+  const { group, subscription } = classifyDisplayTaskLabels(all, task?.labels || [], task?.subscription_labels)
+  const groupSet = new Set(group)
+  const subscriptionSet = new Set(subscription)
+  return all.filter((label: string) => {
+    if (groupSet.has(label)) return prefs.group
+    if (subscriptionSet.has(label)) return prefs.subscription
+    return prefs.custom
+  })
+}
+
 function ensureCanOperate(message = '当前账号没有操作任务权限') {
   if (canOperateTasks.value) return true
   ElMessage.warning(message)
@@ -542,13 +639,17 @@ async function handlePin(task: any) {
  * 在模板里调用等于跑在渲染 effect 内，row 的响应式字段（handleRun 里会把 status 改成 2）
  * 与 canOperateTasks 都会被正常追踪。
  *
- * 「运行 / 停止」互斥且已由主体承担：空闲时主体是「运行」，运行中主体整个换成「停止」，
- * 所以这两项在菜单里【一个都不挂】——既不会出现「停止 ▾」里还有「停止」，
- * 也不会出现空闲状态下点得到「停止」。
+ * 铁规则：谁上了一级，谁就不在菜单里出现（同一个操作绝不在同一个按钮上出现两次）。
+ * - 「运行 / 停止」互斥且已由主体承担：空闲时主体是「运行」，运行中主体整个换成「停止」，
+ *   所以这两项在菜单里【一个都不挂】——既不会出现「停止 ▾」里还有「停止」，
+ *   也不会出现空闲状态下点得到「停止」。
+ * - 「实时日志」已经外置成操作列里独立的「日志」按钮（打开实时日志是这一页最高频的动作，
+ *   原来要先点 ▾ 再选第 2 项），所以它整项从菜单里摘掉了。
  *
- * visible 兜的是权限：观察者（canOperateTasks=false）改造前顶层只有「实时日志」、
- * ⋯ 里只有「详情 / 日志文件」，这里必须一模一样。观察者那一支主体已经是「实时日志」，
- * 所以它在菜单里也要一起隐掉，否则同一个操作在一个按钮上出现两次。
+ * visible 兜的是权限：观察者（canOperateTasks=false）运行/启用/编辑/复制/置顶/删除全部无权。
+ * 「实时日志」外置后观察者那一支的 Split Button 没有主体可用了，改由「详情」当主体，
+ * 于是「详情」的 visible 也得跟着 op：有权限时它留在菜单里，观察者那一支由主体承担、
+ * 菜单只剩「日志文件」。两支都是「2 字主体 + caret + 外置日志按钮」，宽度完全一致。
  *
  * 「删除」不可撤销，只能待在菜单里，并且 danger + divided，绝不上主体。
  */
@@ -556,9 +657,8 @@ function taskActionItems(row: any): SplitButtonItem[] {
   const op = canOperateTasks.value
   return [
     { key: 'toggle', label: row.status === 0 ? '启用' : '禁用', visible: op },
-    { key: 'liveLog', label: '实时日志', visible: op },
     { key: 'edit', label: '编辑', visible: op },
-    { key: 'detail', label: '详情' },
+    { key: 'detail', label: '详情', visible: op },
     { key: 'logFiles', label: '日志文件' },
     { key: 'copy', label: '复制', visible: op },
     { key: 'pin', label: row.is_pinned ? '取消置顶' : '置顶', visible: op },
@@ -566,10 +666,10 @@ function taskActionItems(row: any): SplitButtonItem[] {
   ]
 }
 
-// 只是把原来每个按钮的 @click 原样接过来，逻辑不动
+// 只是把原来每个按钮的 @click 原样接过来，逻辑不动。
+// liveLog 分支已随「实时日志」外置成一级按钮而删除，菜单不再派发这个 key。
 function onTaskAction(key: string, row: any) {
   if (key === 'toggle') handleToggle(row)
-  else if (key === 'liveLog') openLogViewer(row)
   else if (key === 'edit') openEdit(row)
   else if (key === 'detail') openDetail(row)
   else if (key === 'logFiles') openLogFiles(row)
@@ -580,6 +680,15 @@ function onTaskAction(key: string, row: any) {
 
 function handleSelectionChange(rows: any[]) {
   selectedIds.value = rows.map(r => r.id)
+}
+
+// 退出多选态。批量区占住左槽后状态分段和搜索框都被藏起来了，这是唯一的出口，必须有。
+// 桌面表格的勾选状态存在 el-table 内部：只清 selectedIds 的话表头/行里的复选框仍是勾上的，
+// 所以要调它自己的 clearSelection（会反过来触发 selection-change 把数组也清掉）。
+// 移动端不渲染表格，taskTableRef 是 null，可选链兜住；那边的复选框直接绑 isSelected(id)，清数组就够。
+function clearSelection() {
+  taskTableRef.value?.clearSelection?.()
+  selectedIds.value = []
 }
 
 function isSelected(id: number) {
@@ -743,16 +852,51 @@ async function handleImport(event: Event) {
     <ViewManager @view-change="handleViewChange" />
 
     <div class="toolbar">
+      <!-- 左槽是一个【恒在】的容器（flex:1 + min-width:0 + 锁定 min-height），
+           内部在「筛选区」与「批量区」之间用 out-in 淡切。
+           这么排的两个理由：
+             1) 左槽的 flex 属性恒定 ⇒ .toolbar 的 space-between 不会因为左边突然没了而把右区整个甩过去；
+             2) out-in 保证同一时刻只有一块在 DOM 里 ⇒ 不会两块同时占位、把工具栏从一行撑成两行。
+           勾选期间轮询本来就停了（canPollTaskStatus 带 selectedIds.length === 0），列表是冻结的，
+           这段时间搜不了、改不了筛选是可以接受的，退出口由批量区最右的「取消选择」承担。 -->
       <div class="toolbar__left">
-        <div class="status-tabs">
-          <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部任务</button>
-          <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
-          <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">已禁用</button>
-          <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">已启用</button>
-        </div>
-        <el-input v-model="keyword" placeholder="搜索任务名称/命令" clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
+        <Transition name="dd-toolbar-swap" mode="out-in">
+          <div
+            v-if="canOperateTasks && selectedIds.length > 0"
+            key="batch"
+            class="batch-actions"
+            :class="{ 'is-narrow': isNarrowDesktop }"
+          >
+            <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
+            <!-- 按钮顺序刻意让两个红按钮不相邻：danger-plain 的「批量禁用」与实心 danger 的「批量删除」
+                 中间隔了 5 个按钮。删除也不放最右边缘（那一侧最容易被甩动鼠标顺手点到，代价还不可逆），
+                 由无害的「取消选择」殿后；logs / envs 两页同序。 -->
+            <!-- 窄桌面（<1600px，含 14 寸笔记本 1920×1080 缩放 150% 后的 1280 等效视口）用短文案：
+                 长文案下这一排放不下，会换行把工具栏从 39px 顶成两行。
+                 短文案 + .is-narrow 的 6px gap 后实测内容宽约 695px，左槽 712.1px。
+                 「添加标签」不缩：只剩「标签」两个字看不出是添加还是筛选。
+                 移动端 isNarrowDesktop 为 false，卡片布局本来就竖排换行，保持长文案。 -->
+            <el-button @click="handleBatchAction('enable')">{{ isNarrowDesktop ? '启用' : '批量启用' }}</el-button>
+            <el-button type="danger" plain @click="handleBatchAction('disable')">{{ isNarrowDesktop ? '禁用' : '批量禁用' }}</el-button>
+            <el-button @click="handleBatchAction('run')">{{ isNarrowDesktop ? '运行' : '批量运行' }}</el-button>
+            <el-button type="warning" plain @click="handleBatchAction('stop')">{{ isNarrowDesktop ? '停止' : '批量停止' }}</el-button>
+            <el-button @click="openBatchAddLabel">添加标签</el-button>
+            <el-button @click="handleBatchPin">{{ isNarrowDesktop ? '置顶' : '批量置顶' }}</el-button>
+            <el-button type="danger" @click="handleBatchAction('delete')">{{ isNarrowDesktop ? '删除' : '批量删除' }}</el-button>
+            <el-button @click="clearSelection">{{ isNarrowDesktop ? '取消' : '取消选择' }}</el-button>
+          </div>
+          <div v-else key="filters" class="toolbar__filters">
+            <div class="status-tabs">
+              <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部任务</button>
+              <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
+              <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">已禁用</button>
+              <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">已启用</button>
+            </div>
+            <el-input v-model="keyword" placeholder="搜索任务名称/命令" clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+          </div>
+        </Transition>
       </div>
       <div class="toolbar__right">
         <el-dropdown trigger="click" class="sort-dropdown">
@@ -780,6 +924,39 @@ async function handleImport(event: Event) {
             </el-dropdown-menu>
           </template>
         </el-dropdown>
+        <!-- 显示设置：任务名后面那排标签的分项开关。
+             它是【偏好】不是【动作】，所以单独一个勾选式下拉，不塞进右边的「⋯」——那里全是导出/导入/清理，
+             把勾选项混进一串动作项里语义不齐。
+             el-tooltip 包在 el-dropdown【外面】：el-dropdown 的默认插槽走 ElOnlyChild，
+             它会把 forwardRef 指令挂到插槽里的第一个子节点上，而 el-tooltip 是多根组件、接不住指令，
+             触发器引用会丢。包在外层则 tooltip 的 ElOnlyChild 拿到的是 el-dropdown 的单根 div，正常。
+             hide-on-click=false：连着调好几项时菜单不要一点就关。 -->
+        <el-tooltip content="显示设置" placement="top">
+          <el-dropdown trigger="click" :hide-on-click="false">
+            <el-button>
+              <el-icon><View /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="option in nameLabelOptions"
+                  :key="option.key"
+                  @click="toggleNameLabelPref(option.key)"
+                >
+                  <!-- 与上面排序下拉同一套「选中打勾」写法：下拉菜单 teleport 到 body，scoped 样式命中不到，故用内联色 -->
+                  <el-icon
+                    v-if="nameLabelPrefs[option.key]"
+                    style="margin-right: 6px; color: var(--el-color-primary);"
+                  ><Check /></el-icon>
+                  <span v-else style="display: inline-block; width: 20px;"></span>
+                  <span :style="nameLabelPrefs[option.key] ? 'color: var(--el-color-primary); font-weight: 600;' : ''">
+                    {{ option.label }}
+                  </span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </el-tooltip>
         <el-dropdown trigger="click">
           <el-button><el-icon><More /></el-icon></el-button>
           <template #dropdown>
@@ -791,22 +968,6 @@ async function handleImport(event: Event) {
           </template>
         </el-dropdown>
         <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="handleImport" />
-        <!-- 勾选第一行时这七个按钮凭空插进工具栏右区，会把「新建任务」整个推走、看着像抖了一下。
-             淡入淡出让它有个出现/消失的过程，位置变化就不再显得是闪现。
-             只做 opacity：宽度/高度动画会让 .toolbar 每一帧重新算换行，整页跟着重排。
-             （淡出期间元素仍占位，所以按钮消失时右区只重排一次，这是 opacity 方案的固有代价，
-             比逐帧重排划算得多。） -->
-        <Transition name="dd-batch-actions">
-          <div v-if="canOperateTasks && selectedIds.length > 0" class="batch-actions">
-            <el-button size="small" @click="handleBatchAction('enable')">批量启用</el-button>
-            <el-button size="small" @click="handleBatchAction('disable')">批量禁用</el-button>
-            <el-button size="small" @click="handleBatchAction('run')">批量运行</el-button>
-            <el-button size="small" type="warning" plain @click="handleBatchAction('stop')">批量停止</el-button>
-            <el-button size="small" @click="openBatchAddLabel">添加标签</el-button>
-            <el-button size="small" @click="handleBatchPin">批量置顶</el-button>
-            <el-button size="small" type="danger" @click="handleBatchAction('delete')">批量删除</el-button>
-          </div>
-        </Transition>
         <el-button v-if="canOperateTasks" type="primary" @click="openCreate">
           <el-icon><Plus /></el-icon> 新建任务
         </el-button>
@@ -848,7 +1009,9 @@ async function handleImport(event: Event) {
             </div>
 
             <div class="dd-mobile-card__badges task-name-inline">
-              <el-tag size="small" effect="plain" class="task-label task-label--type">
+              <!-- 类型标签跟随工具栏「显示设置」的开关。桌面那一份还额外带 !isNarrowDesktop，
+                   移动端卡片没有列宽压力，所以只受手动开关控制。 -->
+              <el-tag v-if="nameLabelPrefs.type" size="small" effect="plain" class="task-label task-label--type">
                 {{ getTaskTypeLabel(row.task_type) }}
               </el-tag>
               <!-- 订阅锁：手改过名称/定时的任务不再被订阅拉取覆盖，也不会被自动删除 -->
@@ -863,8 +1026,9 @@ async function handleImport(event: Event) {
                 <el-icon><Lock /></el-icon>
                 已锁定
               </el-tag>
+              <!-- 与桌面表格共用同一份「显示设置」开关（分组 / 订阅 / 自定义三类分项过滤） -->
               <el-tag
-                v-for="label in displayTaskLabels(row)"
+                v-for="label in visibleTaskLabels(row)"
                 :key="label"
                 size="small"
                 effect="plain"
@@ -961,6 +1125,7 @@ async function handleImport(event: Event) {
 
     <div v-else class="table-card" :class="{ 'is-compact': isNarrowDesktop }">
       <el-table
+        ref="taskTableRef"
         v-loading="loading"
         :data="tasks"
         :height="desktopTableHeight"
@@ -989,8 +1154,11 @@ async function handleImport(event: Event) {
                   </button>
                   <!-- 窄桌面隐藏任务类型标签：它和右边的「定时规则」列完全冗余
                        （cron 类型显示表达式、其余类型显示的就是这个标签的文案），
-                       但在被压窄的名称列里它会独占一行，是行高翻倍的直接原因 -->
-                  <el-tag v-if="!isNarrowDesktop" size="small" effect="plain" class="task-label task-label--type">
+                       但在被压窄的名称列里它会独占一行，是行高翻倍的直接原因。
+                       与工具栏「显示设置」是【与】关系：手动关掉就一定不显示；手动开着时，
+                       窄桌面仍按上面这条自动隐藏。取舍理由是自动隐藏解决的是「行高翻倍」这种硬故障，
+                       不该被一个默认开着的偏好覆盖掉。 -->
+                  <el-tag v-if="!isNarrowDesktop && nameLabelPrefs.type" size="small" effect="plain" class="task-label task-label--type">
                     {{ getTaskTypeLabel(row.task_type) }}
                   </el-tag>
                   <!-- 订阅锁：手改过名称/定时的任务不再被订阅拉取覆盖，也不会被自动删除 -->
@@ -1005,8 +1173,10 @@ async function handleImport(event: Event) {
                     <el-icon><Lock /></el-icon>
                     已锁定
                   </el-tag>
+                  <!-- 分组 / 订阅 / 自定义三类标签按工具栏「显示设置」分项过滤。
+                       任务详情弹窗（TaskDetail.vue）刻意不跟随，那里必须能看到完整标签。 -->
                   <el-tag
-                    v-for="label in displayTaskLabels(row)"
+                    v-for="label in visibleTaskLabels(row)"
                     :key="label"
                     size="small"
                     effect="plain"
@@ -1021,7 +1191,8 @@ async function handleImport(event: Event) {
         </el-table-column>
         <el-table-column label="命令 / 脚本" :min-width="isNarrowDesktop ? 70 : 80">
           <template #default="{ row }">
-            <!-- 窄桌面下这一列会被压到 100px 出头，不省略就要换 5 行；title 挂全文兜底 -->
+            <!-- 两档桌面都单行省略：窄桌面这一列被压到 100px 出头、宽桌面也只有 176px，
+                 不省略窄屏要换 5 行、宽屏也会换成两行把行高翻倍；title 挂全文兜底 -->
             <code class="command-text" :title="row.command">
               <template v-if="splitTaskCommandDisplay(row.command).script">
                 <span>{{ splitTaskCommandDisplay(row.command).before }}</span>
@@ -1095,17 +1266,21 @@ async function handleImport(event: Event) {
           </template>
         </el-table-column>
         <!--
-          列宽 140：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24。
-          五个按钮 + ⋯ 收成一个 Split Button 后，最宽的形态是【观察者】那一支：
-          主体「实时日志」= 4×12px 文字 + 22px 内边距 + 2px 边框 = 72px，caret 半边 32px，合计 104px；
-          140 - 24 = 116，余量 12px。有操作权限那一支主体只有「运行 / 停止」两个字，合计 80px，余量 36px。
-          caret 是 32px 不是 24px：EP 2.13 的 el-dropdown 根节点只挂 `el-dropdown` + `is-disabled`，
-          不带 size 修饰类，所以 `.el-dropdown--small .el-dropdown__caret-button{width:24px}` 根本匹配不上，
-          size="small" 的 split button 也是 32px 的 caret —— 估宽时别按 24px 算。
-          按钮组一旦超出可用宽，.cell 就会变成可滚动容器，点 caret 时整行会被滚偏，详见下方 .action-btns 注释。
-          窄桌面（<1600px）与常规桌面按钮形态完全一致，因此两种模式共用这一个宽度。
+          列宽 172：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 列宽 - 24 = 148px。
+          这一格现在是两个元素：左边 Split Button（运行/停止 ▾），右边外置的「日志」普通按钮。
+          实测口径（size="small"，浏览器量出来的，不是估的）：
+            主体 = 中文字数 × 12（字宽）+ 22（EP small 的 padding 5px 11px）+ 2（边框）
+            caret = 32，且【不受 size 影响】：EP 2.13 的 el-dropdown 根节点只挂 `el-dropdown` + `is-disabled`，
+              不带 size 修饰类，`.el-dropdown--small .el-dropdown__caret-button{width:24px}` 根本匹配不上
+            el-button-group 组内相邻按钮还有 -1px 的负边距
+          有权限那一支：Split「运行 / 停止」= 2×12+22+2 = 48 → 48+32-1 = 79px（实测 78.99，吻合）；
+          外置「日志」= 2×12+22+2 = 48px；中间 gap 4px（.action-btns 已把 EP 的 .el-button + .el-button
+          外边距清零，间距只由 gap 决定，不会两份叠加）。合计 79 + 4 + 48 = 131px，148 - 131 = 17px 余量。
+          观察者那一支主体换成「详情」，同样 2 字 → 79px，两支宽度完全一致，
+          所以窄桌面（<1600px）与常规桌面仍然共用这一个宽度。
+          按钮组一旦超出可用宽，.cell 就会变成可滚动容器，点右边的按钮时整行会被滚偏，详见下方 .action-btns 注释。
         -->
-        <el-table-column label="操作" width="140" fixed="right" align="center">
+        <el-table-column label="操作" width="172" fixed="right" align="center">
           <template #default="{ row }">
             <div class="action-btns">
               <!-- 主体是「运行」，任务运行中（status===2）整个换成「停止」：两者互斥，谁上了主体谁就不在
@@ -1127,17 +1302,24 @@ async function handleImport(event: Event) {
                 @command="(key: string) => onTaskAction(key, row)"
               />
               <!-- 观察者：运行/停止/启用/编辑/复制/置顶/删除全部无权（handler 里 ensureCanOperate 会直接拦下），
-                   主体只能给只读操作。改造前这一档顶层唯一的按钮就是「实时日志」，层级原样保留；
-                   菜单里剩下的也仍然只有「详情 / 日志文件」，由 taskActionItems 的 visible 联动。 -->
+                   主体只能给只读操作。原来这一支的主体是「实时日志」，它外置成右边的一级按钮后主体空了，
+                   改成「详情」——DdSplitButton 的契约要求主体点了就能直接执行，「详情」满足（openDetail 就是它的全部）。
+                   菜单里因此只剩「日志文件」，由 taskActionItems 的 visible 联动。
+                   顺带两支形态对称：主体都是 2 个字 = 79px，加外置日志按钮总宽一致，172 的列宽两支通用。 -->
               <DdSplitButton
                 v-else
-                label="实时日志"
+                label="详情"
                 type="default"
                 size="small"
                 :items="taskActionItems(row)"
-                @click="openLogViewer(row)"
+                @click="openDetail(row)"
                 @command="(key: string) => onTaskAction(key, row)"
               />
+              <!-- 「日志」外置成一级：打开实时日志是这一页最高频的动作，原来埋在 ▾ 菜单第 2 项，要点两下。
+                   外置后它就从 taskActionItems 里摘掉了（谁上了一级谁就不在菜单里）。
+                   文案取 2 字「日志」而不是「实时日志」：4 字要多吃 24px，
+                   在已经压到 min-width 下限的窄桌面上这 24px 只能从 cron/命令列身上扣。 -->
+              <el-button size="small" @click="openLogViewer(row)">日志</el-button>
             </div>
           </template>
         </el-table-column>
@@ -1239,7 +1421,20 @@ async function handleImport(event: Event) {
   gap: 12px;
   flex-wrap: wrap;
 
+  // 左槽：恒在的容器，内部在「筛选区」与「批量区」之间切换。
+  // min-height 锁 39px（= .status-tabs 的实测高度）+ align-items:center：
+  // 批量按钮是 32px，不锁高度的话切过去工具栏会矮 7px，表格跟着往上跳一下。
   &__left {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    min-height: 39px;
+  }
+
+  // 筛选区：原来这套横排（状态分段 + 搜索框）是直接挂在 .toolbar__left 上的，
+  // 现在左槽要在两块内容之间切换，单独包一层来承接原先的 gap / flex-wrap / 可压缩。
+  &__filters {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1298,21 +1493,43 @@ async function handleImport(event: Event) {
 
 .batch-actions {
   display: flex;
+  // 「已选 N 项」是一段纯文字，默认的 stretch 会让它按整个行高拉满、与 32px 的按钮基线对不齐
+  align-items: center;
   gap: 8px;
+  // 极窄的桌面视口（以及移动端的竖排工具栏）下这一排装不下时换行，不要顶破左槽横向溢出
+  flex-wrap: wrap;
+  min-width: 0;
+
+  // 窄桌面再收 2px 间距。短文案之后 1280px 下实测内容宽 711.4px、左槽 712.1px，只剩 0.7px 余量，
+  // 窗口再窄 1px 就换行；这一排是 9 个子项 8 个 gap，8px→6px 省出 16px，余量回到约 16.7px。
+  // 判定源与短文案共用 isNarrowDesktop：批量区是 JS 条件渲染，媒体查询没法跟着它的显隐走。
+  &.is-narrow {
+    gap: 6px;
+  }
 }
 
-// 批量操作条进出场：只改 opacity。
+.batch-actions__count {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  cursor: default;
+}
+
+// 左槽内容切换（筛选区 ⇄ 批量区）：只改 opacity。
 // 不做高度/宽度过渡 —— .toolbar 是 flex-wrap 容器，尺寸每帧变一次就要重新算一遍换行，整页跟着重排。
-.dd-batch-actions-enter-active {
+// 这条理由在新布局下依然成立，所以过渡口径不变；变的是它要交代的事：
+// 批量区原来是凭空插进右区、把「新建任务」整个推走，现在它占的是左槽这个固定位置，位移问题不复存在，
+// 剩下的只有「左槽这块内容整个换了一份」，配合 mode="out-in" 用一进一出的淡切说清楚。
+.dd-toolbar-swap-enter-active {
   transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
 }
 
-.dd-batch-actions-leave-active {
+.dd-toolbar-swap-leave-active {
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-.dd-batch-actions-enter-from,
-.dd-batch-actions-leave-to {
+.dd-toolbar-swap-enter-from,
+.dd-toolbar-swap-leave-to {
   opacity: 0;
 }
 
@@ -1433,7 +1650,14 @@ async function handleImport(event: Event) {
   font-family: var(--dd-font-mono);
   font-size: 13px;
   color: var(--el-text-color-secondary);
-  word-break: break-all;
+  // 两档桌面统一单行省略。操作列加宽到 172px 后宽桌面的命令列只剩 176px，
+  // 长命令一换行就把行高从 23px 顶到 46px，正好把隐藏标签省下的高度又吃回去。
+  // word-break 必须是 normal：按字符断行会让 text-overflow 失效。
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
 
   .script-link {
     color: var(--el-color-primary);
@@ -1475,13 +1699,16 @@ async function handleImport(event: Event) {
   // 按钮滚进可视区，整行按钮左移、最左边的「运行」被裁掉且不会自动复位。
   // 间距统一交给 gap，这里把这份外边距清零；顺带修掉「前四个按钮间距 16px、编辑与 ⋯ 之间只有 4px」的不一致。
   //
-  // 这五个按钮 + ⋯ 现在收成了一个 DdSplitButton，这条规则对它是空转（EP 的 el-button-group
-  // 本来就把组内相邻按钮的 margin-left 归零）。保留的理由有两条：上面这段是「操作列为什么会自己
-  // 横向滚起来」的唯一记录；以及哪天又往这一格里塞第二个按钮时，这个坑不用重新踩一遍。
+  // 这条规则一度是空转的：五个按钮 + ⋯ 收成一个 DdSplitButton 后，格子里只剩一个元素，
+  // 而 EP 的 el-button-group 本来就把组内相邻按钮的 margin-left 归零。
+  // 现在「日志」外置成了第二个按钮，它【真的生效了】——Split Button 与「日志」之间的间距
+  // 只由上面的 gap:4px 决定，不会再叠上 EP 的 12px（叠上就正好把 131px 顶到 143px，
+  // 逼近 148px 的可用宽，余量被吃光）。所以这条不能删。
   //
   // 原来这里还有一条 `:deep(.el-button) { padding: 4px 8px }`，是当年硬挤五个文字按钮才加的。
-  // 现在只剩一个实心 Split Button，压内边距只会让它显得局促，已经去掉，改回 EP small 档默认的
-  // 5px 11px —— 与 Open API 页的同款按钮保持一致，列宽估算也按这个默认值算。
+  // 现在这一格只有 Split Button + 「日志」两个元素，列宽也按 172 重算过（见上方操作列注释），
+  // 压内边距只会让它们显得局促，已经去掉，改回 EP small 档默认的 5px 11px ——
+  // 与 Open API 页的同款按钮保持一致，列宽估算也按这个默认值算。
   :deep(.el-button + .el-button) {
     margin-left: 0;
   }
@@ -1559,7 +1786,8 @@ async function handleImport(event: Event) {
 
 // ===== 窄桌面紧凑模式（视口 <1600px，由 isNarrowDesktop 挂 .is-compact）=====
 // 目标是把行高从 94~186px 压回 40px 上下。三件事一起做才有效，缺一件都会被最高的那格顶回去：
-//   1) 命令 / 定时规则单行省略（不省略就是 5 行和 3 行）；
+//   1) 定时规则单行省略（不省略就是 3 行）。命令列的省略已提升到 .command-text 基态、两档桌面共用，
+//      所以这里不再重复声明；
 //   2) 名称行不再换行（配合模板里隐藏任务类型标签，多数行只剩一行文字）；
 //   3) 收紧单元格上下内边距。
 // 列的隐藏在模板里做（v-if="!isNarrowDesktop"），不在这里用 display:none —— el-table 的
@@ -1567,15 +1795,6 @@ async function handleImport(event: Event) {
 .table-card.is-compact {
   :deep(.el-table__cell) {
     padding: 6px 0;
-  }
-
-  .command-text {
-    display: block;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    // 单行省略要求不能按字符断行，否则 text-overflow 不生效
-    word-break: normal;
   }
 
   // 名称行保持 wrap：一旦改成 nowrap，标签（flex-shrink:0）会把任务名挤成 0 宽，
@@ -1601,9 +1820,15 @@ async function handleImport(event: Event) {
 
 .task-card {
   .command-text {
+    // 移动端卡片要反着来：基态的单行省略是给窄表格列准备的，卡片是竖向布局、宽度充裕，
+    // 而且这里的 <code> 没有挂 title，一旦省略用户就再也看不到完整命令。
+    // 只覆盖 white-space / word-break 还不够 —— 基态的 overflow:hidden 会继续把换行后的第二行裁掉，
+    // 所以必须连 overflow / text-overflow 一起还原。
     display: block;
     white-space: pre-wrap;
     word-break: break-all;
+    overflow: visible;
+    text-overflow: clip;
   }
 }
 
@@ -1650,8 +1875,15 @@ async function handleImport(event: Event) {
     align-items: stretch;
     gap: 10px;
 
+    // 移动端左槽是竖排：状态分段与搜索框各占一行，所以高度由内容决定，
+    // 不能被桌面那条 min-height:39px 顶着（批量区在这里同样只是占住左槽的位置，竖排下谈不上「移到左侧」）。
     &__left {
+      min-height: 0;
+    }
+
+    &__filters {
       flex-direction: column;
+      align-items: stretch;
       gap: 10px;
     }
 
@@ -1667,10 +1899,6 @@ async function handleImport(event: Event) {
   .status-tabs {
     width: 100%;
     overflow-x: auto;
-  }
-
-  .batch-actions {
-    flex-wrap: wrap;
   }
 }
 

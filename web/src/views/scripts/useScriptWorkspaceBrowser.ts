@@ -14,10 +14,48 @@ type ScriptBrowserState = {
   editorAutoFocusTicket: number
 }
 
+const SCRIPTS_SIDEBAR_COLLAPSED_KEY = 'dd:scripts:sidebar_collapsed'
+
+function readStoredSidebarCollapsed() {
+  if (typeof window === 'undefined') {
+    return false
+  }
+  try {
+    // 只认 '1'，其余（没写过、脏值、读不到）一律当作展开 —— 默认值 = 改造前的现状
+    return window.localStorage.getItem(SCRIPTS_SIDEBAR_COLLAPSED_KEY) === '1'
+  } catch {
+    // 隐私模式 / 禁用存储时 getItem 会抛错，不能让它把 setup 整块炸掉
+    return false
+  }
+}
+
+function persistSidebarCollapsed(value: boolean) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  try {
+    window.localStorage.setItem(SCRIPTS_SIDEBAR_COLLAPSED_KEY, value ? '1' : '0')
+  } catch {
+    // 写失败只是这次记不住，不影响本次折叠效果，静默忽略
+  }
+}
+
 export function useScriptWorkspaceBrowser() {
   const { isMobile, isTablet } = useResponsive()
   const isCompactLayout = computed(() => isTablet.value)
   const mobileShowEditor = ref(false)
+
+  // 用户的原始选择：不受布局影响，窗口缩到 ≤1024 再拉回宽屏时还能回到折叠前的状态
+  const sidebarCollapsed = ref(readStoredSidebarCollapsed())
+  // 真正生效的折叠态。≤1024 一律当成展开：
+  // 那个断点下已经有 mobileShowEditor 的「文件列表 ↔ 编辑器」互斥模式（靠 v-show + display:none），
+  // 两套逻辑同时开会打架 —— 折叠把宽度收到 0，compact 又把它拉回全宽，结果是谁都不对。
+  const isSidebarCollapsed = computed(() => !isCompactLayout.value && sidebarCollapsed.value)
+
+  function toggleSidebarCollapsed() {
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    persistSidebarCollapsed(sidebarCollapsed.value)
+  }
 
   const fileTree = ref<TreeNode[]>([])
   const selectedFile = ref('')
@@ -272,6 +310,8 @@ export function useScriptWorkspaceBrowser() {
     isMobile,
     isCompactLayout,
     mobileShowEditor,
+    isSidebarCollapsed,
+    toggleSidebarCollapsed,
     fileTree,
     selectedFile,
     fileContent,

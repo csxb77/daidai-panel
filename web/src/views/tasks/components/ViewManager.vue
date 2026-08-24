@@ -12,6 +12,10 @@ const emit = defineEmits<{
 
 const { dialogFullscreen } = useResponsive()
 const views = ref<TaskView[]>([])
+// null 有两层含义：一是「不带任何视图筛选」，二是「全部」标签处于高亮。
+// 「全部」被隐藏后第二层含义失效 —— 此时仍可能短暂停在 null（比如刚删掉当前选中的视图），
+// 标签栏不会有任何高亮项，但 emit 出去的 filters 同样是空数组、列表不带筛选，两者是一致的。
+// 随后的 applyViewFallback() 会把它落到第一个可见视图。
 const activeViewId = ref<number | null>(null)
 const showDialog = ref(false)
 const isEditMode = ref(false)
@@ -19,6 +23,39 @@ const editingViewId = ref<number | null>(null)
 const showManagementDialog = ref(false)
 
 const visibleViews = computed(() => views.value.filter(view => !view.hidden))
+
+// 「全部」是模板里硬编码的内置筛选项，库里没有对应行，后端的 hidden 字段够不到它，
+// 它的显隐只能落到本地存储。默认 '0'（显示），老用户升级后第一眼观感不变。
+const VIEW_ALL_HIDDEN_STORAGE_KEY = 'dd:tasks:view_all_hidden'
+
+function readStoredViewAllHidden() {
+  if (typeof window === 'undefined') {
+    return false
+  }
+  try {
+    return window.localStorage.getItem(VIEW_ALL_HIDDEN_STORAGE_KEY) === '1'
+  } catch {
+    // 隐私模式下读 localStorage 会直接抛错，必须吞掉：否则整个 setup 挂掉、标签栏整块白
+    return false
+  }
+}
+
+function persistViewAllHidden(hidden: boolean) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  try {
+    window.localStorage.setItem(VIEW_ALL_HIDDEN_STORAGE_KEY, hidden ? '1' : '0')
+  } catch {
+    // 存储不可用只影响「下次进页还记不记得」，不该阻断当前这次交互
+  }
+}
+
+const allTabHidden = ref(readStoredViewAllHidden())
+
+// 保底规则：一个可见视图都没有时，忽略隐藏设置强制把「全部」放回来。
+// 否则标签栏只剩右侧两个图标按钮，用户既没有可点的筛选项、也退不回不带筛选的状态。
+const showAllTab = computed(() => !allTabHidden.value || visibleViews.value.length === 0)
 
 const filterFields = [
   { value: 'command', label: '命令' },
@@ -60,22 +97,36 @@ async function loadViews() {
   } catch {
     views.value = []
   }
-  // If the currently active view was just hidden from the management dialog,
-  // fall back to the 全部 tab so the user isn't looking at a tab they can no
-  // longer see.
+  applyViewFallback()
+}
+
+// 视图列表或「全部」显隐变化后校正当前高亮项，三处硬回退点（首次加载 / 管理弹窗保存 / 删除视图）
+// 都汇到这里，避免各写一份规则跑偏：
+//   1. 当前选中的视图被删除或被隐藏了 —— 不能继续停在一个看不见的标签上；
+//   2. 「全部」被隐藏而 activeViewId 还停在 null —— null 是「全部」的高亮语义，
+//      必须落到第一个可见视图，否则标签栏一个高亮都没有；
+//   3. 一个可见视图都没有时 showAllTab 会强制把「全部」放回来，此时停在 null 反而是对的。
+function applyViewFallback() {
   if (activeViewId.value !== null) {
     const current = views.value.find(v => v.id === activeViewId.value)
-    if (!current || current.hidden) {
-      selectView(null)
+    if (current && !current.hidden) {
+      return
     }
+  } else if (showAllTab.value) {
+    return
   }
+  // 走到这里说明当前高亮项已经不可见：优先回落「全部」，「全部」也被隐藏时落到第一个可见视图
+  selectView(showAllTab.value ? null : (visibleViews.value[0]?.id ?? null))
 }
 
 function openManagementDialog() {
   showManagementDialog.value = true
 }
 
-async function handleManagementSaved() {
+async function handleManagementSaved(allHidden: boolean) {
+  // 「全部」不进 taskViewApi.reorder 的提交列表，弹窗只把结果回传上来，由这里写本地存储
+  allTabHidden.value = allHidden
+  persistViewAllHidden(allHidden)
   await loadViews()
 }
 
@@ -196,6 +247,9 @@ async function doDeleteView(viewId: number) {
     await taskViewApi.delete(viewId)
     ElMessage.success('已删除')
     if (activeViewId.value === viewId) {
+      // 先清掉高亮与筛选（被删的视图不该继续作用于列表），
+      // 具体落到「全部」还是第一个可见视图，交给刷新后的 applyViewFallback() 统一判断，
+      // 因为此刻 views 里还留着刚删掉的那一条，就地挑「第一个可见视图」可能挑到它自己。
       selectView(null)
     }
     await loadViews()
@@ -209,37 +263,44 @@ defineExpose({ loadViews })
 
 <template>
   <div class="view-manager">
+    <!-- 槽内只放筛选项（全部 + 各视图），动作按钮（新建 / 视图管理）放槽外：
+         「选哪一个」与「做什么」语义分开，顺带消掉了原来「全部」24px、视图 32px 的高度不一致 -->
     <div class="view-tabs">
-      <el-button
-        :type="activeViewId === null ? 'primary' : 'default'"
-        size="small"
-        @click="selectView(null)"
-      >
-        全部
-      </el-button>
-      <el-button
-        v-for="view in visibleViews"
-        :key="view.id"
-        :type="activeViewId === view.id ? 'primary' : 'default'"
-        size="small"
-        class="view-tab-btn"
-        @click="selectView(view.id)"
-      >
-        {{ view.name }}
-      </el-button>
-      <el-button size="small" @click="openCreateDialog">
-        <el-icon><Plus /></el-icon>
-      </el-button>
-      <el-tooltip v-if="views.length > 0" content="视图管理" placement="top">
-        <el-button size="small" @click="openManagementDialog">
-          <el-icon><Setting /></el-icon>
-        </el-button>
-      </el-tooltip>
+      <div class="view-seg">
+        <button
+          v-if="showAllTab"
+          :class="['view-tab', { active: activeViewId === null }]"
+          @click="selectView(null)"
+        >
+          全部
+        </button>
+        <button
+          v-for="view in visibleViews"
+          :key="view.id"
+          :class="['view-tab', { active: activeViewId === view.id }]"
+          @click="selectView(view.id)"
+        >
+          {{ view.name }}
+        </button>
+      </div>
+      <div class="view-tabs__actions">
+        <el-tooltip content="新建视图" placement="top">
+          <el-button @click="openCreateDialog">
+            <el-icon><Plus /></el-icon>
+          </el-button>
+        </el-tooltip>
+        <el-tooltip v-if="views.length > 0" content="视图管理" placement="top">
+          <el-button @click="openManagementDialog">
+            <el-icon><Setting /></el-icon>
+          </el-button>
+        </el-tooltip>
+      </div>
     </div>
 
     <ViewManagementDialog
       v-model="showManagementDialog"
       :views="views"
+      :all-hidden="allTabHidden"
       @saved="handleManagementSaved"
       @edit="openEditDialog"
       @delete="doDeleteView"
@@ -313,15 +374,77 @@ defineExpose({ loadViews })
 .view-tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   align-items: center;
 }
 
-.view-tab-btn {
-  min-width: 64px;
-  padding: 0 16px;
-  height: 32px;
+// 灰底槽：数值逐条对齐 tasks/index.vue 的 .status-tabs，让上下两排分段控件观感一致
+.view-seg {
+  display: inline-flex;
+  background: var(--el-fill-color-light);
+  border-radius: 0;
+  padding: 3px;
+  gap: 2px;
+  // 视图数量由用户决定、可能很多，这里保留原来的换行而不是照抄 status-tabs 的单行排布。
+  // 取舍：换行会让灰底槽变成两行、把下方工具栏推低；改成横向滚动虽然能锁死高度，
+  // 但滚动条会遮住选中项、也没有溢出提示，权衡后选「宁可换行也别把视图藏起来」。
+  flex-wrap: wrap;
+  // inline-flex 的基准宽是 max-content，窄屏下不加这条会顶破容器让页面横向滚
+  max-width: 100%;
+}
+
+.view-tab {
+  padding: 6px 14px;
+  border-radius: 0;
+  // 透明描边占位，选中时只换 border-color，避免出现 1px 的尺寸跳动
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  // 时长/缓动只能取令牌：写死毫秒会绕过 prefers-reduced-motion 下把令牌压到 1ms 的降级
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
+  white-space: nowrap;
+
+  &:hover {
+    color: var(--el-text-color-primary);
+  }
+
+  // 从 el-button 换成原生 button 后丢了 EP 的焦点环，键盘走查会看不出焦点落在哪一项。
+  // offset 取负值让焦点环画在按钮内侧：槽内 gap 只有 2px，正向外扩会压到相邻项上。
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+    outline-offset: -1px;
+    border-radius: 0;
+  }
+
+  &.active {
+    background: var(--el-bg-color);
+    color: var(--el-color-primary);
+    border-color: var(--el-border-color-lighter);
+    font-weight: 600;
+  }
+}
+
+// 动作按钮在槽外，高度对齐灰底槽（3 + 33 + 3 = 39px），
+// 不再出现原来「图标按钮 24px vs 分段控件 39px」那种半截高的落差。
+.view-tabs__actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  // 锚点是自己模板里的元素，压 el-button 用 :deep()；
+  // 同时清掉 EP 自带的 .el-button + .el-button{margin-left:12px}，间距只由 gap 决定
+  :deep(.el-button) {
+    height: 39px;
+    width: 39px;
+    padding: 0;
+    margin-left: 0;
+  }
 }
 
 .filter-list {

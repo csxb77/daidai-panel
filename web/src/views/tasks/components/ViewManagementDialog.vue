@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Rank, View, Hide, Edit, Delete } from '@element-plus/icons-vue'
+import { Rank, View, Hide, Edit, Delete, Lock } from '@element-plus/icons-vue'
 import { taskViewApi, type TaskView } from '@/api/taskView'
 import { useResponsive } from '@/composables/useResponsive'
 
@@ -14,11 +14,14 @@ interface ManagedView extends TaskView {
 const props = defineProps<{
   modelValue: boolean
   views: TaskView[]
+  // 「全部」的当前显隐状态。它是标签栏里硬编码的内置项、库里没有对应行，
+  // 所以只能由父组件从 localStorage 读来传进来，再由本弹窗把结果原样回传。
+  allHidden: boolean
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  saved: []
+  saved: [allHidden: boolean]
   edit: [view: TaskView]
   delete: [viewId: number]
 }>()
@@ -26,10 +29,14 @@ const emit = defineEmits<{
 const { dialogFullscreen } = useResponsive()
 const saving = ref(false)
 const managed = ref<ManagedView[]>([])
+// 「全部」显隐的本地工作副本，和各视图的 _hidden 一样，点保存前不落地
+const allTabHidden = ref(props.allHidden)
 const listContainer = ref<HTMLElement | null>(null)
 let sortableInstance: any = null
 let sortableLoader: Promise<any> | null = null
 
+// 计数只统计自定义视图，刻意不把「全部」算进去：它不占 sort_order、不能删除、也不在下面的列表里，
+// 算进去会让「共 N 个」与用户数得到的行数对不上。文案里直接写明「自定义视图」，避免口径歧义。
 const hiddenCount = computed(() => managed.value.filter(v => v._hidden).length)
 const visibleCount = computed(() => managed.value.length - hiddenCount.value)
 
@@ -95,22 +102,22 @@ async function handleDelete(view: ManagedView) {
 }
 
 async function handleSave() {
-  if (managed.value.length === 0) {
-    emit('update:modelValue', false)
-    return
-  }
   saving.value = true
   try {
-    // Dense re-numbering keeps sort_order contiguous and mirrors the
-    // visible list order.
-    const payload = managed.value.map((view, index) => ({
-      id: view.id,
-      sort_order: (index + 1) * 10,
-      hidden: view._hidden
-    }))
-    await taskViewApi.reorder(payload)
+    // 「全部」不参与 sort_order 重编号、也不进 reorder 的提交列表 —— 库里根本没有它这一行，
+    // 它的显隐由父组件写本地存储。所以一个自定义视图都没有时也仍然要走到下面的 emit。
+    if (managed.value.length > 0) {
+      // Dense re-numbering keeps sort_order contiguous and mirrors the
+      // visible list order.
+      const payload = managed.value.map((view, index) => ({
+        id: view.id,
+        sort_order: (index + 1) * 10,
+        hidden: view._hidden
+      }))
+      await taskViewApi.reorder(payload)
+    }
     ElMessage.success('视图设置已保存')
-    emit('saved')
+    emit('saved', allTabHidden.value)
     emit('update:modelValue', false)
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || err?.message || '保存失败')
@@ -128,6 +135,8 @@ watch(
   async (open) => {
     if (open) {
       managed.value = cloneToManaged(props.views)
+      // 每次打开都从父组件当前值重新取，避免上次取消掉的改动残留在工作副本里
+      allTabHidden.value = props.allHidden
       await nextTick()
       await initSortable()
     } else {
@@ -157,57 +166,89 @@ watch(
     :close-on-click-modal="false"
     @update:model-value="handleClose"
   >
+    <div class="view-manager-hint">
+      拖动左侧把手调整顺序，右侧开关控制是否在标签栏展示；「全部」是内置项，只能改显隐。
+      <!-- 计数刻意只报自定义视图的口径，并在文案里写明，避免与下方列表行数对不上 -->
+      <span class="view-manager-counts">自定义视图 {{ managed.length }} 个 · 显示 {{ visibleCount }} · 隐藏 {{ hiddenCount }}</span>
+    </div>
+
+    <!-- 「全部」是标签栏里硬编码的内置筛选项，库里没有对应行：
+         不可拖拽（不占 sort_order）、不可编辑（没有筛选条件）、不可删除，只给一个显示开关。
+         放在 listContainer 之外，否则 sortable 会把它算进拖拽索引，和 managed 的下标对不上。 -->
+    <div
+      class="view-manager-row is-builtin"
+      :class="{ 'is-hidden': allTabHidden }"
+    >
+      <span class="view-drag-handle is-locked" title="内置项，不参与排序">
+        <el-icon><Lock /></el-icon>
+      </span>
+      <span class="view-row-name">
+        全部
+        <span class="view-row-note">内置项，不带任何筛选条件</span>
+        <!-- 自定义视图全隐藏时标签栏会保底把「全部」放回来，这里提前讲清楚，
+             免得用户保存后以为开关没生效 -->
+        <span v-if="allTabHidden && visibleCount === 0" class="view-row-note is-warning">
+          自定义视图全部隐藏时，标签栏仍会保底显示「全部」
+        </span>
+      </span>
+      <div class="view-row-actions">
+        <el-tooltip :content="allTabHidden ? '在标签栏隐藏' : '在标签栏显示'" placement="top">
+          <el-switch
+            :model-value="!allTabHidden"
+            inline-prompt
+            :active-icon="View"
+            :inactive-icon="Hide"
+            @update:model-value="allTabHidden = !allTabHidden"
+          />
+        </el-tooltip>
+      </div>
+    </div>
+
     <div v-if="managed.length === 0" class="view-manager-empty">
       还没有任何自定义视图，先从标签栏右侧的「+」创建一个试试。
     </div>
-    <template v-else>
-      <div class="view-manager-hint">
-        拖动左侧把手调整顺序，右侧开关控制是否在标签栏展示。
-        <span class="view-manager-counts">共 {{ managed.length }} 个 · 显示 {{ visibleCount }} · 隐藏 {{ hiddenCount }}</span>
-      </div>
-      <div ref="listContainer" class="view-manager-list">
-        <div
-          v-for="view in managed"
-          :key="view.id"
-          class="view-manager-row"
-          :class="{ 'is-hidden': view._hidden }"
-          :data-id="view.id"
-        >
-          <span class="view-drag-handle" :title="'拖动排序'">
-            <el-icon><Rank /></el-icon>
-          </span>
-          <span class="view-row-name">{{ view.name }}</span>
-          <div class="view-row-actions">
-            <el-tooltip content="编辑" placement="top">
-              <el-button size="small" type="primary" plain @click="handleEdit(view)">
-                <el-icon><Edit /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="删除" placement="top">
-              <el-button size="small" type="danger" plain @click="handleDelete(view)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip :content="view._hidden ? '在标签栏隐藏' : '在标签栏显示'" placement="top">
-              <el-switch
-                :model-value="!view._hidden"
-                inline-prompt
-                :active-icon="View"
-                :inactive-icon="Hide"
-                @update:model-value="toggleHidden(view)"
-              />
-            </el-tooltip>
-          </div>
+    <div v-else ref="listContainer" class="view-manager-list">
+      <div
+        v-for="view in managed"
+        :key="view.id"
+        class="view-manager-row"
+        :class="{ 'is-hidden': view._hidden }"
+        :data-id="view.id"
+      >
+        <span class="view-drag-handle" :title="'拖动排序'">
+          <el-icon><Rank /></el-icon>
+        </span>
+        <span class="view-row-name">{{ view.name }}</span>
+        <div class="view-row-actions">
+          <el-tooltip content="编辑" placement="top">
+            <el-button size="small" type="primary" plain @click="handleEdit(view)">
+              <el-icon><Edit /></el-icon>
+            </el-button>
+          </el-tooltip>
+          <el-tooltip content="删除" placement="top">
+            <el-button size="small" type="danger" plain @click="handleDelete(view)">
+              <el-icon><Delete /></el-icon>
+            </el-button>
+          </el-tooltip>
+          <el-tooltip :content="view._hidden ? '在标签栏隐藏' : '在标签栏显示'" placement="top">
+            <el-switch
+              :model-value="!view._hidden"
+              inline-prompt
+              :active-icon="View"
+              :inactive-icon="Hide"
+              @update:model-value="toggleHidden(view)"
+            />
+          </el-tooltip>
         </div>
       </div>
-    </template>
+    </div>
 
     <template #footer>
       <el-button @click="handleClose(false)">取消</el-button>
+      <!-- 不再按 managed.length 禁用：一个自定义视图都没有时，「全部」的显隐开关仍然要能保存 -->
       <el-button
         type="primary"
         :loading="saving"
-        :disabled="managed.length === 0"
         @click="handleSave"
       >
         保存
@@ -218,7 +259,8 @@ watch(
 
 <style scoped lang="scss">
 .view-manager-empty {
-  padding: 24px 0;
+  // 上方现在恒定有一行「全部」固定项，留出间距免得两块贴在一起
+  padding: 20px 0 4px;
   text-align: center;
   color: var(--el-text-color-secondary);
 }
@@ -241,6 +283,8 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 6px;
+  // 「全部」固定项排在列表之外、不跟着一起滚，这里补一段间距接上
+  margin-top: 6px;
   max-height: 420px;
   overflow-y: auto;
   padding-right: 4px;
@@ -263,6 +307,14 @@ watch(
   &.is-hidden {
     opacity: 0.55;
   }
+
+  // 「全部」固定项：换成卡片底 + 常亮 1px 描边与下方可拖拽的视图行区分开（不靠阴影/圆角）。
+  // hover 也不点亮描边 —— 它没有拖拽/编辑/删除，点亮反而会误导成「这行能拖」。
+  &.is-builtin,
+  &.is-builtin:hover {
+    background: var(--el-bg-color);
+    border-color: var(--el-border-color-lighter);
+  }
 }
 
 .view-drag-handle {
@@ -275,6 +327,12 @@ watch(
   &:active {
     cursor: grabbing;
   }
+
+  // 内置项的把手位只用来占位对齐，光标保持默认，免得用户以为它也能拖
+  &.is-locked,
+  &.is-locked:active {
+    cursor: default;
+  }
 }
 
 .view-row-name {
@@ -283,6 +341,22 @@ watch(
   font-weight: 500;
   color: var(--el-text-color-primary);
   word-break: break-word;
+}
+
+// 内置项的次级说明：字号与字重都降一档与名称拉开层级。
+// 这里靠 display:block 自己换行，而不是把 .view-row-name 改成 column 弹性容器 ——
+// 那会改掉所有自定义视图行的布局模型，为一行说明文字不值当。
+.view-row-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--el-text-color-secondary);
+
+  &.is-warning {
+    color: var(--el-color-warning);
+  }
 }
 
 .view-row-actions {

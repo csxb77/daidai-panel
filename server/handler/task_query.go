@@ -164,6 +164,12 @@ func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string,
 
 		item := task.ToDict()
 		item["display_labels"] = displayLabels
+		// 订阅名再单独下发一份，供前端「按类别隐藏标签」区分订阅标签与自定义标签：
+		// display_labels 是扁平数组，订阅名和自定义标签在里面长得一模一样，前端分不出来。
+		// 值与下面视图筛选/排序用的 subscriptionLabels 同源，不会出现两套口径。
+		// buildPreparedTaskLabels 用 make 初始化两份切片，空值序列化成 []（不是 null），
+		// 与 display_labels 一致，前端可直接当数组用。
+		item["subscription_labels"] = subscriptionLabels
 		if task.NotificationChannelID != nil {
 			if channel, exists := notificationChannels[*task.NotificationChannelID]; exists {
 				item["notification_channel_name"] = channel.Name

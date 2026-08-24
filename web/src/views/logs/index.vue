@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { logApi } from '@/api/log'
 import { taskApi } from '@/api/task'
 import { useAuthStore } from '@/stores/auth'
+import { useBadgesStore } from '@/stores/badges'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { openAuthorizedEventStream, type EventStreamConnection } from '@/utils/sse'
 import { usePageActivity } from '@/composables/usePageActivity'
@@ -21,6 +22,7 @@ import { downloadTextAsFile, foldedLogDownloadName, startRawLogDownload } from '
 
 const route = useRoute()
 const authStore = useAuthStore()
+const badgesStore = useBadgesStore()
 const logs = ref<any[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -232,10 +234,17 @@ watch(
 onMounted(async () => {
   mounted = true
   syncTaskIdFromRoute(true)
+  // 进页即把侧栏的「失败日志」角标标记为已读——用户已经站在这一页上了，再红着没有意义
+  badgesStore.ackLogsFailed()
   await loadLogs()
 })
 
 onActivated(() => {
+  // 角标清零刻意放在下面那道 mounted 闸【外面】、且无条件执行：
+  // 那道闸是给 loadLogs 防重复请求用的（onMounted 刚拉过一次），
+  // 而 MainLayout 的 keep-alive 是 :max="14"，第二次以后进本页只触发 onActivated、
+  // 不再触发 onMounted，写进 if 里就只有首次访问才会清零。
+  badgesStore.ackLogsFailed()
   if (!mounted) {
     void loadLogs()
   }
@@ -619,29 +628,46 @@ onBeforeUnmount(() => {
   <div class="logs-page dd-fixed-page dd-page-hide-heading">
     <!-- ======= Toolbar ======= -->
     <div class="toolbar">
+      <!-- 左槽是【恒在】的容器，勾选时只切换它内部的内容：批量条原来挂在 toolbar__right 里，
+           一出现就把整条工具栏顶成两行、表格跟着下移。
+           mode="out-in" 保证同一时刻只有一个分支在 DOM 里，两者不会同时占位；
+           容器自身的 flex 属性不变，右区也就不会因为 space-between 重新分配而横向滑走。 -->
       <div class="toolbar__left">
-        <div class="status-tabs">
-          <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
-          <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
-          <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
-          <button :class="['status-tab', { active: statusFilter === '3' }]" @click="statusFilter = '3'; handleSearch()">已终止</button>
-          <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
-        </div>
-        <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
-          <template #prefix><el-icon><Search /></el-icon></template>
-        </el-input>
-        <!-- 执行时间范围。inline 模式让快捷项与选择器同排，不把工具栏撑成两行。
-             disableFuture：日志是已经发生过的事，选到明天必然是空结果，
-             与其让用户以为筛选坏了，不如直接禁掉未来日期。 -->
-        <DdDateRangePicker
-          v-model="dateRange"
-          inline
-          size="default"
-          start-placeholder="开始日期"
-          end-placeholder="结束日期"
-          class="toolbar__date"
-          @change="handleSearch"
-        />
+        <Transition name="dd-toolbar-swap" mode="out-in">
+          <div v-if="canOperateLogs && selectedIds.length > 0" key="batch" class="batch-actions">
+            <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
+            <!-- 不写 size：与右区的「停止刷新 / 清理日志」同为 EP default 32px。
+                 原来的 small 是 24px，两边差 8px，正是 issue 说的「高度不一致」。 -->
+            <!-- 顺序与 tasks / envs 两页对齐：「批量删除」在前、「取消选择」殿后。
+                 删除不放最右边缘，是因为那一侧最容易被甩动鼠标顺手点到，代价还不可逆；
+                 让无害的「取消选择」去当边缘那一个。 -->
+            <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
+            <el-button @click="clearSelection">取消选择</el-button>
+          </div>
+          <div v-else key="filters" class="toolbar__filters">
+            <div class="status-tabs">
+              <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
+              <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
+              <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
+              <button :class="['status-tab', { active: statusFilter === '3' }]" @click="statusFilter = '3'; handleSearch()">已终止</button>
+              <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
+            </div>
+            <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+            <!-- 执行时间范围。inline 模式让快捷项与选择器同排，不把工具栏撑成两行。
+                 disableFuture：日志是已经发生过的事，选到明天必然是空结果，
+                 与其让用户以为筛选坏了，不如直接禁掉未来日期。 -->
+            <DdDateRangePicker
+              v-model="dateRange"
+              inline
+              size="default"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              @change="handleSearch"
+            />
+          </div>
+        </Transition>
       </div>
       <div class="toolbar__right">
         <el-button
@@ -655,15 +681,6 @@ onBeforeUnmount(() => {
           <el-icon><Delete /></el-icon>
           <span>清理日志</span>
         </el-button>
-        <!-- 勾选第一条时这两个按钮凭空出现，硬切会让整条工具栏「跳」一下。
-             只做 opacity 淡入淡出：高度/宽度过渡会一路把工具栏、表格、分页条全部重排，
-             代价远大于收益（工具栏是 flex-wrap，宽度动画还会把整排按钮甩到第二行再甩回来）。 -->
-        <Transition name="dd-batch-fade">
-          <div v-if="canOperateLogs && selectedIds.length > 0" class="batch-actions">
-            <el-button size="small" @click="clearSelection">取消选择</el-button>
-            <el-button size="small" type="danger" @click="handleBatchDelete">批量删除</el-button>
-          </div>
-        </Transition>
       </div>
     </div>
 
@@ -1002,12 +1019,30 @@ onBeforeUnmount(() => {
 .toolbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  // 刻意【不】用 align-items: center：左区被 630px 宽的日期选择器挤成两行（实测 88px）时，
+  // center 会把只有 32px 高的右区整个垂直居中到 88px 的中线上，
+  // 于是右侧按钮的中心比左侧 status-tabs 的中心低 22px（实测），正是 issue #103 说的「布局不一致」。
+  // 改成 flex-start + 右区自己撑到 39px（= status-tabs 高度）并内部居中，
+  // 两者就都对齐到左区【第一行】的中心线；左区只有一行时两边同为 39px，结果不变。
+  align-items: flex-start;
   margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
 
+  // 左槽容器：勾选时内部在「筛选区」与「批量区」之间切换，容器本身恒在，flex 属性也恒定。
+  // min-height 取 39px（status-tabs 实测高度）——批量按钮只有 32px，
+  // 少了它工具栏会在切换的一瞬间塌 7px，表格跟着抖一下；
+  // out-in 中途还有一帧容器为空，没有它会直接塌到 0。
   &__left {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    min-height: 39px;
+  }
+
+  // 筛选区：原来这几条挂在 __left 上，现在下沉一层，__left 只负责占位与对齐
+  &__filters {
     display: flex;
     align-items: center;
     gap: 12px;
@@ -1020,6 +1055,8 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     gap: 10px;
+    // 与左区第一行对齐的另一半：撑到同样的 39px，内部 center 让 32px 的按钮落在同一条中线上
+    min-height: 39px;
   }
 
   &__search {
@@ -1063,19 +1100,30 @@ onBeforeUnmount(() => {
 
 .batch-actions {
   display: flex;
+  // 计数是纯文字、按钮是 32px 的实体块，不写 center 两者会按基线/拉伸排，文字看着往上飘
+  align-items: center;
   gap: 8px;
 }
 
-// 批量操作条的进出场：只淡不移、不改尺寸。
-// 不加 mode，离场与入场可以重叠——反正整段就是同一块区域的透明度变化，
-// 加 out-in 反而会在中途留一段完全空白的等待期。
-.dd-batch-fade-enter-active,
-.dd-batch-fade-leave-active {
+// 勾选数：纯文字级提示，用次级色，不跟旁边那排实体按钮抢视觉重量
+.batch-actions__count {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+  cursor: default;
+}
+
+// 左槽内容切换（筛选区 ⇄ 批量区）：只做 opacity，不做宽高。
+// 尺寸过渡会让这条 flex-wrap 工具栏每帧重算换行，把整排按钮甩到第二行再甩回来，
+// 还会一路推着表格与分页条重排，代价远大于收益。
+// 时长走令牌，prefers-reduced-motion 下自动降为 1ms 即等效关闭。
+.dd-toolbar-swap-enter-active,
+.dd-toolbar-swap-leave-active {
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-.dd-batch-fade-enter-from,
-.dd-batch-fade-leave-to {
+.dd-toolbar-swap-enter-from,
+.dd-toolbar-swap-leave-to {
   opacity: 0;
 }
 
@@ -1491,10 +1539,19 @@ onBeforeUnmount(() => {
 
   .toolbar {
     flex-direction: column;
+    // 容器级 stretch 同时接管了桌面端的 align-items: flex-start：
+    // 竖排时交叉轴是水平方向，左右两区都要铺满整行，不能收成内容宽
     align-items: stretch;
     gap: 10px;
 
+    // 竖排改在筛选区上做。左槽保持横向单子项 + stretch，
+    // 让唯一的子项（筛选区 / 批量区）撑满整行；若把 column 写在左槽上，
+    // 它继承来的 align-items: center 会在竖排下把子项压回内容宽。
     &__left {
+      align-items: stretch;
+    }
+
+    &__filters {
       flex-direction: column;
       gap: 10px;
     }
@@ -1506,8 +1563,6 @@ onBeforeUnmount(() => {
     &__right {
       justify-content: stretch;
       flex-wrap: wrap;
-      padding: 0;
-      background: transparent;
     }
 
     &__right > * {

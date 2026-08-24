@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import {
   DocumentAdd,
+  Fold,
   FolderAdd,
   Refresh,
   Search,
@@ -30,6 +31,8 @@ const props = defineProps<{
   onOpenRename: (path: string) => void
   onDelete: (path: string, isDir: boolean) => void | Promise<void>
   onMoveToRoot?: (path: string, isDir: boolean) => void | Promise<void>
+  /** 收起目录树。只在桌面宽屏可用，≤1024 由 mobileShowEditor 的互斥模式负责藏列表 */
+  onToggleCollapse: () => void
 }>()
 
 const treeRef = ref()
@@ -99,6 +102,15 @@ watch(searchKeyword, (val) => {
               <el-icon :size="15"><Refresh /></el-icon>
             </button>
           </el-tooltip>
+
+          <!-- 收起目录树。只在桌面宽屏渲染：≤1024（isMobile 这个 prop 传的是 isCompactLayout）
+               已经有「文件列表 ↔ 编辑器」互斥模式，再给一个收起按钮只会让两套逻辑打架。
+               v-if 挂在 tooltip 上而不是 button 上，否则隐藏时 tooltip 会剩一个空触发器。 -->
+          <el-tooltip v-if="!isMobile" content="收起文件树" placement="bottom">
+            <button class="icon-btn" aria-label="收起文件树" @click="onToggleCollapse">
+              <el-icon :size="15"><Fold /></el-icon>
+            </button>
+          </el-tooltip>
         </div>
       </div>
     </header>
@@ -141,8 +153,15 @@ watch(searchKeyword, (val) => {
 
 <style scoped lang="scss">
 .scripts-sidebar {
-  width: 300px;
-  min-width: 300px;
+  /* 宽度的单一真源在 index.vue 的 .scripts-workspace（--scripts-sidebar-width），折叠时那边置 0px。
+     这里必须消费同一个变量：min-width 是 flex-basis 的下限，还写死 300px 的话
+     index.vue 那边把 flex-basis 收到 0 也没用，卡片会被这一行顶住收不起来。
+     min-width 同样要过渡 —— 若它瞬间跳回 300px，展开动画会被立刻夹到终点，看着像没有动画。 */
+  width: var(--scripts-sidebar-width, 300px);
+  min-width: var(--scripts-sidebar-width, 300px);
+  transition:
+    width var(--dd-motion-normal) var(--dd-ease-standard),
+    min-width var(--dd-motion-normal) var(--dd-ease-standard);
   height: 100%;
   min-height: 0;
   display: flex;

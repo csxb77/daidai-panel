@@ -262,11 +262,19 @@ function splitCronExpressions(raw: string): string[] {
  *   - `分组:xxx` 提到最前面；
  *   - `subscription:N` 换成订阅名（订阅已删除则显示「订阅任务」）。
  * 不翻译的话列表页会直接把 `subscription:1` 当成标签画出来。
+ *
+ * 返回值里的 subscription 对应后端的 subscriptionLabels（只含订阅名）：
+ * display 是扁平数组，订阅名和自定义标签在里面长得一模一样，前端「按类别隐藏标签」
+ * 只能靠这份名单把两者分开。演示站不跟着下发，就会出现「本地能分项隐藏、演示站不能」。
  */
-function buildDisplayLabels(labels: string[]): string[] {
+function buildDisplayLabels(labels: string[]): { display: string[]; subscription: string[] } {
   const current = db()
   const display: string[] = []
+  const subscription: string[] = []
   const seen = new Set<string>()
+  // 订阅名单独一个去重集合（与后端 seenSubscriptions 对齐）：订阅名可能和某个自定义标签重名，
+  // 共用 seen 的话订阅名会被当成重复项丢掉，subscription 里就少一条、该标签也就隐藏不掉。
+  const seenSubscription = new Set<string>()
   let groupName = ''
 
   const push = (label: string) => {
@@ -274,6 +282,13 @@ function buildDisplayLabels(labels: string[]): string[] {
     if (!value || seen.has(value)) return
     seen.add(value)
     display.push(value)
+  }
+
+  const pushSubscription = (label: string) => {
+    const value = label.trim()
+    if (!value || seenSubscription.has(value)) return
+    seenSubscription.add(value)
+    subscription.push(value)
   }
 
   for (const raw of labels) {
@@ -288,21 +303,26 @@ function buildDisplayLabels(labels: string[]): string[] {
       continue
     }
     const subId = Number.parseInt(label.slice('subscription:'.length), 10)
-    const subscription = current.subscriptions.find((item) => item.id === subId)
-    push(subscription?.name || '订阅任务')
+    const matched = current.subscriptions.find((item) => item.id === subId)
+    const subName = matched?.name || '订阅任务'
+    push(subName)
+    pushSubscription(subName)
   }
 
-  return groupName ? [groupName, ...display] : display
+  return { display: groupName ? [groupName, ...display] : display, subscription }
 }
 
 /** 任务列表/详情下发体，字段照抄 server/model/task.go 的 ToDict() + task_query.go 的补充字段 */
 export function toTaskDict(task: DemoTask): Record<string, unknown> {
   const current = db()
+  const preparedLabels = buildDisplayLabels(task.labels)
   const item: Record<string, unknown> = {
     ...task,
     labels: [...task.labels],
     cron_expressions: splitCronExpressions(task.cron_expression),
-    display_labels: buildDisplayLabels(task.labels),
+    display_labels: preparedLabels.display,
+    // 与后端 prepareTaskListItems 一致：订阅名再单独下发一份，前端靠它把订阅标签和自定义标签分开
+    subscription_labels: preparedLabels.subscription,
   }
 
   if (task.notification_channel_id) {
@@ -466,7 +486,8 @@ export function buildLogContent(log: DemoTaskLog): string {
 /** 执行日志下发体，字段照抄 server/model/task_log.go 的 ToDict() */
 export function toLogDict(log: DemoTaskLog, withContent = false): Record<string, unknown> {
   const task = findTask(log.task_id)
-  const labels = task ? buildDisplayLabels(task.labels) : []
+  // 日志页只画展示标签，不需要订阅名单
+  const labels = task ? buildDisplayLabels(task.labels).display : []
   const taskType = task?.task_type ?? 'cron'
 
   return {

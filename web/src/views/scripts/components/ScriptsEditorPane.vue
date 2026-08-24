@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, onMounted, ref, watch } from "vue";
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,12 +10,17 @@ import {
   Document,
   Download,
   Edit,
+  Expand,
   MagicStick,
   MoreFilled,
   Plus,
+  Switch,
   VideoPlay,
 } from "@element-plus/icons-vue";
-import MonacoEditor from "@/components/MonacoEditor.vue";
+import MonacoEditor, {
+  persistEditorWordWrap,
+  readStoredEditorWordWrap,
+} from "@/components/MonacoEditor.vue";
 import { getMonacoLoadErrorMessage, loadMonacoEditor } from "@/utils/monaco";
 
 const fileContent = defineModel<string>("fileContent", { required: true });
@@ -24,6 +29,9 @@ const isEditing = defineModel<boolean>("isEditing", { required: true });
 const props = defineProps<{
   isMobile: boolean;
   mobileShowEditor: boolean;
+  /** 目录树是否已收起（只可能在桌面宽屏为 true），用来决定要不要渲染展开把手 */
+  sidebarCollapsed: boolean;
+  onExpandSidebar: () => void;
   selectedFile: string;
   isBinary: boolean;
   hasChanges: boolean;
@@ -96,6 +104,21 @@ function startEdit() {
   isEditing.value = true;
 }
 
+// 自动换行开关与配置文件页共享同一份记忆（dd:editor:word_wrap），
+// 读写统一走 MonacoEditor 导出的那两个函数，两页不各写一遍。
+const wordWrap = ref(readStoredEditorWordWrap());
+
+function toggleWordWrap() {
+  wordWrap.value = wordWrap.value === "on" ? "off" : "on";
+  persistEditorWordWrap(wordWrap.value);
+}
+
+// 脚本页被 keep-alive 缓存，第二次进来只触发 onActivated 不触发 onMounted。
+// 不在这里补读一次的话，「在配置文件页改了开关、切回脚本页却没变」——共享就名存实亡了。
+onActivated(() => {
+  wordWrap.value = readStoredEditorWordWrap();
+});
+
 const monacoEditorRef = ref<{ focus?: () => void } | null>(null);
 
 // 空状态（还没选文件）时页面上没有 MonacoEditor 实例，这里提前把加载链路跑起来，
@@ -155,6 +178,16 @@ watch(
           >
             <el-icon><Plus /></el-icon>新建脚本
           </el-button>
+          <!-- 空状态里没有 hero，那个展开把手也就不存在。
+               目录树收起 + 还没选文件时，这里如果不补一个入口就是没有退路的死状态
+               （移动端的返回键只在 isMobile 才渲染，桌面用不上）。 -->
+          <el-button
+            v-if="!isMobile && sidebarCollapsed"
+            size="large"
+            @click="onExpandSidebar"
+          >
+            <el-icon><Expand /></el-icon>展开文件树
+          </el-button>
         </div>
       </div>
     </div>
@@ -163,6 +196,21 @@ watch(
       <!-- Hero header -->
       <header class="editor-hero animate-fade-in-up">
         <div class="hero-file">
+          <!-- 展开把手：只在「桌面 + 已折叠」时渲染。
+               折叠后目录树宽度是 0，桌面端必须有个看得见的出口，否则用户回不去。 -->
+          <el-tooltip
+            v-if="!isMobile && sidebarCollapsed"
+            content="展开文件树"
+            placement="bottom"
+          >
+            <button
+              class="sidebar-expand-btn"
+              aria-label="展开文件树"
+              @click="onExpandSidebar"
+            >
+              <el-icon :size="15"><Expand /></el-icon>
+            </button>
+          </el-tooltip>
           <el-button
             v-if="isMobile"
             class="mobile-back"
@@ -267,6 +315,26 @@ watch(
             <el-icon><Plus /></el-icon><span v-if="!isMobile">添加任务</span>
           </el-button>
 
+          <!-- 状态类按钮，排在动作类的「更多」之前。
+               配色沿用本仓工具栏切换按钮的既有写法（开启时 primary + plain），
+               与左边实心 primary 的「保存」靠 plain 区分，不抢主操作的注意力。
+               窄屏收成纯图标，与同排按钮同一套 `<span v-if="!isMobile">` 收缩写法；
+               状态另在底部状态条镜像成 `Wrap ON/OFF`，图标态下也看得出开关。 -->
+          <el-tooltip
+            :content="wordWrap === 'on' ? '关闭自动换行' : '开启自动换行'"
+            placement="bottom"
+          >
+            <el-button
+              class="action-btn"
+              :size="isMobile ? 'small' : 'default'"
+              :type="wordWrap === 'on' ? 'primary' : 'default'"
+              :plain="wordWrap === 'on'"
+              @click="toggleWordWrap"
+            >
+              <el-icon><Switch /></el-icon><span v-if="!isMobile" class="wrap-btn-label">Wrap</span>
+            </el-button>
+          </el-tooltip>
+
           <el-dropdown trigger="click" placement="bottom-end">
             <el-button
               class="action-btn"
@@ -318,6 +386,7 @@ watch(
           v-model="fileContent"
           :language="editorLanguage"
           :readonly="!isEditing"
+          :word-wrap="wordWrap"
           class="code-editor"
         />
       </div>
@@ -338,6 +407,8 @@ watch(
         <div class="status-group">
           <span class="status-item">UTF-8</span>
           <span class="status-item">LF</span>
+          <!-- 镜像 hero 上那个 Wrap 按钮的状态：窄屏按钮收成纯图标后，这里是唯一能读出开关的地方 -->
+          <span class="status-item">Wrap {{ wordWrap === "on" ? "ON" : "OFF" }}</span>
           <span
             class="status-item"
             :class="{ 'status-item--accent': isEditing }"
@@ -447,6 +518,44 @@ watch(
   gap: 12px;
   min-width: 0;
   flex: 1;
+}
+
+/* 展开把手：与 ScriptsSidebar.vue 里那个收起按钮（.icon-btn）同一副长相——
+   30×30 直角、透明底、1px 描边，hover 只改颜色不做位移。
+   两处相隔一个组件边界、scoped 样式互相够不到，只能各写一份；
+   数值要改的话两边一起改。 */
+.sidebar-expand-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex-shrink: 0;
+  border: 1px solid var(--el-border-color-lighter);
+  background: transparent;
+  border-radius: 0;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  &:hover {
+    color: var(--el-color-primary);
+    border-color: color-mix(
+      in srgb,
+      var(--el-color-primary) 40%,
+      var(--el-border-color-lighter)
+    );
+    background: color-mix(in srgb, var(--el-color-primary) 6%, transparent);
+  }
+
+  &:focus-visible {
+    outline: 2px solid
+      color-mix(in srgb, var(--el-color-primary) 50%, transparent);
+    outline-offset: 1px;
+  }
 }
 
 .file-icon {
@@ -594,6 +703,16 @@ watch(
   border-radius: 0;
   font-weight: 500;
   transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+}
+
+/* 1025~1280 这一档：还没进 compact（按钮仍带文字），但编辑器卡被 300px 目录树挤到只剩 ~450px。
+   .hero-actions 是 flex-shrink: 0，装不下不会换行，而是直接被卡片的 overflow: hidden 从右边裁掉。
+   Wrap 是这排里唯一「不看文字也知道状态」的按钮（底部状态条镜像了 Wrap ON/OFF，还有 tooltip），
+   所以这一档优先收掉它的文字，把宽度让给动作类按钮。目录树收起后编辑器多出 314px，更不会紧张。 */
+@media screen and (min-width: 1025px) and (max-width: 1280px) {
+  .wrap-btn-label {
+    display: none;
+  }
 }
 
 .action-btn--cancel {
