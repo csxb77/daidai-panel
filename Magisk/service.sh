@@ -392,6 +392,11 @@ else
   # 刻意不碰 KbdInteractiveAuthentication：Debian 默认 no，密码认证走的是
   # password 方法而不是它，多改一项只会多一个变量。
   #
+  # ⚠️ 这里【刻意不写 UsePAM no】。issue #100 的会话失败是在 PAM 层解决的，见下方
+  #    [ssh][pam] 那段。理由：Debian 有过「openssh 构建时没链上 crypt，UsePAM=no 下
+  #    正确密码也一律被拒」的先例 —— 那会把故障从「连上就断」升级成「根本登不上」，
+  #    比现在更糟。handler/magisk_assets_test.go 有门禁守着这一条。
+  #
   # 指令名与 Match 都是大小写不敏感的，这里把 Match 逐字母写成字符组，
   # 避免依赖某个 awk 实现的忽略大小写扩展（busybox awk 与 mawk 都没有）。
   awk -v port="${SSH_PORT}" '
@@ -436,19 +441,64 @@ else
   mkdir -p /run/sshd
   chmod 0755 /run/sshd
 
-  # PAM：这是 Debian 版 SSH 连不上最可能的根因。
-  # Debian 的 openssh-server 是 --with-pam 构建且 UsePAM yes 默认生效，
-  # /etc/pam.d/sshd 里的 `session required pam_loginuid.so` 要写 /proc/self/loginuid；
-  # ruri 的 -S 把宿主 /proc 直接 bind 进了容器，Android 内核又必然 CONFIG_AUDIT=y
-  # （SELinux 依赖 audit），所以这个文件通常存在，走不到「不存在就 PAM_IGNORE」
-  # 那条安全路径 —— 写入返回 EPERM 即 PAM_SESSION_ERR，required 之下整条
-  # pam_open_session 失败，表现正是「密码验证通过、随即 Connection closed」。
-  # Alpine 的 openssh 是 --without-pam 构建，没有这个文件，这段恒为空操作。
-  # 放在 service.sh（每次开机执行）而不只是 customize.sh：这样用户重刷一次模块 ZIP
-  # 就能修好已经装好的容器，不必重下几百 MB 依赖重装 rootfs。
+  # ---- [ssh][pam] Debian 版「密码对了却立刻断开」的根治：把 session 栈整段换掉 ----
+  #
+  # 症状（issue #99 / #100）：
+  #   Accepted password for root ...            ← 认证是过的
+  #   PAM: pam_open_session(): Error in service module
+  #   Connection closed / Disconnected
+  # 认证通过之后 sshd 要开会话，PAM 的 session 栈里只要有一个 required 模块出错，
+  # 整条 pam_open_session 就失败，sshd 随即断开 —— 表现就是「输完密码就退出」。
+  #
+  # v3.0.7 试过「逐个把出问题的模块降成 optional」，先修的是 pam_loginuid
+  # （它要写 /proc/self/loginuid，容器里 EPERM）。结果 #100 又卡在下一个模块：
+  #   sh: 1: cannot create /run/motd.dynamic.new: Required key not available
+  # 那是 pam_motd 跑 /etc/update-motd.d/ 时写 /run 拿到 ENOKEY。
+  # 逐个 patch 是打地鼠：修好一个，下个用户换台机器又报一个新的
+  # —— loginuid 要写 /proc、keyinit 要建内核 keyring、motd 要写 /run、
+  # limits 要 setrlimit、common-session 里的 systemd 模块要连 D-Bus，全都可能失败。
+  #
+  # 【为什么不是 UsePAM no】
+  # 那样确实一步到位，但 Debian 有过「openssh 构建时没链上 crypt，UsePAM=no 下
+  # 正确密码也一律被拒」的先例 —— 故障会从「连上就断」升级成「根本登不上」，更糟。
+  # handler/magisk_assets_test.go 有门禁守着不许写 UsePAM no。
+  #
+  # 【实际做法】保留 PAM 负责认证（auth / account 栈原样不动，密码校验仍走 PAM，
+  # 不依赖 sshd 自己的 crypt），只把【session 栈】整段替换成一个恒成功的 pam_permit。
+  # 这样无论是哪个 session 模块在这台机器上会失败，都不再有机会掐断会话。
+  #
+  # 代价（明确记下来）：没有 motd、没有 pam_limits 的 ulimit、没有 pam_env、
+  # 没有 PAM 层的 session 审计。面板场景（root 进容器跑脚本）这几样都不需要。
+  #
+  # Alpine 的 openssh 是 --without-pam 构建，没有 /etc/pam.d/sshd，整段恒为空操作。
   if [ -f /etc/pam.d/sshd ]; then
+    # 先保留原来那条 pam_loginuid 降级：它现在被下面的整段替换覆盖了，
+    # 留着是零成本的兜底 —— 万一有人手工把 session 栈改回去，最容易踩的那个模块
+    # 至少已经是 optional。门禁也要求两个脚本里都有这一条。
     sed -i -E 's/^session[[:space:]]+required[[:space:]]+pam_loginuid\.so/session optional pam_loginuid.so/' \
       /etc/pam.d/sshd 2>/dev/null || true
+
+    # 只在第一次备份，别把已经改过的版本又覆盖上去当"原始版本"
+    [ -f /etc/pam.d/sshd.daidai-bak ] || cp -f /etc/pam.d/sshd /etc/pam.d/sshd.daidai-bak 2>/dev/null || true
+
+    # 幂等：已经替换过就不再动（service.sh 每次开机都会跑）
+    if ! grep -qE '^session[[:space:]]+required[[:space:]]+pam_permit\.so[[:space:]]*$' /etc/pam.d/sshd 2>/dev/null; then
+      # 匹配两类行：
+      #   1. 以 session 开头的（含 `session [success=ok ...] pam_selinux.so` 这种带方括号控制的）
+      #   2. @include common-session / common-session-noninteractive
+      # 两类都删掉，在第一次命中的位置放一行 pam_permit。
+      # auth / account / password 栈完全不碰。
+      awk '
+        /^[[:space:]]*session[[:space:]]/ || /^[[:space:]]*@include[[:space:]]+common-session/ {
+          if (!emitted) { print "session required pam_permit.so"; emitted = 1 }
+          next
+        }
+        { print }
+        END { if (!emitted) print "session required pam_permit.so" }
+      ' /etc/pam.d/sshd > /etc/pam.d/sshd.daidai-tmp &&
+        mv -f /etc/pam.d/sshd.daidai-tmp /etc/pam.d/sshd
+      echo "[ssh] 已将 /etc/pam.d/sshd 的 session 栈替换为 pam_permit（原文件备份在 sshd.daidai-bak）" >> $DAIDAI_DIR/service.log
+    fi
   fi
 
   # 启动前自检配置：sshd -t 一次性查出语法错误、host key 不可读、
@@ -523,7 +573,11 @@ else
     echo "[ssh] privsep_user=$(id -u sshd 2>/dev/null || echo NONE) run_sshd=$([ -d /run/sshd ] && echo yes || echo no)"
     echo "[ssh] hostkeys=$(ls /etc/ssh/ssh_host_*_key 2>/dev/null | wc -l | tr -d ' ')"
     echo "[ssh] shadow=$(awk -F: -v u="${SSH_USER}" '$1==u{print substr($2,1,4)}' /etc/shadow 2>/dev/null)"
-    echo "[ssh] usepam=$(grep -cE '^[[:space:]]*UsePAM[[:space:]]+yes' /etc/ssh/sshd_config 2>/dev/null)"
+    # 用 sshd -T 打印【实际生效】的值，而不是去 grep 配置文件。
+    # grep 只能证明「我们写进去了」，证明不了「sshd 认了」——drop-in 覆盖、
+    # Match 块作用域、语法错误导致回落默认值，这三种情况 grep 都看不出来。
+    # sshd -T 是 sshd 自己解析完的结果，是唯一权威的判据。
+    echo "[ssh] effective=$(/usr/sbin/sshd -T 2>/dev/null | grep -iE '^(port|permitrootlogin|passwordauthentication|usepam|printmotd|printlastlog) ' | tr '\n' ' ')"
     echo "[ssh] pam_loginuid=$(grep -E 'pam_loginuid' /etc/pam.d/sshd 2>/dev/null | tr -s ' ' | head -n1)"
     echo "[ssh] dropins=$(ls /etc/ssh/sshd_config.d/ 2>/dev/null | tr '\n' ' ')"
     echo "[ssh] loginuid=$(cat /proc/self/loginuid 2>/dev/null || echo ABSENT)"

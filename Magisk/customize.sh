@@ -841,6 +841,34 @@ chmod 0755 /run/sshd
 if [ -f /etc/pam.d/sshd ]; then
   sed -i -E 's/^session[[:space:]]+required[[:space:]]+pam_loginuid\.so/session optional pam_loginuid.so/' \
     /etc/pam.d/sshd 2>/dev/null || true
+
+  # issue #100：只降 pam_loginuid 不够 —— 用户的日志卡在了下一个模块
+  #   sh: 1: cannot create /run/motd.dynamic.new: Required key not available
+  #   PAM: pam_open_session(): Error in service module
+  # 那是 pam_motd 跑 /etc/update-motd.d/ 时写 /run 拿到 ENOKEY。
+  #
+  # 逐个模块 patch 是打地鼠：loginuid 要写 /proc、keyinit 要建内核 keyring、
+  # motd 要写 /run、limits 要 setrlimit、common-session 里的 systemd 模块要连 D-Bus，
+  # 在 Android chroot 里每一个都可能失败，修好一个下个用户换台机器又报一个新的。
+  #
+  # 所以把【session 栈】整段换成一个恒成功的 pam_permit。
+  # auth / account 栈原样不动 —— 密码校验仍然走 PAM，不依赖 sshd 自己的 crypt，
+  # 从而绕开上面那条「UsePAM no 可能让密码全被拒」的风险。
+  #
+  # 与 service.sh 里的同一段保持一致：那边管每次开机（已装用户重刷 ZIP 就能修好），
+  # 这边管新装。改一处务必同步另一处，handler/magisk_assets_test.go 有门禁。
+  [ -f /etc/pam.d/sshd.daidai-bak ] || cp -f /etc/pam.d/sshd /etc/pam.d/sshd.daidai-bak 2>/dev/null || true
+  if ! grep -qE '^session[[:space:]]+required[[:space:]]+pam_permit\.so[[:space:]]*$' /etc/pam.d/sshd 2>/dev/null; then
+    awk '
+      /^[[:space:]]*session[[:space:]]/ || /^[[:space:]]*@include[[:space:]]+common-session/ {
+        if (!emitted) { print "session required pam_permit.so"; emitted = 1 }
+        next
+      }
+      { print }
+      END { if (!emitted) print "session required pam_permit.so" }
+    ' /etc/pam.d/sshd > /etc/pam.d/sshd.daidai-tmp &&
+      mv -f /etc/pam.d/sshd.daidai-tmp /etc/pam.d/sshd
+  fi
 fi
 
 # 常用镜像源

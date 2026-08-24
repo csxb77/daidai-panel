@@ -72,6 +72,25 @@ func (l *TinyLog) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// broadcast 把新写入的数据推给所有实时订阅者（SSE 连接）。
+//
+// 【这里的 default 分支是有意丢弃，不是 bug】
+// 订阅通道有 100 的缓冲，慢消费者（网络差、浏览器标签在后台）撑满之后就丢。
+// 换成阻塞发送会更糟：一个卡住的 SSE 连接会把 Write 卡住，而 Write 在脚本输出的
+// 同步路径上 —— 等于让一个慢浏览器把整个任务执行拖死。
+//
+// 丢的只是【运行中那一瞬间的实时观感】，不影响最终结果：
+//   - 落盘是同步的（上面 l.writer 那条路径），文件里一个字节都不少；
+//   - 任务结束时 Close() 把完整日志压缩存进 task_logs；
+//   - 前端在收到 SSE 的 done 事件后会 fetchLatestLog 重新拉一次完整日志
+//     （web/src/views/tasks/components/LogViewer.vue 的 onEvent），把实时流覆盖掉。
+// 所以这条路径是「最终一致」的。
+//
+// ⚠️ 注意与 issue #102 区分：那个 bug 是【源头就没读到数据】
+// （cmd.Wait() 抢在读协程前关闭了管道，见 script_runner.go 的 pumpAndWait），
+// 丢的内容既不在文件里也不在数据库里，重新拉也补不回来。
+// 如果又有人报「日志显示不全」，先确认是「刷新后还缺」（源头丢，是真 bug）
+// 还是「只有运行中缺、结束后完整」（这里丢，符合预期）。
 func (l *TinyLog) broadcast(data []byte) {
 	l.subLock.RLock()
 	defer l.subLock.RUnlock()

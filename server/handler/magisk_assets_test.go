@@ -992,7 +992,8 @@ func TestMagiskScriptsDowngradePamLoginuid(t *testing.T) {
 	}
 
 	// 刻意不用 UsePAM no：Debian 有过「构建时没链上 crypt，UsePAM=no 下正确密码
-	// 也一律被拒」的先例，风险比降级 pam_loginuid 大。
+	// 也一律被拒」的先例（Debian bug #1142354），风险比降级 pam_loginuid 大
+	// —— 故障会从「连上就断」升级成「根本登不上」。
 	for _, name := range []string{"service.sh", "customize.sh"} {
 		text := readMagiskScript(t, name)
 		for i, line := range strings.Split(text, "\n") {
@@ -1003,6 +1004,42 @@ func TestMagiskScriptsDowngradePamLoginuid(t *testing.T) {
 			if strings.Contains(trimmed, "UsePAM no") {
 				t.Fatalf("%s:%d 不得写 UsePAM no: %s", name, i+1, trimmed)
 			}
+		}
+	}
+
+	// issue #100：只把 pam_loginuid 降级【不够】。用户重刷模块后仍然连不上，
+	// 日志卡在了下一个模块：
+	//   sh: 1: cannot create /run/motd.dynamic.new: Required key not available
+	//   PAM: pam_open_session(): Error in service module
+	// 那是 pam_motd 跑 /etc/update-motd.d/ 时写 /run 拿到 ENOKEY。
+	//
+	// 逐个模块 patch 是打地鼠 —— loginuid 要写 /proc、keyinit 要建内核 keyring、
+	// motd 要写 /run、limits 要 setrlimit、common-session 里的 systemd 模块要连 D-Bus，
+	// 在 Android chroot 里每一个都可能失败，修好一个下个用户换台机器又报一个新的。
+	//
+	// 所以两个脚本都必须把【session 栈整段】替换成恒成功的 pam_permit。
+	// auth / account 栈保持不动是关键：密码校验仍走 PAM，就不依赖 sshd 自己的 crypt，
+	// 从而绕开上面那条 UsePAM no 的风险。
+	for _, name := range []string{"service.sh", "customize.sh"} {
+		text := readMagiskScript(t, name)
+		for _, snippet := range []string{
+			// 替换动作本身
+			`print "session required pam_permit.so"; emitted = 1`,
+			// @include common-session 也必须被删掉，否则里面的 required 模块照样能掐断会话
+			`/^[[:space:]]*@include[[:space:]]+common-session/`,
+			// 改人家的 PAM 配置必须留备份
+			`/etc/pam.d/sshd.daidai-bak`,
+			// 幂等：service.sh 每次开机都跑，不能每次都再替换一遍
+			`^session[[:space:]]+required[[:space:]]+pam_permit\.so[[:space:]]*$`,
+		} {
+			if !strings.Contains(text, snippet) {
+				t.Fatalf("%s 必须把 sshd 的 PAM session 栈整段换成 pam_permit（issue #100），缺少片段: %q", name, snippet)
+			}
+		}
+
+		// auth 栈绝不能被一起换掉 —— 换了就等于没人校验密码了。
+		if strings.Contains(text, `print "auth required pam_permit.so"`) {
+			t.Fatalf("%s 不得替换 PAM 的 auth 栈：那会让任何密码都能登录", name)
 		}
 	}
 }
