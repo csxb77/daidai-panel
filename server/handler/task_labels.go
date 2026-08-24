@@ -100,7 +100,24 @@ func mergeLabels(existing, newLabels []string) []string {
 	return result
 }
 
+// subscriptionLabelPrefix 是订阅任务的归属标签前缀，值形如 subscription:12，
+// 由 service.subscriptionTaskLabel 在订阅同步时写入。
+const subscriptionLabelPrefix = "subscription:"
+
 // isInternalLabel 判断是否为带保留前缀的内部标签（分组: / subscription:）。
 func isInternalLabel(label string) bool {
-	return strings.HasPrefix(label, taskGroupLabelPrefix) || strings.HasPrefix(label, "subscription:")
+	return strings.HasPrefix(label, taskGroupLabelPrefix) || strings.HasPrefix(label, subscriptionLabelPrefix)
+}
+
+// hasSubscriptionLabel 判断任务是否由订阅管理。
+// 这个标签只可能由订阅同步写入：用户走接口传进来的同前缀标签会被 sanitizeIncomingLabels 丢掉，
+// 所以它可以当作「任务归属订阅」的可信依据。
+func hasSubscriptionLabel(labels []string) bool {
+	for _, label := range labels {
+		// GetLabels 只按逗号切分、不做 trim，历史数据里可能带空格，这里补一次。
+		if strings.HasPrefix(strings.TrimSpace(label), subscriptionLabelPrefix) {
+			return true
+		}
+	}
+	return false
 }

@@ -311,7 +311,11 @@ func (h *TaskHandler) Update(c *gin.Context) {
 	// 刻意由服务端自己推导，subscription_locked 不在 allowedFields 里，前端传什么都会被忽略。
 	// 注意「把任务改成手动执行」这一场景：上面 :234 会把 cron_expression 强制置空，
 	// 与原值不同同样算用户改动，一并加锁，避免订阅每次拉取偷偷回灌订阅源的 cron。
-	if !task.SubscriptionLocked {
+	// 只有订阅管理的任务才需要这把锁：手动建的任务没有任何订阅会来覆盖它，加锁不产生任何行为，
+	// 只会在列表和详情里显示一个误导用户的「已锁定」。
+	// 判定刻意用改动前的 labels：订阅归属不会因为这一次编辑改变——前端编辑标签时内部标签原样保留，
+	// 用户也注入不了 subscription: 前缀，所以 updates 里的新 labels 不是更可靠的依据。
+	if hasSubscriptionLabel(task.GetLabels()) && !task.SubscriptionLocked {
 		if name, ok := updates["name"].(string); ok && name != task.Name {
 			updates["subscription_locked"] = true
 		}

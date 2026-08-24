@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { getDisplayTaskLabels } from '../taskLabels'
+import { getDisplayTaskLabels, isSubscriptionTask } from '../taskLabels'
 import { useResponsive } from '@/composables/useResponsive'
 import { formatDuration } from '@/utils/duration'
 import { formatDateTime } from '@/utils/datetime'
@@ -38,6 +38,10 @@ const displayLabels = computed(() => {
   }
   return getDisplayTaskLabels(props.task?.labels || [])
 })
+
+// 「订阅同步」整行只对订阅任务有意义：手动建的任务不跟随任何订阅源，
+// 显示「跟随订阅源」是错的，显示「已锁定」更是误导。
+const subscriptionManaged = computed(() => isSubscriptionTask(props.task?.labels || []))
 
 // 薄封装转调 utils/datetime，模板里的多处调用点不用改。
 // 空值/无效值由 formatDateTime 统一兜底成 '-'，本地不再自己判空。
@@ -102,7 +106,7 @@ function handleRestoreSubscriptionDefault() {
         <code style="word-break: break-all">{{ task.command }}</code>
       </el-descriptions-item>
       <!-- 订阅锁：用户手改过名称或定时后自动加锁，订阅拉取不再覆盖，也不会自动删除它 -->
-      <el-descriptions-item label="订阅同步" :span="2">
+      <el-descriptions-item v-if="subscriptionManaged" label="订阅同步" :span="2">
         <div v-if="task.subscription_locked" class="subscription-lock-row">
           <el-tag type="warning" size="small" effect="plain">
             <el-icon><Lock /></el-icon>
