@@ -24,8 +24,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 18 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.0.7` · [更新日志](./docs/release-notes/v3.0.7.md)<br>
-> 本次重点：修掉容器设置 `PUID` / `PGID` 后面板内装依赖必报 `EACCES`（顺带修好 `PUID=1000` 在 Debian 版镜像上直接起不来），重写 Magisk 版的 SSH 启动链并补上全套排障日志。<br>
+> 最新稳定版：`v3.0.8` · [更新日志](./docs/release-notes/v3.0.8.md)<br>
+> 本次重点：全站动效交互升级（角标 / 轻提示 / Split Button / 日期范围筛选等七类组件，执行日志新增按时间筛选），并修掉三处静默失效的动效缺陷、实时日志丢最后几秒（#102）与 Magisk Debian 版 SSH 连不上（#100）。<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 在线演示
@@ -464,7 +464,7 @@ daidai-panel-windows-amd64/
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.0.7 更新日志](./docs/release-notes/v3.0.7.md) |
+| 看这一版改了什么 | [v3.0.8 更新日志](./docs/release-notes/v3.0.8.md) |
 
 ## 端口与反向代理
 
