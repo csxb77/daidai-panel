@@ -167,7 +167,19 @@ func ParseSchedule(expression string) (robfigcron.Schedule, error) {
 	return parser.Parse(expression)
 }
 
-var errInvalidFieldCount = &parseError{message: "cron expression must have 5 or 6 fields"}
+// errInvalidFieldCount 是段数不合法时唯一的报错出口，文案直接会显示在面板上，所以说人话并交代两件事：
+//  1. 6 段和 5 段各自的段位含义。两者都合法，但少写/多写一段会让每一段的含义整体平移
+//     （6 段的 `0 5 * * * *` 是每小时第 5 分钟，5 段的 `0 5 * * *` 却是每天 05:00），
+//     不写清楚的话用户只会得到一句「必须是 5 段或 6 段」，仍然不知道自己错在哪；
+//  2. @daily / @hourly / @every 1h / TZ= 前缀这类简写【不支持】。parserForParts 先按 strings.Fields 的
+//     段数分派，这些写法（1 段、2 段、7 段）根本进不到解析器，而用户很可能会照着别处的教程去试。
+//
+// 刻意不在这里举「0 0 5 * * * = 每天 05:00:00」这类例子：这条文案会整块渲染成红色错误徽标，
+// 徽标可用宽只有 500px 左右，句子越长红块越厚（原来的版本要压 4~6 行）。
+// 举例和「少一段含义整体前移」的展开说明由输入框下方常驻的 .cron-field-hint 承担，那里本来就写了同样的内容。
+var errInvalidFieldCount = &parseError{message: "定时规则必须是 5 段或 6 段，用空格分隔：" +
+	"6 段是「秒 分 时 日 月 周」，5 段是「分 时 日 月 周」；" +
+	"不支持 @daily、@every 1h 这类简写"}
 
 type parseError struct {
 	message string
@@ -216,15 +228,41 @@ func describe(fields map[string]string, hasSecond bool) string {
 	day := fields["day"]
 	month := normalizeMonth(fields["month"])
 	dow := normalizeWeek(fields["day_of_week"])
+	// 「每天 …」这几条分支要补的秒位，详见 dailySecondSuffix 的注释
+	secondSuffix := dailySecondSuffix(fields, hasSecond)
 
 	if isEvery(month) && isEvery(day) && isEvery(hour) && isEvery(minute) {
 		return "每分钟"
 	}
 	if isEvery(month) && isEvery(day) && hour == "0" && minute == "0" {
-		return "每天 00:00"
+		return "每天 00:00" + secondSuffix
+	}
+	// 小时段是 `9,21` 这种逗号分隔的数字列表时，逐个拼成「每天 09:50、21:50」。
+	// 必须排在下面那条「每天 HH:MM」之前：那条要求小时是纯数字，含逗号会落空，
+	// 一路走到兜底的「自定义 cron 表达式」。而 `10 50 9,21 * * *` 正是随机弹层
+	// 「合并一条」形态的产物 —— 预览里写着人话、应用后规则条上却退化成兜底文案，
+	// 同一屏里两个说法，比不给描述更像 bug。
+	//
+	// 这里必须连 dow 一起守：不守的话 `0 30 9,21 * * 1-5` 会被说成「每天 09:30、21:30」，
+	// 而它实际只在工作日执行。兜底文案只是含糊，这种是【自信的错误】，比含糊更坏。
+	// 守住之后这类表达式退回兜底「自定义 cron 表达式」，与本分支加入之前的行为一致；
+	// 随机弹层产出的都是 `* * *` 形态，不受影响。前置条件因此与下面「每周」那条对齐。
+	//
+	// ⚠️ 既有缺陷（本轮刻意不修）：上面「每天 00:00」与下面「每天 HH:MM」两条分支同样不看 dow，
+	// 所以出厂预设「周末10点」`0 0 10 * * 0,6` 一直被描述成「每天 10:00」、「每周一0点」
+	// `0 0 0 * * 1` 一直被描述成「每天 00:00」。修它会一次改掉好几条出厂预设的描述，
+	// 属于独立的行为变更，需要单独立项。
+	if isEvery(month) && isEvery(day) && isEvery(dow) && isNumeric(minute) {
+		if hours := numericHourList(hour); len(hours) > 0 {
+			items := make([]string, 0, len(hours))
+			for _, item := range hours {
+				items = append(items, item+":"+twoDigits(minute)+secondSuffix)
+			}
+			return "每天 " + strings.Join(items, "、")
+		}
 	}
 	if isEvery(month) && isEvery(day) && isNumeric(hour) && isNumeric(minute) {
-		return "每天 " + twoDigits(hour) + ":" + twoDigits(minute)
+		return "每天 " + twoDigits(hour) + ":" + twoDigits(minute) + secondSuffix
 	}
 	if isEvery(month) && day == "*" && !isEvery(dow) && isNumeric(hour) && isNumeric(minute) {
 		return "每周 " + dow + " " + twoDigits(hour) + ":" + twoDigits(minute)
@@ -236,6 +274,50 @@ func describe(fields map[string]string, hasSecond bool) string {
 		return "每月 " + day + "日 " + twoDigits(hour) + ":" + twoDigits(minute)
 	}
 	return "自定义 cron 表达式"
+}
+
+// numericHourList 把 `9,21` 这种逗号分隔的纯数字小时段拆成补零后的列表（["09","21"]）。
+// 不含逗号（单个小时，交给后面已有的分支处理）或任一段不是纯数字（`9,*/2`、`9-11,21` 等）
+// 都返回 nil，宁可落到兜底文案也不猜。
+func numericHourList(value string) []string {
+	if !strings.Contains(value, ",") {
+		return nil
+	}
+	items := strings.Split(value, ",")
+	hours := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if !isNumeric(item) {
+			return nil
+		}
+		hours = append(hours, twoDigits(item))
+	}
+	return hours
+}
+
+// dailySecondSuffix 给「每天 HH:MM」这类描述补上 `:SS` 秒位。
+//
+// 只在「有秒段（6 段）且秒是非 0 的固定数字」时才补：
+//   - 秒是 0 时不补，`0 50 9 * * *` 与 5 段的 `50 9 * * *` 描述保持一致，也避免让
+//     出厂那 21 条预设的描述凭空多出 `:00`；
+//   - 秒是 `*/10`、`0-30` 这类非固定值时不补，describe 前面的 describeSimpleStep 或兜底分支会处理。
+//
+// 之所以要补：随机弹层的「随机到秒」会常态产出 `10 50 9 * * *` 这种非零固定秒，
+// 而原来 describe() 只在 `*/N` 形态下提秒、固定秒值一律丢掉，于是弹层预览写「每天 09:50:10」、
+// 应用后规则条却写「每天 09:50」，同一屏里两个说法。
+func dailySecondSuffix(fields map[string]string, hasSecond bool) string {
+	if !hasSecond {
+		return ""
+	}
+	second := fields["second"]
+	if !isNumeric(second) {
+		return ""
+	}
+	// "0"、"00" 都算零秒，不补
+	if strings.Trim(second, "0") == "" {
+		return ""
+	}
+	return ":" + twoDigits(second)
 }
 
 func describeSimpleStep(field, unit string) (string, bool) {

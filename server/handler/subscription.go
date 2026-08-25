@@ -193,6 +193,8 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		AuthToken      string `json:"auth_token"`
 		Alias          string `json:"alias"`
 		ForceOverwrite *bool  `json:"force_overwrite"`
+		// 覆盖拉取策略三态，前端只发这个；不传或传脏值都会被 Normalize 归到 inherit（跟随全局）。
+		OverwriteMode  string `json:"overwrite_mode"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
@@ -234,6 +236,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		AuthToken:      authToken,
 		Alias:          req.Alias,
 		ForceOverwrite: req.ForceOverwrite,
+		OverwriteMode:  model.NormalizeSubscriptionOverwriteMode(req.OverwriteMode),
 	}
 
 	if err := database.DB.Create(&sub).Error; err != nil {
@@ -269,6 +272,7 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		"schedule": true, "whitelist": true, "blacklist": true,
 		"depend_on": true, "pre_script": true, "hook_script": true, "auto_add_task": true, "auto_del_task": true,
 		"save_dir": true, "sub_path": true, "ssh_key_id": true, "auth_type": true, "auth_username": true, "auth_token": true, "alias": true, "force_overwrite": true,
+		"overwrite_mode": true,
 	}
 	updates := make(map[string]interface{})
 	for k, v := range req {
@@ -282,6 +286,14 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 			response.BadRequest(c, "无效的订阅定时规则")
 			return
 		}
+	}
+
+	// 覆盖拉取策略写库前先归一。Update 收的是 map[string]interface{}，
+	// 值可能是任意 JSON 类型（前端误传 null / 数字，或直接调接口塞脏字符串），
+	// 一律归到三个合法值之一，非字符串按 inherit（跟随全局）处理，绝不让脏值落库。
+	if value, exists := updates["overwrite_mode"]; exists {
+		text, _ := value.(string)
+		updates["overwrite_mode"] = model.NormalizeSubscriptionOverwriteMode(text)
 	}
 
 	if _, hasAuthType := updates["auth_type"]; hasAuthType || updates["ssh_key_id"] != nil || updates["auth_token"] != nil {

@@ -857,62 +857,70 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 <template>
   <div class="envs-page dd-fixed-page dd-page-hide-heading">
     <div class="toolbar">
-      <!-- 左槽是恒在的容器（flex:1 + 固定高度下限），内部用 out-in 在「筛选区」与「批量区」之间互切：
-           勾一下就让批量按钮就地占用左槽、筛选控件让位。左槽自身的 flex 尺寸全程不变，
-           右区不会被 space-between 甩位，也不会因为凭空插进来一排按钮把工具栏顶成两行。
-           mode="out-in" 是关键：同一时刻左槽里只有一个分支，两边不会同时占位。
+      <!-- 左槽是恒在的容器（flex:1 + 固定高度下限），内部的「筛选区」与「批量区」两支【都常驻 DOM】，
+           叠放在同一个 1×1 网格格子里，只用 visibility 切换显示：勾一下就让批量按钮就地显形，
+           筛选控件同一帧立即隐藏（transition 只列了 opacity，visibility 是即时生效的，
+           所以只有【进场】那一支有淡入，退场是硬切）。这是刻意的：两支叠在同一个格子里，
+           真做交叉淡出会有一段两排控件互相透视的重影，别为了「对称」把 visibility 加进 transition。
+           左槽自身的 flex 尺寸全程不变，右区不会被 space-between 甩位；
+           更关键的是左槽高度恒等于 max(筛选区高度, 批量区高度)，与当前显示哪一支无关 ⇒ 勾选/取消永不改变工具栏高度。
+           本页两支的换行阈值不一样（筛选区约 724px：3 个 tab + 260px 搜索框 + 220px 分组筛选；
+           批量区 6 个按钮 + 计数且带 flex-wrap），所以窄窗口下【两个方向都可能出现】——
+           以前只留一支在 DOM 里的话，勾选那一刻左槽忽高忽矮，dd-fixed-page 下 .table-card 是 flex:1 1 0，
+           工具栏差多少表格就反向补多少 ⇒ 列表跳一下。换行点又由内容宽决定，而内容宽随侧栏展开/收起漂 156px
+           （220px vs 64px），媒体查询锁不住，只能让两支同时参与撑高。
+           visibility: hidden 自带「不可点、不进 Tab 序、不进无障碍树」，不需要再加 inert / aria-hidden。
            切到批量区的条件只按「当前列表里真实存在的行」算（selectedCountInCurrentPage 拿
            selectedIdSet 过 envList），不是 selectedIds.length 这个可能含已失效 id 的原始数组。 -->
       <div class="toolbar__left">
-        <Transition name="dd-toolbar-swap" mode="out-in">
-          <div v-if="selectedCountInCurrentPage > 0" key="batch" class="batch-actions">
-            <!-- selectionScopeText 已经按分页模式区分过「全部 / 仅当前页」的措辞，挂成 title：
-                 动手前就该知道这几个按钮到底作用在哪些数据上。 -->
-            <span class="batch-actions__count" :title="selectionScopeText">
-              已选 {{ selectedCountInCurrentPage }} 项
-            </span>
-            <el-button @click="handleBatchEnable">批量启用</el-button>
-            <!-- 禁用会让变量在脚本里直接取不到值，属于破坏性变更，用 danger plain 与中性按钮区分；
-                 又刻意排在「批量删除」前面隔着改名/分组两个中性按钮，避免两个红按钮挨在一起被误点。 -->
-            <el-button type="danger" plain @click="handleBatchDisable">批量禁用</el-button>
-            <el-button @click="handleBatchRename">批量改名</el-button>
-            <el-button @click="handleBatchGroup">批量分组</el-button>
-            <!-- 删除是不可逆的，用实心 danger 压过 plain 的「批量禁用」，也与 tasks / logs 两页的
-                 「批量删除」保持同一形态：三页里最醒目的永远是删除。 -->
-            <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
-            <!-- 批量区占用左槽期间搜索框/分组筛选都不在 DOM 里，这里是退出多选态的唯一出口，不能省 -->
-            <el-button @click="clearTableSelection">取消选择</el-button>
+        <div class="toolbar__filters" :class="{ 'is-swapped-out': selectedCountInCurrentPage > 0 }">
+          <div class="status-tabs">
+            <button :class="['status-tab', { active: statusFilter === '' }]" @click="handleStatusFilter('')">全部变量</button>
+            <button :class="['status-tab', { active: statusFilter === 'enabled' }]" @click="handleStatusFilter('enabled')">已启用</button>
+            <button :class="['status-tab', { active: statusFilter === 'disabled' }]" @click="handleStatusFilter('disabled')">已禁用</button>
           </div>
-          <div v-else key="filters" class="toolbar__filters">
-            <div class="status-tabs">
-              <button :class="['status-tab', { active: statusFilter === '' }]" @click="handleStatusFilter('')">全部变量</button>
-              <button :class="['status-tab', { active: statusFilter === 'enabled' }]" @click="handleStatusFilter('enabled')">已启用</button>
-              <button :class="['status-tab', { active: statusFilter === 'disabled' }]" @click="handleStatusFilter('disabled')">已禁用</button>
-            </div>
-            <el-input
-              v-model="keyword"
-              placeholder="搜索变量名、值、备注或分组"
-              clearable
-              class="toolbar__search"
-              @keyup.enter="handleSearch"
-              @clear="handleSearch"
-            >
-              <template #prefix><el-icon><Search /></el-icon></template>
-            </el-input>
-            <el-select
-              v-model="groupFilters"
-              placeholder="分组筛选"
-              multiple
-              collapse-tags
-              collapse-tags-tooltip
-              clearable
-              class="toolbar__group-filter"
-              @change="handleGroupSelect"
-            >
-              <el-option v-for="g in groups" :key="g" :label="g" :value="g" />
-            </el-select>
-          </div>
-        </Transition>
+          <el-input
+            v-model="keyword"
+            placeholder="搜索变量名、值、备注或分组"
+            clearable
+            class="toolbar__search"
+            @keyup.enter="handleSearch"
+            @clear="handleSearch"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-select
+            v-model="groupFilters"
+            placeholder="分组筛选"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
+            clearable
+            class="toolbar__group-filter"
+            @change="handleGroupSelect"
+          >
+            <el-option v-for="g in groups" :key="g" :label="g" :value="g" />
+          </el-select>
+        </div>
+        <div class="batch-actions" :class="{ 'is-swapped-out': !(selectedCountInCurrentPage > 0) }">
+          <!-- selectionScopeText 已经按分页模式区分过「全部 / 仅当前页」的措辞，挂成 title：
+               动手前就该知道这几个按钮到底作用在哪些数据上。 -->
+          <span class="batch-actions__count" :title="selectionScopeText">
+            已选 {{ selectedCountInCurrentPage }} 项
+          </span>
+          <el-button @click="handleBatchEnable">批量启用</el-button>
+          <!-- 禁用会让变量在脚本里直接取不到值，属于破坏性变更，用 danger plain 与中性按钮区分；
+               又刻意排在「批量删除」前面隔着改名/分组两个中性按钮，避免两个红按钮挨在一起被误点。 -->
+          <el-button type="danger" plain @click="handleBatchDisable">批量禁用</el-button>
+          <el-button @click="handleBatchRename">批量改名</el-button>
+          <el-button @click="handleBatchGroup">批量分组</el-button>
+          <!-- 删除是不可逆的，用实心 danger 压过 plain 的「批量禁用」，也与 tasks / logs 两页的
+               「批量删除」保持同一形态：三页里最醒目的永远是删除。 -->
+          <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
+          <!-- 批量区显形期间搜索框/分组筛选虽然还在 DOM 里，但已被 visibility 挡住不能点，
+               这里是退出多选态的唯一出口，不能省 -->
+          <el-button @click="clearTableSelection">取消选择</el-button>
+        </div>
       </div>
       <div class="toolbar__right">
         <!-- 原来是一个「…」更多下拉：主体只能展开菜单，最常用的导出永远要点两次，
@@ -1289,30 +1297,37 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 .toolbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  // 刻意【不】用 align-items: center（与 logs 页统一）：左槽任一支换成两行时，
+  // center 会把只有 32px 的右区整个垂直居中到左槽的中线上，
+  // 右侧按钮的中心比左区第一行低约 20px，看起来就是两边对不齐。
+  // 改成 flex-start + 右区自己撑到 39px（= status-tabs 高度）并内部居中，两者都对齐到左区【第一行】的中心线。
+  align-items: flex-start;
   margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
 
-  // 左槽：恒在的定尺容器，内部靠 Transition 在筛选区/批量区之间换内容。
+  // 左槽：1×1 网格，筛选区与批量区【叠放在同一个格子里】，两支都常驻 DOM。
+  // 这样左槽高度恒等于 max(两支高度)，勾选/取消勾选永远不改变工具栏高度。
+  // align-items 必须是 start 不能是 center：任一支换成两行时，
+  // center 会把只有一行的另一支垂直居中到两行的中线上，切过去时整排控件上下错位。
   // min-height 取 status-tabs 的实测高度 39px——批量按钮只有 32px，没有这个下限的话
-  // 一勾选整条工具栏就会塌 7px、表格跟着上跳一下。
+  // 两支都是单行时整条工具栏会比筛选态矮 7px。
   &__left {
-    display: flex;
-    align-items: center;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
     flex: 1;
     min-width: 0;
     min-height: 39px;
   }
 
   // 筛选区：原来直接挂在 __left 上的那套横排（状态分段 + 搜索框 + 分组筛选），
-  // 现在下沉一层给 Transition 当分支，间距/换行规则原样搬过来。
+  // 现在下沉一层与批量区叠放，间距/换行规则原样搬过来。
   &__filters {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
-    flex: 1;
     min-width: 0;
   }
 
@@ -1320,6 +1335,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     display: flex;
     align-items: center;
     gap: 10px;
+    // 与左区第一行对齐的另一半：撑到同样的 39px，内部 center 让 32px 的按钮落在同一条中线上
+    min-height: 39px;
   }
 
   &__search {
@@ -1369,15 +1386,19 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 // 批量操作条：搬进左槽后可用宽度由左槽给（右边还站着导出/新建），窄窗口下这六个按钮排不下时
-// 必须允许换行，否则会横向溢出被裁掉；桌面常规宽度下只占一行，工具栏高度由左槽的 min-height 兜住。
+// 必须允许换行，否则会横向溢出被裁掉；换行后的两行高度也会被左槽如实吃进去（见下面的叠放规则），
+// 所以勾选前后工具栏依然等高。
 // 移动端竖排也吃这条 flex-wrap，不再在 768px 断点里重复写一遍。
 .batch-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  flex: 1;
-  min-width: 0;
+  // 与 .toolbar__right 站同一条基线：右区也是 min-height:39px + 内部 center，中心线在 19.5px。
+  // 批量条本身只有 32px，而左槽是 align-items: start（任一支换两行时不能把另一支压到中线去），
+  // 不补这个下限它就贴在网格行顶端、中心线只有 16px，勾选后整排批量按钮会比右侧按钮高 3.5px。
+  // 39px 本来就是左槽的 min-height，补上不会改变左槽高度，高度不变式照旧成立。
+  min-height: 39px;
 }
 
 // 勾选数：纯文字级提示，用次级色，不跟旁边那排实体按钮抢视觉重量
@@ -1388,21 +1409,27 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   cursor: default;
 }
 
-// 左槽内容互切（筛选区 ↔ 批量区）：只做 opacity。
-// 两个分支宽度差得远，一旦做宽度/高度过渡，左槽每帧变尺寸就会推着右侧的导出/新建来回移动，
-// 而筛选区本身是 flex-wrap 容器、每帧还要重算换行，整行会持续重排；opacity 不参与布局计算。
+// 左槽的两支叠放在同一个网格格子里：谁都不脱离文档流，所以两支都在为左槽撑高，
+// 左槽高度 = max(两支高度)，切换时高度恒定不变，表格不会被工具栏推着重排。
+// 切换只做 opacity：两个分支宽高差得远，一旦做尺寸过渡，左槽每帧变尺寸就会推着右侧的导出/新建来回移动，
+// 而两支本身都是 flex-wrap 容器、每帧还要重算换行，整行会持续重排；opacity 不参与布局计算。
 // 时长走令牌，prefers-reduced-motion 下自动降为 1ms 即等效关闭。
-.dd-toolbar-swap-enter-active {
-  transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
-}
-
-.dd-toolbar-swap-leave-active {
+.toolbar__filters,
+.batch-actions {
+  grid-area: 1 / 1;
+  min-width: 0;
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-.dd-toolbar-swap-enter-from,
-.dd-toolbar-swap-leave-to {
+// 当前不该显示的那一支：visibility: hidden 已经同时挡掉鼠标、Tab 焦点和读屏，
+// 不要再叠 inert / aria-hidden / pointer-events；也【不能】改成 display: none，
+// 那样它就不再撑高左槽，高度不变式立刻失效（桌面端会退回勾选时表格跳动）。
+// 注意过渡是【单向】的：上面的 transition 只列了 opacity，visibility 不在其中、切换那一帧立即生效，
+// 所以退场的那一支是硬切、只有进场的那一支有淡入。这是刻意的——两支叠在同一个格子里，
+// 真做交叉淡出会有一段两排控件互相透视的重影，别为了「对称」把 visibility 加进 transition。
+.is-swapped-out {
   opacity: 0;
+  visibility: hidden;
 }
 
 // 状态文字切换（桌面状态列 + 移动卡片同用）：
@@ -1908,7 +1935,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
     // 竖排下左槽由内容自然撑高：桌面那条 39px 下限是为了对齐单行工具栏，
     // 这里筛选控件本来就要堆三行，留着只会在批量区那一支下面多出一截空白。
-    // align-items 改 stretch 让唯一的子分支吃满整行宽度。
+    // 左槽是 1×1 网格、子项默认就铺满整列宽，align-items 从 start 放回 stretch 让还显示着的那一支填满行高。
+    // 注意：这条 min-height:0 与下面那条 display:none 是配套的——藏起来的那一支被拿出流之后，
+    // 左槽高度就完全由还显示着的那一支说了算，不该再被 39px 顶着。
     &__left {
       align-items: stretch;
       min-height: 0;
@@ -1930,6 +1959,16 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     &__right {
       justify-content: flex-end;
     }
+  }
+
+  // 移动端把藏起来的那一支直接从流里拿掉。
+  // 桌面端留着它是为了锁死工具栏高度（dd-fixed-page 是定高 flex 列，工具栏差多少表格就反向补多少），
+  // 但 dd-fixed-page 只在 ≥769px 生效，移动端是普通文档流、表格不会被工具栏挤压，
+  // 留着竖排的筛选区（状态分段 + 搜索框 + 分组筛选各占一行）会在批量态白占一大截空高。
+  // 这条【只能】落在 ≤768px 内：写到外面桌面端就退回今天的跳动。
+  .toolbar__filters.is-swapped-out,
+  .batch-actions.is-swapped-out {
+    display: none;
   }
 
   .status-tabs {

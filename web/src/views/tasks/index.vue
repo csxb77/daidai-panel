@@ -337,7 +337,9 @@ async function handleRouteQueryAction() {
         return
       }
       editingTask.value = null
-      prefillData.value = { name, command, cron_expression: '0 0 * * *', task_type: 'cron' }
+      // 6 段（秒 分 时 日 月 周），与 CronInput / TaskForm 的默认值统一 —— 语义仍是「每天 00:00」。
+      // 第一段是【秒】，从 5 段升 6 段要在最前面补 0，绝不能在末尾补 *（那会把「分」当成「秒」整体位移一格）。
+      prefillData.value = { name, command, cron_expression: '0 0 0 * * *', task_type: 'cron' }
       formVisible.value = true
       await clearTaskRouteQuery()
     }
@@ -853,50 +855,68 @@ async function handleImport(event: Event) {
 
     <div class="toolbar">
       <!-- 左槽是一个【恒在】的容器（flex:1 + min-width:0 + 锁定 min-height），
-           内部在「筛选区」与「批量区」之间用 out-in 淡切。
-           这么排的两个理由：
+           内部的「筛选区」与「批量区」两支【对有操作权限的账号都常驻 DOM】，叠放在同一个 1×1 网格格子里，
+           只用 visibility 切换显示（观察者没有选择列、勾不动，批量区对他直接 v-if 掉，
+           左槽高度恒等于筛选区高度，同样是常数）。这么排的两个理由：
              1) 左槽的 flex 属性恒定 ⇒ .toolbar 的 space-between 不会因为左边突然没了而把右区整个甩过去；
-             2) out-in 保证同一时刻只有一块在 DOM 里 ⇒ 不会两块同时占位、把工具栏从一行撑成两行。
+             2) 左槽高度恒等于 max(筛选区高度, 批量区高度)，与当前显示哪一支无关 ⇒ 勾选/取消永不改变工具栏高度。
+           第 2 条是本页的关键：批量区是 8 个按钮 + 计数且带 flex-wrap，约 1050~1230px 这一带它会换成两行，
+           而筛选区（4 个 tab + 260px 搜索框，约 552px）始终只有一行。以前只留一支在 DOM 里的话，
+           勾选那一刻左槽会凭空变高一行，dd-fixed-page 下 .table-card 是 flex:1 1 0，
+           工具栏高多少表格就矮多少 ⇒ 列表向下跳一下（logs 页方向相反、是变矮）。
+           换行点又由内容宽决定，而内容宽随侧栏展开/收起漂 156px（220px vs 64px），媒体查询锁不住，
+           只能让两支同时参与撑高。
+           visibility: hidden 自带「不可点、不进 Tab 序、不进无障碍树」，不需要再加 inert / aria-hidden。
            勾选期间轮询本来就停了（canPollTaskStatus 带 selectedIds.length === 0），列表是冻结的，
            这段时间搜不了、改不了筛选是可以接受的，退出口由批量区最右的「取消选择」承担。 -->
       <div class="toolbar__left">
-        <Transition name="dd-toolbar-swap" mode="out-in">
-          <div
-            v-if="canOperateTasks && selectedIds.length > 0"
-            key="batch"
-            class="batch-actions"
-            :class="{ 'is-narrow': isNarrowDesktop }"
-          >
-            <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
-            <!-- 按钮顺序刻意让两个红按钮不相邻：danger-plain 的「批量禁用」与实心 danger 的「批量删除」
-                 中间隔了 5 个按钮。删除也不放最右边缘（那一侧最容易被甩动鼠标顺手点到，代价还不可逆），
-                 由无害的「取消选择」殿后；logs / envs 两页同序。 -->
-            <!-- 窄桌面（<1600px，含 14 寸笔记本 1920×1080 缩放 150% 后的 1280 等效视口）用短文案：
-                 长文案下这一排放不下，会换行把工具栏从 39px 顶成两行。
-                 短文案 + .is-narrow 的 6px gap 后实测内容宽约 695px，左槽 712.1px。
-                 「添加标签」不缩：只剩「标签」两个字看不出是添加还是筛选。
-                 移动端 isNarrowDesktop 为 false，卡片布局本来就竖排换行，保持长文案。 -->
-            <el-button @click="handleBatchAction('enable')">{{ isNarrowDesktop ? '启用' : '批量启用' }}</el-button>
-            <el-button type="danger" plain @click="handleBatchAction('disable')">{{ isNarrowDesktop ? '禁用' : '批量禁用' }}</el-button>
-            <el-button @click="handleBatchAction('run')">{{ isNarrowDesktop ? '运行' : '批量运行' }}</el-button>
-            <el-button type="warning" plain @click="handleBatchAction('stop')">{{ isNarrowDesktop ? '停止' : '批量停止' }}</el-button>
-            <el-button @click="openBatchAddLabel">添加标签</el-button>
-            <el-button @click="handleBatchPin">{{ isNarrowDesktop ? '置顶' : '批量置顶' }}</el-button>
-            <el-button type="danger" @click="handleBatchAction('delete')">{{ isNarrowDesktop ? '删除' : '批量删除' }}</el-button>
-            <el-button @click="clearSelection">{{ isNarrowDesktop ? '取消' : '取消选择' }}</el-button>
+        <!-- 判定与批量区严格互补：批量区只在【有权限】时渲染、且【有选中】时可见，
+             所以筛选区只有在「有权限且有选中」这一种情况下才让位，两支恒有且仅有一支可见。
+             canOperateTasks 这一项保留着不是冗余：它让「谁隐藏」只依赖显式权限判定，
+             而不是靠「viewer 没有选择列所以 selectedIds 永远是空」这条间接推理。 -->
+        <div
+          class="toolbar__filters"
+          :class="{ 'is-swapped-out': canOperateTasks && selectedIds.length > 0 }"
+        >
+          <div class="status-tabs">
+            <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部任务</button>
+            <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
+            <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">已禁用</button>
+            <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">已启用</button>
           </div>
-          <div v-else key="filters" class="toolbar__filters">
-            <div class="status-tabs">
-              <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部任务</button>
-              <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
-              <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">已禁用</button>
-              <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">已启用</button>
-            </div>
-            <el-input v-model="keyword" placeholder="搜索任务名称/命令" clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
-              <template #prefix><el-icon><Search /></el-icon></template>
-            </el-input>
-          </div>
-        </Transition>
+          <el-input v-model="keyword" placeholder="搜索任务名称/命令" clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+        </div>
+        <!-- 权限走 v-if、选中态才走 is-swapped-out：两者不能混在同一个 class 判定里。
+             观察者（canOperateTasks=false）连选择列都没有（见表格的 type="selection" 上的 v-if），
+             这一支对他永远不可能显示；而 is-swapped-out 只是 visibility: hidden、照常参与撑高，
+             写成 class 就等于让 viewer 白白顶着这 8 个按钮的高度——它们在约 1050~1230px 这一带还会换成两行，
+             工具栏因此恒定高出约 40px，dd-fixed-page 下 .table-card 是 flex:1 1 0，表格就被永久压矮一行。
+             拆开后对 viewer 这一支根本不渲染，左槽高度恒等于筛选区高度，同样是常数，高度不变式不受影响。 -->
+        <div
+          v-if="canOperateTasks"
+          class="batch-actions"
+          :class="{ 'is-narrow': isNarrowDesktop, 'is-swapped-out': selectedIds.length === 0 }"
+        >
+          <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
+          <!-- 按钮顺序刻意让两个红按钮不相邻：danger-plain 的「批量禁用」与实心 danger 的「批量删除」
+               中间隔了 5 个按钮。删除也不放最右边缘（那一侧最容易被甩动鼠标顺手点到，代价还不可逆），
+               由无害的「取消选择」殿后；logs / envs 两页同序。 -->
+          <!-- 窄桌面（<1600px，含 14 寸笔记本 1920×1080 缩放 150% 后的 1280 等效视口）用短文案：
+               长文案下这一排放不下，会换行把工具栏从 39px 顶成两行。
+               短文案 + .is-narrow 的 6px gap 后实测内容宽约 695px，左槽 712.1px。
+               「添加标签」不缩：只剩「标签」两个字看不出是添加还是筛选。
+               移动端 isNarrowDesktop 为 false，卡片布局本来就竖排换行，保持长文案。 -->
+          <el-button @click="handleBatchAction('enable')">{{ isNarrowDesktop ? '启用' : '批量启用' }}</el-button>
+          <el-button type="danger" plain @click="handleBatchAction('disable')">{{ isNarrowDesktop ? '禁用' : '批量禁用' }}</el-button>
+          <el-button @click="handleBatchAction('run')">{{ isNarrowDesktop ? '运行' : '批量运行' }}</el-button>
+          <el-button type="warning" plain @click="handleBatchAction('stop')">{{ isNarrowDesktop ? '停止' : '批量停止' }}</el-button>
+          <el-button @click="openBatchAddLabel">添加标签</el-button>
+          <el-button @click="handleBatchPin">{{ isNarrowDesktop ? '置顶' : '批量置顶' }}</el-button>
+          <el-button type="danger" @click="handleBatchAction('delete')">{{ isNarrowDesktop ? '删除' : '批量删除' }}</el-button>
+          <el-button @click="clearSelection">{{ isNarrowDesktop ? '取消' : '取消选择' }}</el-button>
+        </div>
       </div>
       <div class="toolbar__right">
         <el-dropdown trigger="click" class="sort-dropdown">
@@ -1416,30 +1436,36 @@ async function handleImport(event: Event) {
 .toolbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  // 刻意【不】用 align-items: center（与 logs 页统一）：批量区在约 1050~1230px 这一带会换成两行，
+  // 左槽变高后 center 会把只有 32px 的右区整个垂直居中到左槽的中线上，
+  // 右侧按钮的中心比左区第一行低约 20px，看起来就是两边对不齐。
+  // 改成 flex-start + 右区自己撑到 39px（= status-tabs 高度）并内部居中，两者都对齐到左区【第一行】的中心线。
+  align-items: flex-start;
   margin: 14px 0;
   gap: 12px;
   flex-wrap: wrap;
 
-  // 左槽：恒在的容器，内部在「筛选区」与「批量区」之间切换。
-  // min-height 锁 39px（= .status-tabs 的实测高度）+ align-items:center：
-  // 批量按钮是 32px，不锁高度的话切过去工具栏会矮 7px，表格跟着往上跳一下。
+  // 左槽：1×1 网格，筛选区与批量区【叠放在同一个格子里】，两支都常驻 DOM。
+  // 这样左槽高度恒等于 max(两支高度)，勾选/取消勾选永远不改变工具栏高度。
+  // align-items 必须是 start 不能是 center：批量区换成两行时，
+  // center 会把只有一行的筛选区垂直居中到两行的中线上，切过去时整排筛选控件往下掉一截。
+  // min-height 锁 39px（= .status-tabs 的实测高度）：批量按钮只有 32px，兜底避免左槽塌 7px。
   &__left {
-    display: flex;
-    align-items: center;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
     flex: 1;
     min-width: 0;
     min-height: 39px;
   }
 
   // 筛选区：原来这套横排（状态分段 + 搜索框）是直接挂在 .toolbar__left 上的，
-  // 现在左槽要在两块内容之间切换，单独包一层来承接原先的 gap / flex-wrap / 可压缩。
+  // 现在左槽要叠放两块内容，单独包一层来承接原先的 gap / flex-wrap / 可压缩。
   &__filters {
     display: flex;
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
-    flex: 1;
     min-width: 0;
   }
 
@@ -1447,6 +1473,8 @@ async function handleImport(event: Event) {
     display: flex;
     align-items: center;
     gap: 10px;
+    // 与左区第一行对齐的另一半：撑到同样的 39px，内部 center 让 32px 的按钮落在同一条中线上
+    min-height: 39px;
   }
 
   &__search {
@@ -1499,10 +1527,17 @@ async function handleImport(event: Event) {
   // 极窄的桌面视口（以及移动端的竖排工具栏）下这一排装不下时换行，不要顶破左槽横向溢出
   flex-wrap: wrap;
   min-width: 0;
+  // 与 .toolbar__right 站同一条基线：右区也是 min-height:39px + 内部 center，中心线在 19.5px。
+  // 批量条本身只有 32px，而左槽是 align-items: start（批量区换两行时不能把筛选区压到中线去），
+  // 不补这个下限它就贴在网格行顶端、中心线只有 16px，勾选后整排批量按钮会比右侧按钮高 3.5px。
+  // 39px 本来就是左槽的 min-height，补上不会改变左槽高度，高度不变式照旧成立。
+  min-height: 39px;
 
   // 窄桌面再收 2px 间距。短文案之后 1280px 下实测内容宽 711.4px、左槽 712.1px，只剩 0.7px 余量，
   // 窗口再窄 1px 就换行；这一排是 9 个子项 8 个 gap，8px→6px 省出 16px，余量回到约 16.7px。
-  // 判定源与短文案共用 isNarrowDesktop：批量区是 JS 条件渲染，媒体查询没法跟着它的显隐走。
+  // 判定源与短文案共用 isNarrowDesktop：文案长短是 JS 算的，媒体查询没法跟着它走。
+  // 注意对有操作权限的账号它【常驻 DOM】（见模板注释），所以哪怕没勾选，这一排也在按当前文案长度参与撑高左槽 ——
+  // 这正是勾选前后工具栏等高的原因，不是多余开销；观察者那边整支被 v-if 掉，不会白撑这份高度。
   &.is-narrow {
     gap: 6px;
   }
@@ -1515,22 +1550,26 @@ async function handleImport(event: Event) {
   cursor: default;
 }
 
-// 左槽内容切换（筛选区 ⇄ 批量区）：只改 opacity。
-// 不做高度/宽度过渡 —— .toolbar 是 flex-wrap 容器，尺寸每帧变一次就要重新算一遍换行，整页跟着重排。
-// 这条理由在新布局下依然成立，所以过渡口径不变；变的是它要交代的事：
-// 批量区原来是凭空插进右区、把「新建任务」整个推走，现在它占的是左槽这个固定位置，位移问题不复存在，
-// 剩下的只有「左槽这块内容整个换了一份」，配合 mode="out-in" 用一进一出的淡切说清楚。
-.dd-toolbar-swap-enter-active {
-  transition: opacity var(--dd-motion-fast) var(--dd-ease-decelerate);
-}
-
-.dd-toolbar-swap-leave-active {
+// 左槽的两支叠放在同一个网格格子里：谁都不脱离文档流，所以两支都在为左槽撑高，
+// 左槽高度 = max(两支高度)，切换时高度恒定不变，表格不会被工具栏推着重排。
+// 切换只改 opacity，不做高度/宽度过渡 —— .toolbar 与批量区本身都是 flex-wrap 容器，
+// 尺寸每帧变一次就要重新算一遍换行，整页跟着重排。
+.toolbar__filters,
+.batch-actions {
+  grid-area: 1 / 1;
+  min-width: 0;
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-.dd-toolbar-swap-enter-from,
-.dd-toolbar-swap-leave-to {
+// 当前不该显示的那一支：visibility: hidden 已经同时挡掉鼠标、Tab 焦点和读屏，
+// 不要再叠 inert / aria-hidden / pointer-events；也【不能】改成 display: none，
+// 那样它就不再撑高左槽，高度不变式立刻失效（桌面端会退回勾选时表格跳动）。
+// 注意过渡是【单向】的：上面的 transition 只列了 opacity，visibility 不在其中、切换那一帧立即生效，
+// 所以退场的那一支是硬切、只有进场的那一支有淡入。这是刻意的——两支叠在同一个格子里，
+// 真做交叉淡出会有一段两排按钮互相透视的重影，别为了「对称」把 visibility 加进 transition。
+.is-swapped-out {
   opacity: 0;
+  visibility: hidden;
 }
 
 // 快捷排序触发按钮：图标与文案留出间距，文案过长时不撑破工具栏
@@ -1894,6 +1933,16 @@ async function handleImport(event: Event) {
     &__right {
       justify-content: flex-end;
     }
+  }
+
+  // 移动端把藏起来的那一支直接从流里拿掉。
+  // 桌面端留着它是为了锁死工具栏高度（dd-fixed-page 是定高 flex 列，工具栏高多少表格就矮多少），
+  // 但 dd-fixed-page 只在 ≥769px 生效，移动端是普通文档流、表格不会被工具栏挤压，
+  // 留着竖排的筛选区（状态分段 + 搜索框各占一行）会在批量态白占一大截空高。
+  // 这条【只能】落在 ≤768px 内：写到外面桌面端就退回今天的跳动。
+  .toolbar__filters.is-swapped-out,
+  .batch-actions.is-swapped-out {
+    display: none;
   }
 
   .status-tabs {

@@ -140,6 +140,9 @@ export interface DemoSubscription {
   has_auth_token: boolean
   alias: string
   force_overwrite: boolean
+  // 覆盖拉取策略：inherit=跟随全局 / force=强制覆盖 / preserve=保留本地修改。
+  // force_overwrite 是 v2.2.15 之前的旧字段，只做只读兼容，真正生效的是这一个。
+  overwrite_mode: string
   created_at: string
   updated_at: string
 }

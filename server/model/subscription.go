@@ -10,6 +10,12 @@ const (
 	SubTypeGitRepo    = "git-repo"
 	SubAuthTypeSSH    = "ssh"
 	SubAuthTypeToken  = "token"
+
+	// 覆盖拉取策略三态：inherit 跟随全局开关，force 强制覆盖，preserve 强制保留本地。
+	// inherit 是默认值，存量订阅补列后一律落在这一档，升级前后行为完全一致。
+	SubOverwriteInherit  = "inherit"
+	SubOverwriteForce    = "force"
+	SubOverwritePreserve = "preserve"
 )
 
 type Subscription struct {
@@ -39,6 +45,11 @@ type Subscription struct {
 	SubPath     string     `gorm:"size:512;default:''" json:"sub_path"`
 	Alias       string     `gorm:"size:128;default:''" json:"alias"`
 	ForceOverwrite *bool   `gorm:"default:true" json:"force_overwrite"`
+	// OverwriteMode 覆盖拉取策略：inherit=跟随全局 / force=强制覆盖 / preserve=强制保留本地。
+	// 作用域只有 git 工作区文件（reset --hard vs stash），与任务的名称、定时无关
+	// —— 详见 task.go SubscriptionLocked 的注释。
+	// 上面那个 ForceOverwrite 是 v2.2.15 之后就没人维护的旧列，只做只读兼容，不再参与判定。
+	OverwriteMode string `gorm:"size:16;not null;default:'inherit'" json:"overwrite_mode"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
@@ -72,7 +83,10 @@ func (s *Subscription) ToDict() map[string]interface{} {
 		"auth_username":   s.AuthUsername,
 		"has_auth_token":  s.HasAuthToken(),
 		"alias":           s.Alias,
+		// force_overwrite 是 v2.2.15 之前的旧字段，保留输出只为老客户端不炸；
+		// 真正生效的是下面的 overwrite_mode，前端读的也是它。
 		"force_overwrite": s.ForceOverwrite == nil || *s.ForceOverwrite,
+		"overwrite_mode":  NormalizeSubscriptionOverwriteMode(s.OverwriteMode),
 		"created_at":      s.CreatedAt,
 		"updated_at":      s.UpdatedAt,
 	}
@@ -88,6 +102,20 @@ func NormalizeSubscriptionAuthType(value string) string {
 		return SubAuthTypeToken
 	default:
 		return ""
+	}
+}
+
+// NormalizeSubscriptionOverwriteMode 把覆盖拉取策略归一到三个合法值之一。
+// 空串、老库补列前读出来的 NULL、以及直接改库塞进去的脏值，一律按 inherit（跟随全局）处理，
+// 这样任何异常输入都只会退回「和升级前一样」的行为，不会静默把某个订阅切到覆盖或保留。
+func NormalizeSubscriptionOverwriteMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SubOverwriteForce:
+		return SubOverwriteForce
+	case SubOverwritePreserve:
+		return SubOverwritePreserve
+	default:
+		return SubOverwriteInherit
 	}
 }
 

@@ -82,6 +82,14 @@ export const taskApi = {
     return request.get(`/tasks/${id}/log-files/${encodeURIComponent(filename)}/raw-ticket`, { params: path ? { path } : undefined }) as Promise<RawLogDownloadTicket>
   },
 
+  // 换取「日志文件夹打包下载」的短期票据，zip 同样由浏览器原生下载去拉。
+  // 不传 start/end = 打包该任务的全部日志文件；两端都是 RFC3339，
+  // 用 utils/datetime.ts 的 toDateRangeParams 生成，按磁盘 ModTime（列表里的「时间」列）筛。
+  // 返回体里的 size 是【未压缩总字节】——流式 zip 事先算不出压缩后大小。
+  logArchiveDownloadTicket(id: number, params?: { start?: string; end?: string }) {
+    return request.get(`/tasks/${id}/log-files/archive-ticket`, { params }) as Promise<RawLogDownloadTicket & { file_count: number }>
+  },
+
   stats(id: number, days?: number) {
     return request.get(`/tasks/${id}/stats`, { params: { days } }) as Promise<any>
   },

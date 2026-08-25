@@ -701,10 +701,10 @@
     },
     "subscription_force_overwrite": {
       "default_value": "true",
-      "description": "订阅拉取时覆盖本地修改并清理多余文件",
+      "description": "订阅拉取时覆盖本地修改（未单独设置的订阅使用此默认值）",
       "group": "subscription",
       "group_label": "订阅拉取",
-      "label": "覆盖拉取",
+      "label": "覆盖拉取（默认）",
       "order": 16,
       "registered": true,
       "secret": false,

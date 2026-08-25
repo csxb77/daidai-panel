@@ -2,10 +2,15 @@
 import { computed, ref, watch } from 'vue'
 import { taskApi } from '@/api/task'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
 import { useResponsive } from '@/composables/useResponsive'
 import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
+import { canOperate } from '@/utils/roles'
+import { toDateRangeParams } from '@/utils/datetime'
 import { startRawLogDownload } from '@/utils/rawLogDownload'
 import { extractError } from '@/utils/error'
+import DdSplitButton from '@/components/ui/DdSplitButton.vue'
+import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -17,6 +22,12 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
+// 与后端 handler/log_archive_download.go 的 maxArchiveFiles / maxArchiveBytes 一一对应。
+// 两边必须同时改：前端偏小会挡掉本来能下的包，偏大则等后端 400 才告诉用户，白跑一个来回。
+const MAX_ARCHIVE_FILES = 2000
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+
+const authStore = useAuthStore()
 const logFiles = ref<any[]>([])
 const loading = ref(false)
 const selectedFile = ref<string | null>(null)
@@ -24,11 +35,33 @@ const fileContent = ref('')
 const contentLoading = ref(false)
 // 正在换取下载票据的文件 key，避免连点重复请求
 const downloadingKey = ref<string | null>(null)
+// 打包下载同样只允许一个在飞，写法与 downloadingKey 一致
+const archiveDownloading = ref(false)
 const { dialogFullscreen } = useResponsive()
+const canOperateLogs = computed(() => canOperate(authStore.user?.role))
 
 function getFileKey(file: any) {
   return file?.path || file?.filename
 }
+
+// 列表本来就带 size，总量直接在前端算，不用为了一行汇总再问后端要一次
+const totalBytes = computed(() => logFiles.value.reduce((sum, file) => sum + (Number(file?.size) || 0), 0))
+
+const archiveOverLimit = computed(
+  () => logFiles.value.length > MAX_ARCHIVE_FILES || totalBytes.value > MAX_ARCHIVE_BYTES
+)
+
+const archiveLimitHint = computed(() => {
+  if (!archiveOverLimit.value) return ''
+  // 上限那一半必须由 MAX_ARCHIVE_BYTES 现算：写死「512.0 MB」的话，以后调常量这行会静默变成谎话
+  // （纯文案，没有任何测试守着，只能靠和常量绑死来保证不撒谎）
+  return `共 ${logFiles.value.length} 个文件 / ${formatBytes(totalBytes.value)}，超过打包上限（最多 ${MAX_ARCHIVE_FILES} 个文件 / ${formatBytes(MAX_ARCHIVE_BYTES)}），请改用「最近 7 天」或「最近 30 天」`
+})
+
+const archiveItems = computed<SplitButtonItem[]>(() => [
+  { key: 'last7', label: '最近 7 天', disabled: archiveDownloading.value },
+  { key: 'last30', label: '最近 30 天', disabled: archiveDownloading.value },
+])
 
 const renderedFileContent = computed(() => {
   let currentLine = ''
@@ -132,6 +165,48 @@ async function downloadRawFile(file: any) {
   }
 }
 
+// 「打包下载」：服务端流式打一个 zip 吐给浏览器，zip 内保留 task_<id>[_名字]/ 目录层级。
+// 一个每 5 分钟跑一次的任务，7 天有 2000+ 个日志文件，逐个点「下载原始」根本点不完。
+// 同样走「换票 + 浏览器原生下载」，零新增下载路径。
+async function downloadArchive(params?: { start?: string; end?: string }) {
+  const taskId = props.taskId
+  if (!taskId || archiveDownloading.value) return
+
+  archiveDownloading.value = true
+  try {
+    startRawLogDownload(await taskApi.logArchiveDownloadTicket(taskId, params))
+  } catch (err) {
+    ElMessage.error(extractError(err, '打包下载日志文件失败'))
+  } finally {
+    archiveDownloading.value = false
+  }
+}
+
+// 主体 =「全部」。超上限时就地拦下，不发请求——后端也会 400，但等一个来回才告诉用户太迟了。
+// 之所以不是把主体禁掉：EP 的 split-button 主体与箭头共用同一个 disabled，
+// 一禁就把「最近 7 天 / 30 天」这两条出路一起禁了，那才是真的没救。
+function downloadWholeArchive() {
+  if (archiveOverLimit.value) {
+    ElMessage.warning(archiveLimitHint.value)
+    return
+  }
+  void downloadArchive()
+}
+
+function onArchiveCommand(key: string) {
+  void downloadArchive(recentDaysParams(key === 'last30' ? 30 : 7))
+}
+
+// 「最近 N 天」含今天，与 utils/datetime.ts 的 DATE_RANGE_SHORTCUTS 口径一致。
+// 两端的时分秒必须交给 toDateRangeParams 收拢成「起始日 00:00:00 ~ 结束日 23:59:59.999」，
+// 少了它结束日当天的日志会被整天漏掉。
+function recentDaysParams(days: number) {
+  const end = new Date()
+  const start = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000)
+  const range = toDateRangeParams([start, end])
+  return { start: range.start_time, end: range.end_time }
+}
+
 async function deleteFile(file: any) {
   const filename = file.filename
   const fileKey = getFileKey(file)
@@ -171,37 +246,60 @@ function handleClose() {
     @close="handleClose"
   >
     <div class="log-files-browser">
-      <div class="file-list" v-loading="loading">
-        <div v-if="logFiles.length === 0" class="empty-hint">暂无日志文件</div>
-        <div
-          v-for="file in logFiles"
-          :key="getFileKey(file)"
-          class="file-item"
-          :class="{ active: selectedFile === getFileKey(file) }"
-          @click="viewFile(file)"
-        >
-          <div class="file-info">
-            <el-icon><Document /></el-icon>
-            <span class="file-name">{{ file.filename }}</span>
-          </div>
-          <div class="file-actions">
-            <span class="file-size">{{ formatBytes(file.size) }}</span>
-            <el-button
-              type="primary"
-              text
-              size="small"
-              :loading="downloadingKey === getFileKey(file)"
-              title="下载原始日志文件：由服务端直传磁盘上的字节，回车符与终端控制序列一个不少（右侧预览是折叠后的）"
-              @click.stop="downloadRawFile(file)"
-            >下载原始</el-button>
-            <el-button
-              type="danger"
-              text
-              size="small"
-              @click.stop="deleteFile(file)"
-            >
-              <el-icon><Delete /></el-icon>
-            </el-button>
+      <div class="file-list-pane">
+        <!-- 列表上方常驻一条汇总 + 打包入口：先让用户知道要下多大，再决定下不下 -->
+        <div class="file-list-header">
+          <span class="file-list-summary">共 {{ logFiles.length }} 个文件 · 合计 {{ formatBytes(totalBytes) }}</span>
+          <el-tooltip :content="archiveLimitHint" :disabled="!archiveLimitHint" placement="top">
+            <span>
+              <DdSplitButton
+                label="打包下载"
+                type="primary"
+                size="small"
+                :items="archiveItems"
+                :disabled="logFiles.length === 0 || archiveDownloading"
+                @click="downloadWholeArchive"
+                @command="onArchiveCommand"
+              />
+            </span>
+          </el-tooltip>
+        </div>
+
+        <div class="file-list" v-loading="loading">
+          <div v-if="logFiles.length === 0" class="empty-hint">暂无日志文件</div>
+          <div
+            v-for="file in logFiles"
+            :key="getFileKey(file)"
+            class="file-item"
+            :class="{ active: selectedFile === getFileKey(file) }"
+            @click="viewFile(file)"
+          >
+            <div class="file-info">
+              <el-icon><Document /></el-icon>
+              <span class="file-name">{{ file.filename }}</span>
+            </div>
+            <div class="file-actions">
+              <span class="file-size">{{ formatBytes(file.size) }}</span>
+              <el-button
+                type="primary"
+                text
+                size="small"
+                :loading="downloadingKey === getFileKey(file)"
+                title="下载原始日志文件：由服务端直传磁盘上的字节，回车符与终端控制序列一个不少（右侧预览是折叠后的）"
+                @click.stop="downloadRawFile(file)"
+              >下载原始</el-button>
+              <!-- 观察者没有删除权限：按后端 403 之前就别把按钮摆出来，
+                   与 views/logs/index.vue 的日志文件列表保持一致 -->
+              <el-button
+                v-if="canOperateLogs"
+                type="danger"
+                text
+                size="small"
+                @click.stop="deleteFile(file)"
+              >
+                <el-icon><Delete /></el-icon>
+              </el-button>
+            </div>
           </div>
         </div>
       </div>
@@ -224,13 +322,37 @@ function handleClose() {
   height: 700px;
 }
 
+// 左侧改成「汇总 + 打包入口」与列表上下叠的一列，宽度沿用原来 .file-list 的 340px
+.file-list-pane {
+  width: 340px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.file-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.file-list-summary {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 .file-list {
   // 每行多了「下载原始」入口，比原来的 280px 需要更多横向空间
-  width: 340px;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
   border: 1px solid var(--el-border-color);
   border-radius: 0;
   overflow-y: auto;
-  flex-shrink: 0;
 }
 
 .file-item {
@@ -327,8 +449,12 @@ function handleClose() {
     gap: 12px;
   }
 
-  .file-list {
+  .file-list-pane {
     width: 100%;
+    flex: none;
+  }
+
+  .file-list {
     max-height: 220px;
   }
 }

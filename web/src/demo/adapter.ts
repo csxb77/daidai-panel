@@ -998,6 +998,27 @@ route('GET', '/tasks/:id/log-files/:filename/raw-ticket', (ctx) => {
   return rawLogTicket(filename, log ? buildLogContent(log) : '(演示环境没有这个日志文件)')
 })
 
+// 「日志文件夹打包下载」的换票端点。走不到的理由与上面那条一样（log-files 返回空数组），
+// 铺上的理由也一样：不铺就会掉进空数据兜底，ticket.url 变 undefined、
+// `<a href="undefined">` 静默失败，表现是「点了打包下载没反应」。
+// 真实接口返回的是 zip，这里给一个 22 字节的空 zip（PK\x05\x06 + 18 个 0）——
+// 下下来能被解压工具正常打开，只是里面没有条目，不会被当成损坏文件。
+route('GET', '/tasks/:id/log-files/archive-ticket', (ctx) => {
+  const task = requireTask(ctx)
+  const now = Date.now()
+  const day = new Date(now).toISOString().slice(0, 10).replace(/-/g, '')
+  return {
+    url: 'data:application/zip;base64,UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==',
+    filename: `${task.name}-logs-${day}.zip`.replace(/[\\/:*?"<>|]/g, '_'),
+    // size 是未压缩总字节，演示环境没有历史日志文件，所以是 0
+    size: 0,
+    file_count: 0,
+    // 真实票据 120 秒过期（handler/log_raw_download.go 的 rawLogTicketTTL），照抄口径
+    expires_at: new Date(now + 120 * 1000).toISOString(),
+    expires_in: 120,
+  }
+})
+
 // 日志详情返回的是【裸的 log 字典】，不是 { data: ... }（handler/log.go:214 直接 Success(result)）
 route('GET', '/logs/:id', (ctx) => {
   const log = db().logs.find((row) => row.id === intVar(ctx))
@@ -1462,6 +1483,10 @@ route('POST', '/subscriptions', (ctx) => {
     has_auth_token: Boolean(body['auth_token']),
     alias: String(body['alias'] ?? ''),
     force_overwrite: body['force_overwrite'] === undefined ? true : Boolean(body['force_overwrite']),
+    // 与后端 NormalizeSubscriptionOverwriteMode 同口径：只认 force / preserve，其余一律 inherit（跟随全局）
+    overwrite_mode: ['force', 'preserve'].includes(String(body['overwrite_mode'] ?? ''))
+      ? String(body['overwrite_mode'])
+      : 'inherit',
     created_at: now,
     updated_at: now,
   }
@@ -1537,10 +1562,15 @@ route('PUT', '/subscriptions/:id', (ctx) => {
     'name', 'type', 'url', 'branch', 'schedule', 'whitelist', 'blacklist', 'depend_on',
     'pre_script', 'hook_script', 'auto_add_task', 'auto_del_task', 'enabled', 'sub_path',
     'save_dir', 'ssh_key_id', 'auth_type', 'auth_username', 'alias', 'force_overwrite',
+    'overwrite_mode',
   ]
   for (const key of writable) {
     if (body[key] === undefined) continue
     ;(sub as unknown as Record<string, unknown>)[key] = body[key]
+  }
+  // 与后端一致：脏值 / 非字符串一律归到 inherit，别让演示站存下真站不可能出现的取值
+  if (!['force', 'preserve'].includes(String(sub.overwrite_mode ?? ''))) {
+    sub.overwrite_mode = 'inherit'
   }
   sub.updated_at = nowIso()
   return { message: '更新成功', data: sub }

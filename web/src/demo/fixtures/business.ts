@@ -600,6 +600,8 @@ function buildSubscriptions(now: number): DemoSubscription[] {
     has_auth_token: false,
     alias: '',
     force_overwrite: true,
+    // 覆盖拉取策略默认跟随全局；下面第 2 条订阅单独设成 preserve，用来展示列表里的策略标签
+    overwrite_mode: 'inherit',
   }
 
   return [
@@ -637,6 +639,7 @@ function buildSubscriptions(now: number): DemoSubscription[] {
       save_dir: 'subscriptions/monitor-kit',
       auth_type: 'ssh',
       ssh_key_id: 1,
+      overwrite_mode: 'preserve',
       created_at: iso(now - 14 * DAY_MS),
       updated_at: iso(now - 6 * DAY_MS),
     },

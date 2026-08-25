@@ -65,7 +65,6 @@ func PullSubscriptionWithContext(ctx context.Context, sub *model.Subscription, o
 	}
 
 	emit(fmt.Sprintf("[开始拉取] %s (%s)", sub.Name, sub.Type))
-	applySubscriptionForceOverwriteSetting(sub)
 
 	var output string
 	var pullErr error
@@ -125,12 +124,25 @@ func PullSubscriptionWithContext(ctx context.Context, sub *model.Subscription, o
 	return output, pullErr
 }
 
-func applySubscriptionForceOverwriteSetting(sub *model.Subscription) {
-	if sub == nil || sub.Type != model.SubTypeGitRepo {
-		return
+// resolveSubscriptionForceOverwrite 解析这次拉取到底覆盖还是保留本地。
+// 只读不写：v2.2.15 到 v3.0.9 之间这里是个「覆盖器」，每次拉取开头就把全局值盖进 sub.ForceOverwrite，
+// 订阅自己存的值从此再没生效过；而且盖的那个 sub 稍后还会被 database.DB.Model(sub).Updates(...) 用到，
+// 顺手也是个隐患。现在改成纯解析，sub 对象一个字段都不动。
+//
+// 三态优先级：订阅显式选了 force / preserve 就以订阅为准，inherit（含空串、脏值）才回落全局开关。
+// 刻意不写成 `sub.X || isConfigEnabled(...)` 那种 OR —— OR 表达不了「全局开着、但这个订阅强制关」，
+// 而这正是本功能的核心诉求（同文件里 auto_add_cron / auto_del_cron 的 OR 语义本次不动）。
+func resolveSubscriptionForceOverwrite(sub *model.Subscription) bool {
+	if sub != nil {
+		switch model.NormalizeSubscriptionOverwriteMode(sub.OverwriteMode) {
+		case model.SubOverwriteForce:
+			return true
+		case model.SubOverwritePreserve:
+			return false
+		}
 	}
-	overwrite := isConfigEnabled("subscription_force_overwrite", true)
-	sub.ForceOverwrite = &overwrite
+	// inherit（含空串、脏值、sub 为 nil）才回落全局开关，顺带避免另外两档白读一次配置
+	return isConfigEnabled("subscription_force_overwrite", true)
 }
 
 func runCmdWithCallback(ctx context.Context, cmd *exec.Cmd, emit PullCallback) (string, error) {
@@ -217,7 +229,11 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 			branchLabel = strings.TrimSpace(sub.Branch)
 		}
 
-		emit(fmt.Sprintf("[检测到已有仓库] %s 已存在 Git 仓库，接下来会同步远端并覆盖更新本地文件", saveDir))
+		// 措辞必须中性：这条 emit 在覆盖策略判定之前、无条件执行，preserve 的订阅也会打出来。
+		// 原文写死「覆盖更新本地文件」，于是保留本地修改的订阅日志会先说要覆盖、再说在保留，自相矛盾；
+		// 而用户搜关键字或截图报障时最先命中的恰恰就是这一句，加了策略标签反而多一处矛盾。
+		// 真正的策略由下面 forceOverwrite 分支各自 emit（都带「策略：X」）。
+		emit(fmt.Sprintf("[检测到已有仓库] %s 已存在 Git 仓库，接下来会同步远端并按覆盖策略更新本地文件", saveDir))
 		emit(fmt.Sprintf("[同步远端地址] 正在校正订阅地址 -> %s", authCfg.DisplayURL))
 		output, err := syncGitRemoteWithCallback(ctx, destDir, authCfg.RemoteURL, env, emit)
 		fullOutput.WriteString(output)
@@ -243,9 +259,18 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 			return fullOutput.String(), err
 		}
 
-		forceOverwrite := sub.ForceOverwrite == nil || *sub.ForceOverwrite
+		// 策略来源一并写进日志：用户在订阅里单独设过就显示「强制覆盖 / 保留本地修改」，
+		// 没设过就显示「跟随全局设置」，方便自查「我明明关了怎么还在覆盖」这类问题。
+		forceOverwrite := resolveSubscriptionForceOverwrite(sub)
+		strategyLabel := "跟随全局设置"
+		switch model.NormalizeSubscriptionOverwriteMode(sub.OverwriteMode) {
+		case model.SubOverwriteForce:
+			strategyLabel = "强制覆盖"
+		case model.SubOverwritePreserve:
+			strategyLabel = "保留本地修改"
+		}
 		if forceOverwrite {
-			emit("[覆盖更新本地文件] 正在用远端最新提交覆盖当前订阅目录中的仓库内容")
+			emit(fmt.Sprintf("[覆盖更新本地文件] 正在用远端最新提交覆盖当前订阅目录中的仓库内容（策略：%s）", strategyLabel))
 			cmd = exec.CommandContext(ctx, "git", "reset", "--hard", "FETCH_HEAD")
 			cmd.Dir = destDir
 			cmd.Env = env
@@ -256,7 +281,7 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 			}
 			emit("[已完成] 已覆盖更新所有仓库文件，本地新增的文件已保留")
 		} else {
-			emit("[保留本地修改] 正在合并远端更新（保留本地修改的文件）")
+			emit(fmt.Sprintf("[保留本地修改] 正在合并远端更新（保留本地修改的文件，策略：%s）", strategyLabel))
 			hasStash, err := gitHasWorkingTreeChanges(ctx, destDir, env)
 			if err != nil {
 				return fullOutput.String(), err

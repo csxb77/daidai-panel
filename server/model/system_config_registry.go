@@ -75,6 +75,11 @@ const (
 	LegacyRepoFileExtensions  = "py js sh ts"
 )
 
+// LegacyLogBackgroundColor 是 v1.8.0 ~ v2.2.3 的日志底色默认值（固定深色）。
+// v2.2.4 已把注册表默认改成「留空跟随主题」，但老实例库里存的还是这份旧默认、升级不会自愈；
+// 靠「库里存的正好等于旧默认」判断用户没改过，只有这种情况才抬到新默认。
+const LegacyLogBackgroundColor = "#0f172a"
+
 // defaultBackupScheduleSelection 同时给注册表默认值和 normalizeBackupScheduleSelectionValue 使用。
 //
 // 这两处历史上是各写各的字面量，注册表那份少了 task_views：
@@ -143,7 +148,11 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newIntConfig("disk_warn", "磁盘阈值 (%)", "90", "磁盘告警阈值（%）", "alerts", 1, 100),
 	newBoolConfig("auto_add_cron", "自动添加定时任务", "true", "自动添加定时任务", "subscription"),
 	newBoolConfig("auto_del_cron", "自动删除失效任务", "true", "自动删除失效任务", "subscription"),
-	newBoolConfig("subscription_force_overwrite", "覆盖拉取", "true", "订阅拉取时覆盖本地修改并清理多余文件", "subscription"),
+	// 这项只管 git 工作区里已跟踪文件的覆盖方式（reset --hard）：已跟踪文件会被重置成远端状态、
+	// 远端已删除的也会跟着删掉，但不会删除未跟踪的本地新增文件（日志里「本地新增的文件已保留」说的就是这个）。
+	// 唯一会跑 git clean -fd（连未跟踪文件一起清）的是「目录已存在但不是 git 仓库、原地 init 接管」那条分支，
+	// 它无条件执行、根本不看这个开关，所以说明里不能再写「清理多余文件」。
+	newBoolConfig("subscription_force_overwrite", "覆盖拉取（默认）", "true", "订阅拉取时覆盖本地修改（未单独设置的订阅使用此默认值）", "subscription"),
 	newValidatedStringConfig("default_cron_rule", "默认 Cron 规则", "", "订阅脚本未声明 cron 时使用的默认规则", "subscription", normalizeDefaultCronRule),
 	// 默认值必须含 mjs：ESM 脚本（.mjs）在青龙生态里很常见，
 	// 旧默认 LegacyRepoFileExtensions 漏了它，表现为「仓库拉取成功、.mjs 却一个任务都不建」。

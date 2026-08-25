@@ -103,9 +103,15 @@ export function useSettingsOverview() {
       if (res.data.has_update) {
         releaseNotesVisible.value = true
         if (res.data.auto_update_supported) {
-          ElMessage.success(`发现新版本 v${res.data.latest}`)
+          // 必须把 current 一起报出来：只显示 latest 时用户会把它读成「我已经是这个版本了」，
+          // 于是把左上角显示的旧版本号当成「版本号显示 bug」来报障（issue #104 就是这么来的）。
+          // 两个数字并排放，「当前 → 最新」一眼就能看出这是升级失败而不是显示错。
+          ElMessage.success(`当前 v${res.data.current} → 最新 v${res.data.latest}`)
         } else {
-          ElMessage.warning(res.data.update_disabled_reason || '当前部署暂不支持面板内一键更新')
+          // 这条分支同理要带版本号：只讲「不支持一键更新」而不报版本，
+          // 用户照样不知道自己现在是哪版、该升到哪版，还是会当成版本号显示错误来报障。
+          const reason = res.data.update_disabled_reason || '当前部署暂不支持面板内一键更新'
+          ElMessage.warning(`当前 v${res.data.current}，最新 v${res.data.latest}：${reason}`)
         }
       } else {
         ElMessage.success(`当前版本 v${res.data.current} 已经是最新版了`)

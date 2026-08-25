@@ -711,6 +711,58 @@ X-Content-Type-Options: nosniff
 <磁盘日志文件的原始字节，保留裸 \\r 等终端控制序列，未做任何折叠处理>`,
       },
       {
+        id: 'tasks-log-archive-ticket',
+        method: 'GET',
+        path: '/api/tasks/:id/log-files/archive-ticket',
+        title: '签发任务日志打包下载票据',
+        description: '把一个任务的日志文件夹一次性打成 zip 下载，分两步，这是第一步「换票」。适用于「一个每 5 分钟跑一次的任务，7 天有 2000+ 个日志文件，逐个下载点不完」的场景。待打包的文件清单直接复用 GET /api/tasks/:id/log-files 那份数据，所以「下载到的 = 列表里看到的」。本接口的鉴权与其它日志文件接口完全一致：Authorization: Bearer（用户 JWT 或带 tasks 权限的 Open API Token，viewer 及以上角色）。收集与上限校验全部在签票时完成（zip 一旦开始写就没法回退成 JSON 错误），返回体里的 url 已经把 ticket 与 start/end 拼好，是一个相对路径，直接接在面板地址后面即可，不要自行改写其中的参数 —— start/end 参与票据签名，改任何一个都会导致下载时 401。失败情况：任务 ID 不是数字返回 400「无效的任务ID」；该任务（在给定时间范围内）一个日志文件都没有返回 404「该任务暂无日志文件」；超过 2000 个文件或未压缩总量超过 512MB 返回 400，文案里会带上实际数量与体积并提示改用更小的时间范围；签名失败返回 500「签发下载票据失败」。错误响应体统一为 {"error": "..."}。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '任务 ID' }],
+        queryParams: [
+          { name: 'start', type: 'string', description: '起始时间（RFC3339），按日志文件的磁盘修改时间筛选，也就是日志文件列表里 created_at 那一列；不传表示不限起点', example: '2026-03-04T00:00:00+08:00' },
+          { name: 'end', type: 'string', description: '结束时间（RFC3339），闭区间；不传表示不限终点。手写 URL 时请把时区里的 + 编码成 %2B，否则会被解析成空格（服务端有容错，但不要依赖）', example: '2026-03-10T23:59:59+08:00' },
+        ],
+        responseExample: JSON.stringify({
+          url: '/api/tasks/1/log-files/archive?end=2026-03-10T23%3A59%3A59%2B08%3A00&start=2026-03-04T00%3A00%3A00%2B08%3A00&ticket=v1.YWRtaW4.1785000120.3Qk8x1r0Zq2m9v7bN4pS6cW8dY0aE2gH5jK7lM9nQ1s',
+          filename: '签到任务-logs-20260310.zip',
+          size: 20971520,
+          file_count: 168,
+          expires_at: '2026-08-04T12:02:00+08:00',
+          expires_in: 120,
+        }, null, 2),
+        responseFields: [
+          { name: 'url', type: 'string', description: '已拼好 start / end / ticket 的下载地址（相对路径）；三个参数都参与验签，请整段照用' },
+          { name: 'filename', type: 'string', description: '建议保存的文件名，格式为 <任务名>-logs-<YYYYMMDD>.zip' },
+          { name: 'size', type: 'integer', description: '本次要打包的【未压缩】总字节数。流式 zip 事先算不出压缩后大小，所以这不是响应体长度' },
+          { name: 'file_count', type: 'integer', description: '本次要打包的文件个数' },
+          { name: 'expires_at', type: 'string', description: '票据过期时间（RFC3339）' },
+          { name: 'expires_in', type: 'integer', description: '票据有效期（秒），当前为 120' },
+        ],
+      },
+      {
+        id: 'tasks-log-archive',
+        method: 'GET',
+        path: '/api/tasks/:id/log-files/archive',
+        title: '下载任务日志压缩包',
+        description: '打包下载的第二步：凭票据直传 zip。这条路由刻意没有挂 JWT 中间件，只认 URL 上的 ticket —— 因为浏览器原生下载带不上 Authorization 头；反过来也成立：只带 Bearer 而不带 ticket 一样会被拒（401「缺少下载票据」）。票据的 HMAC 签名里绑定了任务 ID 与原样的 start/end，挪到另一个任务或改动时间范围都会 401「下载票据无效」；超过 120 秒返回 401「下载票据已过期，请重新发起下载」。验票通过后会把文件清单与上限校验完整重跑一遍（票据有效期内文件可能已被日志清理删掉），再开始写 zip。zip 内的路径就是日志根目录内的相对路径（形如 task_1_签到/2026-03-10-09-00-00.log），任务改过名留下多个 task_<id>_<名字> 目录时层级会完整保留、不会撞名；文件内容是磁盘原始字节，未做任何折叠处理。响应是边压边发的流：没有 Content-Length，也【不支持 Range 断点续传】（不会返回 Accept-Ranges），断线只能整包重来。Content-Disposition 同时给出 ASCII 回退名 filename="..." 和 RFC 5987 的 filename*=UTF-8\'\'...（中文任务名不会乱码）。',
+        auth: 'ticket',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '任务 ID，必须与换票时的一致' }],
+        queryParams: [
+          { name: 'ticket', type: 'string', required: true, description: '上一步 archive-ticket 签发的票据（已包含在返回的 url 里，正常无需手动拼）', example: 'v1.YWRtaW4.1785000120.3Qk8...' },
+          { name: 'start', type: 'string', description: '必须与换票时传入的值完全一致，否则验签失败；换票时没传就不要传', example: '2026-03-04T00:00:00+08:00' },
+          { name: 'end', type: 'string', description: '必须与换票时传入的值完全一致，否则验签失败；换票时没传就不要传', example: '2026-03-10T23:59:59+08:00' },
+        ],
+        responseContentType: 'application/zip（流式压缩包）',
+        responseExample: `HTTP/1.1 200 OK
+Content-Type: application/zip
+Content-Disposition: attachment; filename="____-logs-20260310.zip"; filename*=UTF-8''%E7%AD%BE%E5%88%B0%E4%BB%BB%E5%8A%A1-logs-20260310.zip
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+Transfer-Encoding: chunked
+
+<zip 字节流；每个 entry 的路径为 task_<id>[_<任务名>]/<文件名>.log，内容与磁盘完全一致>`,
+      },
+      {
         id: 'logs-delete',
         method: 'DELETE',
         path: '/api/logs/:id',
@@ -891,6 +943,7 @@ X-Content-Type-Options: nosniff
           { name: 'save_dir', type: 'string', description: '脚本存放子目录，留空则按仓库名推导' },
           { name: 'pre_script', type: 'string', description: '拉取前指令：在 git 拉取之前执行的 Shell 命令，可用 $SUB_DIR / $SCRIPTS_DIR / $QL_DIR 等变量。非 0 退出会中断本次拉取并记为失败', example: 'mount -a' },
           { name: 'hook_script', type: 'string', description: '拉取后钩子：拉取成功后、同步定时任务之前执行的 Shell 命令，变量与失败语义同 pre_script', example: 'bash $SUB_DIR/copyfiles.sh' },
+          { name: 'overwrite_mode', type: 'string', description: '覆盖拉取策略，仅对 git 仓库订阅生效：inherit=跟随系统设置里的「覆盖拉取（默认）」开关（默认值）、force=强制覆盖本地改动、preserve=拉取前暂存本地改动再恢复。作用域只有脚本文件（git 工作区），不影响任务的名称与定时；首次拉取（本地还没有仓库）不适用。不传或传非法值一律按 inherit 处理', example: 'preserve' },
         ],
         responseExample: JSON.stringify({ message: '创建成功', data: { id: 1 } }, null, 2),
       },
@@ -899,7 +952,7 @@ X-Content-Type-Options: nosniff
         method: 'PUT',
         path: '/api/subscriptions/:id',
         title: '更新订阅',
-        description: '更新指定订阅配置。请求体为部分更新，字段与「创建订阅」一致（含 whitelist / blacklist / depend_on / sub_path），只提交需要修改的字段即可。',
+        description: '更新指定订阅配置。请求体为部分更新，字段与「创建订阅」一致（含 whitelist / blacklist / depend_on / sub_path / overwrite_mode），只提交需要修改的字段即可。其中 overwrite_mode 的取值为 inherit / force / preserve，非法值会被归一成 inherit。',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '订阅 ID' }],
         responseExample: JSON.stringify({ message: '更新成功' }, null, 2),
@@ -919,7 +972,7 @@ X-Content-Type-Options: nosniff
         method: 'PUT',
         path: '/api/subscriptions/:id/pull',
         title: '手动拉取订阅',
-        description: '立即拉取指定订阅的脚本。拉取时是否覆盖本地修改由订阅设置中的「覆盖拉取」开关控制，本接口不再接收临时覆盖模式参数。',
+        description: '立即拉取指定订阅的脚本。拉取时是否覆盖本地修改由该订阅自己的 overwrite_mode 决定（inherit 时回落到系统设置里的「覆盖拉取（默认）」开关），本接口不接收临时覆盖模式参数。',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '订阅 ID' }],
         responseExample: JSON.stringify({ message: '拉取成功，拉取 5 个文件，新增 3 个任务' }, null, 2),

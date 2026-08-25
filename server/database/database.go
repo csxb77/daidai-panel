@@ -156,6 +156,13 @@ func EnsureColumns() {
 		{"hook_script", "TEXT DEFAULT ''"},
 		// 拉取前指令。DEFAULT ''：存量订阅升级后一律为空，拉取链路与升级前完全一致。
 		{"pre_script", "TEXT DEFAULT ''"},
+		// force_overwrite 是 v2.0.2 就有的老列，之前一直靠 AutoMigrate 兜底、没在这里登记，
+		// 与本文件「所有历史列都显式补一遍」的约定不一致，顺手补上。它现在只做只读兼容。
+		{"force_overwrite", "BOOLEAN DEFAULT 1"},
+		// inherit：存量订阅升级后一律跟随全局开关，拉取行为与升级前完全一致（同 notify_channels.push_scope 的写法）。
+		// 这里刻意新增一列而不是把 force_overwrite 改成 nullable —— 存量行的 force_overwrite 全是 1，
+		// 复用它会让所有老订阅被解读成「强制覆盖」，把全局关掉的用户升级后静默切回覆盖模式。
+		{"overwrite_mode", "VARCHAR(16) NOT NULL DEFAULT 'inherit'"},
 	})
 
 	ensureTableColumns("notify_channels", []columnDef{

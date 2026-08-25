@@ -59,6 +59,28 @@ const fileContentName = ref('')
 // 当前预览的日志文件，换「下载原始文件」票据时要用它的定位参数
 const fileContentSource = ref<{ filename: string; path?: string } | null>(null)
 const rawDownloading = ref(false)
+// 正在换取单文件下载票据的 key（path 或 filename），避免连点重复请求
+const logFileDownloadingKey = ref<string | null>(null)
+const archiveDownloading = ref(false)
+// 与后端 handler/log_archive_download.go 的 maxArchiveFiles / maxArchiveBytes 一一对应。
+// 两边必须同时改：前端偏小会挡掉本来能下的包，偏大则等后端 400 才告诉用户，白跑一个来回。
+const MAX_ARCHIVE_FILES = 2000
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
+// 列表本来就带 size，总量直接在前端算，不用为了一行汇总再问后端要一次
+const logFilesTotalBytes = computed(() => logFiles.value.reduce((sum, file) => sum + (Number(file?.size) || 0), 0))
+const logFilesOverArchiveLimit = computed(
+  () => logFiles.value.length > MAX_ARCHIVE_FILES || logFilesTotalBytes.value > MAX_ARCHIVE_BYTES
+)
+const logFilesArchiveHint = computed(() => {
+  if (!logFilesOverArchiveLimit.value) return ''
+  // 上限那一半必须由 MAX_ARCHIVE_BYTES 现算：写死「512.0 MB」的话，以后调常量这行会静默变成谎话
+  // （纯文案，没有任何测试守着，只能靠和常量绑死来保证不撒谎）
+  return `共 ${logFiles.value.length} 个文件 / ${formatFileSize(logFilesTotalBytes.value)}，超过打包上限（最多 ${MAX_ARCHIVE_FILES} 个文件 / ${formatFileSize(MAX_ARCHIVE_BYTES)}），请改用「最近 7 天」或「最近 30 天」`
+})
+const logFilesArchiveItems = computed<SplitButtonItem[]>(() => [
+  { key: 'last7', label: '最近 7 天', disabled: archiveDownloading.value },
+  { key: 'last30', label: '最近 30 天', disabled: archiveDownloading.value },
+])
 const hasRunningLogs = computed(() => logs.value.some(l => l.status === 2))
 const routeTaskId = ref<number | null>(null)
 const pendingOpenTaskLog = ref(false)
@@ -589,6 +611,62 @@ async function viewLogFile(file: any) {
   }
 }
 
+// 列表里每行的「下载」：服务端直传磁盘上的原始字节（弹窗预览是折叠过裸 \r 的）。
+// 与 tasks/components/LogFileBrowser.vue 的每行入口保持一致，这边原来只有查看/删除。
+async function downloadRawLogFileRow(file: any) {
+  const fileKey = file.path || file.filename
+  if (!currentTaskId.value || logFileDownloadingKey.value) return
+
+  logFileDownloadingKey.value = fileKey
+  try {
+    startRawLogDownload(await taskApi.logFileRawDownloadTicket(currentTaskId.value, file.filename, file.path))
+  } catch (err) {
+    ElMessage.error(extractError(err, '下载原始日志文件失败'))
+  } finally {
+    logFileDownloadingKey.value = null
+  }
+}
+
+// 「打包下载」：服务端流式打一个 zip，zip 内保留 task_<id>[_名字]/ 目录层级。
+// 一个每 5 分钟跑一次的任务，7 天有 2000+ 个日志文件，逐个点根本点不完。
+async function downloadLogFilesArchive(params?: { start?: string; end?: string }) {
+  if (!currentTaskId.value || archiveDownloading.value) return
+
+  archiveDownloading.value = true
+  try {
+    startRawLogDownload(await taskApi.logArchiveDownloadTicket(currentTaskId.value, params))
+  } catch (err) {
+    ElMessage.error(extractError(err, '打包下载日志文件失败'))
+  } finally {
+    archiveDownloading.value = false
+  }
+}
+
+// 主体 =「全部」。超上限就地拦下，不发请求——后端也会 400，但等一个来回才告诉用户太迟了。
+// 之所以不是把主体禁掉：EP 的 split-button 主体与箭头共用同一个 disabled，
+// 一禁就把「最近 7 天 / 30 天」这两条出路一起禁了。
+function downloadWholeLogFilesArchive() {
+  if (logFilesOverArchiveLimit.value) {
+    ElMessage.warning(logFilesArchiveHint.value)
+    return
+  }
+  void downloadLogFilesArchive()
+}
+
+function onLogFilesArchiveCommand(key: string) {
+  void downloadLogFilesArchive(recentArchiveDaysParams(key === 'last30' ? 30 : 7))
+}
+
+// 「最近 N 天」含今天，与 DATE_RANGE_SHORTCUTS 口径一致。
+// 两端的时分秒必须交给 toDateRangeParams 收拢成「起始日 00:00:00 ~ 结束日 23:59:59.999」，
+// 少了它结束日当天的日志会被整天漏掉。
+function recentArchiveDaysParams(days: number) {
+  const end = new Date()
+  const start = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000)
+  const range = toDateRangeParams([start, end])
+  return { start: range.start_time, end: range.end_time }
+}
+
 async function deleteLogFile(file: any) {
   if (!canOperateLogs.value) {
     ElMessage.warning('当前账号没有删除日志文件权限')
@@ -608,10 +686,15 @@ async function deleteLogFile(file: any) {
   }
 }
 
+// 这一页的「共 N 个文件 · 合计 X」与 tasks/components/LogFileBrowser.vue 的那条长得一模一样，
+// 口径必须一致。原来这里最高只到 MB，3 GB 会写成「3072.0 MB」，而那边的 formatBytes 写「3.0 GB」——
+// 同一句话两个数值单位。补上 GB 档对齐。
+// 单文件大小列也用这个函数：单个日志有 10 MB 硬上限，走不到 GB 档，行为不变。
 function formatFileSize(size: number) {
   if (size < 1024) return size + ' B'
   if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB'
-  return (size / 1024 / 1024).toFixed(1) + ' MB'
+  if (size < 1024 * 1024 * 1024) return (size / 1024 / 1024).toFixed(1) + ' MB'
+  return (size / 1024 / 1024 / 1024).toFixed(1) + ' GB'
 }
 
 onBeforeUnmount(() => {
@@ -628,46 +711,62 @@ onBeforeUnmount(() => {
   <div class="logs-page dd-fixed-page dd-page-hide-heading">
     <!-- ======= Toolbar ======= -->
     <div class="toolbar">
-      <!-- 左槽是【恒在】的容器，勾选时只切换它内部的内容：批量条原来挂在 toolbar__right 里，
+      <!-- 左槽是【恒在】的容器，勾选时只切换它内部显示哪一支：批量条原来挂在 toolbar__right 里，
            一出现就把整条工具栏顶成两行、表格跟着下移。
-           mode="out-in" 保证同一时刻只有一个分支在 DOM 里，两者不会同时占位；
-           容器自身的 flex 属性不变，右区也就不会因为 space-between 重新分配而横向滑走。 -->
+           这里两支【对有操作权限的账号都常驻 DOM】、在同一个 1×1 网格里叠放，只用 visibility 切换显示：
+           左槽高度因此恒等于 max(筛选区高度, 批量区高度)，与当前显示哪一支完全无关。
+           观察者没有选择列、永远勾不动，批量区对他直接 v-if 掉（见下），左槽高度恒等于筛选区高度——
+           同样是个常数，高度不变式一样成立，而且不用替一支永远看不到的按钮排白让出高度。
+           这一点是必须的——本页筛选区宽约 1251px（日期选择器就占 630px），窄窗口下会换成两行（实测 88px），
+           而批量条永远只有一行（39px）。若像以前那样只留一支在 DOM 里，勾选那一刻左槽会矮 49px，
+           dd-fixed-page 下 .table-card 是 flex:1 1 0，工具栏矮多少表格就立刻长多少 ⇒ 整个列表跳一下。
+           换行点又由内容宽决定，而内容宽随侧栏展开/收起漂 156px（220px vs 64px），
+           所以「按媒体查询锁一个固定高度」根本锁不住，只能让两支同时参与撑高。
+           visibility: hidden 自带「不可点、不进 Tab 序、不进无障碍树」，不需要再加 inert / aria-hidden。 -->
       <div class="toolbar__left">
-        <Transition name="dd-toolbar-swap" mode="out-in">
-          <div v-if="canOperateLogs && selectedIds.length > 0" key="batch" class="batch-actions">
-            <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
-            <!-- 不写 size：与右区的「停止刷新 / 清理日志」同为 EP default 32px。
-                 原来的 small 是 24px，两边差 8px，正是 issue 说的「高度不一致」。 -->
-            <!-- 顺序与 tasks / envs 两页对齐：「批量删除」在前、「取消选择」殿后。
-                 删除不放最右边缘，是因为那一侧最容易被甩动鼠标顺手点到，代价还不可逆；
-                 让无害的「取消选择」去当边缘那一个。 -->
-            <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
-            <el-button @click="clearSelection">取消选择</el-button>
+        <!-- 判定与批量区严格互补：批量区只在【有权限】时渲染、且【有选中】时可见，
+             所以筛选区只有在「有权限且有选中」这一种情况下才让位，两支恒有且仅有一支可见。
+             canOperateLogs 这一项保留着不是冗余：它让「谁隐藏」这件事只依赖显式权限判定，
+             而不是靠「viewer 没有选择列所以 selectedIds 永远是空」这条间接推理——
+             哪天给 viewer 开了只读多选，这里也不会连筛选区一起藏掉、把左槽变成一片空白。 -->
+        <div class="toolbar__filters" :class="{ 'is-swapped-out': canOperateLogs && selectedIds.length > 0 }">
+          <div class="status-tabs">
+            <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
+            <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
+            <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
+            <button :class="['status-tab', { active: statusFilter === '3' }]" @click="statusFilter = '3'; handleSearch()">已终止</button>
+            <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
           </div>
-          <div v-else key="filters" class="toolbar__filters">
-            <div class="status-tabs">
-              <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
-              <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
-              <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
-              <button :class="['status-tab', { active: statusFilter === '3' }]" @click="statusFilter = '3'; handleSearch()">已终止</button>
-              <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
-            </div>
-            <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
-              <template #prefix><el-icon><Search /></el-icon></template>
-            </el-input>
-            <!-- 执行时间范围。inline 模式让快捷项与选择器同排，不把工具栏撑成两行。
-                 disableFuture：日志是已经发生过的事，选到明天必然是空结果，
-                 与其让用户以为筛选坏了，不如直接禁掉未来日期。 -->
-            <DdDateRangePicker
-              v-model="dateRange"
-              inline
-              size="default"
-              start-placeholder="开始日期"
-              end-placeholder="结束日期"
-              @change="handleSearch"
-            />
-          </div>
-        </Transition>
+          <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <!-- 执行时间范围。inline 模式让快捷项与选择器同排，不把工具栏撑成两行。
+               disableFuture：日志是已经发生过的事，选到明天必然是空结果，
+               与其让用户以为筛选坏了，不如直接禁掉未来日期。 -->
+          <DdDateRangePicker
+            v-model="dateRange"
+            inline
+            size="default"
+            start-placeholder="开始日期"
+            end-placeholder="结束日期"
+            @change="handleSearch"
+          />
+        </div>
+        <!-- 权限走 v-if、选中态才走 is-swapped-out：两者不能混在同一个 class 判定里。
+             观察者（canOperateLogs=false）连选择列都没有（见表格的 type="selection" 上的 v-if），
+             这一支对他永远不可能显示；而 is-swapped-out 只是 visibility: hidden，照常参与撑高，
+             写成 class 就等于让 viewer 白白顶着一整条批量按钮的高度（表格被压矮一截）。
+             拆开后对 viewer 这一支根本不渲染，左槽高度恒等于筛选区高度，同样是常数，高度不变式不受影响。 -->
+        <div v-if="canOperateLogs" class="batch-actions" :class="{ 'is-swapped-out': selectedIds.length === 0 }">
+          <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
+          <!-- 不写 size：与右区的「停止刷新 / 清理日志」同为 EP default 32px。
+               原来的 small 是 24px，两边差 8px，正是 issue 说的「高度不一致」。 -->
+          <!-- 顺序与 tasks / envs 两页对齐：「批量删除」在前、「取消选择」殿后。
+               删除不放最右边缘，是因为那一侧最容易被甩动鼠标顺手点到，代价还不可逆；
+               让无害的「取消选择」去当边缘那一个。 -->
+          <el-button type="danger" @click="handleBatchDelete">批量删除</el-button>
+          <el-button @click="clearSelection">取消选择</el-button>
+        </div>
       </div>
       <div class="toolbar__right">
         <el-button
@@ -920,6 +1019,25 @@ onBeforeUnmount(() => {
       :fullscreen="dialogFullscreen"
       class="log-files-dialog"
     >
+      <!-- 表格上方常驻一条汇总 + 打包入口：先让用户知道要下多大，再决定下不下。
+           与 tasks/components/LogFileBrowser.vue 的同一处保持一致 -->
+      <div class="log-files-header">
+        <span class="log-files-summary">共 {{ logFiles.length }} 个文件 · 合计 {{ formatFileSize(logFilesTotalBytes) }}</span>
+        <el-tooltip :content="logFilesArchiveHint" :disabled="!logFilesArchiveHint" placement="top">
+          <span>
+            <DdSplitButton
+              label="打包下载"
+              type="primary"
+              size="small"
+              :items="logFilesArchiveItems"
+              :disabled="logFiles.length === 0 || archiveDownloading"
+              @click="downloadWholeLogFilesArchive"
+              @command="onLogFilesArchiveCommand"
+            />
+          </span>
+        </el-tooltip>
+      </div>
+
       <el-table :data="logFiles" v-loading="logFilesLoading" max-height="420px" size="small">
         <el-table-column prop="filename" label="文件名" min-width="220" />
         <el-table-column label="大小" width="110">
@@ -928,9 +1046,17 @@ onBeforeUnmount(() => {
         <el-table-column label="时间" width="180">
           <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column label="操作" width="180" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" text size="small" @click="viewLogFile(row)">查看</el-button>
+            <el-button
+              type="primary"
+              text
+              size="small"
+              :loading="logFileDownloadingKey === (row.path || row.filename)"
+              title="下载原始日志文件：由服务端直传磁盘上的字节，回车符与终端控制序列一个不少（弹窗预览是折叠后的）"
+              @click="downloadRawLogFileRow(row)"
+            >下载</el-button>
             <el-button v-if="canOperateLogs" type="danger" text size="small" @click="deleteLogFile(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -1029,13 +1155,15 @@ onBeforeUnmount(() => {
   gap: 12px;
   flex-wrap: wrap;
 
-  // 左槽容器：勾选时内部在「筛选区」与「批量区」之间切换，容器本身恒在，flex 属性也恒定。
-  // min-height 取 39px（status-tabs 实测高度）——批量按钮只有 32px，
-  // 少了它工具栏会在切换的一瞬间塌 7px，表格跟着抖一下；
-  // out-in 中途还有一帧容器为空，没有它会直接塌到 0。
+  // 左槽容器：1×1 网格，筛选区与批量区【叠放在同一个格子里】，两支都常驻 DOM。
+  // 这样左槽高度恒等于 max(两支高度)，勾选/取消勾选永远不改变工具栏高度。
+  // align-items 必须是 start 不能是 center：筛选区换成两行（88px）时，
+  // center 会把只有一行（39px）的批量条垂直居中到 88px 的中线上，切过去时按钮整体往下掉 24px。
+  // min-height 取 39px（status-tabs 实测高度）：两支都是空/极窄时兜底，避免左槽塌到 0。
   &__left {
-    display: flex;
-    align-items: center;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
     flex: 1;
     min-width: 0;
     min-height: 39px;
@@ -1047,7 +1175,6 @@ onBeforeUnmount(() => {
     align-items: center;
     gap: 12px;
     flex-wrap: wrap;
-    flex: 1;
     min-width: 0;
   }
 
@@ -1103,6 +1230,11 @@ onBeforeUnmount(() => {
   // 计数是纯文字、按钮是 32px 的实体块，不写 center 两者会按基线/拉伸排，文字看着往上飘
   align-items: center;
   gap: 8px;
+  // 与 .toolbar__right 站同一条基线：右区也是 min-height:39px + 内部 center，中心线在 19.5px。
+  // 批量条本身只有 32px，而左槽是 align-items: start（筛选区换两行时不能把它压到中线去），
+  // 不补这个下限它就贴在网格行顶端、中心线只有 16px，勾选后整排批量按钮会比右侧按钮高 3.5px。
+  // 39px 本来就是左槽的 min-height，补上不会改变左槽高度，高度不变式照旧成立。
+  min-height: 39px;
 }
 
 // 勾选数：纯文字级提示，用次级色，不跟旁边那排实体按钮抢视觉重量
@@ -1113,18 +1245,27 @@ onBeforeUnmount(() => {
   cursor: default;
 }
 
-// 左槽内容切换（筛选区 ⇄ 批量区）：只做 opacity，不做宽高。
-// 尺寸过渡会让这条 flex-wrap 工具栏每帧重算换行，把整排按钮甩到第二行再甩回来，
-// 还会一路推着表格与分页条重排，代价远大于收益。
+// 左槽的两支叠放在同一个网格格子里：谁都不脱离文档流，所以两支都在为左槽撑高，
+// 左槽高度 = max(两支高度)，切换时高度恒定不变，表格不会被工具栏推着重排。
+// 切换只做 opacity，不做宽高：尺寸过渡会让这条 flex-wrap 工具栏每帧重算换行，
+// 把整排按钮甩到第二行再甩回来，还会一路推着表格与分页条重排，代价远大于收益。
 // 时长走令牌，prefers-reduced-motion 下自动降为 1ms 即等效关闭。
-.dd-toolbar-swap-enter-active,
-.dd-toolbar-swap-leave-active {
+.toolbar__filters,
+.batch-actions {
+  grid-area: 1 / 1;
+  min-width: 0;
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-.dd-toolbar-swap-enter-from,
-.dd-toolbar-swap-leave-to {
+// 当前不该显示的那一支：visibility: hidden 已经同时挡掉鼠标、Tab 焦点和读屏，
+// 不要再叠 inert / aria-hidden / pointer-events；也【不能】改成 display: none，
+// 那样它就不再撑高左槽，高度不变式立刻失效（桌面端会退回勾选时表格跳动）。
+// 注意过渡是【单向】的：上面的 transition 只列了 opacity，visibility 不在其中、切换那一帧立即生效，
+// 所以退场的那一支是硬切、只有进场的那一支有淡入。这是刻意的——两支叠在同一个格子里，
+// 真做交叉淡出会有一段两排按钮互相透视的重影，别为了「对称」把 visibility 加进 transition。
+.is-swapped-out {
   opacity: 0;
+  visibility: hidden;
 }
 
 // 状态 tag 的 out-in 交接。位移一律禁掉：
@@ -1505,6 +1646,21 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
 }
 
+/* 日志文件弹窗顶部的「共 N 个文件 · 合计 X MB」+ 打包下载 */
+.log-files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.log-files-summary {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 /* =============== Animations =============== */
 @keyframes pulse {
   0%, 100% { opacity: 1; }
@@ -1544,9 +1700,8 @@ onBeforeUnmount(() => {
     align-items: stretch;
     gap: 10px;
 
-    // 竖排改在筛选区上做。左槽保持横向单子项 + stretch，
-    // 让唯一的子项（筛选区 / 批量区）撑满整行；若把 column 写在左槽上，
-    // 它继承来的 align-items: center 会在竖排下把子项压回内容宽。
+    // 竖排改在筛选区上做。左槽是 1×1 网格，子项默认就铺满整列宽，
+    // 这里把纵向对齐从 start 放回 stretch，让唯一还显示着的那一支填满行高。
     &__left {
       align-items: stretch;
     }
@@ -1579,6 +1734,16 @@ onBeforeUnmount(() => {
   .batch-actions {
     flex-wrap: wrap;
     width: 100%;
+  }
+
+  // 移动端把藏起来的那一支直接从流里拿掉。
+  // 桌面端留着它是为了锁死工具栏高度（dd-fixed-page 是定高 flex 列，工具栏矮多少表格就长多少），
+  // 但 dd-fixed-page 只在 ≥769px 生效，移动端是普通文档流、表格不会被工具栏挤压，
+  // 留着竖排的筛选区（4 个控件竖着摞起来）会在批量态白占一大截空高。
+  // 这条【只能】落在 ≤768px 内：写到外面桌面端就退回今天的跳动。
+  .toolbar__filters.is-swapped-out,
+  .batch-actions.is-swapped-out {
+    display: none;
   }
 
   .pagination-bar {

@@ -25,7 +25,10 @@ const form = ref({
   name: '',
   command: '',
   python_version: '3.12',
-  cron_expression: '0 0 * * *',
+  // 默认定时统一写成 6 段（秒 分 时 日 月 周），与随机生成器、后端 21 条出厂预设保持同一形态。
+  // `0 0 0 * * *` 与旧的 5 段 `0 0 * * *` 语义相同，都是每天 00:00:00。
+  // ⚠️ 5 段补 6 段永远是在【开头补 0】，末尾补 `*` 会把「每分钟」变成「每秒」。
+  cron_expression: '0 0 0 * * *',
   task_type: 'cron',
   timeout: 0,
   success_exit_codes: '0',
@@ -103,7 +106,8 @@ watch(() => props.visible, (val) => {
       name: props.task.name || '',
       command: props.task.command || '',
       python_version: props.task.python_version || getDefaultPythonVersion(),
-      cron_expression: props.task.cron_expression || '* * * * *',
+      // 6 段的「每分钟」是 `0 * * * * *`（秒固定 0），不是 `* * * * * *`（那是每秒）
+      cron_expression: props.task.cron_expression || '0 * * * * *',
       task_type: props.task.task_type || 'cron',
       timeout: props.task.timeout ?? 0,
       success_exit_codes: props.task.success_exit_codes || '0',
@@ -129,7 +133,8 @@ watch(() => props.visible, (val) => {
     form.value = {
       name: p?.name || '', command: p?.command || '',
       python_version: p?.python_version || getDefaultPythonVersion(),
-      cron_expression: p?.cron_expression || '* * * * *',
+      // 同上：6 段的「每分钟」是 `0 * * * * *`
+      cron_expression: p?.cron_expression || '0 * * * * *',
       task_type: p?.task_type || 'cron',
       timeout: 0, success_exit_codes: '0', random_delay_seconds: null, max_retries: 0, retry_interval: 60,
       notify_on_failure: false, notify_on_success: false, notification_channel_id: null, labels: [], depends_on: null,
@@ -148,7 +153,8 @@ watch([() => props.defaultPythonVersion, () => props.pythonRuntimes], () => {
 
 watch(() => form.value.task_type, (value) => {
   if (value === 'cron' && !form.value.cron_expression) {
-    form.value.cron_expression = '0 0 * * *'
+    // 与上面的表单默认值保持一致：6 段的每天 00:00:00
+    form.value.cron_expression = '0 0 0 * * *'
   }
 })
 

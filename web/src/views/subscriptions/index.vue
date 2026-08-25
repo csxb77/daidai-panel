@@ -9,6 +9,8 @@ import {
   type EventStreamConnection,
 } from "@/utils/sse";
 import { useResponsive } from "@/composables/useResponsive";
+import { useAuthStore } from "@/stores/auth";
+import { canAdminister } from "@/utils/roles";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
 import { formatDuration } from "@/utils/duration";
 import { formatDateTime } from "@/utils/datetime";
@@ -26,6 +28,12 @@ const selectedIdSet = computed(() => new Set(selectedIds.value));
 const { isMobile, dialogFullscreen } = useResponsive();
 const typeFilter = ref<"" | "git-repo" | "single-file" | "disabled">("");
 
+const authStore = useAuthStore();
+// 本页路由的 minRole 是 operator，而 GET /configs 是 JWTAuth() + RequireAdmin() 的管理员接口。
+// 不按角色 gate 的话，每个 operator 每次进这个页面都会打一次注定 403 的请求
+// （被 catch 静默吞掉、不弹错，但白白多一次调用）。
+const isAdmin = computed(() => canAdminister(authStore.user?.role));
+
 const filteredSubList = computed(() => {
   if (!typeFilter.value) return subList.value;
   if (typeFilter.value === "disabled")
@@ -41,6 +49,16 @@ const qlCommand = ref("");
 
 const settingsLoading = ref(false);
 const settingsSaving = ref(false);
+// 全局「覆盖拉取（默认）」的**只读展示值**，只供订阅编辑弹窗里那句「（当前：X）」使用。
+// 刻意不复用 settingsForm.subscription_force_overwrite：那个字段同时是「订阅设置」弹窗里
+// el-switch 的 v-model，而该弹窗的「取消」只做 showSettingsDialog = false、不重置表单。
+// 于是「拨动开关 → 取消 → 打开订阅编辑弹窗」会把用户已经撤销的值当成服务端现状展示出来，
+// 用户据此选了 inherit，下次拉取的实际行为和提示相反（提示保留本地、实际 reset --hard）。
+// 所以这里只在真正拿到/写入服务端值的时刻更新：页面加载、打开设置弹窗回包、设置保存成功、
+// 打开订阅编辑弹窗时的静默刷新。settingsForm 从此只负责设置弹窗自己的编辑态。
+const globalOverwriteDefault = ref(true);
+// 上面那个值到底读到没有。没读到时订阅表单不显示「当前：X」，见 loadGlobalOverwriteDefault。
+const globalOverwriteLoaded = ref(false);
 const settingsForm = ref({
   github_mirror: "",
   auto_add_cron: true,
@@ -84,6 +102,10 @@ const editForm = ref({
   auth_token: "",
   has_auth_token: false,
   alias: "",
+  // 覆盖拉取策略三态：inherit=跟随全局 / force=强制覆盖 / preserve=保留本地修改。
+  // 这个字段要在四个地方同步：这里的初值、openCreate、openEdit 回填、handleSave 提交，
+  // 漏掉任意一处的表现都是「设了但存不住」。
+  overwrite_mode: "inherit",
 });
 
 const sshKeys = ref<any[]>([]);
@@ -199,9 +221,32 @@ async function loadSSHKeys() {
   }
 }
 
+// 订阅表单里「跟随全局设置」那一项要当场标出全局开关现在是什么值，所以进页面就先读一次；
+// 打开「订阅设置」弹窗（handleOpenSettings）、保存设置（handleSaveSettings）、
+// 打开订阅编辑弹窗（openEdit）时都会再刷新一遍。
+//
+// /configs 是 admin-only 接口，所以这里先按角色 gate：operator 直接返回、根本不发这个必然 403 的请求。
+// 派生结论是「（当前：X）」这句话对 operator 永远不存在（globalOverwriteLoaded 保持 false）——
+// 这是有意为之：拿不到服务端真值时宁可不写，也别把前端写死的默认值当成实际值展示误导用户。
+async function loadGlobalOverwriteDefault() {
+  if (!isAdmin.value) return;
+  try {
+    const res = await configApi.list();
+    globalOverwriteDefault.value = readCfgBool(
+      res.data || {},
+      "subscription_force_overwrite",
+      true,
+    );
+    globalOverwriteLoaded.value = true;
+  } catch {
+    /* ignore：失败就沿用上一次读到的值，不弹错 */
+  }
+}
+
 onMounted(() => {
   loadData();
   loadSSHKeys();
+  loadGlobalOverwriteDefault();
 });
 
 onBeforeUnmount(() => {
@@ -251,6 +296,7 @@ function openCreate() {
     auth_token: "",
     has_auth_token: false,
     alias: "",
+    overwrite_mode: "inherit",
   };
   showEditDialog.value = true;
 }
@@ -312,6 +358,11 @@ async function handleOpenSettings() {
       "subscription_force_overwrite",
       true,
     );
+    // 这一刻读到的是服务端最新值，同步给只读展示 ref；此后用户在这个弹窗里怎么拨开关、
+    // 拨完是点保存还是点取消，都不会再影响订阅编辑弹窗里的「（当前：X）」。
+    globalOverwriteDefault.value =
+      settingsForm.value.subscription_force_overwrite;
+    globalOverwriteLoaded.value = true;
     settingsForm.value.default_cron_rule = readCfgStr(
       cfgs,
       "default_cron_rule",
@@ -347,6 +398,10 @@ async function handleSaveSettings() {
       default_cron_rule: settingsForm.value.default_cron_rule,
       repo_file_extensions: settingsForm.value.repo_file_extensions,
     });
+    // 保存成功 ⇒ 编辑态的值已经落到服务端，只读展示值同步跟上（失败时不动，展示的仍是旧的服务端值）。
+    globalOverwriteDefault.value =
+      settingsForm.value.subscription_force_overwrite;
+    globalOverwriteLoaded.value = true;
     const mirror = mirrorRaw || DEFAULT_GITHUB_MIRROR;
     githubMirror.value = normalizeMirror(mirror);
     localStorage.setItem(GITHUB_MIRROR_STORAGE_KEY, githubMirror.value);
@@ -492,8 +547,14 @@ function openEdit(row: any) {
     auth_token: "",
     has_auth_token: !!row.has_auth_token,
     alias: row.alias || "",
+    // 老库或老接口没有这个字段时回落 inherit（跟随全局），与后端归一口径一致。
+    overwrite_mode: row.overwrite_mode || "inherit",
   };
   showEditDialog.value = true;
+  // 「（当前：X）」展示的是全局开关：别的管理员在别处改过之后，本页那个值一旦读到就不会自己回落，
+  // 会一直陈旧到用户手动打开一次「订阅设置」。这里顺手静默刷新一次
+  //（非管理员在函数内部直接 return；失败就沿用旧值、不弹错），代价只有一次低频请求。
+  void loadGlobalOverwriteDefault();
 }
 
 async function handleSave() {
@@ -530,6 +591,9 @@ async function handleSave() {
       data.ssh_key_id = null;
       data.auth_username = "";
       data.auth_token = "";
+      // 单文件订阅没有 git 工作区，覆盖策略对它无意义（后端也不会读），
+      // 存成 inherit 免得用户先在 git 模式选了强制覆盖、改成单文件后还留着一个假设置。
+      data.overwrite_mode = "inherit";
     } else if (data.auth_type === "ssh") {
       data.auth_username = "";
       data.auth_token = "";
@@ -1093,12 +1157,32 @@ function viewLogDetail(log: any) {
                 />
                 <span class="dd-mobile-card__title">{{ row.name }}</span>
               </div>
-              <el-tag
-                size="small"
-                :type="row.type === 'git-repo' ? '' : 'warning'"
-              >
-                {{ row.type === "git-repo" ? "Git 仓库" : "单文件" }}
-              </el-tag>
+              <!--
+                标签整体包一层：title-row 是 space-between，直接并排放两个标签会被拉开到两端。
+                覆盖策略同桌面，只在「不是跟随全局」时才显示。
+              -->
+              <div class="subscription-card__title-tags">
+                <el-tag
+                  size="small"
+                  :type="row.type === 'git-repo' ? '' : 'warning'"
+                >
+                  {{ row.type === "git-repo" ? "Git 仓库" : "单文件" }}
+                </el-tag>
+                <el-tag
+                  v-if="row.overwrite_mode === 'force'"
+                  size="small"
+                  type="warning"
+                >
+                  强制覆盖
+                </el-tag>
+                <el-tag
+                  v-else-if="row.overwrite_mode === 'preserve'"
+                  size="small"
+                  type="info"
+                >
+                  保留本地
+                </el-tag>
+              </div>
             </div>
             <div class="dd-mobile-card__subtitle">{{ row.url }}</div>
           </div>
@@ -1197,6 +1281,37 @@ function viewLogDetail(log: any) {
                 round
               >
                 {{ row.type === "git-repo" ? "Git" : "文件" }}
+              </el-tag>
+              <!--
+                覆盖策略只在「不是跟随全局」时才挂标签：它是低频配置，
+                绝大多数订阅都是 inherit，常驻一列会白占桌面表格本就紧张的宽度（操作列已 fixed）。
+
+                文案在桌面端缩成「覆盖 / 保留」，与同格的「Git / 文件」一个风格（那两个也是桌面缩写、
+                移动端卡片才用全称）：这一列 min-width 只有 120，而「Git」+「强制覆盖」两个 small round
+                标签加 gap 粗算已经 124px、比列宽本身还宽，订阅名一个字都放不下，
+                force/preserve 那几行会靠 .sub-name-cell 的 flex-wrap 掉到第二行、行高比 inherit 行高一截。
+                缩写后两个标签约 96px，常规订阅名能和标签同排。
+                全称走 title 兜底（设计规范：省略后必须挂 title）。
+                注意标签里不要塞 el-icon —— EP 会把 .el-tag 内的任意 .el-icon 当成关闭按钮，
+                图标与文字会被拆成两行（见 design-system.md 的 Gotcha）。
+              -->
+              <el-tag
+                v-if="row.overwrite_mode === 'force'"
+                size="small"
+                type="warning"
+                round
+                title="强制覆盖：该订阅强制覆盖本地脚本文件，不跟随全局设置"
+              >
+                覆盖
+              </el-tag>
+              <el-tag
+                v-else-if="row.overwrite_mode === 'preserve'"
+                size="small"
+                type="info"
+                round
+                title="保留本地修改：该订阅拉取时保留本地脚本改动，不跟随全局设置"
+              >
+                保留
               </el-tag>
             </div>
           </template>
@@ -1520,6 +1635,43 @@ function viewLogDetail(log: any) {
             带下来）。含空格或中文的内容会被当作文字备注跳过，不参与检出。
           </div>
         </el-form-item>
+        <!--
+          覆盖拉取策略（订阅级三态）。只对 git 仓库出现——单文件订阅没有工作区，
+          后端在拉取分支里也压根不看这个值，显示出来只会让人以为它有用。
+          用单选而不是开关：开关只有两态，表达不了「跟随全局」这个默认档。
+        -->
+        <el-form-item
+          v-if="editForm.type === 'git-repo'"
+          label="覆盖拉取"
+          class="form-item--full"
+        >
+          <el-radio-group v-model="editForm.overwrite_mode">
+            <!--
+              这里必须读 globalOverwriteDefault（只读展示值）而不是
+              settingsForm.subscription_force_overwrite：后者是「订阅设置」弹窗里 el-switch 的
+              编辑态，而那个弹窗的「取消」不重置表单，读它会把用户已经撤销的值当成服务端现状展示。
+            -->
+            <el-radio value="inherit"
+              >跟随全局设置<template v-if="globalOverwriteLoaded"
+                >（当前：{{
+                  globalOverwriteDefault ? "强制覆盖" : "保留本地修改"
+                }}）</template
+              ></el-radio
+            >
+            <el-radio value="force">强制覆盖</el-radio>
+            <el-radio value="preserve">保留本地修改</el-radio>
+          </el-radio-group>
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            只作用于脚本文件：强制覆盖会在拉取前丢弃本地改动，保留本地会先暂存再恢复。<strong>不影响任务配置</strong>——手动改过名称/定时的任务会自动锁定，拉取不会覆盖。首次拉取（本地还没有仓库时）不适用，一律按远端内容检出。
+          </div>
+        </el-form-item>
         <el-form-item label="拉取前指令" class="form-item--full">
           <el-input
             v-model="editForm.pre_script"
@@ -1719,7 +1871,7 @@ function viewLogDetail(log: any) {
             订阅源删除脚本后，自动删除对应定时任务
           </div>
         </el-form-item>
-        <el-form-item label="覆盖拉取">
+        <el-form-item label="覆盖拉取（默认）">
           <el-switch
             v-model="settingsForm.subscription_force_overwrite"
             inline-prompt
@@ -1727,7 +1879,7 @@ function viewLogDetail(log: any) {
             inactive-text="关"
           />
           <div class="settings-hint">
-            只作用于脚本文件：开启后拉取前丢弃本地改动，关闭则先暂存再恢复。<b>不影响任务配置</b>——手动改过名称/定时的任务会自动锁定，拉取不会覆盖
+            只作用于脚本文件：开启后拉取前丢弃本地改动，关闭则先暂存再恢复。<b>不影响任务配置</b>——手动改过名称/定时的任务会自动锁定，拉取不会覆盖。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑弹窗里选「强制覆盖 / 保留本地修改」
           </div>
         </el-form-item>
         <el-form-item label="默认 Cron 规则">
@@ -1947,6 +2099,10 @@ function viewLogDetail(log: any) {
   display: flex;
   align-items: center;
   gap: 8px;
+  // 覆盖策略标签之后，这一格最多可能同时出现「Git」+「覆盖」两个标签（都是桌面缩写，全称挂 title）。
+  // 缩写后两个标签约 96px，常规订阅名能和标签同排；这里仍保留换行兜底，
+  // 遇到超长订阅名时让标签整块掉到第二行，而不是把订阅名挤成一列一个字。
+  flex-wrap: wrap;
 }
 .sub-name-text {
   font-weight: 500;
@@ -2029,6 +2185,14 @@ function viewLogDetail(log: any) {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+}
+// 类型标签 + 覆盖策略标签同处右侧，靠内部 gap 挨在一起，不参与外层的 space-between 分配
+.subscription-card__title-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .subscription-card__actions > * {
   flex: 1 1 calc(50% - 4px);

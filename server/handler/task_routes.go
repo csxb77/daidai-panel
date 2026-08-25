@@ -11,6 +11,9 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 	// 因此不能放进下面带 JWTAuth 的 tasks 组。票据由 /log-files/:filename/raw-ticket 签发，
 	// 那条接口的鉴权与其它日志文件接口完全一致。
 	r.GET("/tasks/:id/log-files/:filename/raw", h.DownloadRawLogFile)
+	// 日志文件夹打包下载，同样是票据鉴权。静态段 archive 与同层的 :filename 共存，
+	// 和下面 /tasks/export、/tasks/views 与 /tasks/:id 是同一个形态。
+	r.GET("/tasks/:id/log-files/archive", h.DownloadLogArchive)
 
 	tasks := r.Group("/tasks", middleware.JWTAuth(), middleware.OpenAPIAccess("tasks"))
 	{
@@ -19,6 +22,7 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.GET("/:id/latest-log", middleware.RequireRole("viewer"), h.LatestLog)
 		tasks.GET("/:id/live-logs", middleware.RequireRole("viewer"), h.LiveLogs)
 		tasks.GET("/:id/log-files", middleware.RequireRole("viewer"), h.LogFiles)
+		tasks.GET("/:id/log-files/archive-ticket", middleware.RequireRole("viewer"), h.LogArchiveDownloadTicket)
 		tasks.GET("/:id/log-files/:filename", middleware.RequireRole("viewer"), h.LogFileContent)
 		tasks.GET("/:id/log-files/:filename/download", middleware.RequireRole("viewer"), h.DownloadLogFile)
 		tasks.GET("/:id/log-files/:filename/raw-ticket", middleware.RequireRole("viewer"), h.RawLogFileDownloadTicket)

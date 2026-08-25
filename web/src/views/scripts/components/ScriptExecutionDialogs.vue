@@ -258,7 +258,12 @@ function markDebugCodeChanged() {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-all;
-  color: var(--el-text-color-primary);
+  // 必须用 --dd-log-text-color 而不是面板主题文字色：日志区底色来自 log_background_color，
+  // 与面板明暗主题是两套独立取值，--dd-log-text-color 才是 panelAppearance 按日志底色亮度
+  // 推导出来的配对前景色。写 --el-text-color-primary 会出现「浅色面板的深灰字压在深色日志底上」
+  // ——这正是脚本调试弹窗日志看不清的原因（全站只有这一处写错）。
+  // 兜底值保留面板文字色，覆盖变量还没挂上（首屏 applyPanelAppearance 之前）的一瞬间。
+  color: var(--dd-log-text-color, var(--el-text-color-primary));
   flex: 1;
 }
 
