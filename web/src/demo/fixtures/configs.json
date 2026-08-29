@@ -71,7 +71,7 @@
       "group": "backup",
       "group_label": "定时备份",
       "label": "启用定时备份",
-      "order": 32,
+      "order": 33,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -98,7 +98,7 @@
           "label": "每月"
         }
       ],
-      "order": 33,
+      "order": 34,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -113,7 +113,7 @@
       "label": "每月执行日",
       "max": 28,
       "min": 1,
-      "order": 36,
+      "order": 37,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -126,7 +126,7 @@
       "group": "backup",
       "group_label": "定时备份",
       "label": "文件名前缀",
-      "order": 37,
+      "order": 38,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -139,7 +139,7 @@
       "group": "backup",
       "group_label": "定时备份",
       "label": "加密密码",
-      "order": 38,
+      "order": 39,
       "registered": true,
       "secret": true,
       "updated_at": null,
@@ -152,7 +152,7 @@
       "group": "backup",
       "group_label": "定时备份",
       "label": "备份内容",
-      "order": 39,
+      "order": 40,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -165,7 +165,7 @@
       "group": "backup",
       "group_label": "定时备份",
       "label": "执行时间",
-      "order": 34,
+      "order": 35,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -208,7 +208,7 @@
           "label": "周六"
         }
       ],
-      "order": 35,
+      "order": 36,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -234,7 +234,7 @@
       "group": "security",
       "group_label": "安全",
       "label": "启用极验验证码",
-      "order": 45,
+      "order": 46,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -257,7 +257,7 @@
           "label": "严格拦截"
         }
       ],
-      "order": 48,
+      "order": 49,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -270,7 +270,7 @@
       "group": "security",
       "group_label": "安全",
       "label": "Captcha ID",
-      "order": 46,
+      "order": 47,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -283,7 +283,7 @@
       "group": "security",
       "group_label": "安全",
       "label": "Captcha Key",
-      "order": 47,
+      "order": 48,
       "registered": true,
       "secret": true,
       "updated_at": null,
@@ -423,7 +423,7 @@
       "label": "APP 端会话上限",
       "max": 20,
       "min": 1,
-      "order": 44,
+      "order": 45,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -468,7 +468,7 @@
       "label": "网页端会话上限",
       "max": 20,
       "min": 1,
-      "order": 43,
+      "order": 44,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -562,7 +562,7 @@
           "label": "仅写文件"
         }
       ],
-      "order": 40,
+      "order": 41,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -585,7 +585,7 @@
           "label": "systemd"
         }
       ],
-      "order": 41,
+      "order": 42,
       "registered": true,
       "secret": false,
       "updated_at": null,
@@ -598,12 +598,35 @@
       "group": "branding",
       "group_label": "面板与运行时",
       "label": "systemd 服务名",
-      "order": 42,
+      "order": 43,
       "registered": true,
       "secret": false,
       "updated_at": null,
       "value": "daidai-panel",
       "value_type": "string"
+    },
+    "panel_shape_style": {
+      "default_value": "square",
+      "description": "网页端界面的圆角风格。直角=扁平工具型（默认）；圆角=各控件与卡片带圆角。仅网页端生效，APP 不受影响。",
+      "group": "branding",
+      "group_label": "面板与运行时",
+      "label": "界面圆角",
+      "options": [
+        {
+          "value": "square",
+          "label": "直角"
+        },
+        {
+          "value": "rounded",
+          "label": "圆角"
+        }
+      ],
+      "order": 32,
+      "registered": true,
+      "secret": false,
+      "updated_at": null,
+      "value": "square",
+      "value_type": "enum"
     },
     "panel_title": {
       "default_value": "呆呆面板",

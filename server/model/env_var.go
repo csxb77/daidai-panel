@@ -6,7 +6,12 @@ import (
 )
 
 type EnvVar struct {
-	ID        uint      `gorm:"primarykey" json:"id"`
+	ID uint `gorm:"primarykey" json:"id"`
+	// 🔴 这里的 index 是普通索引，绝对不要「顺手补齐」成 uniqueIndex。
+	// 同名多条是青龙风格的刻意功能（多账号场景）：新建一律纯 insert，运行时由
+	// BuildManagedRuntimeEnvMap 按 name 分组再用 & 拼接暴露给脚本，前端还有「复制同名变量」入口。
+	// database.dropEnvVarUniqueIndex() 每次启动都会主动 DROP 掉历史遗留的唯一索引，
+	// 在这里加唯一键既会废掉多账号能力，也会和那段启动清理逻辑互相拆台。
 	Name      string    `gorm:"size:128;index;not null" json:"name"`
 	Value     string    `gorm:"type:text;default:''" json:"value"`
 	Remarks   string    `gorm:"size:256;default:''" json:"remarks"`

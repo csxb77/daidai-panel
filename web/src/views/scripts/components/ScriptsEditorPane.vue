@@ -452,7 +452,8 @@ watch(
   width: 100%;
   padding: 36px 32px 32px;
   text-align: center;
-  border-radius: 0;
+  // 空态提示卡是独立成块的容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-light);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
@@ -462,7 +463,8 @@ watch(
   width: 44px;
   height: 44px;
   margin: 0 auto 14px;
-  border-radius: 0;
+  // 44×44 的图标色底属控件类表面 → control 档（与 .dd-stat-card__icon 同档，不做正圆免得像头像）
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -521,7 +523,7 @@ watch(
 }
 
 /* 展开把手：与 ScriptsSidebar.vue 里那个收起按钮（.icon-btn）同一副长相——
-   30×30 直角、透明底、1px 描边，hover 只改颜色不做位移。
+   30×30、透明底、1px 描边，hover 只改颜色不做位移；圆角统一吃 --dd-radius-control。
    两处相隔一个组件边界、scoped 样式互相够不到，只能各写一份；
    数值要改的话两边一起改。 */
 .sidebar-expand-btn {
@@ -531,7 +533,8 @@ watch(
   flex-shrink: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
-  border-radius: 0;
+  // 图标按钮属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   color: var(--el-text-color-secondary);
   cursor: pointer;
   display: inline-flex;
@@ -561,7 +564,8 @@ watch(
 .file-icon {
   width: 36px;
   height: 36px;
-  border-radius: 0;
+  // 36×36 的文件类型图标色底属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -624,7 +628,10 @@ watch(
   align-items: center;
   height: 20px;
   padding: 0 8px;
-  border-radius: 0;
+  // 类名虽叫 pill，实际是「语言 / 只读 / 二进制」这类静态标签，不是状态灯：
+  // 与 el-tag、.dd-env-chip 同归控件类 → control 档，
+  // 好和旁边真正的状态 chip（.unsaved-pulse，pill 档）拉开主次。
+  border-radius: var(--dd-radius-control);
   font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.4px;
@@ -653,16 +660,20 @@ watch(
   gap: 5px;
   height: 20px;
   padding: 0 9px 0 6px;
-  border-radius: 0;
+  // 「未保存」是状态 chip，天然胶囊 → pill 档（与 .dd-status-chip 同档）
+  border-radius: var(--dd-radius-pill);
   font-size: 11px;
   color: #e6a23c;
   background: rgba(230, 162, 60, 0.1);
 
-  /* 未保存标记：直角小方块 + 明暗呼吸（不做缩放形变） */
+  /* 未保存标记：呼吸点 + 明暗渐变（不做缩放形变） */
   .unsaved-dot {
     width: 6px;
     height: 6px;
-    border-radius: 0;
+    // 白名单：形状承载语义 —— 6×6 的呼吸点是「有未保存改动」的状态灯，
+    // 方化后和旁边的文字糊成一小块色斑，认不出是状态指示。
+    // 两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度（同 global.scss 的 .pulse-dot）。
+    border-radius: 50%;
     background: #e6a23c;
     animation: unsaved-pulse 1.6s ease-in-out infinite;
   }
@@ -692,7 +703,8 @@ watch(
 .hero-actions {
   display: inline-flex;
   padding: 4px;
-  border-radius: 0;
+  // 按钮组的灰底槽 → control 档（和槽内 .action-btn 同档，圆角一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 8px;
@@ -700,7 +712,8 @@ watch(
 }
 
 .action-btn {
-  border-radius: 0;
+  // 按钮属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   font-weight: 500;
   transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
@@ -770,7 +783,8 @@ watch(
   margin: 24px;
   padding: 24px 28px;
   border: 1px dashed var(--el-border-color);
-  border-radius: 0;
+  // 二进制文件提示块是带外边距、独立成块的容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-light);
 
   .binary-card-title {
@@ -853,7 +867,8 @@ watch(
     .file-icon {
       width: 30px;
       height: 30px;
-      border-radius: 0;
+      // 移动端只缩尺寸，圆角仍与桌面端同档
+      border-radius: var(--dd-radius-control);
     }
 
     .file-title {

@@ -239,13 +239,15 @@ const binaryProxyOptions = [
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 帮助说明区块属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-lighter);
 
   code {
     display: block;
     padding: 7px 9px;
-    border-radius: 0;
+    // 区块内的代码块（四周有 12px 留白、不贴边）→ surface 档
+    border-radius: var(--dd-radius-surface);
     background: var(--el-bg-color);
     color: var(--el-text-color-primary);
     font-family: var(--dd-font-mono);
@@ -272,7 +274,8 @@ const binaryProxyOptions = [
   margin-bottom: 12px;
   padding: 10px 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 镜像来源提示块属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-lighter);
   color: var(--el-text-color-secondary);
   font-size: 13px;
@@ -294,7 +297,8 @@ const binaryProxyOptions = [
   min-height: 40px;
   padding: 9px 12px;
   border: 1px solid var(--el-border-color);
-  border-radius: 0;
+  // 可点击的镜像选项是控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   background: var(--el-bg-color);
   color: var(--el-text-color-primary);
   cursor: pointer;

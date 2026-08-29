@@ -68,7 +68,10 @@
   display: inline-block;
   width: 6px;
   height: 6px;
-  border-radius: 0;
+  // 白名单：形状承载语义 —— 6×6 的呼吸点是「运行中」的状态指示，
+  // 方化后与旁边的文字/标签糊成一小块色斑，认不出是状态灯。
+  // 两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度。
+  border-radius: 50%;
   background: currentColor;
   flex-shrink: 0;
   position: relative;
@@ -158,45 +161,69 @@ body {
   --el-color-primary-light-7: #c6e2ff;
   --el-color-primary-light-9: #ecf5ff;
   --el-color-primary-dark-2: #337ecc;
-  // ===== 形状契约：全站直角 =====
-  // v3.0.0 起统一为纯扁平直角（青龙同款观感），所有圆角刻度归零。
-  // 保留这些令牌是为了让 Element Plus 内部引用（它到处用 --el-border-radius-*）也一并方化，
-  // 不要为了「看起来更干净」把令牌删掉，否则 EP 会退回自带的 4px/8px。
+  // ===== 形状契约：三档圆角刻度（v3.1.0 起可配置）=====
+  // v3.0.0 ~ v3.0.10 是「全站硬直角」；v3.1.0 起改成可切换：系统配置 panel_shape_style
+  // 取 square（默认，直角）或 rounded（圆角），由 utils/panelAppearance.ts 在运行时
+  // 往 documentElement 上写下面这三条私有刻度。这里只写 square 档（全 0）。
+  //
+  // 🔴 这三条【绝对不能带 !important】：运行时用的是 documentElement.style.setProperty()，
+  //    内联声明是普通重要级；一旦这里带了 !important，内联值就压不过来，圆角模式会整个失效。
+  //    （下面派生出去的 --el-* 三条则相反，必须带 !important，理由见那一段。）
+  //
+  // 三档的适用范围 —— 新写样式一律从这三档里挑一个，不要再写死像素：
+  //   control  按钮、输入框、select、tag、分段项、图标按钮、下拉/浮层菜单项、日期控件
+  //   surface  卡片、表格容器、弹窗、浮层容器、通知、消息框、移动端卡片、日志面板
+  //   pill     状态 chip、计数角标、进度条、滚动条
+  // 例外有三类：①「贴边内嵌于已圆角容器」的元素保持 0（各处都写了注释）；
+  //            ② 形状承载语义的白名单（开关、状态灯、头像、单选点、加载弧、标签关闭键）
+  //               固定圆形，不吃令牌；
+  //            ③ 🔴 **边长 ≤12px 的分类/装饰色标固定 2px**，也不吃令牌。
+  //
+  // 第 ③ 类是 v3.1.0 浏览器实测后新立的判据，理由是 CSS 的圆角收缩规则：
+  //   一条边上两个半径之和超过边长时，全部半径按同一系数等比缩小。
+  //   ⇒ control 档的 6px 落在 10×10 上会被夹成 5px、落在 8×8 上夹成 4px，两者都是【正圆】。
+  // 所以「刻意不进白名单、吃 control 以便和圆形状态灯区分形状」这种写法在圆角模式下
+  // 会自动失效，注释写的理由和实际渲染结果正好相反。这类小色标（文件类型标、分组色标、
+  // 图例色块）表达的是分类/装饰、不随运行状态变，固定 2px 才能稳定保住方形轮廓。
+  //   判据速查：形状承载语义 → 50%；≤12px 且只表达分类/装饰 → 2px；其余 → 吃三档令牌。
+  //
+  // 注：旧的 --dd-card-radius / --dd-radius-shell / --dd-radius-sm 三个令牌已删除。
+  // 它们全仓 0 处引用（是 v3.0.0 归零时留下的死令牌），职责已被上面这三档刻度完全取代。
+  --dd-radius-control: 0;
+  --dd-radius-surface: 0;
+  --dd-radius-pill: 0;
+  // Element Plus 的三条基础圆角令牌全部派生自上面的刻度，切 shape 时它们跟着一起变。
   //
   // ⚠️ 这三条【必须带 !important】，2026-08-24 浏览器实测才发现的静默失效：
   //    EP 在 theme-chalk/base.css 与 el-var.css 里也写了 `:root{--el-border-radius-base:4px}`，
   //    与这里【特异性完全相同】(0,1,0)。而 ElementPlusResolver 的 importStyle:'css'
   //    让组件样式随 SFC 懒注入，必然排在入口包的 global.scss 之后 —— 同特异性后来者赢，
-  //    于是这三行一直是死的，运行时 --el-border-radius-base 实际是 4px。
+  //    去掉 !important 拿到的就是 EP 自带的 4px，而不是这里写的值（看着「生效了」只是巧合）。
   //
-  //    后果比看上去大，因为凡是【没有被单独写死 border-radius:0】的地方都在吃这个令牌：
+  //    影响面比看上去大，因为凡是【没有被单独写死 border-radius】的地方都在吃这个令牌：
   //      - `.el-button--small{border-radius:calc(var(--el-border-radius-base) - 1px)}`
-  //        → 全站 size="small" 的按钮一直是 3px 圆角（它与 global 里那条 `.el-button` 打平，也压不住）
-  //      - `.el-select-dropdown` / `.el-dropdown-menu` / `.el-date-editor` → 4px
-  //    实测一个普通页面上能数出 39 处非零圆角。
+  //        → 圆角档是 calc(6px - 1px)=5px；直角档 calc(0px - 1px) 会被夹到 0，与现状一致
+  //      - `.el-select-dropdown` / `.el-dropdown-menu` / `.el-date-editor` → 直接吃令牌
+  //    历史实测：不带 !important 时一个普通页面能数出 39 处非零圆角。
   //
   //    `!important` 对自定义属性声明是有效的，且与加载顺序无关（同 --el-dialog-margin-top
   //    那一处的处理方式），所以这是唯一能钉死结果的写法。
-  //    注意：--el-border-radius-circle 属白名单，刻意不动（见下方注释）。
-  --el-border-radius-base: 0 !important;
-  --el-border-radius-small: 0 !important;
-  --el-border-radius-round: 0 !important;
+  //    注意：--el-border-radius-circle 属白名单，两种模式下都刻意不动（见下方注释）。
+  --el-border-radius-base: var(--dd-radius-control) !important;
+  --el-border-radius-small: var(--dd-radius-control) !important;
+  --el-border-radius-round: var(--dd-radius-pill) !important;
   // 浮层（tooltip / dropdown / select 下拉 / date-picker 面板）的圆角是另一条独立链：
   //   .el-popper 的 --el-popper-border-radius 取自 --el-popover-border-radius（缺省回退 4px）
-  // 它同样绕开 --el-border-radius-base，不归零的话所有浮层会保留 4px 圆角。
-  // EP 没有在 :root 定义 --el-popover-border-radius，所以这里补 0 能兜住全部普通 popper；
-  // el-popover 自身另有同名令牌声明，见下方 .el-popover 就地归零。
-  --el-popover-border-radius: 0;
+  // 它绕开 --el-border-radius-base；浮层是「容器」类表面，所以吃 surface 档。
+  // EP 没有在 :root 定义 --el-popover-border-radius，所以这里补一条能兜住全部普通 popper；
+  // el-popover 自身另有同名令牌声明（写在元素上、会赢过继承值），见下方 .el-popover 那一处。
+  --el-popover-border-radius: var(--dd-radius-surface);
   // 注意：--el-border-radius-circle 属白名单（el-radio 圆点的来源），刻意不动。
   --dd-sidebar-width: 220px;
   --dd-header-height: 56px;
   --dd-page-padding: 20px;
-  --dd-card-radius: 0;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   // ===== 表面质感令牌 =====
-  // 圆角刻度（外壳 / 小控件）同样归零，保留令牌名是为了兼容已有引用点。
-  --dd-radius-shell: 0;
-  --dd-radius-sm: 0;
   // 阴影刻度：纯扁平方案下不再用阴影制造悬浮层次，一律 none；
   // 需要区分层级的地方改用 1px 边框（--el-border-color-lighter）。
   --dd-shadow-card: none;
@@ -245,7 +272,8 @@ a {
 
 ::-webkit-scrollbar-thumb {
   background: var(--el-border-color);
-  border-radius: 0;
+  // 滚动条滑块只有 6px 宽，pill 档在圆角模式下正好是两端半圆的细条
+  border-radius: var(--dd-radius-pill);
   &:hover {
     background: var(--el-text-color-placeholder);
   }
@@ -256,7 +284,9 @@ a {
 }
 
 .el-button {
-  border-radius: 0;
+  // 与 --el-border-radius-base 同值（它也派生自 control 档），写在这里只是让意图显式；
+  // size="small" 仍走 EP 自己的 calc(base - 1px)，不在这条规则的管辖范围内。
+  border-radius: var(--dd-radius-control);
   font-weight: 500;
   // 纯扁平：按钮只做颜色过渡，不再有按下缩放与浮起阴影
   transition:
@@ -268,7 +298,7 @@ a {
 // 主按钮不再做渐变 + 辉光覆盖，直接沿用 Element Plus 原生实心色：
 // 静置 --el-color-primary、hover 换浅一档底色，符合「hover 只换颜色」的扁平规则。
 
-// 圆角走 --el-card-border-radius，归零见文件末尾的「Element Plus 圆角兜底」一块。
+// 圆角走 --el-card-border-radius，刻度化见文件末尾的「Element Plus 圆角兜底」一块。
 .el-card {
   // 去阴影后，卡片与页面底色的分隔完全依赖这条 1px 边框
   border: 1px solid var(--el-border-color-lighter);
@@ -294,7 +324,8 @@ a {
   //    时跑一次；EP 的 el-dialog 默认 destroy-on-close=false，同一个弹窗第二次打开
   //    DOM 被复用，动画不会重放。实测过：第 2、3 次打开时 getAnimations() 返回空数组。
   //    进场位移已改挂到 `.dialog-fade-enter-active .el-overlay-dialog`，见下方浮层动画段。
-  border-radius: 0;
+  // 弹窗属容器类表面，吃 surface 档
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   // 注意：这条 margin-bottom 不能删。Element Plus 原生写的是
   //     `margin: var(--el-dialog-margin-top, 15vh) auto 50px;`
@@ -558,7 +589,7 @@ a {
 }
 
 // el-tag 的圆角走 EP 自己的私有令牌（--el-tag-border-radius / -rounded），
-// 归零逻辑统一放到文件末尾的「Element Plus 圆角兜底」一块，这里只留排版相关的声明。
+// 刻度化统一放到文件末尾的「Element Plus 圆角兜底」一块，这里只留排版相关的声明。
 .el-tag {
   font-weight: 500;
 }
@@ -582,7 +613,8 @@ a {
 
 .el-input {
   .el-input__wrapper {
-    border-radius: 0;
+    // 输入框属控件类表面
+    border-radius: var(--dd-radius-control);
     // 注意：这里的 box-shadow 过渡针对的是 Element Plus 用 inset box-shadow 画的输入框边框，
     // 属于功能性描边（不是悬浮阴影），不在去阴影范围内。
     transition: box-shadow var(--dd-transition);
@@ -591,7 +623,8 @@ a {
 
 .el-select {
   .el-select__wrapper {
-    border-radius: 0;
+    // select 触发器属控件类表面，与 .el-input__wrapper 同档
+    border-radius: var(--dd-radius-control);
     // EP 只给了 `transition: var(--el-transition-duration)`（= all 0.3s）。
     // all 会把 inset 描边、字色、背景一起过渡，而且 0.3s 不吃项目令牌。
     // 这里按属性收紧：inset box-shadow 是 EP 用来画输入框边框的功能性描边，
@@ -680,8 +713,8 @@ a {
 // Split Button（components/ui/DdSplitButton.vue 用的 el-dropdown split-button）
 // ----------------------------------------------------------------------------
 // 圆角不用管：EP 的 split-button 内部是 el-button-group，它那一组圆角规则全部
-// 取自 --el-border-radius-base，已被 :root 归零；主体与 caret 之间的 -1px 负边距
-// 也由 el-button-group 自己处理，不需要额外方化。
+// 取自 --el-border-radius-base，已在 :root 派生自 --dd-radius-control；主体与 caret
+// 之间的 -1px 负边距也由 el-button-group 自己处理，不需要额外处理形状。
 //
 // 唯一要补的是【中缝的可见度】。EP 用一个 1px 的 ::before 伪元素画中缝
 // （而不是 border-left，因为 border 会被 button-group 的负边距压掉），
@@ -722,9 +755,9 @@ a {
   }
 }
 
-// el-switch 方化统一放到文件末尾的「Element Plus 圆角兜底」一块。
-// 这里原先写的 `.el-switch .el-switch__core` 与 EP 的尺寸变体
-// `.el-switch--small/--large .el-switch__core` 特异性打平，压不住，见那一块的说明。
+// el-switch 的形状处理统一放到文件末尾的「Element Plus 圆角兜底」一块。
+// v3.1.0 起它进了白名单：轨道与滑块两种 shape 模式下都保持 EP 原本的圆形，
+// 但仍要按尺寸变体逐档写（特异性问题见那一块的说明）。
 
 .el-form-item__label {
   font-weight: 500;
@@ -735,7 +768,8 @@ a {
   border-right: none !important;
 
   .el-menu-item {
-    border-radius: 0;
+    // 侧栏菜单项属控件类表面（与下拉菜单项同档）
+    border-radius: var(--dd-radius-control);
     margin: 2px 8px;
     height: 44px;
     line-height: 44px;
@@ -781,13 +815,14 @@ a {
   }
 }
 
-// 圆角走 --el-messagebox-border-radius，归零见文件末尾的「Element Plus 圆角兜底」一块。
+// 圆角走 --el-messagebox-border-radius，刻度化见文件末尾的「Element Plus 圆角兜底」一块。
 .el-message-box {
   padding: 24px;
 }
 
 .el-notification {
-  border-radius: 0;
+  // 通知是浮层容器，吃 surface 档
+  border-radius: var(--dd-radius-surface);
   // 去掉浮层阴影后，靠 1px 边框与页面内容分隔
   border: 1px solid var(--el-border-color-lighter);
 }
@@ -801,7 +836,8 @@ a {
 // ============================================================================
 
 .el-message {
-  border-radius: 0;
+  // 轻提示是浮层容器，与 el-notification 同属 surface 档
+  border-radius: var(--dd-radius-surface);
 
   // EP 把 transform / top / bottom 的时长【写死成 .4s】（见 theme-chalk/el-message.css），
   // 不走任何 CSS 变量。后果有二：
@@ -862,7 +898,8 @@ a {
   // 边框与文字都取提示条的语义色：成功提示上是绿框，失败提示上是红框，自动成套。
   // 这里刻意【不用 currentcolor】——见下面 hover 的说明。
   border: 1px solid var(--el-message-text-color, var(--el-color-info));
-  border-radius: 0;
+  // 提示条里的操作按钮属控件类表面
+  border-radius: var(--dd-radius-control);
   background: transparent;
   color: var(--el-message-text-color, var(--el-color-info));
   font-size: 12px;
@@ -901,7 +938,7 @@ a {
   }
 }
 
-// 圆角走 --el-pagination-border-radius，归零见文件末尾的「Element Plus 圆角兜底」一块。
+// 圆角走 --el-pagination-border-radius，刻度化见文件末尾的「Element Plus 圆角兜底」一块。
 .el-pagination {
   .el-pager li {
     min-width: 32px;
@@ -916,6 +953,11 @@ a {
 // ----------------------------------------------------------------------------
 // EP 有三类机制会绕过 :root 里的 --el-border-radius-* 基础令牌，前两轮排查各只
 // 覆盖了一类，所以一直有漏网的圆角。这里集中处理，新增覆盖请一律加到本块内。
+//
+// 🔴 v3.1.0 起本块不再是「一律 0」，而是【按类别取 --dd-radius-* 三档刻度】：
+//    直角模式下三档都是 0（等价于原来的写法），圆角模式下由运行时改写成 6/10/999px。
+//    新增覆盖时先判断它是控件（control）、容器（surface）还是天然胶囊（pill），
+//    再挑对应的档；只有「贴边内嵌于已圆角容器」和「形状承载语义」两类才写死值。
 //
 // 机制 A：私有圆角令牌，且声明在**组件根元素**上而不是 :root
 //   例：`.el-tag{--el-tag-border-radius:4px}`、`.el-pagination{--el-pagination-border-radius:2px}`
@@ -937,9 +979,13 @@ a {
 //   就是这么失效的。源码顺序在这里不可靠，只能靠 !important 把结果钉死。
 //   （同类先例：上面 .el-dialog 的 --el-dialog-margin-top、下面的暗色补丁段。）
 //
-// 白名单，刻意不动，别顺手加进来：
+// 白名单（形状承载语义/可供性，两种 shape 模式下都保持圆形），别顺手改成吃令牌：
 //   - `--el-border-radius-circle`：el-radio 圆点的取值来源，圆=单选是通用可供性。
-//     下面方化 el-switch 滑块时也只按选择器就地压，不碰这个全局令牌。
+//   - el-switch 的轨道与滑块：轨道保留 EP 原值（10px / small 8px / large 12px），
+//     滑块保留 --el-border-radius-circle。圆头轨道 + 圆滑块是「可拨动」的通用可供性，
+//     方化后与两段式标签按钮无法区分。见下方 el-switch 那一段。
+//   - el-badge 的 dot 模式（8×8 小红点）与 .pulse-dot（6×6 呼吸点）：状态灯，见各自注释。
+//   - el-tag 的图标底与关闭键 hover 底（50%）：圆底是「可点」的暗示。
 //   - loading 旋转圆弧（.el-loading-spinner / .el-button .el-icon.is-loading / LoadingMotion.vue）。
 //   - 更新与恢复进度弹窗的 .update-progress-orbit / .ring / .update-progress-core
 //     （三者共用圆心，方化会穿破内圈环；它们是自绘 div，不走 el-progress）。
@@ -958,92 +1004,165 @@ a {
 //    而不是假设 :root 的基础令牌能兜住——这三类机制里有两类是兜不住的。
 // ============================================================================
 
-// —— 机制 A：组件私有令牌，在组件根元素上就地归零 ——
+// —— 机制 A：组件私有令牌，在组件根元素上就地改派生 ——
 // 下面这几个是全部用到的组件里仅有的「硬编码像素值」私有圆角令牌，其余（--el-input-border-radius /
-// --el-dialog-border-radius / --el-alert-border-radius-base / --el-checkbox-border-radius）
-// 都取自 --el-border-radius-base|small，已被 :root 归零覆盖，不必重复处理。
+// --el-dialog-border-radius / --el-alert-border-radius-base）都取自 --el-border-radius-base|small，
+// 已在 :root 派生自 control 档，不必重复处理。
+// ⚠️ --el-checkbox-border-radius 也取自 --el-border-radius-small，但它【尺寸太小、不能吃整档】，
+//    需要单独缩比例，见本段末尾的 .el-checkbox 一处。
 .el-card {
   // `.el-card{--el-card-border-radius:4px}`——整个系统设置页都是 el-card，漏了很显眼。
-  --el-card-border-radius: 0 !important;
+  // 卡片是容器类表面 → surface 档。
+  --el-card-border-radius: var(--dd-radius-surface) !important;
 }
 
 .el-tag {
   // .el-tag 取 --el-tag-border-radius（4px）；.el-tag.is-round 取 -rounded（9999px 胶囊）。
-  // 归零后模板里散落的 `round` 属性自动方化，不必逐个去删。
-  --el-tag-border-radius: 0 !important;
-  --el-tag-border-radius-rounded: 0 !important;
+  // 标签属控件类表面，两条都收到 control 档：这样模板里散落的 `round` 属性不会在
+  // 圆角模式下突然变成长胶囊、和旁边的方角标签混着出现，观感统一。
+  --el-tag-border-radius: var(--dd-radius-control) !important;
+  --el-tag-border-radius-rounded: var(--dd-radius-control) !important;
 }
 
 .el-pagination {
   // 一条令牌同时管 .el-pager li 与 .btn-prev / .btn-next（EP 两处都是 2px）。
-  --el-pagination-border-radius: 0 !important;
+  // 页码按钮属控件类表面 → control 档。
+  --el-pagination-border-radius: var(--dd-radius-control) !important;
 }
 
-// --el-messagebox-border-radius(4px) 是少数几个 EP 写在 :root 而非组件根元素上的。
-// el-message-box.css 在 main.ts 里是 eager import 且排在 global.scss 之前，所以原来那条
-// `.el-message-box{border-radius:0}` 靠加载顺序侥幸赢了——但这依赖 main.ts 的 import 顺序，
-// 谁挪一下那两行就会静默回退。这里改成压令牌 + !important，跟其它组件保持同一种处理方式。
-:root {
-  --el-messagebox-border-radius: 0 !important;
+// 🔴 --el-messagebox-border-radius(4px) 原来在这里是靠 `:root` 压的，
+//    但去 theme-chalk 核对后确认：EP 是写在【组件根元素】上的
+//    （`.el-message-box{--el-messagebox-border-radius:4px; ... border-radius:var(...)}`），
+//    不是写在 :root。元素上的声明会赢过从 :root 继承来的值，跟 !important 无关
+//    ——也就是说原来那条 `:root{--el-messagebox-border-radius:0 !important}` 是一条死 CSS，
+//    运行时 el-message-box 一直是 4px 圆角。这里改成在 .el-message-box 上就地覆盖。
+//    弹出确认框属容器类表面 → surface 档。
+.el-message-box {
+  --el-messagebox-border-radius: var(--dd-radius-surface) !important;
+}
+
+// 🔴 复选框：吃整档 control 会把「方=多选 / 圆=单选」这条可供性削掉，必须按比例缩小。
+//
+// EP 的 .el-checkbox__inner 是 14×14（本文件上方还给表格里的复选框加了 scale(1.15)，
+// 视觉约 16px），而 --el-checkbox-border-radius 取自 --el-border-radius-small，
+// v3.1.0 起 -small 已派生自 control 档 ⇒ 圆角模式下复选框拿到 6px。
+// 6/14 ≈ 43%，四角圆到只剩一小片直边，远看几乎就是 el-radio 那颗圆点。
+// 白名单里保留 el-radio 圆点的理由正是「方化后与复选框无法区分」，反过来同样成立：
+// 复选框圆化到这个程度，两种控件就分不出来了。这里按比例缩到 1/3（圆角档 2px），
+// 保住「基本还是个方块，只是角软了一点」的观感。
+//
+// 🔴 必须写在 .el-checkbox 元素上，不能写 :root ——
+//    EP 是 `@include b(checkbox){ @include set-component-css-var('checkbox', $checkbox) }`，
+//    即 `.el-checkbox{--el-checkbox-border-radius:var(--el-border-radius-small)}`。
+//    元素上的声明会赢过从 :root 继承来的值，:root 覆盖是一条死 CSS
+//    （与上面 .el-message-box 踩过的是同一个坑，已回 theme-chalk/src/checkbox.scss 核对）。
+// 🔴 !important 同样不能省：这条与 EP 那条特异性打平 (0,1,0)，而 EP 组件 CSS 懒注入、
+//    排在 global.scss 之后，打平时后来者赢。
+//
+// ⚠️ 直角档的 --dd-radius-control 是【无单位 0】（panelAppearance.ts 写的就是 '0'），
+//    于是这里会算成 calc(0 / 3) —— CSS calc 里无单位 0 是 <number> 不是 <length>，
+//    结果对 border-radius 属于「计算值时无效」，浏览器按 unset 处理；border-radius
+//    不可继承 ⇒ 回落到初始值 0，直角档照样是绝对直角。EP 自己的
+//    `.el-button--small{calc(var(--el-border-radius-base) - 1px)}` 走的是同一条回落路径，
+//    行为一致。别为了「更保险」把它改成 min()/clamp()，那些混用数字与长度会直接失效。
+.el-checkbox {
+  --el-checkbox-border-radius: calc(var(--dd-radius-control) / 3) !important;
 }
 
 // —— 机制 B / C：硬编码像素圆角 ——
 
-// el-switch：轨道 10px，且 --large 12px、--small 8px 各有一条尺寸变体规则。
-// 表格里的开关全是 size="small"，正好命中打平的那一档，这就是上一轮方化没生效的原因。
-// 用 !important 一条通吃三档，不必按变体逐条列。
+// 🔴 el-switch 属白名单：轨道与滑块在两种 shape 模式下都保持 EP 原本的圆形。
+// 「圆头轨道 + 圆滑块」是拨动开关的通用可供性，v3.0.0 一刀切方化属于误伤——
+// 方掉之后它和「两段式标签按钮」长得一样，用户看不出这是可拨动的。
+//
+// EP 的三档轨道值（已回 theme-chalk/el-switch.css 核对）：
+//   .el-switch__core{10px} / .el-switch--small .el-switch__core{8px} / --large{12px}
+// 这里必须【三档各写一条 + 全部带 !important】，不能只写 .el-switch__core：
+// 单独一条 `.el-switch__core{10px !important}`(0,1,0) 会把两条尺寸变体(0,2,0) 一起压掉，
+// 结果 size="small" 的开关拿到 10px 轨道，比 16px 的高度还大，两端会被裁出直边。
 .el-switch__core {
-  border-radius: 0 !important;
+  border-radius: 10px !important;
+}
+.el-switch--small .el-switch__core {
+  border-radius: 8px !important;
+}
+.el-switch--large .el-switch__core {
+  border-radius: 12px !important;
 }
 
 // 滑块：EP 写的是 `.el-switch__core .el-switch__action`，取值来自 --el-border-radius-circle。
-// 这里刻意**不**去改那个令牌（它是 el-radio 圆点的来源，属白名单），只按选择器就地归零；
-// 这样即使 EP 以后把滑块改成硬编码像素值，这条覆盖依然有效。
+// 同样属白名单，这里显式写回那个令牌（而不是删掉规则），是为了留住「刻意保持圆形」的意图，
+// 避免后人看到没规则又顺手补一条 0 上去。全局令牌 --el-border-radius-circle 依旧不动。
 .el-switch__core .el-switch__action {
-  border-radius: 0 !important;
+  border-radius: var(--el-border-radius-circle) !important;
 }
 
 // el-progress：线形进度条的轨道与填充都写死 100px（胶囊）。
 // 全库无 type="circle"，不存在需要保留的环形进度。
+// 进度条是天然胶囊 → pill 档（直角模式仍是 0，圆角模式回到 EP 那种药丸形）。
 .el-progress-bar__outer,
 .el-progress-bar__inner {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-pill) !important;
 }
 
 // el-scrollbar：.el-scrollbar__bar 写死 4px，thumb 是 border-radius:inherit，压住 bar 即可。
 // 影响面很大——select 下拉、table、drawer、tree 内部都嵌了 el-scrollbar。
+// 滚动条只有 6px 宽，与文件开头那条 ::-webkit-scrollbar-thumb 同属 pill 档。
 .el-scrollbar__bar {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-pill) !important;
 }
 
-// el-tag 可关闭标签：图标底与关闭按钮各写死 50%（TaskForm 的标签编辑区在用）。
+// 🔴 el-tag 的图标底与关闭键属白名单：EP 写死 50%（TaskForm 的标签编辑区在用）。
+// 这两个是「鼠标移上去会出现的圆形底」，圆底本身就是「这里可以点」的暗示，
+// 而且直径只有 14~16px，方化后与标签文字挤成一片，看不出是独立的关闭热区。
 .el-tag .el-icon,
 .el-tag .el-tag__close {
-  border-radius: 0 !important;
+  border-radius: 50% !important;
 }
 
 // el-upload：ScriptManageDialogs 用了 drag + 文件列表，拖拽区 6px、列表项 4px。
-.el-upload-dragger,
+// 拖拽区是一整块虚线容器 → surface；文件列表项是一行条目 → control。
+.el-upload-dragger {
+  border-radius: var(--dd-radius-surface) !important;
+}
 .el-upload-list__item {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-control) !important;
 }
 
 // el-color-picker：SystemConfigCard 的两个取色器。触发块与展开面板各 4px。
+// 触发块是控件 → control；展开面板是浮层容器 → surface。
 // 面板内部的色相/透明度滑块（1px）与取色游标（50%，仅 4×4px）保持原样：
 // 它们是取值精度指示器，且尺寸小到方圆不可辨，改了只增加规则不改变观感。
-.el-color-picker__trigger,
-.el-color-picker-panel.is-border {
-  border-radius: 0 !important;
+.el-color-picker__trigger {
+  border-radius: var(--dd-radius-control) !important;
 }
+.el-color-picker-panel.is-border {
+  border-radius: var(--dd-radius-surface) !important;
+}
+// 触发块【内部】那块色块（.el-color-picker__color）是 --el-border-radius-small 的第二个消费方，
+// v3.1.0 起会跟着派生到 control 档。它不能吃整档：
+// el-color-picker 默认 32×32，触发块 1px 边框 + 4px 内边距 ⇒ 色块只有 22×22，
+// 而且它是【同心内嵌】在一个已经取 control 档的触发块里。同心圆角的正确取值是
+// 「外圈半径 − 内外间距」= 6 − 4 = 2px；内外都写 6px 的话，四角会露出一圈忽宽忽窄的白边。
+// 2px 正好是 control 档的 1/3，与上面复选框用同一个表达式（无单位 0 的回落说明见那一处）。
+.el-color-picker__color {
+  border-radius: calc(var(--dd-radius-control) / 3) !important;
+}
+// 注：--el-border-radius-small 的第三个消费方 `.el-menu--popup`（折叠侧栏弹出的子菜单容器，
+// 按语义应走 surface）在本项目【不会渲染】—— MainLayout 的侧栏只有 el-menu-item，没有
+// el-sub-menu，弹不出这个容器。故意不加覆盖以免样式膨胀；将来真加了二级菜单，
+// 记得在这里补一条 `.el-menu--popup{border-radius:var(--dd-radius-surface) !important}`。
 
 // el-input：内部滚动条 thumb 写死 5px，比文件开头那条全局 ::-webkit-scrollbar-thumb 更特异。
+// 同属滚动条 → pill 档。
 .el-input::-webkit-scrollbar-thumb {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-pill) !important;
 }
 
 // el-tabs：键盘焦点环 3px（settings / api-docs / TaskForm 的标签页都可键盘切换）。
+// 焦点环贴着标签项本身，跟着控件走 → control 档。
 .el-tabs__item:focus-visible {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-control) !important;
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,52 +1174,71 @@ a {
 // ---------------------------------------------------------------------------
 
 // —— el-badge ——
-// 机制 A：--el-badge-radius(10px) 声明在 .el-badge{} 上，:root 补 0 无效，必须就地覆盖。
+// 机制 A：--el-badge-radius(10px) 声明在 .el-badge{} 上，:root 补值无效，必须就地覆盖。
 // 命中范围不止我们自己写的角标：ElMessage 的 grouping 计数徽标（.el-message__badge）
-// 内部渲染的就是一个 el-badge，不压它的话「同一条提示 ×3」那个小圆点会是胶囊形。
+// 内部渲染的就是一个 el-badge。
+// 计数角标是天然胶囊 → pill 档（EP 原值 10px 配 18px 高，本来就是胶囊）。
 .el-badge {
-  --el-badge-radius: 0 !important;
+  --el-badge-radius: var(--dd-radius-pill) !important;
 }
 
-// 机制 B：dot 模式硬编码 50%，与上面的私有令牌是两条独立的链，压一条不够。
+// 🔴 dot 模式属白名单：8×8 的小红点是「有未读」的状态灯，形状即语义，
+// 两种 shape 模式下都保持正圆。它与上面的私有令牌是两条独立的链，改一条不够。
 .el-badge__content.is-dot {
-  border-radius: 0 !important;
+  border-radius: 50% !important;
 }
 
 // —— el-date-picker / el-time-picker ——
 // 这一组全是机制 B 的硬编码像素/百分比，按令牌名去枚举一个都扫不到。
 // 不覆盖的话，日期面板会在一片直角界面里冒出一格一格的圆形日期，非常突兀。
 //
-// 面板自身（.el-picker-panel）走 --el-popper-border-radius，已被 :root 归零，不在此列。
+// 面板自身（.el-picker-panel）走 --el-popper-border-radius，已在 :root 派生自 surface 档，不在此列。
+// 日期格是控件类表面 → control 档（EP 原值是 50% / 15px / 18px / 24px 的圆形与胶囊，
+// 圆角模式下也不还原成正圆：一格一格的圆日期在这种工具型后台里过于花哨）。
 .el-date-table td .el-date-table-cell .el-date-table-cell__text,
 .el-date-table td.selected .el-date-table-cell,
 .el-date-table td.selected .el-date-table-cell__text,
 .el-month-table td .el-date-table-cell__text,
 .el-month-table td.current:not(.disabled) .el-date-table-cell,
 .el-year-table td .el-date-table-cell__text {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-control) !important;
 }
 
 // 范围选择（daterange / monthrange）的起止端另有一套【分角】圆角，
-// 与上面那组 selected 是不同的选择器，容易漏：
-//   .el-date-table td.start-date .el-date-table-cell { border-top-left-radius: 15px; ... }
+// 与上面那组 selected 是不同的选择器，容易漏（已回 theme-chalk 核对）：
+//   .el-date-table  td.start-date .el-date-table-cell{border-top/bottom-left-radius:15px;margin-left:5px}
+//   .el-date-table  td.end-date   .el-date-table-cell{border-top/bottom-right-radius:15px;margin-right:5px}
+//   .el-month-table 同形状，取值 24px / margin 3px
 // EP 靠「起止端做成半个胶囊 + 中间格填浅底」拼出一条药丸形的范围条。
-// 直角体系下药丸没有意义，而两端各 5px 的外边距会让范围条在首尾缩进一截、
-// 看起来像断了两个口子，所以圆角和外边距要一起清掉，范围才是一条连贯的实心条带。
+// 两端各 5px 的外边距会让范围条在首尾缩进一截、看起来像断了两个口子，
+// 所以【两种 shape 模式下都把外边距清掉】，范围才是一条连贯的实心条带。
+//
+// 圆角这里刻意沿用 EP 的【长手分角】写法而不是 border-radius 简写：
+// 起端只圆左侧、末端只圆右侧，中间的 in-range 格保持直角，条带才不会在接缝处被咬出缺口；
+// 用简写把四角一起圆掉的话，圆角模式下起止格的内侧会出现两个明显的白色凹口。
+// 长手还顺带解决「起止是同一天」的情况——那一格同时命中两条规则，左右各自生效。
 .el-date-table td.start-date .el-date-table-cell,
-.el-date-table td.end-date .el-date-table-cell,
-.el-month-table td.start-date .el-date-table-cell,
-.el-month-table td.end-date .el-date-table-cell {
-  border-radius: 0 !important;
+.el-month-table td.start-date .el-date-table-cell {
+  border-top-left-radius: var(--dd-radius-control) !important;
+  border-bottom-left-radius: var(--dd-radius-control) !important;
   margin-left: 0 !important;
+}
+.el-date-table td.end-date .el-date-table-cell,
+.el-month-table td.end-date .el-date-table-cell {
+  border-top-right-radius: var(--dd-radius-control) !important;
+  border-bottom-right-radius: var(--dd-radius-control) !important;
   margin-right: 0 !important;
 }
 
-// 日期面板底部的「此刻 / 确定」按钮 2px，以及时间面板与时间范围面板的 2px。
-.el-picker-panel__btn,
+// 日期面板底部的「此刻 / 确定」按钮 2px → 按钮属 control 档。
+.el-picker-panel__btn {
+  border-radius: var(--dd-radius-control) !important;
+}
+
+// 时间面板与时间范围面板 2px → 它们是独立的浮层容器，走 surface 档。
 .el-time-panel,
 .el-time-range-picker__body {
-  border-radius: 0 !important;
+  border-radius: var(--dd-radius-surface) !important;
 }
 
 html.dark {
@@ -1299,9 +1437,12 @@ html.dark {
 }
 
 // el-popover 在 `.el-popover` 元素上把 --el-popover-border-radius 重新声明为 4px，
-// 会赢过 :root 的继承值，因此需要就地归零（tooltip / dropdown 已由 :root 兜住）。
+// 会赢过 :root 的继承值，因此必须就地覆盖（tooltip / dropdown 已由 :root 那条兜住）。
+// 浮层容器 → surface 档，与 :root 上那条保持同一个来源，两处漏一处就是死 CSS。
+// !important 是必需的：两条选择器都是 `.el-popover`(0,1,0)，而 EP 组件 CSS 懒注入、
+// 排在 global.scss 之后，特异性打平时后加载者赢（同本文件其它 EP 覆盖的成因）。
 .el-popover {
-  --el-popover-border-radius: 0;
+  --el-popover-border-radius: var(--dd-radius-surface) !important;
 }
 
 // ===== 暗色浮层（tooltip）=====
@@ -1402,7 +1543,20 @@ html.dark {
   background-repeat: no-repeat, no-repeat, no-repeat;
   background-size: cover, auto, auto;
   border: 1px solid var(--dd-log-border-color);
-  border-radius: 0;
+  // 日志窗口是一整块容器类表面 → surface 档。
+  //
+  // 🔴 这条只对「自己就是最外层日志窗口」的用法成立。把 .dd-log-surface 用成
+  //    【铺满父容器的内层】时（弹窗 body 内边距为 0 直接顶到弹窗边、或塞进一个已经
+  //    带 surface 圆角 + overflow:hidden 的外框），【必须在使用点写回 border-radius: 0】：
+  //      - 顶到外层边框：圆角模式下深色日志底会被自己的 10px 圆角切出缺口、露出弹窗白底；
+  //      - 嵌在已圆角外框里：内外两条 10px 圆角只差 1px 同心叠着，四角线宽看起来变粗。
+  //    圆角交给外层容器 + overflow:hidden 去裁才是对的。
+  //    已按 flush 处理的使用点：logs/index.vue 的 .detail-log（只在详情弹窗那一支写 0，
+  //    另一支嵌在有内边距的 body 里、仍吃 surface）、ScriptExecutionDialogs.vue 的
+  //    .debug-log-content、LogViewer.vue 的 .viewer-log、LogFileBrowser.vue 的 .content-text。
+  //    其余使用点（deps / subscriptions / PanelLogCard / SystemConfigCard）四周都有留白，
+  //    自己就是最外层日志面板，继续吃 surface 档。新增使用点时先判断属于哪一种。
+  border-radius: var(--dd-radius-surface);
   color: var(--dd-log-text-color);
   scrollbar-color: var(--dd-log-scrollbar-thumb-color)
     var(--dd-log-scrollbar-track-color);
@@ -1416,14 +1570,17 @@ html.dark {
 
   &::-webkit-scrollbar-track {
     background: var(--dd-log-scrollbar-track-color);
+    // 保持 0，不吃令牌：轨道是贴着日志窗口右/下内边铺满的一条，
+    // 圆角会在它与已经圆角的窗口边框之间露出一线底色，反而更脏。
     border-radius: 0;
   }
 
-  // 这里的 border 是给 thumb 留出的“内缩留白”，属于功能性写法，只去圆角不要删
+  // 这里的 border 是给 thumb 留出的“内缩留白”，属于功能性写法，只改圆角不要删
   &::-webkit-scrollbar-thumb {
     min-height: 40px;
     border: 3px solid var(--dd-log-scrollbar-track-color);
-    border-radius: 0;
+    // 滑块与全局滚动条同档
+    border-radius: var(--dd-radius-pill);
     background: var(--dd-log-scrollbar-thumb-color);
   }
 
@@ -1594,7 +1751,8 @@ html.dark {
   background: var(--el-bg-color);
   // 去阴影后靠这条边框与页面底色分隔
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 统计卡片是容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   padding: 16px 18px;
   display: flex;
   align-items: center;
@@ -1655,7 +1813,9 @@ html.dark {
   gap: 2px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 0;
+  // 涨跌幅是卡片里的小标签，归控件类 → control 档
+  // （不是 pill：它和 .dd-status-chip 常出现在同一屏，全做成胶囊会分不清主次）
+  border-radius: var(--dd-radius-control);
   font-size: 11.5px;
 
   &.is-up {
@@ -1677,7 +1837,8 @@ html.dark {
 .dd-stat-card__icon {
   width: 44px;
   height: 44px;
-  border-radius: 0;
+  // 44×44 的图标色底属控件类表面 → control 档（不做成正圆，避免与头像混淆）
+  border-radius: var(--dd-radius-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1716,7 +1877,8 @@ html.dark {
 .dd-seg-group {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽 → control 档（与槽内的项同档，两者圆角一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
@@ -1727,7 +1889,8 @@ html.dark {
   background: transparent;
   padding: 6px 14px;
   font-size: 13px;
-  border-radius: 0;
+  // 分段项属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   color: var(--el-text-color-secondary);
   // 按属性列而不是 all：扁平方案下这里只会变颜色，用 all 会把将来任何新增属性
@@ -1756,7 +1919,8 @@ html.dark {
   align-items: center;
   gap: 4px;
   padding: 2px 10px;
-  border-radius: 0;
+  // 状态 chip 是天然胶囊 → pill 档
+  border-radius: var(--dd-radius-pill);
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1.5;
@@ -1792,7 +1956,8 @@ html.dark {
 .dd-env-chip {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 0;
+  // 环境标记是标签而不是状态灯，归控件类 → control 档（与 el-tag 保持同档）
+  border-radius: var(--dd-radius-control);
   font-size: 11.5px;
   font-weight: 500;
   letter-spacing: 0.02em;
@@ -1824,7 +1989,10 @@ html.dark {
   background: var(--el-bg-color);
   // 去阴影后靠这条边框与页面底色分隔
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 数据卡片是容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
+  // overflow:hidden 让内部贴边的 toolbar / 表格 / 分页条自动被圆角裁掉四角，
+  // 所以 .dd-data-card__toolbar 与 .dd-pagination 刻意不写圆角（贴边内嵌，写了反而露角）
   overflow: hidden;
 }
 
@@ -1870,7 +2038,8 @@ html.dark {
 .dd-icon-btn {
   width: 28px;
   height: 28px;
-  border-radius: 0;
+  // 图标按钮属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   border: none;
   background: transparent;
   display: inline-flex;
@@ -1911,7 +2080,8 @@ html.dark {
 
 .dd-mobile-card {
   padding: var(--dd-mobile-card-padding);
-  border-radius: 0;
+  // 移动端卡片是容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   // 去掉底色渐变与投影，纯色底 + 1px 边框划分卡片
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);

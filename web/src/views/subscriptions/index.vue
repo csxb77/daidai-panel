@@ -45,6 +45,8 @@ const showEditDialog = ref(false);
 const showLogDialog = ref(false);
 const showSettingsDialog = ref(false);
 const isCreate = ref(true);
+// 订阅保存的在途锁：从「镜像加速」确认框开始就锁住按钮，避免连点重复创建订阅
+const editSaving = ref(false);
 const qlCommand = ref("");
 
 const settingsLoading = ref(false);
@@ -114,6 +116,8 @@ const showSSHKeyDialog = ref(false);
 const isCreateSSHKey = ref(true);
 const sshKeyForm = ref({ id: 0, name: "", private_key: "" });
 const sshKeyLoading = ref(false);
+// SSH 密钥保存的在途锁：与订阅保存各用一个独立 ref，避免互相牵连转圈
+const sshKeySaving = ref(false);
 
 const logList = ref<any[]>([]);
 const logTotal = ref(0);
@@ -568,6 +572,9 @@ async function handleSave() {
     /^https?:\/\/github\.com\//.test(editForm.value.url) &&
     mirrorHost &&
     !editForm.value.url.includes(mirrorHost);
+  // 置位放在镜像确认框之前：确认框本身也是 await，弹着的时候按钮同样必须是锁住的，
+  // 否则用户可以在确认框外面继续连点「创建」，锁不住完整的在途窗口。
+  editSaving.value = true;
   if (githubDirect) {
     try {
       await ElMessageBox.confirm(
@@ -618,6 +625,8 @@ async function handleSave() {
     ElMessage.error(
       err?.response?.data?.error || (isCreate.value ? "创建失败" : "更新失败"),
     );
+  } finally {
+    editSaving.value = false;
   }
 }
 
@@ -1030,6 +1039,8 @@ async function handleSaveSSHKey() {
     ElMessage.warning("私钥不能为空");
     return;
   }
+  // 校验通过后才置位，复位放 finally
+  sshKeySaving.value = true;
   try {
     const data: any = { name: sshKeyForm.value.name };
     if (sshKeyForm.value.private_key) {
@@ -1044,8 +1055,16 @@ async function handleSaveSSHKey() {
     }
     showSSHKeyDialog.value = false;
     loadSSHKeys();
-  } catch {
-    ElMessage.error(isCreateSSHKey.value ? "创建失败" : "更新失败");
+  } catch (err: any) {
+    // ssh_keys.name 现在是唯一索引，后端把冲突翻译成了面向用户的中文 400
+    // （创建与改名两条路径都会返回「同名 SSH 密钥已存在」）。
+    // 这里必须优先取后端文案，否则那条提示在 UI 上是死的，用户只会看到笼统的「创建失败」。
+    ElMessage.error(
+      err?.response?.data?.error ||
+        (isCreateSSHKey.value ? "创建失败" : "更新失败"),
+    );
+  } finally {
+    sshKeySaving.value = false;
   }
 }
 
@@ -1703,9 +1722,13 @@ function viewLogDetail(log: any) {
       </el-form>
       <template #footer>
         <el-button @click="showEditDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleSave">{{
-          isCreate ? "创建" : "保存"
-        }}</el-button>
+        <el-button
+          type="primary"
+          :loading="editSaving"
+          :disabled="editSaving"
+          @click="handleSave"
+          >{{ isCreate ? "创建" : "保存" }}</el-button
+        >
       </template>
     </el-dialog>
 
@@ -1987,9 +2010,13 @@ function viewLogDetail(log: any) {
       </el-form>
       <template #footer>
         <el-button @click="showSSHKeyDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleSaveSSHKey">{{
-          isCreateSSHKey ? "创建" : "保存"
-        }}</el-button>
+        <el-button
+          type="primary"
+          :loading="sshKeySaving"
+          :disabled="sshKeySaving"
+          @click="handleSaveSSHKey"
+          >{{ isCreateSSHKey ? "创建" : "保存" }}</el-button
+        >
       </template>
     </el-dialog>
   </div>
@@ -2052,18 +2079,20 @@ function viewLogDetail(log: any) {
   }
 }
 
-// 状态分段控件：与定时任务页/执行日志页一致的直角容器 + 选中态白底品牌色 + 1px 边框
+// 状态分段控件：与定时任务页/执行日志页一致的分段容器 + 选中态白底品牌色 + 1px 边框
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽属控件类表面 → control 档（与槽内的项同档，两者一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 0;
+  // 分段项属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   // 未选中态用透明边框占位，选中态只换边框颜色，避免尺寸跳动
   border: 1px solid transparent;
   background: transparent;
@@ -2087,10 +2116,11 @@ function viewLogDetail(log: any) {
   }
 }
 
-// 表格卡：直角无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器属容器类表面 → surface 档；overflow:hidden 让内部贴边的表头/行自动被圆角裁角
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -2203,7 +2233,8 @@ function viewLogDetail(log: any) {
   font-size: 13px;
   line-height: 1.6;
   padding: 12px 16px;
-  border-radius: 0;
+  // 拉取日志面板属容器类表面 → surface 档（弹窗 body 有内边距，不贴边，不会露角）
+  border-radius: var(--dd-radius-surface);
   max-height: 560px;
   overflow-y: auto;
   white-space: pre-wrap;
@@ -2221,9 +2252,9 @@ function viewLogDetail(log: any) {
 }
 
 // 拉取日志弹窗底部的状态指示。
-// 用「方形色标 + 次级文字」替代原来的 el-tag：颜色只落在 8px 色标上，
+// 用「圆点状态灯 + 次级文字」替代原来的 el-tag：颜色只落在 8px 色标上，
 // 文字保持 --el-text-color-secondary，不跟右侧的「停止 / 关闭」抢视觉重量。
-// 形状严格直角，无边框底色块、无阴影、无渐变。
+// 无边框底色块、无阴影、无渐变；色标本身固定正圆（理由见下方 .pull-status__mark）。
 .pull-status {
   // footer 已是 flex 容器，这条才真正把状态推到最左侧
   margin-right: auto;
@@ -2242,6 +2273,11 @@ function viewLogDetail(log: any) {
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
+  // 形状承载语义：这是一枚 8×8 的拉取状态灯（下面按 is-running/is-aborted/is-success/is-failed 换色），
+  // 与全站其它同尺寸状态灯（.pulse-dot / .status-dot / .dd-badge--dot / .menu-collapsed-dot 等）一样
+  // 固定正圆、不吃 --dd-radius-* 令牌 —— 两种 shape 模式下都必须是圆点，方块会读成色块而不是状态灯。
+  // 之前整条规则一个 border-radius 都没写，圆角化时的白名单扫描扫不到它，是漏网的一处。
+  border-radius: 50%;
   background: var(--el-text-color-placeholder);
 }
 

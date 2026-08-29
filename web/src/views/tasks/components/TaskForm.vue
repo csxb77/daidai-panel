@@ -7,14 +7,19 @@ import { mergeTaskLabels, splitTaskLabels } from '../taskLabels'
 import { useResponsive } from '@/composables/useResponsive'
 import type { PythonRuntimeInfo } from '@/api/deps'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   visible: boolean
   task?: any
   prefill?: any
   defaultPythonVersion?: string
   pythonRuntimes?: PythonRuntimeInfo[]
   notificationChannels?: { id: number; name: string; type: string; enabled: boolean; push_scope?: string }[]
-}>()
+  // 提交在途标记：父组件创建/更新请求期间置位。
+  // 弹窗要等请求成功才关，不锁按钮的话连点就会建出多条重复任务。
+  submitting?: boolean
+}>(), {
+  submitting: false
+})
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
@@ -185,6 +190,10 @@ function removeLabel(label: string) {
 }
 
 function handleSubmit() {
+  // 上一发还在路上时直接忽略，避免重复提交
+  if (props.submitting) {
+    return
+  }
   if (!form.value.name || !form.value.command) {
     ElMessage.warning('请填写任务名称和执行命令')
     return
@@ -432,7 +441,7 @@ function handleSubmit() {
 
     <template #footer>
       <el-button @click="emit('update:visible', false)">取消</el-button>
-      <el-button type="primary" @click="handleSubmit">{{ task ? '更新' : '创建' }}</el-button>
+      <el-button type="primary" :loading="submitting" :disabled="submitting" @click="handleSubmit">{{ task ? '更新' : '创建' }}</el-button>
     </template>
   </el-dialog>
 </template>
@@ -468,7 +477,8 @@ function handleSubmit() {
   margin: 0 0 14px;
   padding: 10px 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 弹窗内的说明区块 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-lighter);
   color: var(--el-text-color-regular);
   font-size: 13px;

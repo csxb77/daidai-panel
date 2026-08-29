@@ -18,6 +18,8 @@ const channelTypes = ref<NotifyChannelDefinition[]>([])
 
 const showChannelDialog = ref(false)
 const isCreateChannel = ref(true)
+// 渠道保存的在途锁：请求期间锁住底部按钮，避免连点重复创建渠道
+const channelSaving = ref(false)
 
 interface ChannelFormState {
   id: number
@@ -302,6 +304,8 @@ async function handleSaveChannel() {
     config: channelForm.value.config,
     push_scope: normalizePushScope(channelForm.value.push_scope),
   }
+  // 校验全部通过后才置位，保证校验失败的早退分支不会把按钮锁死
+  channelSaving.value = true
   try {
     if (isCreateChannel.value) {
       await notificationApi.create(payload)
@@ -314,6 +318,8 @@ async function handleSaveChannel() {
     loadChannels()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || (isCreateChannel.value ? '创建失败' : '更新失败'))
+  } finally {
+    channelSaving.value = false
   }
 }
 
@@ -832,7 +838,7 @@ function getChannelConfigSummary(row: any): string[] {
       </el-form>
       <template #footer>
         <el-button @click="showChannelDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleSaveChannel">{{ isCreateChannel ? '创建' : '保存' }}</el-button>
+        <el-button type="primary" :loading="channelSaving" :disabled="channelSaving" @click="handleSaveChannel">{{ isCreateChannel ? '创建' : '保存' }}</el-button>
       </template>
     </el-dialog>
 
@@ -883,10 +889,11 @@ function getChannelConfigSummary(row: any): string[] {
   &__filter { width: 130px; }
 }
 
-// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器属容器类表面 → surface 档；overflow:hidden 让内部贴边的表头/行自动被圆角裁角
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -898,11 +905,12 @@ function getChannelConfigSummary(row: any): string[] {
 }
 
 // 渠道头像：底色/文字色保留按类型的品牌识别色（来自模板内联 style），
-// 这里只统一通用尺寸与轻边框（直角方块），边框走令牌以适配明暗。
+// 这里只统一通用尺寸与轻边框，边框走令牌以适配明暗。
+// 形状承载语义（圆形=头像/身份标识），两种圆角模式下都固定正圆，不吃 --dd-radius-* 令牌。
 .channel-avatar {
   width: 36px;
   height: 36px;
-  border-radius: 0;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;

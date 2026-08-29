@@ -101,7 +101,8 @@ defineProps<{
 
 .card-header-buttons {
   padding: 2px;
-  border-radius: 0;
+  // 按钮组的灰底槽 → control 档（与槽内按钮同档，圆角一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   display: flex;
   gap: 8px;

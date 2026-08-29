@@ -3,9 +3,13 @@ import { ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   modelValue: boolean
-}>()
+  // 提交在途标记：父组件导入请求期间置位，防止弹窗还开着时连点重复导入
+  submitting?: boolean
+}>(), {
+  submitting: false
+})
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
@@ -21,6 +25,11 @@ function closeDialog() {
 }
 
 function handleImport() {
+  // 上一发还没回来就不再叠加请求
+  if (props.submitting) {
+    return
+  }
+
   let envs: any[]
   try {
     envs = JSON.parse(importText.value)
@@ -106,7 +115,7 @@ watch(
     </el-form>
     <template #footer>
       <el-button @click="closeDialog">取消</el-button>
-      <el-button type="primary" @click="handleImport">导入</el-button>
+      <el-button type="primary" :loading="submitting" :disabled="submitting" @click="handleImport">导入</el-button>
     </template>
   </el-dialog>
 </template>

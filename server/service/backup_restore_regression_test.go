@@ -776,6 +776,138 @@ func TestCreateBackupSkipsQuarantinedScriptEntriesInArchive(t *testing.T) {
 	}
 }
 
+// 归档里的重名不会随升级被清洗：v3.0.10 时代导出的备份里可能有两条都叫「推送」的通知渠道
+// （当时完全合法），而 v3.1.0 给这些表加了名称唯一索引。
+// 恢复时必须自己改名让路，否则第二条 Create 会撞 UNIQUE 约束 → 整个事务 rollback →
+// 用户拿着一份永远恢复不了的备份，任务 / 环境变量 / 订阅全部白做，且没有任何自救入口。
+//
+// open_apps 这一条同时守住青龙导入：青龙 app 表的 name 没有唯一约束，
+// 青龙用户有两个同名应用时，以前会让整个青龙导入直接失败。
+func TestRestoreBackupManifestRenamesDuplicateNamesFromLegacyArchive(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	manifest := BackupManifest{
+		Format:  "daidai-panel-backup",
+		Version: "0.4.0",
+		Source:  "daidai-panel",
+		Selection: BackupSelection{
+			Configs:       true,
+			Subscriptions: true,
+			TaskViews:     true,
+		},
+		Data: BackupPayload{
+			Configs: BackupConfigBundle{
+				NotifyChannels: []BackupNotifyChannel{
+					{ID: 1, Name: "推送", Type: "webhook", Config: `{"url":"https://example.com/a"}`, Enabled: true},
+					{ID: 2, Name: "推送", Type: "webhook", Config: `{"url":"https://example.com/b"}`, Enabled: true},
+				},
+				OpenApps: []BackupOpenApp{
+					// app_key 本身是唯一索引，这里必须错开，才能确保撞的是我们要测的 name 约束。
+					{Name: "我的应用", AppKey: "key-a", AppSecret: "secret-a", Scopes: "tasks", Enabled: true},
+					{Name: "我的应用", AppKey: "key-b", AppSecret: "secret-b", Scopes: "tasks", Enabled: true},
+				},
+			},
+			SSHKeys: []BackupSSHKey{
+				{ID: 1, Name: "我的密钥", PrivateKey: "-----BEGIN KEY A-----"},
+				{ID: 2, Name: "我的密钥", PrivateKey: "-----BEGIN KEY B-----"},
+			},
+			TaskViews: []model.TaskView{
+				{Name: "我的视图"},
+				{Name: "我的视图"},
+			},
+		},
+	}
+
+	if err := restoreBackupManifest(manifest, t.TempDir()); err != nil {
+		t.Fatalf("含重名的老备份必须能恢复成功，实际失败：%v", err)
+	}
+
+	var channels []model.NotifyChannel
+	if err := database.DB.Order("id ASC").Find(&channels).Error; err != nil {
+		t.Fatalf("list notify channels: %v", err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("两条同名渠道都要恢复回来，实际 %d 条", len(channels))
+	}
+	if channels[0].Name != "推送" || channels[1].Name != "推送 (2)" {
+		t.Fatalf("重名渠道应被改名而不是丢弃，实际 %q / %q", channels[0].Name, channels[1].Name)
+	}
+	// 改名只能动名字，配置必须原样搬回来 —— 重复渠道里也可能存着用户唯一一份 webhook 地址。
+	if !strings.Contains(channels[1].Config, "https://example.com/b") {
+		t.Fatalf("被改名的渠道配置丢了，实际 %q", channels[1].Config)
+	}
+
+	var apps []model.OpenApp
+	if err := database.DB.Order("id ASC").Find(&apps).Error; err != nil {
+		t.Fatalf("list open apps: %v", err)
+	}
+	if len(apps) != 2 || apps[0].Name != "我的应用" || apps[1].Name != "我的应用 (2)" {
+		t.Fatalf("重名 OpenAPI 应用应被改名后全部恢复，实际 %+v", apps)
+	}
+
+	var keys []model.SSHKey
+	if err := database.DB.Order("id ASC").Find(&keys).Error; err != nil {
+		t.Fatalf("list ssh keys: %v", err)
+	}
+	if len(keys) != 2 || keys[0].Name != "我的密钥" || keys[1].Name != "我的密钥 (2)" {
+		t.Fatalf("重名 SSH 密钥应被改名后全部恢复，实际 %+v", keys)
+	}
+	// 私钥往往只有备份里这一份，改名绝不能把它带丢。
+	if keys[1].PrivateKey != "-----BEGIN KEY B-----" {
+		t.Fatalf("被改名的 SSH 密钥私钥丢了，实际 %q", keys[1].PrivateKey)
+	}
+
+	var views []model.TaskView
+	if err := database.DB.Order("id ASC").Find(&views).Error; err != nil {
+		t.Fatalf("list task views: %v", err)
+	}
+	if len(views) != 2 || views[0].Name != "我的视图" || views[1].Name != "我的视图 (2)" {
+		t.Fatalf("重名任务视图应被改名后全部恢复，实际 %+v", views)
+	}
+}
+
+// 归档里已经存在一条叫「推送 (2)」的记录时，改名不能二次撞车。
+// 与启动迁移 DeduplicateBeforeUniqueIndex 共用 database.NextAvailableName，行为必须一致。
+func TestRestoreBackupManifestSkipsOccupiedRenameCandidates(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	manifest := BackupManifest{
+		Format:  "daidai-panel-backup",
+		Version: "0.4.0",
+		Source:  "daidai-panel",
+		Selection: BackupSelection{
+			Configs: true,
+		},
+		Data: BackupPayload{
+			Configs: BackupConfigBundle{
+				NotifyChannels: []BackupNotifyChannel{
+					{ID: 1, Name: "推送", Type: "webhook", Config: `{"url":"https://example.com/a"}`, Enabled: true},
+					{ID: 2, Name: "推送 (2)", Type: "webhook", Config: `{"url":"https://example.com/b"}`, Enabled: true},
+					{ID: 3, Name: "推送", Type: "webhook", Config: `{"url":"https://example.com/c"}`, Enabled: true},
+				},
+			},
+		},
+	}
+
+	if err := restoreBackupManifest(manifest, t.TempDir()); err != nil {
+		t.Fatalf("恢复应成功，实际失败：%v", err)
+	}
+
+	var channels []model.NotifyChannel
+	if err := database.DB.Order("id ASC").Find(&channels).Error; err != nil {
+		t.Fatalf("list notify channels: %v", err)
+	}
+	want := []string{"推送", "推送 (2)", "推送 (3)"}
+	if len(channels) != len(want) {
+		t.Fatalf("期望恢复 %d 条渠道，实际 %d 条", len(want), len(channels))
+	}
+	for i, expected := range want {
+		if channels[i].Name != expected {
+			t.Fatalf("第 %d 条渠道名不符：期望 %q，实际 %q", i, expected, channels[i].Name)
+		}
+	}
+}
+
 func TestRestoreScriptFilesKeepsLiveDataWhenStageCopyFails(t *testing.T) {
 	testutil.SetupTestEnv(t)
 

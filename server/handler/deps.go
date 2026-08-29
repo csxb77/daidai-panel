@@ -227,6 +227,20 @@ func (h *DepsHandler) Create(c *gin.Context) {
 					skipped++
 					continue
 				}
+			} else {
+				// nodejs / linux 同样做「先查后插」，但只按「类型 + 名称」精确匹配，
+				// 不套 Python 那套 PEP 503 归一化 —— 各生态的包名归一规则不同（npm 区分大小写、
+				// apt 包名带冒号架构后缀），硬套会把不同的包判成同一个，属于误伤。
+				// 这里也刻意不给 dependencies 加 DB 唯一索引，理由同上。
+				var existingCount int64
+				database.DB.Model(&model.Dependency{}).
+					Where("type = ? AND name = ? AND status IN ?", req.Type, name,
+						[]string{model.DepStatusInstalled, model.DepStatusInstalling, model.DepStatusQueued}).
+					Count(&existingCount)
+				if existingCount > 0 {
+					skipped++
+					continue
+				}
 			}
 
 			dep := model.Dependency{

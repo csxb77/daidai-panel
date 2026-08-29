@@ -317,6 +317,12 @@ var registeredNotifyChannels = []NotifyChannelDefinition{
 		Fields: []NotifyFieldDefinition{
 			notifyInput("token", "Token", "PushPlus 用户 Token").required(),
 			notifyInput("topic", "群组编码 (可选)", "一对多推送时的群组编码"),
+			// 只放这 4 个通用排版模板。PushPlus 官方现在还有 cloudMonitor / jenkins /
+			// route / pay / form / doc / excel，**刻意不补齐**，别看到「少了」就往里加：
+			//   - cloudMonitor / jenkins / route / pay 是特定场景的专用排版，面板发的是
+			//     任务执行结果，套上去只会把消息排得面目全非；
+			//   - form / doc / excel 还必须额外带一个 pushId 参数，而面板没有「表单/文档」
+			//     这个概念，也就没地方产出 pushId —— 摆进下拉框等于给用户挖坑：选了必失败。
 			notifySelect("template", "模板 (可选)", "消息模板", []SystemConfigOption{
 				{Value: "html", Label: "默认 (html)"},
 				{Value: "json", Label: "JSON"},
@@ -326,20 +332,33 @@ var registeredNotifyChannels = []NotifyChannelDefinition{
 			// 不写 Default：留空等于完全不发送 channel 参数，由 PushPlus 按账号默认
 			// （微信公众号）处理，没有可言的回退值。写了 Default 会让老渠道编辑保存一次
 			// 就凭空多出一个键，行为反而变了。
-			notifySelect("channel", "发送渠道 (可选)", "留空按 PushPlus 账号默认（微信公众号）", []SystemConfigOption{
+			//
+			// 选项顺序：免费渠道在前，消耗积分的 sms / voice 垫底，避免用户顺手选中要花钱的。
+			// qq 是官方新增的免费渠道，排在同样需要填 option 的 webhook / cp 之后、mail 之前，
+			// 让「选了它下面会多出一个编码输入框」的三个渠道在下拉里挨着。
+			notifySelect("channel", "发送渠道 (可选)", "留空按 PushPlus 账号默认（微信公众号）；QQ 机器人建议配 txt 或 markdown 模板，单条约 2000 字", []SystemConfigOption{
 				{Value: "wechat", Label: "微信公众号 (wechat)"},
 				{Value: "app", Label: "App (app)"},
 				{Value: "extension", Label: "浏览器扩展 (extension)"},
 				{Value: "webhook", Label: "第三方 Webhook (webhook)"},
 				{Value: "clawbot", Label: "微信 ClawBot (clawbot)"},
 				{Value: "cp", Label: "企业微信应用 (cp)"},
+				{Value: "qq", Label: "QQ 机器人 (qq)"},
 				{Value: "mail", Label: "邮箱 (mail)"},
 				{Value: "sms", Label: "短信 (sms，消耗 10 积分/条)"},
 				{Value: "voice", Label: "语音 (voice，消耗 30 积分/条)"},
 			}),
-			// webhook 填的是 PushPlus 后台的 webhook 编码，不是 URL；cp 填企业微信自定义应用编码。
+			// option 是 PushPlus 对原 webhook 参数的改名，同一个键在三种渠道下含义完全不同：
+			//   webhook -> PushPlus 后台的 webhook 编码（是编码，不是 URL）
+			//   cp      -> 企业微信自定义应用编码
+			//   qq      -> 目标 QQ 群的「配置编码」（先在 PushPlus 渠道配置里为该群建一条群配置）；
+			//              发给**个人**时留空即可，填了反而会被当成群消息。
 			// 其余渠道不需要这个参数，所以用 show_when 收起来，避免误填。
-			notifyInput("option", "渠道编码", "webhook 渠道填 webhook 编码，企业微信应用渠道填自定义应用编码").showWhen("channel", "webhook", "cp"),
+			//
+			// 官方还规定 QQ 群消息不能同时带 topic —— 但 show_when 只能单键等值命中，
+			// 表达不了「channel=qq 且 option 非空时隐藏 topic」，所以这条只在文案里提示，
+			// 不在 schema 里硬拦（硬拦要么扩表达力、要么把 topic 对 QQ 一刀切禁掉，两者代价都更大）。
+			notifyInput("option", "渠道编码 (按所选渠道填)", "webhook 填 webhook 编码；企业微信应用填自定义应用编码；QQ 填群配置编码（发给个人留空，且群消息不能再填群组编码）").showWhen("channel", "webhook", "cp", "qq"),
 		},
 	},
 	{

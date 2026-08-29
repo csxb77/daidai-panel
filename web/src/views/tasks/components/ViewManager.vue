@@ -18,6 +18,9 @@ const views = ref<TaskView[]>([])
 // 随后的 applyViewFallback() 会把它落到第一个可见视图。
 const activeViewId = ref<number | null>(null)
 const showDialog = ref(false)
+// 提交在途锁：弹窗要等请求成功才关，期间不锁按钮连点就会建出多个同名视图。
+// 写法与同目录 ViewManagementDialog 的 saving 保持一致。
+const saving = ref(false)
 const isEditMode = ref(false)
 const editingViewId = ref<number | null>(null)
 const showManagementDialog = ref(false)
@@ -211,6 +214,8 @@ async function handleSave() {
     ElMessage.warning('请至少添加一个有效的筛选条件')
     return
   }
+  // 两处校验早退都过了才置位，否则校验失败会把按钮永久锁死
+  saving.value = true
   try {
     const payload = {
       name: editForm.value.name,
@@ -230,8 +235,13 @@ async function handleSave() {
     }
     showDialog.value = false
     await loadViews()
-  } catch {
-    ElMessage.error(isEditMode.value ? '更新失败' : '创建失败')
+  } catch (err: any) {
+    // task_views.name 现在是唯一索引，后端把冲突翻译成了面向用户的中文 400
+    // （新建与改名两条路径都会返回「同名任务视图已存在」）。
+    // 这里必须优先取后端文案，否则那条提示在 UI 上是死的，用户只会看到笼统的「创建失败」。
+    ElMessage.error(err?.response?.data?.error || (isEditMode.value ? '更新失败' : '创建失败'))
+  } finally {
+    saving.value = false
   }
 }
 
@@ -360,7 +370,7 @@ defineExpose({ loadViews })
       </el-form>
       <template #footer>
         <el-button @click="showDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleSave">{{ isEditMode ? '保存' : '创建' }}</el-button>
+        <el-button type="primary" :loading="saving" :disabled="saving" @click="handleSave">{{ isEditMode ? '保存' : '创建' }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -382,7 +392,10 @@ defineExpose({ loadViews })
 .view-seg {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 灰底槽取 control 档，与全站通用类 .dd-seg-group、tasks/index.vue 的 .status-tabs 同档。
+  // 槽 padding 3px ⇒ 内侧曲率 = 槽圆角 - 3px；取 control(6px) 时内侧 3px 小于项的 6px，
+  // 选中项的角稳稳落在槽内侧曲线之内；取 surface(10px) 时内侧 7px 反而大于 6px，会露出错位。
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
   // 视图数量由用户决定、可能很多，这里保留原来的换行而不是照抄 status-tabs 的单行排布。
@@ -395,7 +408,8 @@ defineExpose({ loadViews })
 
 .view-tab {
   padding: 6px 14px;
-  border-radius: 0;
+  // 槽内的分段项 → control 档
+  border-radius: var(--dd-radius-control);
   // 透明描边占位，选中时只换 border-color，避免出现 1px 的尺寸跳动
   border: 1px solid transparent;
   background: transparent;
@@ -419,7 +433,8 @@ defineExpose({ loadViews })
   &:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--el-color-primary) 45%, transparent);
     outline-offset: -1px;
-    border-radius: 0;
+    // 焦点环沿 border-radius 描边，要跟分段项本身同档，否则圆角模式下环是方的、项是圆的
+    border-radius: var(--dd-radius-control);
   }
 
   &.active {

@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { configApi, type SystemConfigMap } from '@/api/system'
 import { ElMessage } from 'element-plus'
-import { applyPanelAppearance } from '@/utils/panelAppearance'
+import { applyPanelAppearance, applyPanelShapeStyle } from '@/utils/panelAppearance'
 import type { SettingsConfigForm } from './types'
 import {
   buildConfigDraftWrites,
@@ -407,7 +407,14 @@ export function useSettingsConfig() {
         return
       }
     }
-    await submitConfigs(buildConfigDraftWrites(extraConfigItems.value, extraConfigDraft.value))
+    if (await submitConfigs(buildConfigDraftWrites(extraConfigItems.value, extraConfigDraft.value))) {
+      // 单独补一次圆角刻度：panel_shape_style 走的是兜底区、不在 configForm 里，
+      // 本文件另外四个 applyPanelAppearance(configForm.value) 的调用点
+      //（loadSystemConfigs / saveConfigKeys / handleLogBackgroundUpload / previewPanelAppearance）
+      // 都覆盖不到这条保存路径，不补的话用户在这里切了圆角要刷新页面才看得到效果。
+      // 认不出的值会被 applyPanelShapeStyle 忽略，草稿里没有这一项时也能安全传 undefined。
+      applyPanelShapeStyle(extraConfigDraft.value['panel_shape_style'])
+    }
   }
 
   return {

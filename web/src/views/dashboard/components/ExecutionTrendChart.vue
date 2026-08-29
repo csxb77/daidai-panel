@@ -61,8 +61,10 @@ function renderChart() {
       borderColor: c.tooltipBorder,
       borderWidth: 1,
       textStyle: { color: c.tooltipText, fontSize: 12 },
-      // 提示框与全局扁平风格一致：直角、无投影，仅靠 1px 边框与背景色区分层次
-      extraCssText: 'border-radius: 0; box-shadow: none;',
+      // 提示框与全局风格一致：无投影，仅靠 1px 边框与背景色区分层次。
+      // 圆角吃 surface 档（tooltip 是浮层容器）；ECharts 把 tooltip 挂在 <body> 下，
+      // CSS 变量沿 :root 继承下来，所以切换外观开关后无需重新 setOption 就会自动重算。
+      extraCssText: 'border-radius: var(--dd-radius-surface); box-shadow: none;',
     },
     legend: {
       data: ['执行总数', '成功', '失败', '终止'],

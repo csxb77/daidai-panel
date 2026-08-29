@@ -639,7 +639,7 @@
           "key": "channel",
           "label": "发送渠道 (可选)",
           "widget": "select",
-          "placeholder": "留空按 PushPlus 账号默认（微信公众号）",
+          "placeholder": "留空按 PushPlus 账号默认（微信公众号）；QQ 机器人建议配 txt 或 markdown 模板，单条约 2000 字",
           "options": [
             {
               "value": "wechat",
@@ -666,6 +666,10 @@
               "label": "企业微信应用 (cp)"
             },
             {
+              "value": "qq",
+              "label": "QQ 机器人 (qq)"
+            },
+            {
               "value": "mail",
               "label": "邮箱 (mail)"
             },
@@ -681,14 +685,15 @@
         },
         {
           "key": "option",
-          "label": "渠道编码",
+          "label": "渠道编码 (按所选渠道填)",
           "widget": "input",
-          "placeholder": "webhook 渠道填 webhook 编码，企业微信应用渠道填自定义应用编码",
+          "placeholder": "webhook 填 webhook 编码；企业微信应用填自定义应用编码；QQ 填群配置编码（发给个人留空，且群消息不能再填群组编码）",
           "show_when": {
             "key": "channel",
             "values": [
               "webhook",
-              "cp"
+              "cp",
+              "qq"
             ]
           }
         }

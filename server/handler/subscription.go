@@ -214,6 +214,29 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		return
 	}
 
+	// 订阅只做「先查后插」，刻意不给 subscriptions.url 加 DB 唯一索引：
+	// 同一个仓库以不同分支 / 不同子目录订阅两次是合法用法，加硬约束会让这些历史数据在升级时被动改名。
+	//
+	// 判重口径必须覆盖**所有决定这条订阅落到哪个目录**的字段，也就是
+	// service.subscriptionSaveDir 的整条取值链：save_dir → alias → URL 末段。
+	// 只卡「地址 + 分支 + 子目录」会误伤青龙生态里很常见的一种用法 ——
+	// 同一个脚本仓库订阅两次，一条 whitelist=jd_*.js 存进 jd、另一条 whitelist=utils/*.js 存进 libs，
+	// 两条的 url/branch/sub_path 逐字相同，升级后第二条会被 400 拒掉且没有任何绕过入口。
+	// 单文件订阅（type=file，branch 与 sub_path 恒为空）撞上的概率更高，save_dir 是它唯一的区分维度。
+	//
+	// 连点创建按钮时这五个字段本来就逐字相同，所以挡重复的能力不受影响。
+	// 注意这只是尽力而为的一道闸 —— 两个请求同时进来时仍可能双双查不到再双双插入，
+	// 前端的按钮在途锁才是主力，这里兜的是「超时后用户手动再点一次」那一半。
+	var duplicateSubCount int64
+	database.DB.Model(&model.Subscription{}).
+		Where("url = ? AND COALESCE(branch, '') = ? AND COALESCE(sub_path, '') = ? AND COALESCE(save_dir, '') = ? AND COALESCE(alias, '') = ?",
+			req.URL, req.Branch, req.SubPath, req.SaveDir, req.Alias).
+		Count(&duplicateSubCount)
+	if duplicateSubCount > 0 {
+		response.BadRequest(c, "相同地址、分支、子目录、保存目录和别名的订阅已存在")
+		return
+	}
+
 	sub := model.Subscription{
 		Name:           req.Name,
 		Type:           req.Type,

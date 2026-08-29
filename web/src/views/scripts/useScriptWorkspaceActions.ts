@@ -35,6 +35,11 @@ export function useScriptWorkspaceActions({
 
   const saving = ref(false)
   const formatting = ref(false)
+  // 新建文件 / 新建目录 / 上传各自一把在途锁，对齐上面 saving 的写法。
+  // 刻意不合并成一个 flag：合并后点「新建文件」会让「新建目录」「上传」的按钮一起转圈。
+  const creatingFile = ref(false)
+  const creatingDir = ref(false)
+  const uploading = ref(false)
 
   const showCreateFileDialog = ref(false)
   const showCreateDirDialog = ref(false)
@@ -128,6 +133,11 @@ export function useScriptWorkspaceActions({
 
   async function handleCreateFile() {
     if (!newFileName.value.trim()) return
+    // 输入框上还挂着 @keyup.enter="onCreateFile"，按钮的 :loading/:disabled 拦不住回车入口：
+    // 请求期间 newFileName 还没清空（清空在 await 之后）、弹窗也还开着，
+    // 连按两次回车会把同一个文件写两遍（版本历史里出现两条「V1 初始版本」）。这里补一道在途判断。
+    if (creatingFile.value) return
+    creatingFile.value = true
     try {
       const fullPath = newFileParent.value
         ? `${newFileParent.value}/${newFileName.value.trim()}`
@@ -152,11 +162,17 @@ export function useScriptWorkspaceActions({
       }
     } catch (err: any) {
       ElMessage.error(err?.response?.data?.error || err?.message || '创建失败')
+    } finally {
+      creatingFile.value = false
     }
   }
 
   async function handleCreateDir() {
     if (!newDirName.value.trim()) return
+    // 同 handleCreateFile：目录名输入框上挂着 @keyup.enter="onCreateDir"，绕开按钮的 :loading。
+    // 连按回车时第二次会撞上「目录已存在」，用户会看到「创建成功」后紧跟一条红色报错。
+    if (creatingDir.value) return
+    creatingDir.value = true
     try {
       const fullPath = newDirParent.value
         ? `${newDirParent.value}/${newDirName.value.trim()}`
@@ -169,6 +185,8 @@ export function useScriptWorkspaceActions({
       await loadTree()
     } catch (err: any) {
       ElMessage.error(err?.response?.data?.error || err?.message || '创建失败')
+    } finally {
+      creatingDir.value = false
     }
   }
 
@@ -284,7 +302,17 @@ export function useScriptWorkspaceActions({
       ElMessage.warning('请至少选择一个文件')
       return
     }
-    await handleUpload(uploadFileList.value)
+    // 上传目前只有按钮一个入口、不存在回车绕过，这道在途判断是和上面两个函数保持一致：
+    // 三处写法统一，将来给上传弹窗补回车提交时不会再漏一次防重。
+    if (uploading.value) return
+    // 上传本身耗时较长，且成功后还会弹「是否加到定时任务」确认框，
+    // 整段都要锁住，否则连点会重复上传并连开多个确认框。
+    uploading.value = true
+    try {
+      await handleUpload(uploadFileList.value)
+    } finally {
+      uploading.value = false
+    }
   }
 
   function navigateToTaskWithScript(filePath: string) {
@@ -460,6 +488,9 @@ export function useScriptWorkspaceActions({
   return {
     saving,
     formatting,
+    creatingFile,
+    creatingDir,
+    uploading,
     showCreateFileDialog,
     showCreateDirDialog,
     showRenameDialog,

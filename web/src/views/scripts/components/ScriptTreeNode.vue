@@ -81,7 +81,10 @@ const extLabel = computed(() => {
 <style scoped lang="scss">
 .tree-node {
   display: flex;
-  border-radius: 0;
+  // 这一层是真正接 :hover 底色的可点小块（见文件末尾的 .tree-node:hover）→ control 档，
+  // 与外层 .el-tree-node__content（ScriptsSidebar.vue 里同样是 control）保持一致，
+  // 免得两层底色的圆角错位、在拐角处露出一线深色。
+  border-radius: var(--dd-radius-control);
   transition: background-color 0.16s ease;
   align-items: center;
   gap: 10px;
@@ -93,16 +96,24 @@ const extLabel = computed(() => {
   overflow: hidden;
 }
 
-/* 文件类型色标：直角小方块 */
+/* 文件类型色标：8×8 的小色块，按扩展名取色。
+   它【不属于】§4「状态圆点」白名单——那批是 .pulse-dot 这类「运行中 / 有新消息」的状态灯，
+   靠圆形才认得出是指示灯；这个只是类型配色标记，与运行状态无关。
+
+   🔴 但也【不能吃 control 档】（v3.1.0 新立的「≤12px 小色标」判据）：
+   8×8 的盒子上 control 的 6px 会触发 CSS 圆角等比收缩（6+6=12 > 8 ⇒ 全部夹到 4px），
+   结果就是一个正圆，跟状态灯彻底混淆——「不进白名单以便区分形状」的意图在圆角模式下
+   自动失效。写死一个小于半边长的 2px，才能在两种 shape 模式下都稳住方形轮廓。 */
 .tree-node-dot {
   width: 8px;
   height: 8px;
-  border-radius: 0;
+  border-radius: 2px;
   flex-shrink: 0;
 }
 
 .tree-node.is-folder .tree-node-dot {
-  border-radius: 0;
+  // 目录版只放大 1px 并压低透明度，圆角与上面同值（9px 边长同理夹不住 control 档）
+  border-radius: 2px;
   width: 9px;
   height: 9px;
   opacity: 0.75;
@@ -129,7 +140,8 @@ const extLabel = computed(() => {
   font-weight: 700;
   font-family: var(--dd-font-mono);
   padding: 2px 6px;
-  border-radius: 0;
+  // 扩展名是静态标签，与 el-tag 同归控件类 → control 档
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color) 85%, transparent);
   color: var(--el-text-color-secondary);
   flex-shrink: 0;
@@ -151,7 +163,8 @@ const extLabel = computed(() => {
     padding: 0;
     border: none;
     background: transparent;
-    border-radius: 0;
+    // 24×24 的「更多操作」图标按钮属控件类表面 → control 档
+    border-radius: var(--dd-radius-control);
     color: var(--el-text-color-secondary);
     display: inline-flex;
     align-items: center;

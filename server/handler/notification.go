@@ -86,8 +86,10 @@ func (h *NotificationHandler) Create(c *gin.Context) {
 		Enabled:   true,
 	}
 
+	// notify_channels.name 是唯一索引，连点创建按钮的第二发会撞在这里。
+	// 照 security.go 的 AddIPWhitelist 写法翻译成友好 400，不把 GORM 原文透给前端。
 	if err := database.DB.Create(&ch).Error; err != nil {
-		response.InternalError(c, "创建通知渠道失败")
+		response.BadRequest(c, "同名通知渠道已存在")
 		return
 	}
 
@@ -162,7 +164,12 @@ func (h *NotificationHandler) Update(c *gin.Context) {
 	}
 
 	if len(updates) > 0 {
-		database.DB.Model(&ch).Updates(updates)
+		// name 加了唯一索引之后，改名撞上别的渠道会在这里报错。
+		// 不接 .Error 的话前端会拿到「更新成功」、刷新又变回原值，属于最难查的一类问题。
+		if err := database.DB.Model(&ch).Updates(updates).Error; err != nil {
+			response.BadRequest(c, "同名通知渠道已存在")
+			return
+		}
 	}
 
 	database.DB.First(&ch, chID)

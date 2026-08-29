@@ -154,7 +154,8 @@ function clearAll() {
 .dd-multi-select__clear {
   padding: 0;
   border: none;
-  border-radius: 0;
+  // 纯文字按钮本身没有底色，圆角只影响 :focus-visible 的 outline 形状，跟着控件档走
+  border-radius: var(--dd-radius-control);
   background: transparent;
   color: var(--el-text-color-secondary);
   font-size: 12px;

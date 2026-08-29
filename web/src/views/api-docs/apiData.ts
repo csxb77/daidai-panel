@@ -997,7 +997,7 @@ Transfer-Encoding: chunked
         method: 'POST',
         path: '/api/notifications',
         title: '创建通知渠道',
-        description: '创建新的通知渠道，支持：webhook / email / telegram(支持 api_host、proxy 单独代理) / dingtalk / wecom(企业微信机器人，支持 text/markdown/markdown_v2/image/news/template_card) / wecom_app(企业微信应用，支持 text/markdown/image/file/video/news/template_card，并支持 base_url 反代基础地址) / bark / pushplus(支持 channel 选择发送渠道：wechat/app/extension/webhook/clawbot/cp/mail/sms/voice，webhook 与 cp 需配合 option 填渠道编码) / serverchan / feishu / gotify / pushdeer / pushme / chanify / igot / qmsg / pushover / discord / slack / ntfy / wxpusher(WxPusher / ClawBot(iLink)，支持 url、verify_pay_type) / custom',
+        description: '创建新的通知渠道，支持：webhook / email / telegram(支持 api_host、proxy 单独代理) / dingtalk / wecom(企业微信机器人，支持 text/markdown/markdown_v2/image/news/template_card) / wecom_app(企业微信应用，支持 text/markdown/image/file/video/news/mpnews/template_card，并支持 base_url 反代基础地址) / bark / pushplus(支持 channel 选择发送渠道：wechat/app/extension/webhook/clawbot/cp/qq/mail/sms/voice，webhook、cp 与 qq 需配合 option 填渠道编码；QQ 发给个人时 option 留空，发给群才填群配置编码) / serverchan / feishu / gotify / pushdeer / pushme / chanify / igot / qmsg / pushover / discord / slack / ntfy / wxpusher(WxPusher / ClawBot(iLink)，支持 url、verify_pay_type) / custom',
         auth: 'jwt',
         bodyParams: [
           { name: 'name', type: 'string', required: true, description: '渠道名称' },

@@ -121,6 +121,8 @@ const {
   backupScheduleSelection,
   uploadProgress,
   uploadUploading,
+  // 创建备份的在途锁，透传给备份卡片绑「创建」按钮的 loading
+  backupCreating,
   showRestoreDialog,
   restoreFilename,
   restorePassword,
@@ -153,6 +155,8 @@ const {
   showAddIPDialog,
   newIP,
   newIPRemarks,
+  // 添加 IP 白名单的在途锁，透传给白名单卡片绑「添加」按钮的 loading
+  ipAdding,
   loadBackups,
   handleCreateBackup,
   handleUploadBackup,
@@ -427,6 +431,7 @@ watch(
           :restore-progress-error="restoreProgressError"
           :upload-progress="uploadProgress"
           :upload-uploading="uploadUploading"
+          :backup-creating="backupCreating"
           :on-create-backup="handleCreateBackup"
           :on-upload-backup="handleUploadBackup"
           :on-confirm-create-backup="confirmCreateBackup"
@@ -501,6 +506,7 @@ watch(
               v-model:new-i-p-remarks="newIPRemarks"
               :ip-whitelist="ipWhitelist"
               :ip-whitelist-loading="ipWhitelistLoading"
+              :ip-adding="ipAdding"
               :on-load-i-p-whitelist="loadIPWhitelist"
               :on-add-i-p="handleAddIP"
               :on-remove-i-p="handleRemoveIP"
@@ -521,7 +527,8 @@ watch(
   align-items: center;
   margin-bottom: 12px;
   padding: 4px;
-  border-radius: 0;
+  // 按钮组的灰底槽 → control 档（与槽内按钮同档，圆角一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
 }
 
@@ -600,7 +607,8 @@ watch(
   // 下划线指示条：品牌色，跟随选中项滑动，无填充背景不会被裁切
   .el-tabs__active-bar {
     height: 3px;
-    border-radius: 0;
+    // 3px 高的下划线指示条属天然胶囊（与进度条同类）→ pill 档
+    border-radius: var(--dd-radius-pill);
     background-color: var(--el-color-primary);
   }
 }

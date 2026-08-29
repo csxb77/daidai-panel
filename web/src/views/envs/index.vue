@@ -79,8 +79,11 @@ const tableDensity = ref<'comfortable' | 'compact'>(
 const showEditDialog = ref(false)
 const editDialogMode = ref<'create' | 'edit'>('create')
 const currentEditEnv = ref<EnvFormModel | null>(null)
+// 提交在途锁：请求返回前弹窗一直开着，不锁按钮连点就会连发 POST 建出多条重复变量
+const editSubmitting = ref(false)
 
 const showImportDialog = ref(false)
+const importSubmitting = ref(false)
 
 const showExportDialog = ref(false)
 const exportFormat = ref('shell')
@@ -90,7 +93,9 @@ const exportScopeText = computed(() =>
 )
 
 const showBatchRenameDialog = ref(false)
+const batchRenameSubmitting = ref(false)
 const showBatchGroupDialog = ref(false)
+const batchGroupSubmitting = ref(false)
 
 const tableRef = ref()
 const desktopTableReady = ref(false)
@@ -559,6 +564,8 @@ function openEdit(row: any) {
 }
 
 async function handleSave(data: EnvFormModel | EnvFormModel[]) {
+  // 校验都在子弹窗里做完了，走到这里必然要发请求，直接置位在途锁
+  editSubmitting.value = true
   try {
     if (Array.isArray(data)) {
       await envApi.create(data as any)
@@ -581,6 +588,8 @@ async function handleSave(data: EnvFormModel | EnvFormModel[]) {
     void loadGroups()
   } catch {
     ElMessage.error(editDialogMode.value === 'create' ? '创建失败' : '更新失败')
+  } finally {
+    editSubmitting.value = false
   }
 }
 
@@ -689,6 +698,8 @@ function handleBatchRename() {
 }
 
 async function confirmBatchRename(payload: { name: string }) {
+  // 在途锁：弹窗要等请求成功才关，期间连点会重复提交
+  batchRenameSubmitting.value = true
   try {
     const res = await envApi.batchRename(selectedIds.value, payload.name)
     ElMessage.success(res.message || '批量改名成功')
@@ -697,10 +708,14 @@ async function confirmBatchRename(payload: { name: string }) {
     void loadData()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || err?.message || '批量改名失败')
+  } finally {
+    batchRenameSubmitting.value = false
   }
 }
 
 async function confirmBatchGroup(groups: string[]) {
+  // 在途锁：同上，弹窗在请求期间仍可点
+  batchGroupSubmitting.value = true
   try {
     await envApi.batchSetGroup(selectedIds.value, normalizeGroupList(groups))
     ElMessage.success('批量分组成功')
@@ -710,6 +725,8 @@ async function confirmBatchGroup(groups: string[]) {
     void loadGroups()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || err?.message || '批量分组失败')
+  } finally {
+    batchGroupSubmitting.value = false
   }
 }
 
@@ -744,6 +761,8 @@ function handleSelectionChange(rows: any[]) {
 }
 
 async function handleImport(payload: { envs: any[]; mode: string }) {
+  // 在途锁：JSON 体积大时导入耗时长，不锁按钮连点会把同一份数据导多遍
+  importSubmitting.value = true
   try {
     const res = await envApi.import(payload.envs, payload.mode)
     ElMessage.success(res.message)
@@ -752,6 +771,8 @@ async function handleImport(payload: { envs: any[]; mode: string }) {
     void loadGroups()
   } catch {
     ElMessage.error('导入失败')
+  } finally {
+    importSubmitting.value = false
   }
 }
 
@@ -1236,22 +1257,26 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
       :mode="editDialogMode"
       :initial-data="currentEditEnv"
       :groups="groups"
+      :submitting="editSubmitting"
       @save="handleSave"
     />
 
     <EnvImportDialog
       v-model="showImportDialog"
+      :submitting="importSubmitting"
       @import="handleImport"
     />
 
     <EnvBatchRenameDialog
       v-model="showBatchRenameDialog"
+      :submitting="batchRenameSubmitting"
       @confirm="confirmBatchRename"
     />
 
     <EnvBatchGroupDialog
       v-model="showBatchGroupDialog"
       :groups="groups"
+      :submitting="batchGroupSubmitting"
       @confirm="confirmBatchGroup"
     />
   </div>
@@ -1348,18 +1373,23 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
-// 状态分段控件：与定时任务页/执行日志页/订阅页一致的直角容器 + 选中态白底品牌色 + 1px 边框
+// 状态分段控件：与定时任务页/执行日志页/订阅页一致的灰底槽 + 选中态白底品牌色 + 1px 边框
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽 → control 档。
+  // 全站 13 处分段槽（含 global.scss 的通用类 .dd-seg-group）统一走 control：
+  // 槽只比槽内的项高 6px（padding 3px），槽外圈取 surface(10px)、内层项取 control(6px)
+  // 的话，选中项白底的四角会从灰底槽里探出来，露出一圈错位的角。同档才严丝合缝。
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 0;
+  // 槽内的分段项 → control 档
+  border-radius: var(--dd-radius-control);
   // 未选中态用透明边框占位，选中态只换边框颜色，避免尺寸跳动
   border: 1px solid transparent;
   background: transparent;
@@ -1447,10 +1477,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Table Card ---- */
-// 表格卡：直角无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器 → surface 档
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1538,7 +1569,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 12px;
 }
 
-// 桌面空态/骨架容器（特有元素）：直角纯色底 + 1px 边框，明暗自动适配；保留自定义空态结构
+// 桌面空态/骨架容器（特有元素）：纯色底 + 1px 边框，明暗自动适配；保留自定义空态结构
 .env-desktop-state {
   display: flex;
   align-items: center;
@@ -1546,7 +1577,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   min-height: 360px;
   padding: 28px 24px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 它站在表格卡的位置上（空态/加载态占位）→ 与 .table-card 同走 surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-bg-color);
 }
 
@@ -1561,7 +1593,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 .env-skeleton {
   position: relative;
   overflow: hidden;
-  border-radius: 0;
+  // 骨架条是标题/工具栏/表格行的占位，尺寸都是控件量级 → control 档
+  border-radius: var(--dd-radius-control);
   background: var(--el-fill-color);
 }
 
@@ -1636,7 +1669,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   justify-content: center;
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 30×30 的图标按钮 → control 档
+  border-radius: var(--dd-radius-control);
   color: var(--el-text-color-secondary);
   cursor: grab;
   touch-action: none;
@@ -1722,14 +1756,16 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   white-space: nowrap;
 }
 
-// 置顶标签：直角纯色底 + 1px 边框（原胶囊渐变与内描边已去掉）
+// 置顶标签：纯色底 + 1px 边框（原胶囊渐变与内描边已去掉）
 .pinned-chip {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  border-radius: 0;
+  // 走 control 而不是 pill：它和分组标签 .group-pill 是同一格里的一组同级小标签
+  // （紧凑模式那条规则也是把两者一起收的），做成胶囊会跟旁边的分组标签形状打架。
+  border-radius: var(--dd-radius-control);
   font-size: 12px;
   font-weight: 700;
   color: #8a4b00;
@@ -1780,7 +1816,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   color: var(--el-text-color-placeholder);
 }
 
-// 分组标签：直角纯色底；原来的内描边改成真实 1px 边框，保证浅底在白色表格上仍有分隔
+// 分组标签：纯色底；原来的内描边改成真实 1px 边框，保证浅底在白色表格上仍有分隔
 .group-pill {
   --group-hue: 210;
   display: inline-flex;
@@ -1788,7 +1824,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   gap: 6px;
   max-width: 100%;
   padding: 4px 10px;
-  border-radius: 0;
+  // 名字里虽然叫 pill，但它是分组标签（tag 一类）→ control 档，和 .pinned-chip 保持同档
+  border-radius: var(--dd-radius-control);
   font-size: 12px;
   font-weight: 600;
   color: hsl(var(--group-hue) 55% 32%);
@@ -1815,11 +1852,20 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   white-space: nowrap;
 }
 
-// 分组色标：直角小方块
+// 分组色标
 .group-dot {
   width: 7px;
   height: 7px;
-  border-radius: 0;
+  // 🔴 固定 2px，既不进圆形白名单、也不吃 control 档（v3.1.0 新立的「≤12px 小色标」判据）。
+  //
+  // 它的颜色由 --group-hue（按分组名派生）决定，**与运行状态无关**，表达的是「分类」
+  // 而不是「这个东西现在是什么状态」—— 语义上就不该和 .pulse-dot / .env-status 那类
+  // 状态灯长得一样。原来写 50% 是照着 .pulse-dot 抄的，理由并不成立。
+  //
+  // 但也不能改成吃 control：7×7 的盒子上，6px 半径会触发 CSS 的圆角等比收缩
+  // （一条边上两个半径之和 12px > 边长 7px ⇒ 全部夹到 3.5px），结果还是一个正圆，
+  // 等于什么都没改。只有写死一个小于半边长的值才稳得住方形轮廓。
+  border-radius: 2px;
   background: hsl(var(--group-hue) 72% 48%);
   flex-shrink: 0;
 }
@@ -1894,7 +1940,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 .export-preview {
   background: var(--el-bg-color-page);
-  border-radius: 0;
+  // 导出预览是弹窗里的一整块代码面板 → surface 档
+  border-radius: var(--dd-radius-surface);
   padding: 16px;
   font-family: var(--dd-font-mono);
   font-size: 13px;
@@ -2036,11 +2083,13 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 /* 这些类由 sortablejs 在运行时动态加到 el-table 行 / body 上的拖拽克隆上，
    不在本组件 scoped 作用域内，必须用全局样式才能命中。 */
 
-/* 被拖起的克隆行：不做放大与投影，改为直角实底 + 主色描边标出正在拖动的行。
+/* 被拖起的克隆行：不做放大与投影，改为实底 + 主色描边标出正在拖动的行。
    用 outline 而不是 border：el-table 是 border-collapse: separate，tr 上的 border 不会绘制。 */
 .sortable-drag {
   background: var(--el-bg-color);
   opacity: 1 !important;
+  // 保持 0，不吃令牌：这是铺满表格宽度的一整行 <tr>，贴着 table-card 的内边；
+  // 给它加圆角只会在行两端与表格边框之间露出缺口（且 border-collapse:separate 下 tr 圆角几乎不可见）。
   border-radius: 0;
   cursor: grabbing;
   outline: 1px solid var(--el-color-primary);
@@ -2050,6 +2099,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 /* 落点占位：高亮"插槽"，清楚指示会落到哪（主色浅底本身已足够区分，不再叠内描边） */
 .sortable-ghost {
   background: var(--el-color-primary-light-9) !important;
+  // 保持 0，不吃令牌：与 .sortable-drag 同理，它是贴边铺满的落点占位行
   border-radius: 0;
 }
 .sortable-ghost > td {

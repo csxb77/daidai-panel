@@ -1191,18 +1191,21 @@ onBeforeUnmount(() => {
   }
 }
 
-// 状态分段控件：与定时任务页一致的直角分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
+// 状态分段控件：与定时任务页一致的分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽 → control 档（与 global.scss 的 .dd-seg-group 同档，
+  // 必须和槽内的 .status-tab 同档，圆角不一致会在拐角露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 0;
+  // 分段项属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   border: none;
   background: transparent;
   color: var(--el-text-color-secondary);
@@ -1281,10 +1284,12 @@ onBeforeUnmount(() => {
 }
 
 /* =============== Table Card =============== */
-// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器是容器类表面 → surface 档；
+  // overflow: hidden 会把内部贴边的表头 / 表格 / 分页条自动裁成同样的角
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1389,12 +1394,15 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-secondary);
 }
 
-// 状态点：直角小方块，去掉彩色光晕环，只保留纯色块
+// 状态点：纯色小圆点（去掉了彩色光晕渐变，只保留纯色）
+// 白名单：形状承载语义 —— 10×10 的色点是这一行日志「成功 / 失败 / 运行中」的状态灯，
+// 方化后与旁边的状态文字标签糊成一小块色斑，认不出是状态指示。
+// 两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度（同 global.scss 的 .pulse-dot）。
 .status-indicator {
   position: relative;
   width: 10px;
   height: 10px;
-  border-radius: 0;
+  border-radius: 50%;
   display: inline-block;
   flex-shrink: 0;
 
@@ -1407,7 +1415,9 @@ onBeforeUnmount(() => {
 .status-indicator-pulse {
   position: absolute;
   inset: -3px;
-  border-radius: 0;
+  // 白名单：跟着 .status-indicator 一起固定圆形。这是套在状态点外面的「运行中」涟漪，
+  // 圆点外面套一个方环会立刻穿帮，两者形状必须一致。
+  border-radius: 50%;
   background: color-mix(in srgb, var(--el-color-warning) 50%, transparent);
   animation: orb-ripple 1.6s ease-out infinite;
 }
@@ -1421,7 +1431,8 @@ onBeforeUnmount(() => {
   font-weight: 700;
   letter-spacing: 0.5px;
   font-family: var(--dd-font-mono);
-  border-radius: 0;
+  // 这是「成功 / 失败 / 运行中」的状态 chip，天然胶囊 → pill 档（与 global.scss 的 .dd-status-chip 同档）
+  border-radius: var(--dd-radius-pill);
 
   &--success { background: color-mix(in srgb, var(--logs-accent) 14%, transparent); color: color-mix(in srgb, var(--logs-accent) 80%, var(--el-text-color-primary)); }
   &--danger { background: color-mix(in srgb, var(--el-color-danger) 14%, transparent); color: var(--el-color-danger); }
@@ -1431,7 +1442,9 @@ onBeforeUnmount(() => {
 
 /* =============== Detail dialog =============== */
 :deep(.log-detail-dialog) {
-  border-radius: 0;
+  // 弹窗是容器类表面 → surface 档；overflow: hidden 会把内部贴边铺满的
+  // header / 正文 / footer 一起裁成同样的角
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1460,6 +1473,16 @@ onBeforeUnmount(() => {
     padding: 12px 18px;
     border-top: 1px solid var(--logs-border-soft);
     flex-shrink: 0;
+  }
+
+  // 保持 0，不吃令牌：详情弹窗里 .el-dialog__body 的 padding 已经归零，
+  // 这块正文是【铺满】弹窗正文区的，四边直接贴着弹窗内壁，
+  // 圆角交给上面弹窗自身的 surface 档 + overflow: hidden 去裁。
+  // 它再吃一次 surface 档就会在弹窗边内又缩出一圈角，露出一线底色。
+  // （.detail-log 基类之所以给 surface，是因为另一处用法 —— 日志文件内容弹窗 ——
+  //   嵌在有默认内边距的 body 里、四边留白，那里才是一块独立的日志面板。）
+  .detail-log {
+    border-radius: 0;
   }
 }
 
@@ -1517,14 +1540,15 @@ onBeforeUnmount(() => {
   font-family: var(--dd-font-ui);
 }
 
-// 关闭按钮：直角方形，hover 只换底色/文字色，不做缩放、旋转与渐变辉光
+// 关闭按钮：hover 只换底色/文字色，不做缩放、旋转与渐变辉光
 .detail-hero-close {
   width: 34px;
   height: 34px;
   padding: 0;
   border: 1px solid transparent;
   background: transparent;
-  border-radius: 0;
+  // 34×34 的图标按钮属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   color: var(--el-text-color-secondary);
   display: inline-flex;
@@ -1583,17 +1607,20 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--dd-log-text-color, #e2e8f0);
-  border-radius: 0;
+  // 日志正文窗口是容器类表面 → surface 档（与 global.scss 的 .dd-log-surface 同档）。
+  // 详情弹窗那一处是铺满的，已在上面 :deep(.log-detail-dialog) 里单独压回 0。
+  border-radius: var(--dd-radius-surface);
 }
 
-// 渲染窗口封顶提示：扁平直角虚线块，颜色全部从日志前景色派生，明暗两态自动适配
+// 渲染窗口封顶提示：扁平虚线块，颜色全部从日志前景色派生，明暗两态自动适配
 .log-omitted-notice {
   display: block;
   width: 100%;
   margin: 0 0 10px;
   padding: 6px 10px;
   border: 1px dashed color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 32%, transparent);
-  border-radius: 0;
+  // 它是一枚可点的提示条（button，点了展开完整内容）→ 归控件类 control 档
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 8%, transparent);
   color: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 70%, transparent);
   font-family: var(--dd-font-mono);

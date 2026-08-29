@@ -472,7 +472,8 @@ onBeforeUnmount(() => {
   gap: 22px;
   align-items: center;
   padding: 22px;
-  border-radius: 0;
+  // 弹窗内的主视觉区块，属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   // 扁平化：去掉投影，用纯色底 + 1px 描边划分层次
   background: var(--dd-restore-surface);
   border: 1px solid var(--dd-restore-accent-soft);
@@ -569,7 +570,8 @@ onBeforeUnmount(() => {
 .restore-progress-eyebrow {
   display: inline-flex;
   padding: 6px 10px;
-  border-radius: 0;
+  // 小标签块（不是状态灯）→ control 档，与 el-tag 保持同档
+  border-radius: var(--dd-radius-control);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -588,7 +590,8 @@ onBeforeUnmount(() => {
     align-items: center;
     min-height: 30px;
     padding: 0 12px;
-    border-radius: 0;
+    // 元信息小标签属控件类表面 → control 档
+    border-radius: var(--dd-radius-control);
     font-size: 12px;
     color: var(--el-text-color-secondary);
     background: var(--el-bg-color);
@@ -598,7 +601,8 @@ onBeforeUnmount(() => {
 
 .restore-progress-bar {
   padding: 18px 20px;
-  border-radius: 0;
+  // 进度区整块是容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-lighter);
 }
@@ -607,14 +611,16 @@ onBeforeUnmount(() => {
   position: relative;
   height: 12px;
   overflow: hidden;
-  border-radius: 0;
+  // 进度条轨道是天然胶囊 → pill 档
+  border-radius: var(--dd-radius-pill);
   background: rgba(148, 163, 184, 0.16);
 }
 
 .restore-progress-bar__fill {
   position: relative;
   height: 100%;
-  border-radius: 0;
+  // 进度条填充跟随轨道 → pill 档
+  border-radius: var(--dd-radius-pill);
   background: linear-gradient(90deg, color-mix(in srgb, var(--dd-restore-accent) 82%, white), var(--dd-restore-accent));
   transition: width 0.45s ease;
 
@@ -654,7 +660,8 @@ onBeforeUnmount(() => {
   gap: 8px;
   min-height: 34px;
   padding: 0 14px;
-  border-radius: 0;
+  // 恢复目标标签（不是状态灯）→ control 档
+  border-radius: var(--dd-radius-control);
   font-size: 12px;
   font-weight: 600;
   color: var(--el-text-color-primary);
@@ -679,7 +686,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   padding: 16px 12px;
-  border-radius: 0;
+  // 步骤卡片是独立的容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   text-align: center;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-lighter);
@@ -708,8 +716,8 @@ onBeforeUnmount(() => {
   justify-content: center;
   width: 36px;
   height: 36px;
-  // 静态的步骤序号，方化为直角方块
-  border-radius: 0;
+  // 静态的步骤序号底块，属控件类表面 → control 档（不做成正圆，避免与状态灯/头像混淆）
+  border-radius: var(--dd-radius-control);
   font-size: 14px;
   font-weight: 700;
   color: var(--el-text-color-secondary);
@@ -750,7 +758,8 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: start;
   padding: 16px 18px;
-  border-radius: 0;
+  // 错误提示是弹窗内的独立区块 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: rgba(254, 242, 242, 0.92);
   border: 1px solid rgba(220, 38, 38, 0.18);
   color: #b42318;

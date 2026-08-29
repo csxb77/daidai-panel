@@ -1904,10 +1904,11 @@ onBeforeUnmount(() => {
 }
 
 // ---------- Table Card ----------
-// 表格卡：直角无阴影，仅用 1px 边框与页面底色区分；本页是滚动页（dd-scroll-page），不做 fixed 高度链处理。
+// 表格卡：无阴影，仅用 1px 边框与页面底色区分；本页是滚动页（dd-scroll-page），不做 fixed 高度链处理。
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器属容器类表面 → surface 档；overflow:hidden 让内部贴边的表头/行自动被圆角裁角
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1919,10 +1920,11 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+// 依赖名首字头像：形状承载语义（圆形=头像/身份标识），两种圆角模式下都固定正圆，不吃 --dd-radius-* 令牌
 .dep-name-avatar {
   width: 24px;
   height: 24px;
-  border-radius: 0;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1940,19 +1942,21 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-// 状态分段控件：与定时任务页/执行日志页/订阅页/环境变量页一致的直角容器 + 选中态白底品牌色 + 1px 边框。
+// 状态分段控件：与定时任务页/执行日志页/订阅页/环境变量页一致的分段容器 + 选中态白底品牌色 + 1px 边框。
 // 本页有两组：①运行时切换（Node/Python3/Linux）②状态筛选（.status-tabs--filter，含已安装/失败计数），
 // 共用同一套观感，使两组视觉统一。
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽属控件类表面 → control 档（与槽内的项同档，两者一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
 .status-tab {
   padding: 6px 14px;
-  border-radius: 0;
+  // 分段项属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   // 未选中态用透明边框占位，选中态只换边框颜色，避免尺寸跳动
   border: 1px solid transparent;
   background: transparent;
@@ -2085,7 +2089,8 @@ onBeforeUnmount(() => {
 
 // ---------- Log dialog ----------
 .log-content {
-  border-radius: 0;
+  // 安装日志面板属容器类表面 → surface 档（弹窗 body 有内边距，不贴边，不会露角）
+  border-radius: var(--dd-radius-surface);
   padding: 16px;
   font-family: var(--dd-font-mono);
   font-size: 13px;
@@ -2269,7 +2274,8 @@ onBeforeUnmount(() => {
 }
 .runtime-item {
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 运行时条目是弹窗内的列表卡片，属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   padding: 12px 14px;
   margin-bottom: 12px;
   background: var(--el-fill-color-lighter);
@@ -2309,7 +2315,8 @@ onBeforeUnmount(() => {
 }
 .android-runtime-log pre {
   background: var(--el-fill-color);
-  border-radius: 0;
+  // 运行时安装日志代码块属容器类表面 → surface 档（上方有虚线分隔+padding-top，不贴边）
+  border-radius: var(--dd-radius-surface);
   padding: 10px 12px;
   font-size: 12px;
   max-height: 240px;

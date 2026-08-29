@@ -49,6 +49,10 @@ const {
   versionDiffOriginalContent,
   versionDiffModifiedContent,
   formatting,
+  // 新建文件 / 新建目录 / 上传的在途锁，透传给弹窗组件绑按钮 loading
+  creatingFile,
+  creatingDir,
+  uploading,
   editorLanguage,
   hasChanges,
   allFolders,
@@ -233,6 +237,9 @@ async function handleCancelEdit() {
       :versions="versions"
       :versions-loading="versionsLoading"
       :version-diff-loading="versionDiffLoading"
+      :creating-file="creatingFile"
+      :creating-dir="creatingDir"
+      :uploading="uploading"
       :on-create-file="handleCreateFile"
       :on-create-dir="handleCreateDir"
       :on-rename="handleRename"
@@ -329,14 +336,15 @@ async function handleCancelEdit() {
   background: transparent;
 }
 
-/* ---- 目录树卡（直角面板，靠 1px 边框划分层次）---- */
+/* ---- 目录树卡（靠 1px 边框划分层次，圆角跟随 --dd-radius-surface）---- */
 :deep(.scripts-sidebar) {
   flex: 0 0 var(--scripts-sidebar-width);
   min-height: 0;
-  overflow: hidden; /* 裁切内部溢出内容 */
+  overflow: hidden; /* 裁切内部溢出内容，顺带把内部贴边元素裁成同样的角 */
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  /* 整张目录树卡是容器类表面 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   /* 折叠动画只动宽度，【绝不能用 transform】：
      残留 transform 会让这张卡成为 Monaco 内部 position:fixed 浮层（补全 / 右键菜单 /
      悬浮提示）的包含块，弹层会飘位 —— 与文末入场动画那条「只能 backwards」是同一个坑。
@@ -360,13 +368,14 @@ async function handleCancelEdit() {
   }
 }
 
-/* ---- 编辑器卡（直角面板，靠 1px 边框划分层次）---- */
+/* ---- 编辑器卡（靠 1px 边框划分层次，圆角跟随 --dd-radius-surface）---- */
 :deep(.scripts-editor) {
   min-height: 0;
-  overflow: hidden; /* 裁切内部溢出内容 */
+  overflow: hidden; /* 裁切内部溢出内容，顺带把内部贴边的 hero / 状态条裁成同样的角 */
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  /* 整张编辑器卡是容器类表面 → surface 档 */
+  border-radius: var(--dd-radius-surface);
 }
 
 :deep(.editor-hero) {

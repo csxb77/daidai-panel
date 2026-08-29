@@ -178,6 +178,25 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newTrimmedStringConfig("editor_background_color", "编辑器背景颜色", "", "脚本编辑器背景颜色（留空使用默认样式）", "branding"),
 	newTrimmedStringConfig("log_background_color", "日志背景颜色", "", "日志视图背景颜色（留空跟随当前主题）", "branding"),
 	newTrimmedStringConfig("log_background_image", "日志背景图片", "", "日志视图背景图片（data URL）", "branding"),
+	// 界面圆角开关：网页端把全站圆角刻度化成 --dd-radius-* 三档令牌，这一项决定取直角(全 0)还是圆角。
+	// 默认 square 是为了保持 v3.0.0 以来「扁平工具型」的既有观感，升级的实例不会因为加了这项而变样。
+	//
+	// ⚠️ 这项纯粹由客户端消费，服务端没有任何运行时状态依赖它，所以不需要进
+	// handler.reloadRuntimeConfigKeys 的热加载分支。
+	// ⚠️ 注册表是原样下发给 Web 和 APP 的（见本文件顶部 SystemConfigDefinition 的说明），
+	// APP 的 schema 驱动设置页也会渲染出这个开关但点了不会有效果，
+	// 所以 description 里必须写明「仅网页端生效」，避免被当成 APP 的 bug。
+	newEnumConfig(
+		"panel_shape_style",
+		"界面圆角",
+		"square",
+		"网页端界面的圆角风格。直角=扁平工具型（默认）；圆角=各控件与卡片带圆角。仅网页端生效，APP 不受影响。",
+		"branding",
+		[]SystemConfigOption{
+			{Value: "square", Label: "直角"},
+			{Value: "rounded", Label: "圆角"},
+		},
+	),
 	newBoolConfig("backup_schedule_enabled", "启用定时备份", "false", "启用定时备份", "backup"),
 	newEnumConfig(
 		"backup_schedule_frequency",

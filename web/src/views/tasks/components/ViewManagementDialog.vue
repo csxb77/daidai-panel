@@ -297,7 +297,8 @@ watch(
   padding: 8px 10px;
   background: var(--el-fill-color-lighter);
   border: 1px solid transparent;
-  border-radius: 0;
+  // 视图列表里的一行卡片（行间有 6px 间隔，不是贴边内嵌）→ surface 档
+  border-radius: var(--dd-radius-surface);
   transition: border-color 0.15s, background 0.15s, opacity 0.15s;
 
   &:hover {

@@ -46,6 +46,9 @@ export const DEMO_PANEL_VERSION = String(import.meta.env.VITE_DEMO_VERSION || ''
 const DEMO_PANEL_SETTINGS: PanelSettingsPayload = {
   panel_title: '呆呆面板',
   panel_icon: '',
+  // 界面圆角风格，与服务端 SystemHandler.PanelSettings 下发的字段对齐。
+  // 演示站取注册表默认值 square（直角），保持与全新安装的面板同一个观感。
+  panel_shape_style: 'square',
 }
 
 /**

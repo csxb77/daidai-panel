@@ -469,8 +469,8 @@ function methodClass(method: string) {
   width: 280px;
   flex-shrink: 0;
   background: var(--el-bg-color);
-  // 直角 + 1px 边框，使侧栏与右侧文档卡观感统一（不再用阴影浮起）
-  border-radius: 0;
+  // 1px 边框 + 圆角刻度，使侧栏与右侧文档卡观感统一（不再用阴影浮起）
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
   height: 100%;
@@ -526,7 +526,7 @@ function methodClass(method: string) {
   padding: 6px 12px 6px 9px;
   border-left: 3px solid transparent;
   margin: 2px 8px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   // 选中/hover 过渡走令牌（快 + 标准缓动），与全站侧边菜单观感一致
   transition:
@@ -564,7 +564,7 @@ function methodClass(method: string) {
   justify-content: center;
   min-width: 52px;
   padding: 1px 8px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -578,7 +578,7 @@ function methodClass(method: string) {
   padding: 0 5px;
   font-size: 10px;
   line-height: 18px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
 }
 
 // 方法色标改纯色（原为渐变）
@@ -590,8 +590,8 @@ function methodClass(method: string) {
 .api-content {
   flex: 1;
   background: var(--el-bg-color);
-  // 直角 + 1px 边框，不再用阴影浮起
-  border-radius: 0;
+  // 1px 边框 + 圆角刻度，不再用阴影浮起
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   padding: 28px 32px;
   overflow: auto;
@@ -620,7 +620,7 @@ function methodClass(method: string) {
   padding: 12px 20px;
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   margin-bottom: 24px;
   flex-wrap: wrap;
   // hover 只加深描边，不再叠阴影
@@ -650,7 +650,7 @@ function methodClass(method: string) {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   margin-bottom: 20px;
   font-size: 13px;
   line-height: 1.7;
@@ -665,7 +665,7 @@ function methodClass(method: string) {
     // 用 color-mix 基于当前文字色生成半透明底，明暗双主题都自适应
     background: color-mix(in srgb, currentColor 10%, transparent);
     padding: 2px 6px;
-    border-radius: 0;
+    border-radius: var(--dd-radius-control);
   }
 
   // JWT / 无鉴权两种状态：用 Element Plus 语义色 + color-mix 生成浅底，明暗双主题自适应
@@ -690,8 +690,8 @@ function methodClass(method: string) {
 }
 
 .api-card {
-  // 直角卡；这些卡用了 shadow="never"，层次全部交给自身的 1px lighter 边框（暗色自动适配）。
-  border-radius: 0;
+  // 这些卡用了 shadow="never"，层次全部交给自身的 1px lighter 边框（暗色自动适配）。
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   margin-bottom: 20px;
   overflow: hidden;
@@ -722,7 +722,8 @@ function methodClass(method: string) {
     top: 3px;
     bottom: 3px;
     width: 3px;
-    border-radius: 0;
+    // 3px 宽的品牌色指示条属于天然胶囊，吃 pill 档：直角模式是细方条，圆角模式两端收圆
+    border-radius: var(--dd-radius-pill);
     background: var(--el-color-primary);
   }
 }
@@ -740,7 +741,7 @@ function methodClass(method: string) {
   font-size: 12px;
   background: var(--el-fill-color);
   padding: 2px 6px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
 }
 
 .param-example {
@@ -764,7 +765,7 @@ function methodClass(method: string) {
 
 .code-block-wrapper {
   position: relative;
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   margin: 0;
 
@@ -809,14 +810,17 @@ function methodClass(method: string) {
   align-items: center;
   gap: 6px;
   padding: 4px 12px;
-  border-radius: 0;
+  // 「200 OK」这类状态 chip 属于天然胶囊，吃 pill 档
+  border-radius: var(--dd-radius-pill);
   font-size: 13px;
   font-weight: 600;
 
   .status-dot {
     width: 8px;
     height: 8px;
-    border-radius: 0;
+    // 圆形承载语义：状态指示圆点，圆形是通用可供性，方块会被误读成色块装饰。
+    // 两种圆角模式下都保持圆形，不吃 --dd-radius-* 令牌。
+    border-radius: 50%;
     background: var(--el-color-success);
     display: inline-block;
   }

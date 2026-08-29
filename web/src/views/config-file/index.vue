@@ -252,11 +252,13 @@ async function copyConfigScript() {
   align-items: start;
 }
 
-// 直角卡：层次交给 1px 边框，不再用阴影浮起
+// 卡片：层次交给 1px 边框，不再用阴影浮起
 .editor-card,
 .info-card,
 .tips-card {
-  border-radius: 0;
+  // 三张都是容器类表面 → surface 档
+  // （.editor-card 还带 overflow: hidden，内部贴边的 header 与编辑器会被裁成同样的角）
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
 }
 
@@ -391,7 +393,8 @@ async function copyConfigScript() {
 
 code {
   padding: 1px 5px;
-  border-radius: 0;
+  // 行内代码底是文字里的小色块（不是块级代码面板）→ 归控件类 control 档
+  border-radius: var(--dd-radius-control);
   background: var(--el-fill-color-lighter);
   color: var(--el-text-color-primary);
   font-family: var(--dd-font-mono);

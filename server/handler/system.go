@@ -420,6 +420,10 @@ func (h *SystemHandler) PanelSettings(c *gin.Context) {
 	panelRuntimeMode := service.ResolvePanelRuntimeMode()
 	panelServiceManager := model.GetRegisteredConfig("panel_service_manager")
 	panelServiceName := model.GetRegisteredConfig("panel_service_name")
+	// 界面圆角风格。这个接口在 JWTAuth 之外，是 Web 首屏唯一能拿到外观配置的地方
+	// （/api/configs 要登录后才能读），不在这里下发的话前端 applyPanelAppearance()
+	// 永远拿不到值，设置里的圆角开关就只能靠 localStorage 缓存、换台设备就失效。
+	panelShapeStyle := model.GetRegisteredConfig("panel_shape_style")
 	response.Success(c, gin.H{
 		"data": gin.H{
 			"panel_title":             title,
@@ -430,6 +434,7 @@ func (h *SystemHandler) PanelSettings(c *gin.Context) {
 			"panel_runtime_mode":      panelRuntimeMode,
 			"panel_service_manager":   panelServiceManager,
 			"panel_service_name":      panelServiceName,
+			"panel_shape_style":       panelShapeStyle,
 		},
 	})
 }

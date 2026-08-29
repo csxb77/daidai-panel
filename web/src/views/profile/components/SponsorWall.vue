@@ -238,10 +238,17 @@ function rankLabel(rank: number) {
   gap: 8px;
 }
 
+/* 注意：类名叫 dot，实际是 3×14 的竖条色标（不是状态灯），所以不进圆形白名单。
+
+   归档为「装饰性细指示条」→ pill 档，与 api-docs 的 .api-card 品牌色竖条、
+   ScriptsSidebar 当前项的左缘条同类，全站这一类统一走 pill。
+   ⚠️ 这里换档是【为了归类一致，不是为了改观感】：3px 宽的盒子上，CSS 圆角等比收缩会把
+   control(6px) 和 pill(999px) 一起夹到 1.5px（= 半个宽度），两者渲染结果完全相同。
+   写 pill 是为了让「细条 = 胶囊」这条判据在代码里读得出来，避免后人以为它属于控件类。 */
 .title-dot {
   width: 3px;
   height: 14px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-pill);
   display: inline-block;
   flex-shrink: 0;
 }
@@ -263,7 +270,8 @@ function rankLabel(rank: number) {
 
 .summary-pill {
   padding: 6px 10px;
-  border-radius: 0;
+  /* 「N 位支持者 / 累计金额」计数角标，天然胶囊 → pill 档 */
+  border-radius: var(--dd-radius-pill);
   background: #ffffff;
   border: 1px solid rgba(249, 115, 22, 0.12);
 }
@@ -274,12 +282,13 @@ function rankLabel(rank: number) {
   gap: 12px;
 }
 
-/* 骨架屏：直角占位块；::after 的横向流光是加载指示（非装饰），保留 */
+/* 骨架屏：占位块；::after 的横向流光是加载指示（非装饰），保留 */
 .sponsor-loading__card {
   position: relative;
   overflow: hidden;
   min-height: 88px;
-  border-radius: 0;
+  /* 占位块要和真实的 .sponsor-card 同形，否则加载完会看到形状跳变 → 同取 surface 档 */
+  border-radius: var(--dd-radius-surface);
   background: #ffffff;
   border: 1px solid rgba(251, 146, 60, 0.16);
 
@@ -302,7 +311,8 @@ function rankLabel(rank: number) {
 .sponsor-empty {
   position: relative;
   padding: 28px 24px;
-  border-radius: 0;
+  /* 空状态面板是容器类表面 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   background: #ffffff;
   border: 1px dashed rgba(249, 115, 22, 0.24);
   text-align: center;
@@ -370,8 +380,8 @@ function rankLabel(rank: number) {
   justify-content: center;
   gap: 10px;
   padding: 18px 16px 16px;
-  /* 直角纯色卡：去掉顶部圆形高光、投影与 hover 上浮，层次交给 1px 描边 */
-  border-radius: 0;
+  /* 纯色卡：去掉顶部圆形高光、投影与 hover 上浮，层次交给 1px 描边。卡片本体 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   text-align: center;
   background: #ffffff;
   border: 1px solid rgba(249, 115, 22, 0.16);
@@ -387,7 +397,8 @@ function rankLabel(rank: number) {
   top: 12px;
   left: 12px;
   padding: 4px 10px;
-  border-radius: 0;
+  /* 「No.1」名次标签，是卡片里的小标签而非状态胶囊 → control 档（与 .dd-stat-card__delta 同档） */
+  border-radius: var(--dd-radius-control);
   background: #ffffff;
   border: 1px solid rgba(249, 115, 22, 0.18);
   font-size: 11px;
@@ -404,8 +415,10 @@ function rankLabel(rank: number) {
   span {
     width: 100%;
     height: 100%;
-    /* 直角头像：去圆角、去渐变与投影，改纯橙底 */
-    border-radius: 0;
+    /* 白名单：形状承载语义 —— 这里直接渲染 GitHub 头像，头像本身按圆形构图，
+       方切后人像被裁到角上观感最差。两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度。
+       （底色也保留纯橙，只是去掉了渐变与投影） */
+    border-radius: 50%;
     object-fit: cover;
     background: #ea580c;
     color: #fff;
@@ -443,9 +456,9 @@ function rankLabel(rank: number) {
   font-size: 19px;
 }
 
-/* 领奖台底座：直角纯色块，去掉渐变与顶部内高光 */
+/* 领奖台底座：纯色块，去掉渐变与顶部内高光。它与上方卡片之间有 gap，是独立的容器类表面 → surface 档 */
 .podium-base {
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   border: 1px solid rgba(249, 115, 22, 0.14);
   background: #fef3c7;
 }
@@ -473,7 +486,8 @@ function rankLabel(rank: number) {
   align-items: center;
   gap: 12px;
   padding: 14px;
-  border-radius: 0;
+  /* 赞助者列表卡片本体 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   background: #ffffff;
   border: 1px solid rgba(253, 186, 116, 0.18);
 }
@@ -487,7 +501,8 @@ function rankLabel(rank: number) {
   span {
     width: 100%;
     height: 100%;
-    border-radius: 0;
+    /* 白名单：形状承载语义 —— 同 .podium-card__avatar，直接渲染 GitHub 头像，固定圆形 */
+    border-radius: 50%;
     object-fit: cover;
     background: #ea580c;
     color: #fff;

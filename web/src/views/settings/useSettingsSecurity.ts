@@ -52,6 +52,9 @@ export function useSettingsSecurity() {
   })
   const uploadProgress = ref(-1)
   const uploadUploading = ref(false)
+  // 创建备份的在途锁。备份是长耗时操作，连点最容易打出多份重复备份，
+  // 刻意与导入用的 uploadUploading 分开，避免一个动作把另一个按钮也锁住。
+  const backupCreating = ref(false)
 
   const showRestoreDialog = ref(false)
   const restoreFilename = ref('')
@@ -95,6 +98,8 @@ export function useSettingsSecurity() {
   const showAddIPDialog = ref(false)
   const newIP = ref('')
   const newIPRemarks = ref('')
+  // 添加 IP 白名单的在途锁，独立一把，不与备份/导入共用
+  const ipAdding = ref(false)
 
   async function loadBackups() {
     backupsLoading.value = true
@@ -160,6 +165,8 @@ export function useSettingsSecurity() {
         ElMessage.warning('请至少选择一个备份项')
         return
       }
+      // 校验通过后才置位，复位统一放 finally（上面的早退分支也会走到 finally，不会把按钮锁死）
+      backupCreating.value = true
       await systemApi.backup(backupPassword.value, backupSelection.value, backupName.value)
       ElMessage.success('备份创建成功')
       showBackupDialog.value = false
@@ -168,6 +175,8 @@ export function useSettingsSecurity() {
       void loadBackups()
     } catch {
       ElMessage.error('备份失败')
+    } finally {
+      backupCreating.value = false
     }
   }
 
@@ -603,6 +612,8 @@ export function useSettingsSecurity() {
       ElMessage.warning('IP 或网段不能为空')
       return
     }
+    // IP 非空校验通过后才置位，复位放 finally
+    ipAdding.value = true
     try {
       await securityApi.addIPWhitelist({ ip: newIP.value.trim(), remarks: newIPRemarks.value })
       ElMessage.success('添加成功')
@@ -612,6 +623,8 @@ export function useSettingsSecurity() {
       void loadIPWhitelist()
     } catch {
       ElMessage.error('添加失败')
+    } finally {
+      ipAdding.value = false
     }
   }
 
@@ -662,6 +675,7 @@ export function useSettingsSecurity() {
     backupScheduleSelection,
     uploadProgress,
     uploadUploading,
+    backupCreating,
     showRestoreDialog,
     restoreFilename,
     restorePassword,
@@ -695,6 +709,7 @@ export function useSettingsSecurity() {
     showAddIPDialog,
     newIP,
     newIPRemarks,
+    ipAdding,
     loadBackups,
     handleCreateBackup,
     handleUploadBackup,

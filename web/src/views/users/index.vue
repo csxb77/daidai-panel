@@ -23,6 +23,8 @@ const showResetPwdDialog = ref(false)
 
 const createForm = ref({ username: '', password: '', role: 'operator' })
 const resetPwdForm = ref({ id: 0, username: '', password: '' })
+// 新建用户的在途锁：请求期间锁住「创建」按钮，避免连点重复建号
+const creating = ref(false)
 
 const roleFilter = ref('')
 
@@ -110,6 +112,8 @@ async function handleCreate() {
     ElMessage.warning(pwdErr)
     return
   }
+  // 用户名与密码都校验通过后才置位，复位放 finally
+  creating.value = true
   try {
     await userApi.create({ ...createForm.value, username })
     ElMessage.success('创建成功')
@@ -117,6 +121,8 @@ async function handleCreate() {
     loadUsers()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '创建失败')
+  } finally {
+    creating.value = false
   }
 }
 
@@ -422,7 +428,7 @@ function getRoleName(role: string) {
       </el-form>
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
-        <el-button type="primary" @click="handleCreate">创建</el-button>
+        <el-button type="primary" :loading="creating" :disabled="creating" @click="handleCreate">创建</el-button>
       </template>
     </el-dialog>
 
@@ -468,16 +474,18 @@ function getRoleName(role: string) {
   &__search { width: 260px; }
 }
 
-// 角色分段控件：与定时任务页/订阅管理页一致的直角分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
+// 角色分段控件：与定时任务页/订阅管理页一致的分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
 .status-tabs {
-  display: inline-flex; background: var(--el-fill-color-light); border-radius: 0; padding: 3px; gap: 2px;
+  // 分段控件的灰底槽属控件类表面 → control 档（与槽内的项同档，两者一致才不会露出内外错位的角）
+  display: inline-flex; background: var(--el-fill-color-light); border-radius: var(--dd-radius-control); padding: 3px; gap: 2px;
 }
 
 .status-tab {
   // inline-flex + gap：标签文字与计数角标并排，间距交给 gap，不用 margin 拼。
   // 角标高 18px，与 13px 文字的行盒高度基本齐平，加上去不会把分段控件顶高。
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 6px 14px; border-radius: 0; border: none; background: transparent;
+  // 分段项属控件类表面 → control 档
+  padding: 6px 14px; border-radius: var(--dd-radius-control); border: none; background: transparent;
   color: var(--el-text-color-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
   transition:
     color var(--dd-motion-fast) var(--dd-ease-standard),
@@ -487,16 +495,18 @@ function getRoleName(role: string) {
   &.active { background: var(--el-bg-color); color: var(--el-color-primary); font-weight: 600; }
 }
 
-// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格卡：1px 边框划分层次，不再用阴影浮起（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
+// 表格容器属容器类表面 → surface 档；overflow:hidden 让内部贴边的表头/行自动被圆角裁角
 .table-card {
-  background: var(--el-bg-color); border-radius: 0;
+  background: var(--el-bg-color); border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter); overflow: hidden;
 }
 
 .user-name-cell { display: flex; align-items: center; gap: 12px; }
 .user-avatar {
-  width: 36px; height: 36px; border-radius: 0;
-  // 头像改为直角方块 + 品牌纯色底（原为圆形 + 渐变）
+  // 用户头像：形状承载语义（圆形=头像/身份标识），两种圆角模式下都固定正圆，不吃 --dd-radius-* 令牌
+  width: 36px; height: 36px; border-radius: 50%;
+  // 底色保持品牌纯色（原为渐变，扁平化时已去掉，此处不恢复）
   background: var(--el-color-primary);
   color: #fff; display: flex; align-items: center; justify-content: center;
   font-weight: 600; font-size: 14px; flex-shrink: 0;

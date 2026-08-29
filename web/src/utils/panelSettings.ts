@@ -1,9 +1,22 @@
+/**
+ * 界面圆角风格。真源是服务端注册项 `panel_shape_style`
+ * （server/model/system_config_registry.go，square=直角 默认 / rounded=圆角）。
+ *
+ * 只有网页端消费它：applyPanelAppearance() 会按它往 documentElement 写三档
+ * `--dd-radius-*` 刻度令牌。APP 侧的 schema 设置页也会渲染出这个开关，但不生效
+ * （服务端 description 里已写明）。
+ */
+export type PanelShapeStyle = 'square' | 'rounded'
+
 export interface PanelSettingsPayload {
   panel_title?: string
   panel_icon?: string
   editor_background_color?: string
   log_background_color?: string
   log_background_image?: string
+  // 服务端下发的原始值仍是字符串，这里按已知枚举收窄；真正的取值校验在
+  // panelAppearance.ts 的 normalizePanelShape() 里做（历史脏值 / 将来新增枚举值都要兜住）。
+  panel_shape_style?: PanelShapeStyle
 }
 
 let cachedPanelSettings: PanelSettingsPayload | null = null

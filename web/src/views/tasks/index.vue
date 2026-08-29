@@ -129,6 +129,8 @@ const defaultPythonVersion = ref('3.12')
 // 任务表单的 Python 版本候选：保留后端算好的 available/message，用于标注/禁用未安装版本
 const pythonRuntimeOptions = ref<PythonRuntimeInfo[]>([])
 const formVisible = ref(false)
+// 提交在途锁：弹窗要等请求成功才关，请求期间不锁按钮连点就会建出多条重复任务
+const formSubmitting = ref(false)
 const editingTask = ref<any>(null)
 const prefillData = ref<any>(null)
 const logViewerVisible = ref(false)
@@ -508,6 +510,8 @@ function openLogFiles(task: any) {
 
 async function handleFormSubmit(data: any) {
   if (!ensureCanOperate()) return
+  // 权限这道早退分支过了才置位，否则没权限的用户会把按钮永久转圈
+  formSubmitting.value = true
   try {
     if (editingTask.value) {
       await taskApi.update(editingTask.value.id, data)
@@ -520,6 +524,8 @@ async function handleFormSubmit(data: any) {
     loadTasks()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '操作失败')
+  } finally {
+    formSubmitting.value = false
   }
 }
 
@@ -588,14 +594,37 @@ async function handleDelete(task: any) {
   }
 }
 
+// 复制的入口是下拉菜单项（DdSplitButton / el-dropdown-item），没有 loading 位可绑
+// （给 DdSplitButton 加 loading prop 会波及 10+ 调用点，本轮明确不做），所以在函数内自己闸一道。
+//
+// 记的是「正在复制哪个任务的 id」而不是一个整页布尔：整页布尔是一把闸，
+// 会把「对任务 A 点复制、请求还没回来时又对任务 B 点复制」也一并吞掉 ——
+// 这两次复制的是不同任务，本来就不属于要防的「重复创建」。
+let copyingTaskId: number | null = null
+
 async function handleCopy(task: any) {
   if (!ensureCanOperate('当前账号没有复制任务权限')) return
+  const taskId = task?.id ?? null
+  // 被拦下时给一句轻提示：下拉项没有 loading 态可看，静默 return 会让用户
+  // 分不清「被防重拦住了」还是「菜单点歪了没生效」。
+  // 这里额外判 !== null，避免 task.id 缺失时 null === null 把第一次点击也误拦。
+  if (copyingTaskId !== null && copyingTaskId === taskId) {
+    ElMessage.info('复制中，请稍候')
+    return
+  }
+  copyingTaskId = taskId
   try {
     await taskApi.copy(task.id)
     ElMessage.success('任务已复制')
     loadTasks()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '复制失败')
+  } finally {
+    // 只在「闸上记的还是自己」时才复位：并发复制 A、B 时若无条件置 null，
+    // 先返回的 A 会把还在途的 B 的闸提前放开。不会卡死 —— 后返回的那一发一定与闸相等。
+    if (copyingTaskId === taskId) {
+      copyingTaskId = null
+    }
   }
 }
 
@@ -1366,6 +1395,7 @@ async function handleImport(event: Event) {
       :default-python-version="defaultPythonVersion"
       :python-runtimes="pythonRuntimeOptions"
       :notification-channels="notificationChannels"
+      :submitting="formSubmitting"
       @submit="handleFormSubmit"
     />
 
@@ -1482,18 +1512,23 @@ async function handleImport(event: Event) {
   }
 }
 
-// 状态分段控件：对齐全站统一的 .dd-seg-group / .dd-seg-btn 观感（直角容器 + 选中态白底品牌色 + 1px 描边）
+// 状态分段控件：对齐全站统一的 .dd-seg-group / .dd-seg-btn 观感（灰底槽 + 选中态白底品牌色 + 1px 描边）
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 灰底槽取 control 档，与全站通用类 .dd-seg-group 以及槽内的 .status-tab 同档。
+  // 为什么不是 surface：槽 padding 3px，内侧曲率 = 槽圆角 - 3px。
+  // 槽取 control(6px) 时内侧曲率 3px < 项的 6px，选中项的白底角始终落在槽内侧曲线之内；
+  // 槽取 surface(10px) 时内侧曲率 7px > 6px，选中项的角会略微越过内侧曲线露出错位，方向是反的。
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
 
 .status-tab {
   padding: 6px 14px;
-  border-radius: 0;
+  // 槽内的分段项 → control 档，与灰底槽同档（理由见上面 .status-tabs 的注释）
+  border-radius: var(--dd-radius-control);
   // 透明描边占位，选中时只换 border-color，避免出现 1px 的尺寸跳动
   border: 1px solid transparent;
   background: transparent;
@@ -1597,10 +1632,11 @@ async function handleImport(event: Event) {
   opacity: 0;
 }
 
-// 表格卡：直角无阴影，仅靠 1px 边框与页面底色区分（dd-fixed-page 下的 flex:1 + 内部滚动由全局规则接管）
+// 表格卡：无阴影，仅靠 1px 边框与页面底色区分（dd-fixed-page 下的 flex:1 + 内部滚动由全局规则接管）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器 → surface 档
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -1663,7 +1699,8 @@ async function handleImport(event: Event) {
   &:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--el-color-primary) 45%, transparent);
     outline-offset: 2px;
-    border-radius: 0;
+    // 焦点环沿 border-radius 描边，跟着控件档走
+    border-radius: var(--dd-radius-control);
   }
 }
 
@@ -1676,7 +1713,8 @@ async function handleImport(event: Event) {
 
 .task-label {
   font-size: 11px !important;
-  border-radius: 0;
+  // 任务名后面的类型标签（el-tag）→ control 档，与全局 --el-tag-border-radius 同档
+  border-radius: var(--dd-radius-control);
 
   &--type {
     background: rgba(64, 158, 255, 0.08);

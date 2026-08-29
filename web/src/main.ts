@@ -64,7 +64,10 @@ import {
 import App from "./App.vue";
 import LoadingMotion from "./components/LoadingMotion.vue";
 import router from "./router";
-import { fetchAndApplyPanelAppearance } from "./utils/panelAppearance";
+import {
+  applyPanelShapeStyle,
+  fetchAndApplyPanelAppearance,
+} from "./utils/panelAppearance";
 import "./styles/global.scss";
 import "./styles/animations.css";
 // visual-enhancements.css 已删除（v3.0.8）：209 行 / 22 个工具类【全部零引用】，
@@ -168,6 +171,15 @@ const globalIcons = {
 //    ⇒ 只把 mount 推迟到 demo 加载完是【不够】的，必须连 app.use(router) 一起推迟。
 //    改动这里前请先确认这条时序，不要退回「装 mock 与建 app 并行」的写法。
 async function bootstrap() {
+  // 首屏防闪形：圆角风格来自异步的 panel-settings，首帧一定先按 :root 的直角画一遍，
+  // 圆角用户会看到「先方后圆」的形状跳变 —— 比闪色刺眼得多。
+  // 这里先用 localStorage 里上次记住的值【同步】写一遍三条 --dd-radius-*，
+  // 等下面那发请求回来 applyPanelAppearance() 再以服务端值重写（值一致时什么都不会变）。
+  //
+  // ⚠️ 必须放在下面 demo 的 await import() 之前：演示版构建里那一 await 会让出主线程，
+  //    浏览器很可能已经把首帧画出去了，放在它后面就等于没做。
+  applyPanelShapeStyle();
+
   // 这段刻意写成「编译期常量守卫 + 动态 import()」：
   // VITE_DEMO 在发布版构建里被 define 成 ''（见 vite.config.ts），条件恒假，
   // rollup 会把整个 if 分支连同 web/src/demo/** 的 chunk 一起剔除——

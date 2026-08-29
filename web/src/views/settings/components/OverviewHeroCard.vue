@@ -199,7 +199,8 @@ const stopPanelDisabledTip = computed(
 
 <style scoped lang="scss">
 .hero-card {
-  border-radius: 0;
+  // 卡片本体属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   // 扁平化：不再用投影制造浮起，仅靠 1px 描边与页面底色区分
   border: 1px solid var(--el-border-color-lighter);
   height: 100%;
@@ -232,7 +233,8 @@ const stopPanelDisabledTip = computed(
 .hero-logo {
   width: 72px;
   height: 72px;
-  border-radius: 0;
+  // 面板 logo 的图片容器（不是用户头像，不进圆形白名单）→ surface 档
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   margin-bottom: 14px;
 }
@@ -300,7 +302,8 @@ const stopPanelDisabledTip = computed(
   font-weight: 600 !important;
   font-size: 13px !important;
   padding: 8px 18px !important;
-  border-radius: 0 !important;
+  // 按钮属控件类表面 → control 档（!important 是为了压过 EP 的按钮尺寸变体选择器，保留）
+  border-radius: var(--dd-radius-control) !important;
 }
 
 .hero-btn-icon {
@@ -357,7 +360,8 @@ const stopPanelDisabledTip = computed(
   max-height: 46vh;
   overflow: auto;
   padding: 16px;
-  border-radius: 0;
+  // 更新日志面板（弹窗内独立区块、四周有留白不贴边）→ surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-lighter);
   border: 1px solid var(--el-border-color-light);
   white-space: pre-wrap;

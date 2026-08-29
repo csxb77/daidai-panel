@@ -1132,7 +1132,9 @@ function rerunLog(log: any) {
   align-items: center;
   gap: 7px;
   padding: 7px 14px;
-  border-radius: 0;
+  /* 注意：类名叫 pill，实际是问候条右侧的快捷操作按钮（可点击）→ control 档，
+     不吃 pill 档，否则会和状态 chip 混成一类 */
+  border-radius: var(--dd-radius-control);
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
   color: var(--el-text-color-regular);
@@ -1167,7 +1169,8 @@ function rerunLog(log: any) {
   position: relative;
   // 扁平风格下靠 1px 边框与背景色分层，不再使用阴影与上浮
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 统计卡片是容器类表面 → surface 档（与 global.scss 的 .dd-stat-card 同档）
+  border-radius: var(--dd-radius-surface);
   padding: 16px 18px;
   display: flex;
   align-items: center;
@@ -1238,7 +1241,8 @@ function rerunLog(log: any) {
   gap: 2px;
   font-weight: 600;
   padding: 1px 6px;
-  border-radius: 0;
+  // 涨跌幅是卡片里的小标签，归控件类 → control 档（与 global.scss 的 .dd-stat-card__delta 同档）
+  border-radius: var(--dd-radius-control);
 
   &.is-up {
     color: #10b981;
@@ -1260,7 +1264,8 @@ function rerunLog(log: any) {
 .stat-card__icon {
   width: 44px;
   height: 44px;
-  border-radius: 0;
+  // 44×44 的图标色底属控件类表面 → control 档（不做成正圆，避免与头像混淆）
+  border-radius: var(--dd-radius-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1297,7 +1302,9 @@ function rerunLog(log: any) {
   animation: dd-panel-rise-in 420ms var(--dd-ease-emphasized) both;
   // 面板与页面底色的分隔完全由 1px 边框承担，不再叠加阴影
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 面板外壳是容器类表面 → surface 档；下面的 overflow:hidden 会把贴边内嵌的
+  // .panel-header / 表格 / 移动端列表自动裁掉四角，所以那些子块刻意不写圆角
+  border-radius: var(--dd-radius-surface);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1349,7 +1356,8 @@ function rerunLog(log: any) {
   color: var(--el-color-primary);
   font-size: 12px;
   padding: 4px 6px;
-  border-radius: 0;
+  // 文字链接按钮属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   transition: background 0.15s, border-color 0.18s ease;
 
   &:hover {
@@ -1360,7 +1368,8 @@ function rerunLog(log: any) {
 .seg-btn-group {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽 → control 档（与槽内的 .seg-btn 同档，两者一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 2px;
   gap: 2px;
 
@@ -1374,7 +1383,8 @@ function rerunLog(log: any) {
   background: transparent;
   padding: 4px 10px;
   font-size: 12px;
-  border-radius: 0;
+  // 分段项属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   color: var(--el-text-color-secondary);
   transition: background-color 0.18s, color 0.18s;
@@ -1401,7 +1411,8 @@ function rerunLog(log: any) {
 
 .trend-chart-placeholder {
   height: 300px;
-  border-radius: 0;
+  // 图表骨架屏是面板内的独立区块 → surface 档
+  border-radius: var(--dd-radius-surface);
   padding: 18px;
   // 骨架屏用纯色底，不再用渐变
   background: var(--el-fill-color-lighter);
@@ -1413,7 +1424,8 @@ function rerunLog(log: any) {
 
 .placeholder-bar {
   height: 8px;
-  border-radius: 0;
+  // 骨架屏占位条属小型块 → control 档（8px 高时半径会被自动夹到 4px，呈圆头条）
+  border-radius: var(--dd-radius-control);
   background: rgba(59, 130, 246, 0.15);
   animation: placeholderPulse 1.6s ease-in-out infinite;
 }
@@ -1431,7 +1443,8 @@ function rerunLog(log: any) {
 .placeholder-legend span {
   width: 48px;
   height: 6px;
-  border-radius: 0;
+  // 骨架屏图例占位块，与 .placeholder-bar 同类 → control 档
+  border-radius: var(--dd-radius-control);
   background: rgba(140, 140, 140, 0.12);
 }
 
@@ -1456,7 +1469,9 @@ function rerunLog(log: any) {
 
 .resource-row {
   display: flex;
-  border-radius: 0;
+  // 资源列表的每一行是独立内容块（hover 换底色），归容器类表面 → surface 档；
+  // 父级 .resource-list 有 16px 18px 内边距，行不贴边，可以安全吃圆角
+  border-radius: var(--dd-radius-surface);
   padding: 8px 10px;
   transition: background-color 0.18s ease;
   align-items: flex-start;
@@ -1466,7 +1481,8 @@ function rerunLog(log: any) {
 .resource-row__icon {
   width: 36px;
   height: 36px;
-  border-radius: 0;
+  // 36×36 的图标色底属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1514,15 +1530,18 @@ function rerunLog(log: any) {
 
 .resource-bar {
   height: 6px;
-  border-radius: 0;
+  // 进度条轨道是天然胶囊 → pill 档
+  border-radius: var(--dd-radius-pill);
   background: var(--el-fill-color);
   overflow: hidden;
 }
 
-// 进度条为纯色直角实心，去掉了原来的流光高亮层
+// 进度条为纯色实心，去掉了原来的流光高亮层
 .resource-bar__fill {
   height: 100%;
-  border-radius: 0;
+  // 与轨道同档（pill）：轨道虽有 overflow:hidden 兜住两端，但填充未满时右侧前沿在轨道中间，
+  // 需要自己带圆头才和 el-progress 的 __inner 观感一致
+  border-radius: var(--dd-radius-pill);
   transition: width 0.6s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
@@ -1542,10 +1561,13 @@ function rerunLog(log: any) {
   font-size: 11.5px;
 }
 
+// 白名单：形状承载语义 —— 8×8 的状态灯（面板持续运行中），与 global.scss 的 .pulse-dot、
+// api-docs 的 .status-dot 同类，方化后与旁边文字糊成一小块色斑，认不出是状态灯。
+// 两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度。
 .uptime-track__dot {
   width: 8px;
   height: 8px;
-  border-radius: 0;
+  border-radius: 50%;
   background: #f59e0b;
   flex-shrink: 0;
 }
@@ -1553,7 +1575,8 @@ function rerunLog(log: any) {
 .uptime-track__line {
   height: 6px;
   flex: 1;
-  border-radius: 0;
+  // 状态灯后面的运行轨道线，与进度条同类 → pill 档
+  border-radius: var(--dd-radius-pill);
   background: rgba(245, 158, 11, 0.28);
   overflow: hidden;
 }
@@ -1684,7 +1707,8 @@ function rerunLog(log: any) {
   justify-content: center;
   min-width: 44px;
   padding: 2px 10px;
-  border-radius: 0;
+  // 执行状态 chip 是天然胶囊 → pill 档（与 global.scss 的 .dd-status-chip 同档）
+  border-radius: var(--dd-radius-pill);
   font-size: 11.5px;
   font-weight: 600;
   line-height: 1.4;
@@ -1716,7 +1740,8 @@ function rerunLog(log: any) {
   justify-content: center;
   max-width: 100%;
   padding: 2px 8px;
-  border-radius: 0;
+  // 环境标记是标签而不是状态灯，归控件类 → control 档（与 global.scss 的 .dd-env-chip 同档）
+  border-radius: var(--dd-radius-control);
   font-size: 11.5px;
   font-weight: 500;
   font-family: "Inter", var(--dd-font-ui), sans-serif;
@@ -1728,7 +1753,8 @@ function rerunLog(log: any) {
 
 .log-cell-actions {
   display: inline-flex;
-  border-radius: 0;
+  // 操作按钮组的灰底槽 → control 档（与槽内的 .icon-btn 同档，两者一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 2px;
   background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
   align-items: center;
@@ -1739,7 +1765,8 @@ function rerunLog(log: any) {
 .icon-btn {
   width: 26px;
   height: 26px;
-  border-radius: 0;
+  // 图标按钮属控件类表面 → control 档（与 global.scss 的 .dd-icon-btn 同档）
+  border-radius: var(--dd-radius-control);
   border: none;
   background: transparent;
   display: inline-flex;
@@ -1764,7 +1791,9 @@ function rerunLog(log: any) {
 
 .log-mobile-card {
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 移动端卡片是容器类表面 → surface 档（与 global.scss 的 .dd-mobile-card 同档）；
+  // 父级 .log-mobile-list 有内边距，卡片不贴边，可以安全吃圆角
+  border-radius: var(--dd-radius-surface);
   padding: 10px 12px;
   background: var(--el-fill-color-light);
 }
@@ -1824,7 +1853,10 @@ function rerunLog(log: any) {
   display: flex;
   width: 100%;
   height: 8px;
-  border-radius: 0;
+  // 横向堆叠占比条与进度条同类，是天然胶囊 → pill 档；
+  // 下面的 overflow:hidden 会把内部 .task-stats__seg 各分段裁进这个圆头轨道，
+  // 所以分段本身刻意不写圆角（贴边内嵌，写了反而露角）
+  border-radius: var(--dd-radius-pill);
   // 总执行数为 0 时四段宽度都是 0，这里的底色就是空态表现
   background: var(--el-fill-color);
   overflow: hidden;
@@ -1868,7 +1900,15 @@ function rerunLog(log: any) {
 .task-stats__swatch {
   width: 10px;
   height: 10px;
-  border-radius: 0;
+  // 🔴 固定 2px，不吃令牌（v3.1.0 新立的「≤12px 小色标」判据）。
+  //
+  // 图例色块只做「颜色对应」用（对应上面那条堆叠占比条的四个分段），不是表达运行状态的
+  // 状态灯，所以不进圆形白名单——这一层判断没变。但原来写「吃 control 档」是错的：
+  // 10×10 的盒子上，control 的 6px 会触发 CSS 圆角等比收缩（6+6=12 > 10 ⇒ 全部夹到 5px），
+  // 结果正好是一个【正圆】，跟上面 .uptime-track__dot 那类状态灯长得一模一样，
+  // 「不进白名单以便区分形状」的意图在圆角模式下自动失效。
+  // 写死一个小于半边长的值才稳得住方形轮廓。
+  border-radius: 2px;
   flex-shrink: 0;
 
   &.is-success {

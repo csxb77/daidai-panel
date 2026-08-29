@@ -183,7 +183,9 @@ function markDebugCodeChanged() {
   min-width: 0;
   min-height: 0;
   border: 1px solid var(--el-border-color-light);
-  border-radius: 0;
+  // 代码区 / 日志区都是独立成块、带边框的容器类表面 → surface 档；
+  // 下面的 overflow: hidden 会把内部贴边铺满的 header / 日志区自动裁成同样的角
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   background: var(--el-bg-color);
 }
@@ -243,6 +245,10 @@ function markDebugCodeChanged() {
   // 脚本运行输出和调试日志也属于日志窗口，复用统一滚动条增强；
   // 外层面板已经有边框，这里去掉重复边框和阴影，避免视觉变厚。
   border: 0;
+  // 保持 0，不吃令牌：它是 .debug-log-panel 里贴边铺满的正文区（紧接 .panel-header 之下），
+  // 圆角交给外层面板的 surface 档 + overflow: hidden 去裁；
+  // 这里再吃一次 global.scss 给 .dd-log-surface 的 surface 档，
+  // 会在面板直角的下半段露出两个内缩的圆角缺口。
   border-radius: 0;
   box-shadow: none;
 }

@@ -351,7 +351,8 @@ function handleClose() {
   flex: 1;
   min-height: 0;
   border: 1px solid var(--el-border-color);
-  border-radius: 0;
+  // 文件列表容器 → surface 档（自身是滚动容器，内部行会被圆角裁掉，不会溢出到角外）
+  border-radius: var(--dd-radius-surface);
   overflow-y: auto;
 }
 
@@ -408,7 +409,8 @@ function handleClose() {
 .file-content {
   flex: 1;
   border: 1px solid var(--el-border-color);
-  border-radius: 0;
+  // 日志正文面板 → surface 档
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -434,6 +436,12 @@ function handleClose() {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
+  // 🔴 保持 0，不吃令牌 —— 必须写回来压掉 global.scss 里 .dd-log-surface 的 surface 档。
+  // 它是【贴边内嵌】于上面的 .file-content：那个外框已经有 1px 边框 + surface 档圆角 +
+  // overflow:hidden，而这块 <pre> 铺满外框内部、只隔着 1px 边框。两者都取 10px 的话，
+  // 圆角模式下四角会出现两条相距 1px 的同心圆弧，看起来像边框在拐角处凭空变粗一倍。
+  // 圆角交给 .file-content 一层去表达 + overflow:hidden 去裁即可。
+  border-radius: 0;
 }
 
 .empty-hint {

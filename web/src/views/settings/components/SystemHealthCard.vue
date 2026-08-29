@@ -149,8 +149,8 @@ onMounted(() => {
 @use './config-card-shared.scss' as *;
 
 .health-card {
-  // 扁平化：直角无阴影，层次只靠 1px 描边表达（边框色走令牌，暗色下自动跟随）
-  border-radius: 0;
+  // 扁平化：无阴影，层次只靠 1px 描边表达（边框色走令牌，暗色下自动跟随）；卡片本体 → surface 档
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   height: 100%;
 }
@@ -219,7 +219,8 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 600;
   padding: 1px 8px;
-  border-radius: 0;
+  // 健康状态 chip 是天然胶囊 → pill 档（与 .dd-status-chip 同档）
+  border-radius: var(--dd-radius-pill);
 
   &.is-ok {
     color: #10b981;

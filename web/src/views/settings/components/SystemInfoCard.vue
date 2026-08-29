@@ -89,8 +89,8 @@ async function handleCopyMachineCode(code: string) {
 
 .mt-card {
   margin-top: 16px;
-  // 扁平化：直角无阴影，层次只靠 1px 描边表达（边框色走令牌，暗色下自动跟随）
-  border-radius: 0;
+  // 扁平化：无阴影，层次只靠 1px 描边表达（边框色走令牌，暗色下自动跟随）；卡片本体 → surface 档
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
 }
 

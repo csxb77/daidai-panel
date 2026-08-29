@@ -231,7 +231,8 @@ function handleApply() {
   flex-wrap: wrap;
   padding: 6px 10px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 预览列表里的一行卡片 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-lighter);
 }
 

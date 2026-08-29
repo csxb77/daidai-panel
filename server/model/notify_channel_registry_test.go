@@ -221,6 +221,62 @@ func TestNotifyChannelTypesRemainBackwardCompatible(t *testing.T) {
 	}
 }
 
+// TestPushplusQQChannelStaysWiredToOptionField 钉住 PushPlus 的 QQ 机器人渠道。
+//
+// 这个渠道要能用，两件事必须**同时**成立，而它们是分开声明的：
+//
+//   - channel 下拉里有 qq，否则用户根本选不到 QQ 机器人；
+//   - option 的 show_when 命中 qq，否则选了 qq 之后「群配置编码」那个输入框不出现，
+//     用户只能发个人消息，群消息连填的地方都没有。
+//
+// 缺任何一半都不会报错、不会崩，只是功能少一块 —— 正是最容易在后续改动里被顺手删掉
+// 又没人发现的那种。所以钉在这里，而不是靠人记着两处同步。
+func TestPushplusQQChannelStaysWiredToOptionField(t *testing.T) {
+	channel, exists := model.GetNotifyChannelDefinition("pushplus")
+	if !exists {
+		t.Fatal("pushplus 应当是已注册渠道")
+	}
+
+	var channelField, optionField *model.NotifyFieldDefinition
+	for i := range channel.Fields {
+		switch channel.Fields[i].Key {
+		case "channel":
+			channelField = &channel.Fields[i]
+		case "option":
+			optionField = &channel.Fields[i]
+		}
+	}
+	if channelField == nil || optionField == nil {
+		t.Fatal("pushplus 应当同时声明 channel 和 option 两个字段")
+	}
+
+	hasQQ := false
+	for _, option := range channelField.Options {
+		if option.Value == "qq" {
+			hasQQ = true
+			break
+		}
+	}
+	if !hasQQ {
+		t.Error("pushplus 的 channel 下拉里没有 qq，用户选不到官方的 QQ 机器人渠道")
+	}
+
+	if optionField.ShowWhen == nil || optionField.ShowWhen.Key != "channel" {
+		t.Fatalf("pushplus 的 option 应当按 channel 显隐，实际 %#v", optionField.ShowWhen)
+	}
+	matchedQQ := false
+	for _, value := range optionField.ShowWhen.Values {
+		if value == "qq" {
+			matchedQQ = true
+			break
+		}
+	}
+	if !matchedQQ {
+		t.Errorf("pushplus 的 option 在 channel=qq 时不显示，QQ 群配置编码没有输入框可填。当前命中值：%v",
+			optionField.ShowWhen.Values)
+	}
+}
+
 // TestNotifyChannelDefinitionsReturnsDeepCopy 保证调用方改不坏全局注册表。
 // Options 是切片、ShowWhen 是指针，浅拷贝挡不住。
 func TestNotifyChannelDefinitionsReturnsDeepCopy(t *testing.T) {

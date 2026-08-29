@@ -551,7 +551,7 @@ async function loadVersion() {
   align-items: center;
   gap: 10px;
   padding: 7px 10px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   background: var(--el-bg-color);
   border: 1px solid color-mix(in srgb, var(--el-color-primary) 10%, var(--el-border-color-lighter));
   transition: border-color 0.3s;
@@ -574,7 +574,7 @@ async function loadVersion() {
 .logo-icon-wrap {
   width: 28px;
   height: 28px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -603,7 +603,7 @@ async function loadVersion() {
 .logo-version {
   flex-shrink: 0;
   padding: 3px 8px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   font-family: var(--dd-font-mono);
   font-size: 10px;
   font-weight: 700;
@@ -627,7 +627,8 @@ async function loadVersion() {
 
   &::-webkit-scrollbar-thumb {
     background: transparent;
-    border-radius: 0;
+    // 3px 宽的细 thumb 属于天然胶囊，吃 pill 档：直角模式仍是细方条，圆角模式变胶囊条
+    border-radius: var(--dd-radius-pill);
   }
 
   &:hover::-webkit-scrollbar-thumb {
@@ -656,7 +657,7 @@ async function loadVersion() {
   white-space: nowrap;
 }
 
-// 收起态：#title 插槽整体不渲染，数字角标跟着消失，只在图标右上角留一个方点。
+// 收起态：#title 插槽整体不渲染，数字角标跟着消失，只在图标右上角留一个圆点。
 // 定位上下文用 el-icon 自己（下面给它 position: relative），
 // 而不是依赖 .el-menu-tooltip__trigger —— 那是 EP 的内部实现，位置和定位属性都可能变。
 .sidebar-nav :deep(.el-menu-item .el-icon) {
@@ -678,9 +679,11 @@ async function loadVersion() {
   right: -3px;
   width: 7px;
   height: 7px;
-  border-radius: 0;
+  // 圆形承载语义：这是「有未读/异常」的状态角标点，圆点是通用可供性，
+  // 方块会被误认成图标本身的一部分。两种圆角模式下都保持圆形，不吃 --dd-radius-* 令牌。
+  border-radius: 50%;
   background: var(--el-color-danger);
-  // 描边取侧栏底色，让方点从图标上"浮"出来又不用阴影。
+  // 描边取侧栏底色，让圆点从图标上"浮"出来又不用阴影。
   // 侧栏底色是 --el-bg-color（见 .layout-aside），暗色下自动跟着变。
   border: 1.5px solid var(--el-bg-color);
 }
@@ -735,7 +738,7 @@ async function loadVersion() {
 .envs-add-btn {
   width: 20px;
   height: 20px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   display: flex;
@@ -767,7 +770,7 @@ async function loadVersion() {
   align-items: center;
   gap: 8px;
   padding: 5px 6px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   transition: background 0.2s;
 
@@ -780,7 +783,8 @@ async function loadVersion() {
 .env-dot {
   width: 7px;
   height: 7px;
-  border-radius: 0;
+  // 7×7 的状态色点属于天然胶囊：pill 档下正好是圆点，直角档保持现有方点观感
+  border-radius: var(--dd-radius-pill);
   flex-shrink: 0;
 }
 
@@ -823,7 +827,7 @@ async function loadVersion() {
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   transition: background 0.2s;
 
@@ -841,7 +845,9 @@ async function loadVersion() {
 .user-avatar {
   width: 32px;
   height: 32px;
-  border-radius: 0;
+  // 圆形承载语义：头像是用户上传/来自 GitHub 的人像，本身按圆形构图，
+  // 直角硬切会把边缘内容裁掉。两种圆角模式下都保持圆形，不吃 --dd-radius-* 令牌。
+  border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
 }
@@ -887,7 +893,7 @@ async function loadVersion() {
   gap: 6px;
   height: 40px;
   margin: 4px 12px 10px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   cursor: pointer;
@@ -936,7 +942,7 @@ async function loadVersion() {
 .header-toggle-btn {
   width: 34px;
   height: 34px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   display: flex;
@@ -957,7 +963,7 @@ async function loadVersion() {
 .header-breadcrumb {
   display: flex;
   padding: 6px 10px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 76%, transparent);
   align-items: center;
   gap: 6px;
@@ -998,7 +1004,7 @@ async function loadVersion() {
   width: 100%;
   height: 36px;
   padding: 0 14px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   background: var(--el-fill-color-light);
   border: 1px solid transparent;
   cursor: pointer;
@@ -1027,7 +1033,7 @@ async function loadVersion() {
 .search-kbd {
   flex-shrink: 0;
   padding: 2px 6px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   font-size: 11px;
   font-family: var(--dd-font-mono);
   color: var(--el-text-color-placeholder);
@@ -1039,7 +1045,7 @@ async function loadVersion() {
 .header-right {
   display: flex;
   padding: 4px 6px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
   align-items: center;
   gap: 6px;
@@ -1048,7 +1054,7 @@ async function loadVersion() {
 .header-icon-btn {
   width: 34px;
   height: 34px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   border: none;
   background: transparent;
   display: flex;
@@ -1080,7 +1086,7 @@ async function loadVersion() {
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   cursor: pointer;
   transition: all 0.2s;
   outline: none;
@@ -1094,7 +1100,9 @@ async function loadVersion() {
 .header-user-avatar {
   width: 28px;
   height: 28px;
-  border-radius: 0;
+  // 圆形承载语义：同 .user-avatar，头像本身按圆形构图，直角硬切会裁掉边缘内容。
+  // 两种圆角模式下都保持圆形，不吃 --dd-radius-* 令牌。
+  border-radius: 50%;
   object-fit: cover;
   flex-shrink: 0;
 }

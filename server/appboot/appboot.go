@@ -58,6 +58,9 @@ func InitWithConfig(cfg *config.Config) error {
 	config.C = cfg
 
 	database.Init(&cfg.Database)
+	// 必须排在 AutoMigrate 之前：AutoMigrate 建唯一索引失败会直接 log.Fatalf，
+	// 老库里的同名数据要先改名让路，否则升级后面板起不来。
+	database.DeduplicateBeforeUniqueIndex()
 	database.AutoMigrate(allModels()...)
 	database.EnsureColumns()
 

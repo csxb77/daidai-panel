@@ -118,8 +118,10 @@ func (h *OpenAPIHandler) Create(c *gin.Context) {
 		RateLimit: req.RateLimit,
 	}
 
+	// open_apps.name 是唯一索引，连点创建按钮的第二发会撞在这里。
+	// 这个接口尤其怕连点：每成功一次前端就弹一次「密钥只展示这一次」，用户根本对不上是哪一个应用。
 	if err := database.DB.Create(&app).Error; err != nil {
-		response.InternalError(c, "创建应用失败")
+		response.BadRequest(c, "同名应用已存在")
 		return
 	}
 
@@ -164,7 +166,11 @@ func (h *OpenAPIHandler) Update(c *gin.Context) {
 	}
 
 	if len(updates) > 0 {
-		database.DB.Model(&app).Updates(updates)
+		// 改名撞上别的应用会在这里报错；不接 .Error 就会出现「提示更新成功、刷新又变回去」。
+		if err := database.DB.Model(&app).Updates(updates).Error; err != nil {
+			response.BadRequest(c, "同名应用已存在")
+			return
+		}
 	}
 
 	database.DB.First(&app, appID)

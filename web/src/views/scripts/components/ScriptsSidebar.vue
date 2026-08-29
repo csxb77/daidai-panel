@@ -189,7 +189,8 @@ watch(searchKeyword, (val) => {
 
 .sidebar-search-input {
   :deep(.el-input__wrapper) {
-    border-radius: 0;
+    // 输入框属控件类表面 → control 档
+    border-radius: var(--dd-radius-control);
     padding: 4px 12px;
     box-shadow: 0 0 0 1px var(--el-border-color-lighter) inset;
     transition: box-shadow 0.2s, background 0.2s;
@@ -232,7 +233,8 @@ watch(searchKeyword, (val) => {
 .sidebar-toolbar-actions {
   display: flex;
   padding: 2px;
-  border-radius: 0;
+  // 工具条按钮组的灰底槽 → control 档（与槽内按钮同档，圆角一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 6px;
@@ -241,12 +243,15 @@ watch(searchKeyword, (val) => {
 /* class 落到 DdSplitButton 的根节点（EP 的 div.el-dropdown）上。
    EP small 档按钮高 24px，会比右边 30px 的 .icon-btn 矮一截，工具条看着参差不齐，
    所以这里只把两半按钮的高度和字号拉回原先「新建」按钮的 30px / 12.5px。
-   圆角归零与 caret 中缝的可见度由 global.scss 的 Split Button 一节统一负责，
+   圆角与 caret 中缝的可见度由 global.scss 的 Split Button 一节统一负责，
    chevron 也由组件自带，不需要再手写。 */
 .new-split-button {
   :deep(.el-button) {
+    // 这里刻意【不写】border-radius：split-button 内部是 el-button-group，
+    // 只有最外两个角该跟着 --dd-radius-control 变圆、中缝两侧必须保持直角，
+    // 这套 first-child/last-child 规则由 EP 自己按 --el-border-radius-base 算好了。
+    // 在这里补一句 border-radius 会把两半四个角一起改掉，中缝直接糊成一整条。
     height: 30px;
-    border-radius: 0;
     font-size: 12.5px;
     font-weight: 500;
   }
@@ -258,7 +263,8 @@ watch(searchKeyword, (val) => {
   padding: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
-  border-radius: 0;
+  // 图标按钮属控件类表面 → control 档（与 ScriptsEditorPane 的 .sidebar-expand-btn 同档）
+  border-radius: var(--dd-radius-control);
   color: var(--el-text-color-secondary);
   cursor: pointer;
   display: inline-flex;
@@ -300,7 +306,8 @@ watch(searchKeyword, (val) => {
     height: 34px;
     min-width: 0;
     padding-left: 4px;
-    border-radius: 0;
+    // 目录树的行是可点小块（hover / 选中都会上底色）→ control 档
+    border-radius: var(--dd-radius-control);
     transition: background 0.15s;
     font-size: 13px;
     overflow: hidden;
@@ -321,7 +328,14 @@ watch(searchKeyword, (val) => {
       top: 6px;
       bottom: 6px;
       width: 2.5px;
-      border-radius: 0;
+      // 装饰性细指示条 → pill 档，与 api-docs 的 .api-card 竖条、SponsorWall 的 .title-dot
+      // 归为同一类，全站这一类统一走 pill。
+      //
+      // ⚠️ 原注释写的「圆角化后会缩成一个小圆点、彻底看不出是条」是错的：
+      //    CSS 的圆角等比收缩只会把半径夹到 min(边长)/2，2.5px 宽的条最多得到 1.25px 半径，
+      //    结果是一条【圆头细条】而不是圆点——条的长度（22px）一点没变。
+      //    细条天然就是胶囊形，pill 与 control 在这个宽度下渲染结果相同，写 pill 只是让归类显式。
+      border-radius: var(--dd-radius-pill);
       background: var(--el-color-primary);
     }
   }
@@ -335,6 +349,14 @@ watch(searchKeyword, (val) => {
   :deep(.el-tree__drop-indicator) {
     height: 2px;
     background: var(--el-color-primary);
+    // 🔴 保持 0，不吃令牌 —— 它与上面那条选中标识条【看着像同类，实则不是】：
+    // 那条是「当前在哪一项」的装饰性标识（走 pill），这条是「松手会插到哪两行之间」的
+    // 落点指示线，语义上等同于文本光标。方头两端才能把落点的横向范围指得干脆，
+    // 端头一旦收圆，线的两头会先淡出再消失，看起来像没对齐任何一行。
+    //
+    // ⚠️ 原注释说「吃圆角会把两端磨成尖角」是错的（圆角只会变圆不会变尖）。
+    //    实际吃 control 的话，2px 高会把半径夹到 1px——差别很小，但方向是错的，
+    //    所以这里是按语义显式保持 0，不是因为「反正看不出来」。
     border-radius: 0;
   }
 
@@ -363,7 +385,8 @@ watch(searchKeyword, (val) => {
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 运行器入口是侧栏底部独立成块的卡片（带边框、有自己的留白）→ surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-fill-color-light);
   color: inherit;
   text-align: left;
@@ -385,7 +408,8 @@ watch(searchKeyword, (val) => {
 .runner-card-icon {
   width: 30px;
   height: 30px;
-  border-radius: 0;
+  // 30×30 的图标色底属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;

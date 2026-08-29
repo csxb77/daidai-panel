@@ -942,7 +942,10 @@ func sendPushplus(cfg map[string]string, title, content string) error {
 	if token == "" {
 		return fmt.Errorf("PushPlus Token 为空")
 	}
-	apiURL := "http://www.pushplus.plus/send"
+	// 走 https：同一个请求分别打 https 和 http 实测过，两边都是 HTTP 200 且响应体逐字节相同
+	// （{"code":903,...}），说明 https 通道可用。而 http 会让用户的 PushPlus token 明文过网，
+	// 没有任何理由继续用。
+	apiURL := "https://www.pushplus.plus/send"
 	body := map[string]string{
 		"token":   token,
 		"title":   title,
@@ -959,8 +962,9 @@ func sendPushplus(cfg map[string]string, title, content string) error {
 	if v := cfg["channel"]; v != "" {
 		body["channel"] = v
 	}
-	// option 是 PushPlus 对原 webhook 参数的改名：webhook 渠道填 webhook 编码，
-	// 企业微信应用渠道填自定义应用编码。其余渠道不需要。
+	// option 是 PushPlus 对原 webhook 参数的改名，含义随 channel 变：webhook 渠道填 webhook 编码，
+	// cp 渠道填企业微信自定义应用编码，qq 渠道填目标 QQ 群的配置编码（发给个人时留空）。
+	// 其余渠道不需要。
 	if v := cfg["option"]; v != "" {
 		body["option"] = v
 	}

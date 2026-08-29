@@ -76,8 +76,9 @@ const ariaLabel = computed(() => {
 </script>
 
 <style scoped lang="scss">
-/* 纯扁平直角：角标是一枚方块，不是胶囊。
-   层次靠实心底色与页面反差表达，不用圆角也不用阴影。 */
+/* 计数角标吃 pill 档令牌：直角模式下仍是一枚方块（与 v3.0.0 起的扁平基调一致），
+   圆角模式下 999px 会把这枚 18px 高的角标压成胶囊。
+   两种模式都不用阴影，层次只靠实心底色与页面反差表达。 */
 .dd-badge {
   display: inline-flex;
   align-items: center;
@@ -86,7 +87,7 @@ const ariaLabel = computed(() => {
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-pill);
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
@@ -102,6 +103,9 @@ const ariaLabel = computed(() => {
   width: 8px;
   height: 8px;
   padding: 0;
+  // 圆形承载语义：dot 模式是「有事在发生」的状态指示点，圆点是通用可供性。
+  // 两种圆角模式下都保持圆形，覆盖上面 .dd-badge 继承来的 pill 档令牌。
+  border-radius: 50%;
 }
 
 .dd-badge--danger {

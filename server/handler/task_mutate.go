@@ -425,6 +425,12 @@ func (h *TaskHandler) Copy(c *gin.Context) {
 		AllowMultipleInstances: task.AllowMultipleInstances,
 		StopSchedule:           task.StopSchedule,
 	}
-	database.DB.Select("*").Create(&newTask)
+	// 原来这行没接 .Error：插入失败也照样返回 201 + 一个没有 id 的空壳，用户以为复制成功了。
+	// 注意 tasks 表刻意不加名称唯一键（同名任务合法，这里本来就是产出「XX (副本)」），
+	// 所以这里报的一定是真实的写库故障，按 500 返回。
+	if err := database.DB.Select("*").Create(&newTask).Error; err != nil {
+		response.InternalError(c, "复制任务失败")
+		return
+	}
 	response.Created(c, gin.H{"message": "复制成功", "data": newTask.ToDict()})
 }

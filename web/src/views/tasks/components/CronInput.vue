@@ -635,7 +635,9 @@ const groupedTemplates = computed(() => {
   gap: 4px;
   padding: 4px 10px;
   background: var(--el-color-success);
-  border-radius: 0;
+  // 与下面的 .error-badge 是同一槽位互斥的两态，统一走 control 档：
+  // error 那条会折成多行，胶囊档在多行块上会变成一个大椭圆，两态之间形状还会跳。
+  border-radius: var(--dd-radius-control);
   color: #fff;
   font-weight: 500;
 
@@ -660,7 +662,8 @@ const groupedTemplates = computed(() => {
   gap: 4px;
   padding: 5px 10px;
   background: var(--el-color-danger);
-  border-radius: 0;
+  // 会折行的多行提示块 → control 档（不用 pill：多行时胶囊两端会撑成半圆）
+  border-radius: var(--dd-radius-control);
   color: #fff;
   font-weight: 500;
   line-height: 1.6;
@@ -684,7 +687,8 @@ const groupedTemplates = computed(() => {
   gap: 5px;
   padding: 4px 10px;
   background: var(--el-color-primary-light-9);
-  border-radius: 0;
+  // 「下次执行」信息小块 → control 档，与旁边的 .valid-badge 同档
+  border-radius: var(--dd-radius-control);
   color: var(--el-color-primary);
   font-weight: 500;
   border: 1px solid var(--el-color-primary-light-7);
@@ -724,7 +728,8 @@ const groupedTemplates = computed(() => {
   margin-bottom: 12px;
   padding: 10px 12px;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 模板弹窗里的分组标题条，是一块独立的容器类表面 → surface 档，与下面的 .template-item 同档
+  border-radius: var(--dd-radius-surface);
   border-left: 4px solid var(--el-color-primary);
 }
 
@@ -739,7 +744,8 @@ const groupedTemplates = computed(() => {
   color: var(--el-text-color-secondary);
   background: var(--el-bg-color);
   padding: 2px 8px;
-  border-radius: 0;
+  // 分组里的模板条数，是计数角标 → pill 档
+  border-radius: var(--dd-radius-pill);
 }
 
 .group-items {
@@ -751,7 +757,8 @@ const groupedTemplates = computed(() => {
 .template-item {
   padding: 12px;
   border: 1px solid var(--el-border-color-light);
-  border-radius: 0;
+  // 模板卡片 → surface 档
+  border-radius: var(--dd-radius-surface);
   background: var(--el-bg-color);
   cursor: pointer;
   transition: border-color 0.2s ease, background-color 0.2s ease;

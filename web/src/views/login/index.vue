@@ -671,7 +671,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 /* ================= 2FA dialog ================= */
 :deep(.totp-dialog) {
   .el-dialog {
-    border-radius: 0;
+    border-radius: var(--dd-radius-surface);
     overflow: hidden;
   }
 
@@ -699,7 +699,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 .totp-dialog-badge {
   width: 38px;
   height: 38px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -729,7 +729,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
 
 .totp-field {
   :deep(.el-input__wrapper) {
-    border-radius: 0;
+    border-radius: var(--dd-radius-control);
     padding: 6px 14px;
   }
 
@@ -762,9 +762,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   gap: 8px;
 }
 
-/* 提交按钮：直角纯色，去掉渐变与辉光，hover 只加深底色 */
+/* 提交按钮：纯色底，去掉渐变与辉光，hover 只加深底色；圆角吃控件档令牌 */
 .totp-submit-btn {
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   padding: 0 18px;
   background: #1677ff;
   border: none;
@@ -799,12 +799,12 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   right: 24px;
   z-index: 10;
 
-  /* 主题切换：默认方形图标按钮（原 circle），hover 只换底色不上浮 */
+  /* 主题切换：普通图标按钮（原 circle），hover 只换底色不上浮；圆角吃控件档令牌 */
   .theme-toggle-btn {
     width: 44px;
     height: 44px;
     padding: 0;
-    border-radius: 0;
+    border-radius: var(--dd-radius-control);
     font-size: 20px;
     color: #666;
     background: rgba(255, 255, 255, 0.7);
@@ -821,13 +821,13 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   }
 }
 
-/* 登录卡：直角 + 1px 边框划分层次，不再用投影浮起 */
+/* 登录卡：1px 边框划分层次，不再用投影浮起；圆角吃表面档令牌 */
 .login-container {
   display: flex;
   width: 940px;
   max-width: 100%;
   min-height: 560px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   border: 1px solid var(--el-border-color-lighter);
   // 时长/缓动改吃令牌：原来写死 0.6s ease-out，是全站少数几个绕过
@@ -923,7 +923,7 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
     justify-content: center;
 
     img {
-      border-radius: 0;
+      border-radius: var(--dd-radius-control);
     }
   }
 
@@ -955,9 +955,9 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   }
 
   /* inset 1px 是 Element Plus 输入框的边框实现（功能性，非装饰阴影），保留；
-     只去掉圆角与聚焦时外扩的 3px 辉光 */
+     只去掉聚焦时外扩的 3px 辉光。圆角吃控件档令牌 */
   :deep(.el-input__wrapper) {
-    border-radius: 0;
+    border-radius: var(--dd-radius-control);
     height: 46px;
     box-shadow: 0 0 0 1px #e0e0e0 inset;
     transition: box-shadow var(--dd-motion-normal) var(--dd-ease-standard);
@@ -982,11 +982,11 @@ const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
   }
 }
 
-/* 登录按钮：直角纯色，hover 只加深底色，不上浮不加投影 */
+/* 登录按钮：纯色底，hover 只加深底色，不上浮不加投影；圆角吃控件档令牌 */
 .login-btn {
   width: 100%;
   height: 46px;
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
   font-weight: 600;
   font-size: 15px;
   background: #1f1f1f;

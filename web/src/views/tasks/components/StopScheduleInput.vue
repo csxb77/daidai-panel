@@ -242,7 +242,8 @@ function handleKeyDown(event: KeyboardEvent) {
   gap: 4px;
   padding: 4px 10px;
   background: var(--el-color-success);
-  border-radius: 0;
+  // 与 .error-badge 是同一槽位互斥的两态，统一走 control 档，避免有效/错误之间形状跳变
+  border-radius: var(--dd-radius-control);
   color: #fff;
   font-weight: 500;
 
@@ -262,7 +263,8 @@ function handleKeyDown(event: KeyboardEvent) {
   gap: 4px;
   padding: 4px 10px;
   background: var(--el-color-danger);
-  border-radius: 0;
+  // 校验错误提示块 → control 档（与 CronInput 的同名元素保持一致）
+  border-radius: var(--dd-radius-control);
   color: #fff;
   font-weight: 500;
 
@@ -281,7 +283,8 @@ function handleKeyDown(event: KeyboardEvent) {
   gap: 5px;
   padding: 4px 10px;
   background: var(--el-color-warning-light-9);
-  border-radius: 0;
+  // 「下次停止」信息小块 → control 档
+  border-radius: var(--dd-radius-control);
   color: var(--el-color-warning);
   font-weight: 500;
   border: 1px solid var(--el-color-warning-light-7);

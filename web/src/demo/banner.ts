@@ -10,8 +10,10 @@ import { resetDb } from './db'
  * （哪怕外面套了 v-if，import 语句本身是静态的）。
  * 这里用 DOM 注入，业务代码零改动，发布版产物也就自然是 0 字节。
  *
- * 样式遵循 .trellis/spec/frontend/design-system.md 的全屏纯扁平直角基调：
- * 直角、无阴影、无渐变、hover 只换底色，颜色一律引用设计令牌（暗色下不会串色）。
+ * 样式遵循 .trellis/spec/frontend/design-system.md 的全屏纯扁平基调：
+ * 无阴影、无渐变、hover 只换底色，颜色一律引用设计令牌（暗色下不会串色）；
+ * 圆角走 --dd-radius-* 三档刻度，跟随 panel_shape_style 开关，不写死像素。
+ * 横幅本身是贴视口顶边的通栏，任何模式下都不加圆角（加了会在屏幕角上露缺口）。
  */
 
 const BANNER_ID = 'dd-demo-banner'
@@ -101,7 +103,7 @@ body { padding-top: var(--dd-demo-banner-height); }
   color: var(--el-color-primary);
   background: var(--el-bg-color);
   border: 1px solid var(--el-color-primary-light-5);
-  border-radius: 0;
+  border-radius: var(--dd-radius-control, 0);
   transition:
     background-color var(--dd-motion-fast, 160ms) var(--dd-ease-standard, ease),
     color var(--dd-motion-fast, 160ms) var(--dd-ease-standard, ease),

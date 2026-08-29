@@ -46,8 +46,8 @@ defineProps<{
 @use './config-card-shared.scss' as *;
 
 .stats-card {
-  // 扁平化：直角无阴影，层次只靠 1px 描边表达
-  border-radius: 0;
+  // 扁平化：无阴影，层次只靠 1px 描边表达；卡片本体属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   height: 100%;
 }
@@ -61,7 +61,8 @@ defineProps<{
 
 .os-item {
   padding: 18px 10px;
-  border-radius: 0;
+  // 卡片内的统计数字块（可 hover 的小块，格子间有 10px 间距、不贴边）→ control 档
+  border-radius: var(--dd-radius-control);
   // 扁平化：hover 不再上浮，只换底色
   transition: background 0.18s;
   background: var(--el-fill-color-light);

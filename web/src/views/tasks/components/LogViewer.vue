@@ -714,7 +714,8 @@ function handleClose() {
   font-weight: 700;
   letter-spacing: 0.5px;
   font-family: var(--dd-font-mono);
-  border-radius: 0;
+  // 运行/成功/失败的状态 chip，属于天然胶囊 → pill 档
+  border-radius: var(--dd-radius-pill);
 
   &--running {
     background: color-mix(in srgb, var(--el-color-warning) 14%, transparent);
@@ -749,12 +750,13 @@ function handleClose() {
   font-family: var(--dd-font-ui);
 }
 
-/* Status orb：方形状态底，靠底色区分运行/成功/失败 */
+/* Status orb：状态底块，靠底色区分运行/成功/失败 */
 .status-orb {
   position: relative;
   width: 22px;
   height: 22px;
-  border-radius: 0;
+  // 22×22 的图标底属于小型交互块 → control 档
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -783,7 +785,9 @@ function handleClose() {
 .status-orb-core {
   width: 8px;
   height: 8px;
-  border-radius: 0;
+  // 白名单：形状承载语义 —— 8×8 的呼吸点是「运行中」的状态灯，与 global.scss 的 .pulse-dot 同类，
+  // 方化后就是一小块色斑、看不出是状态灯。两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度。
+  border-radius: 50%;
   background: var(--el-color-warning);
   animation: orb-core 1.4s ease-in-out infinite;
 }
@@ -791,7 +795,8 @@ function handleClose() {
 .status-orb-ripple {
   position: absolute;
   inset: 0;
-  border-radius: 0;
+  // 涟漪是从 .status-orb 里放大出来的一层，形状必须跟底块同档，否则放大过程中会露出错位的角
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-color-warning) 40%, transparent);
   animation: orb-ripple 1.8s ease-out infinite;
 }
@@ -824,7 +829,8 @@ function handleClose() {
   border: 1px solid var(--viewer-border-soft, var(--el-border-color-light));
   background: var(--el-bg-color);
   color: var(--el-text-color-regular);
-  border-radius: 0;
+  // 工具栏按钮 → control 档
+  border-radius: var(--dd-radius-control);
   font-size: 12px;
   font-family: var(--dd-font-mono);
   cursor: pointer;
@@ -856,7 +862,8 @@ function handleClose() {
     justify-content: center;
     color: var(--el-text-color-secondary);
     border-color: transparent;
-    border-radius: 0;
+    // 34×34 的图标按钮，与 .tool-btn 同档
+    border-radius: var(--dd-radius-control);
     margin-left: 6px;
     position: relative;
     overflow: hidden;
@@ -872,7 +879,8 @@ function handleClose() {
       content: '';
       position: absolute;
       inset: 0;
-      border-radius: 0;
+      // hover 铺满的红底盖在按钮上，圆角必须跟按钮同档，否则圆角模式下四角会溢出按钮轮廓
+      border-radius: var(--dd-radius-control);
       background: var(--el-color-danger);
       opacity: 0;
       transition: opacity 0.2s ease;
@@ -941,6 +949,14 @@ function handleClose() {
   font-size: var(--viewer-log-font-size, 13.5px);
   line-height: 1.65;
   color: var(--dd-log-text-color, #e2e8f0);
+  // 🔴 保持 0，不吃令牌 —— 必须写回来压掉 global.scss 里 .dd-log-surface 的 surface 档。
+  // 这块深色日志区是【贴边内嵌】的：本文件下方把 .log-viewer-dialog .el-dialog__body 的
+  // padding 设成了 0，.viewer-body 也没有内边距，所以它从 header 分隔线正下方一路铺满到
+  // 弹窗底边、左右也顶到弹窗边框。带着自己的 10px 圆角的话，圆角模式下左上/右上会被切出
+  // 两个缺口露出弹窗白底（缺口正好卡在 header 分隔线两端，很显眼）。
+  // 外轮廓的圆角由 .log-viewer-dialog 的 surface 档 + overflow:hidden 统一去裁，这里必须是 0。
+  // 同形态的另外三处（logs/index.vue、ScriptExecutionDialogs.vue、LogFileBrowser.vue）写法一致。
+  border-radius: 0;
 }
 
 // 正文容器用 div + white-space:pre-wrap 代替 <pre>：
@@ -958,14 +974,15 @@ function handleClose() {
   }
 }
 
-// 渲染窗口封顶提示：扁平直角虚线块，颜色全部从日志前景色派生，明暗两态自动适配
+// 渲染窗口封顶提示：扁平虚线块，颜色全部从日志前景色派生，明暗两态自动适配
 .log-omitted-notice {
   display: block;
   width: 100%;
   margin: 0 0 10px;
   padding: 6px 10px;
   border: 1px dashed color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 32%, transparent);
-  border-radius: 0;
+  // 可点击的提示小块（点一下展开更多日志）→ control 档
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 8%, transparent);
   color: color-mix(in srgb, var(--dd-log-text-color, #e2e8f0) 70%, transparent);
   font-family: var(--dd-font-mono);
@@ -1123,7 +1140,8 @@ function handleClose() {
   --viewer-border-soft: color-mix(in srgb, var(--el-border-color-light) 85%, transparent);
 
   width: min(1400px, 92vw);
-  border-radius: 0;
+  // 弹窗外壳 → surface 档
+  border-radius: var(--dd-radius-surface);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -1142,6 +1160,7 @@ function handleClose() {
     width: 100%;
     height: 100%;
     max-height: 100%;
+    // 保持 0，不吃令牌：全屏态下弹窗铺满整个视口，四角带圆角会露出遮罩层的黑边
     border-radius: 0;
     margin: 0;
   }

@@ -114,7 +114,8 @@ const statusText = computed(() => {
 
 <style scoped lang="scss">
 .usc {
-  border-radius: 0;
+  // 卡片本体属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   // 扁平化：不再用投影制造浮起，仅靠 1px 描边与页面底色区分
   border: 1px solid var(--el-border-color-lighter);
   height: 100%;
@@ -154,7 +155,8 @@ const statusText = computed(() => {
   align-items: center;
   gap: 14px;
   padding: 16px;
-  border-radius: 0;
+  // 卡片内的独立区块（四周有 24px 留白、不贴边）→ surface 档
+  border-radius: var(--dd-radius-surface);
   // 扁平化：装饰渐变换成主色浅底纯色
   background: var(--el-color-primary-light-9);
   border: 1px solid var(--el-border-color-lighter);
@@ -165,7 +167,8 @@ const statusText = computed(() => {
 .usc-switch-icon-wrap {
   width: 40px;
   height: 40px;
-  border-radius: 0;
+  // 40×40 图标色底属控件类表面 → control 档（不做成正圆，避免与头像混淆）
+  border-radius: var(--dd-radius-control);
   // 扁平化：装饰渐变与辉光换成主色纯底
   background: var(--el-color-primary);
   display: flex;
@@ -214,8 +217,16 @@ const statusText = computed(() => {
 .usc-footer-dot {
   width: 8px;
   height: 8px;
-  // 装饰圆点方化为直角小方块，并去掉外圈辉光
-  border-radius: 0;
+  // 🔴 固定 2px，既不进圆形白名单、也不吃 control 档（v3.1.0 新立的「≤12px 小色标」判据）。
+  //
+  // 原注释说它是「状态灯」，但模板里这三个点是写死的三个装饰 bullet
+  // （--blue / --green / --cyan 分别钉在「最后检查时间 / 当前状态 / 下次检查时间」三行上），
+  // 颜色永远不随 autoUpdateEnabled 或任何运行状态变——绿点在「未开启自动检查」时照样是绿的。
+  // 它表达的是「这是第几项信息」而不是「现在是什么状态」，做成正圆反而是误导性的状态灯。
+  //
+  // 也不能改成吃 control：8×8 的盒子上 control 的 6px 会被 CSS 圆角等比收缩夹到 4px，
+  // 结果仍是正圆，等于没改。写死一个小于半边长的值才稳得住方形轮廓。
+  border-radius: 2px;
   flex-shrink: 0;
   margin-top: 4px;
 

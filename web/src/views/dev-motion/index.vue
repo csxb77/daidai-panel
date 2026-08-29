@@ -453,7 +453,9 @@ function onSplitCommand(key: string) {
   padding: 20px;
   margin-bottom: 16px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 分节卡片属容器类表面 → surface 档（与业务页的 .table-card / .dd-data-card 同档，
+  // 这样这页作为动效/形状预览入口时，观感与业务页一致，不会自成一套）
+  border-radius: var(--dd-radius-surface);
   background: var(--el-bg-color);
   // 入场：与全站 dd-*-rise-in 同一语汇（opacity + translateY），时长吃令牌
   animation: dd-motion-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;
@@ -485,7 +487,8 @@ function onSplitCommand(key: string) {
 
   code {
     padding: 1px 4px;
-    border-radius: 0;
+    // 行内 code 是文字级小块，归控件类 → control 档（与 el-tag 同档）
+    border-radius: var(--dd-radius-control);
     background: var(--el-fill-color-light);
     font-family: var(--dd-font-mono);
     font-size: 12px;
@@ -523,7 +526,9 @@ function onSplitCommand(key: string) {
   gap: 6px;
   padding: 4px 10px;
   border: 1px solid var(--el-border-color-lighter);
-  border-radius: 0;
+  // 这是包着「文字 + DdBadge」的描边小块，属控件类表面 → control 档；
+  // 不吃 pill：它不是状态灯，内部还嵌了角标，做成胶囊会和角标本身的圆度打架
+  border-radius: var(--dd-radius-control);
   font-size: 13px;
   color: var(--el-text-color-regular);
 }

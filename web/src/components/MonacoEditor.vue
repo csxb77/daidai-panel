@@ -341,6 +341,9 @@ function resolveMinHeight(value: string | number | undefined) {
   font-size: 14px;
   background: var(--dd-editor-bg-color, #111827);
   color: var(--dd-editor-fg-color, #e5e7eb);
+  /* 固定 0，不吃 --dd-radius-* 令牌：这个占位块和加载完成后的真实编辑器是同一个盒子，
+     而 Monaco 自绘的编辑器 DOM 不受我们的圆角令牌控制、永远是直角。
+     占位若在圆角模式下变圆，加载完成的一瞬间会看到角"弹"回直角。 */
   border-radius: 0;
 }
 
@@ -355,8 +358,8 @@ function resolveMinHeight(value: string | number | undefined) {
   line-height: 1.6;
 }
 
-/* 扁平直角：与面板整体基调一致 */
+/* 重试按钮吃控件档令牌，与面板整体形状基调保持一致 */
 .monaco-retry {
-  border-radius: 0;
+  border-radius: var(--dd-radius-control);
 }
 </style>

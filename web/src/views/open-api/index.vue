@@ -428,7 +428,13 @@
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitForm">确定</el-button>
+        <el-button
+          type="primary"
+          :loading="submitting"
+          :disabled="submitting"
+          @click="submitForm"
+          >确定</el-button
+        >
       </template>
     </el-dialog>
 
@@ -545,6 +551,8 @@ const dialogVisible = ref(false);
 const secretDialogVisible = ref(false);
 const logsDialogVisible = ref(false);
 const editingApp = ref<any>(null);
+// 应用创建/更新的在途锁：连点会连开多个密钥弹窗，必须把整段（含弹密钥）锁在窗口内
+const submitting = ref(false);
 const secretData = ref<any>({});
 const callLogs = ref<any[]>([]);
 const logTotal = ref(0);
@@ -753,6 +761,8 @@ const submitForm = async () => {
     scopes: scopesToString(form.value.scopesList),
     rate_limit: form.value.rate_limit,
   };
+  // 名称校验通过后才置位，复位放 finally
+  submitting.value = true;
   try {
     if (editingApp.value) {
       await openApiApi.update(editingApp.value.id, payload);
@@ -767,6 +777,8 @@ const submitForm = async () => {
     loadApps();
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || "操作失败");
+  } finally {
+    submitting.value = false;
   }
 };
 
@@ -946,11 +958,12 @@ onMounted(loadApps);
   }
 }
 
-// 状态分段控件：与定时任务页/订阅页一致的直角分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
+// 状态分段控件：与定时任务页/订阅页一致的分段容器；选中态靠底色+品牌色文字区分，不再用阴影浮起
 .status-tabs {
   display: inline-flex;
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 分段控件的灰底槽属控件类表面 → control 档（与槽内的项同档，两者一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
 }
@@ -962,7 +975,8 @@ onMounted(loadApps);
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border-radius: 0;
+  // 分段项属控件类表面 → control 档
+  border-radius: var(--dd-radius-control);
   border: none;
   background: transparent;
   color: var(--el-text-color-secondary);
@@ -983,10 +997,11 @@ onMounted(loadApps);
   }
 }
 
-// 表格卡：直角 + 1px 边框划分层次，不再用阴影浮起（本页为滚动页，无需 fixed 高度链）
+// 表格卡：1px 边框划分层次，不再用阴影浮起（本页为滚动页，无需 fixed 高度链）
 .table-card {
   background: var(--el-bg-color);
-  border-radius: 0;
+  // 表格容器属容器类表面 → surface 档；overflow:hidden 让内部贴边的表头/行自动被圆角裁角
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
   overflow: hidden;
 }
@@ -997,11 +1012,11 @@ onMounted(loadApps);
   gap: 10px;
 }
 
-// 应用头像：直角方块（原圆形）
+// 应用头像：形状承载语义（圆形=头像/身份标识），两种圆角模式下都固定正圆，不吃 --dd-radius-* 令牌
 .app-avatar {
   width: 34px;
   height: 34px;
-  border-radius: 0;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1052,7 +1067,8 @@ onMounted(loadApps);
   word-break: break-all;
   background: var(--el-fill-color-light);
   padding: 4px 8px;
-  border-radius: 0;
+  // 表格内的 key 展示块是行内小型交互块（可复制），归控件类 → control 档
+  border-radius: var(--dd-radius-control);
   border: 1px solid var(--el-border-color-lighter);
   font-family: var(--dd-font-mono);
   flex: 1;
@@ -1115,10 +1131,11 @@ onMounted(loadApps);
 }
 
 .info-card {
-  // 信息卡：直角 + 1px 边框，色面走令牌明暗自动适配；hover 只加深描边，不上浮
+  // 信息卡：1px 边框，色面走令牌明暗自动适配；hover 只加深描边，不上浮
   background: var(--el-bg-color);
   transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
-  border-radius: 0;
+  // 信息卡属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   padding: 24px;
   border: 1px solid var(--el-border-color-lighter);
 
@@ -1140,7 +1157,8 @@ onMounted(loadApps);
   &__icon {
     width: 40px;
     height: 40px;
-    border-radius: 0;
+    // 40×40 图标色底属控件类表面 → control 档（不做成正圆，避免与头像混淆）
+    border-radius: var(--dd-radius-control);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1176,7 +1194,8 @@ onMounted(loadApps);
 
 .secret-display-card {
   background: var(--el-fill-color-light);
-  border-radius: 0;
+  // 弹窗内的密钥展示区块属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   padding: 20px;
   border: 1px solid var(--el-border-color-lighter);
 }
@@ -1203,7 +1222,8 @@ onMounted(loadApps);
   gap: 8px;
   background: var(--el-fill-color-blank);
   border: 1px solid var(--el-border-color);
-  border-radius: 0;
+  // 只读取值框（外观等同 input，且卡片有 20px 内边距不贴边）→ control 档
+  border-radius: var(--dd-radius-control);
   padding: 10px 12px;
 }
 

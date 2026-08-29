@@ -17,9 +17,13 @@ const props = withDefaults(defineProps<{
   mode: 'create' | 'edit'
   initialData?: EnvFormModel | null
   groups?: string[]
+  // 提交在途标记：父组件发起创建/更新请求期间置位。
+  // 请求返回前弹窗一直开着，不锁住按钮的话连点就会连发 POST，造成重复创建。
+  submitting?: boolean
 }>(), {
   initialData: null,
-  groups: () => []
+  groups: () => [],
+  submitting: false
 })
 
 const emit = defineEmits<{
@@ -78,6 +82,11 @@ function closeDialog() {
 }
 
 function handleSave() {
+  // 上一发还在路上时直接忽略：按钮虽然已经 loading，但回车等入口仍可能再次触发
+  if (props.submitting) {
+    return
+  }
+
   const name = form.value.name.trim()
   const remarks = form.value.remarks.trim()
   const groups = normalizeGroupList(form.value.groups)
@@ -193,7 +202,7 @@ watch(
     </el-form>
     <template #footer>
       <el-button @click="closeDialog">取消</el-button>
-      <el-button type="primary" @click="handleSave">{{ submitText }}</el-button>
+      <el-button type="primary" :loading="submitting" :disabled="submitting" @click="handleSave">{{ submitText }}</el-button>
     </template>
   </el-dialog>
 </template>

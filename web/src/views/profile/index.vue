@@ -965,9 +965,10 @@ onUnmounted(() => {
   position: relative;
   overflow: hidden;
   padding: 30px 34px;
-  /* 直角纯色底：去掉紫蓝渐变与阴影，层次仅靠 1px 描边。
-     注意：暗色下 hero 背景由 global.scss 的 `.profile-hero` 覆盖接管为纯色，与此处一致 */
-  border-radius: 0;
+  /* 纯色底：去掉紫蓝渐变与阴影，层次仅靠 1px 描边。
+     注意：暗色下 hero 背景由 global.scss 的 `.profile-hero` 覆盖接管为纯色，与此处一致。
+     hero 是整页最外层的容器类表面 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   background: var(--profile-surface);
   border: 1px solid var(--profile-border);
 }
@@ -998,12 +999,15 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-/* 头像：直角方块 + 纯色底，hover 只显示遮罩，不再缩放 */
+/* 头像：纯色底，hover 只显示遮罩，不再缩放。
+   白名单：形状承载语义 —— 这里渲染的是用户上传的头像（与顶栏 .user-avatar 是同一张图），
+   头像按圆形构图，方切后人脸/图标会被裁到角上；且同一张头像在顶栏是圆、在这里是方会很割裂。
+   两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度。 */
 .profile-avatar {
   position: relative;
   width: 72px;
   height: 72px;
-  border-radius: 0;
+  border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1034,7 +1038,8 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 0;
+  /* 铺满头像本体，跟随头像走白名单圆形，否则圆形底的四角会露出图片直角 */
+  border-radius: 50%;
   z-index: 1;
 }
 
@@ -1046,7 +1051,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   background: rgba(0, 0, 0, 0.4);
-  border-radius: 0;
+  /* hover 遮罩铺满头像本体，跟随头像走白名单圆形 */
+  border-radius: 50%;
   opacity: 0;
   // 时长/缓动走令牌：写死毫秒会绕过 prefers-reduced-motion 的降级
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
@@ -1064,7 +1070,8 @@ onUnmounted(() => {
   z-index: 3;
   width: 22px;
   height: 22px;
-  border-radius: 0;
+  /* 22×22 的相机角标是可点的小图标底 → control 档 */
+  border-radius: var(--dd-radius-control);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1084,7 +1091,7 @@ onUnmounted(() => {
   }
 }
 
-/* 删除头像按钮：默认方形图标按钮（原 circle），去阴影，靠 1px 描边与头像分隔 */
+/* 删除头像按钮：图标按钮（原 circle），去阴影，靠 1px 描边与头像分隔 */
 .avatar-delete-btn {
   position: absolute;
   bottom: -2px;
@@ -1094,7 +1101,9 @@ onUnmounted(() => {
   height: 22px;
   min-height: 0;
   padding: 0 !important;
-  border-radius: 0 !important;
+  /* 图标按钮 → control 档；这里的 !important 是为了压住 el-button 自己的圆角，
+     不是为了压 --dd-radius-*，令牌值仍随外观开关切换 */
+  border-radius: var(--dd-radius-control) !important;
   color: var(--el-color-danger) !important;
   border: 1px solid var(--profile-border) !important;
   background: var(--profile-surface) !important;
@@ -1115,7 +1124,8 @@ onUnmounted(() => {
 .profile-avatar-ring {
   position: absolute;
   inset: -4px;
-  border-radius: 0;
+  /* 头像外圈环，与头像同心，必须跟随头像走白名单圆形，否则方环套圆头像会露出四角 */
+  border-radius: 50%;
   border: 2.5px solid rgba(34, 197, 94, 0.25);
   z-index: 0;
 }
@@ -1150,7 +1160,8 @@ onUnmounted(() => {
   gap: 5px;
   height: 24px;
   padding: 0 10px;
-  border-radius: 0;
+  /* 角色 / 2FA 状态 chip，与 global.scss 的 .dd-status-chip 同类 → pill 档 */
+  border-radius: var(--dd-radius-pill);
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.2px;
@@ -1178,11 +1189,13 @@ onUnmounted(() => {
   color: #16a34a;
 }
 
-/* 2FA 状态点：直角小方块，去掉外圈光晕 */
+/* 2FA 状态点：去掉外圈光晕。
+   白名单：形状承载语义 —— 6×6 的状态灯与 global.scss 的 .pulse-dot 同类，
+   方化后与旁边文字糊成一小块色斑，认不出是状态灯。两种 shape 模式下都固定圆形。 */
 .hero-chip-dot {
   width: 6px;
   height: 6px;
-  border-radius: 0;
+  border-radius: 50%;
   background: var(--el-color-danger);
 }
 
@@ -1225,9 +1238,9 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 4px;
   background: var(--profile-surface);
-  /* 直角 + 1px 边框，与卡片外壳风格统一（不再用阴影浮起） */
+  /* 1px 边框，与卡片外壳风格统一（不再用阴影浮起）。侧边栏是容器类表面 → surface 档 */
   border: 1px solid var(--profile-border);
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   padding: 12px;
   align-self: flex-start;
 }
@@ -1237,7 +1250,8 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
-  border-radius: 0;
+  /* 侧边栏分段项属控件类表面 → control 档（父级 .profile-sidebar 有 12px 内边距，不贴边，可以吃圆角） */
+  border-radius: var(--dd-radius-control);
   border: none;
   background: transparent;
   color: var(--el-text-color-regular);
@@ -1287,9 +1301,9 @@ onUnmounted(() => {
 .profile-card {
   position: relative;
   background: var(--profile-surface);
-  /* 直角 + 1px 边框划分层次，不再用阴影浮起 */
+  /* 1px 边框划分层次，不再用阴影浮起。卡片本体是容器类表面 → surface 档 */
   border: 1px solid var(--profile-border);
-  border-radius: 0;
+  border-radius: var(--dd-radius-surface);
   padding: 20px 24px;
   overflow: hidden;
 }
@@ -1364,7 +1378,8 @@ onUnmounted(() => {
     display: flex;
     gap: 10px;
     padding: 10px 14px;
-    border-radius: 0;
+    /* 每条提示是卡片内独立的内容块（带底色 + 描边），归容器类表面 → surface 档 */
+    border-radius: var(--dd-radius-surface);
     background: var(--profile-surface-muted);
     border: 1px solid var(--profile-border);
     font-size: 12.5px;
@@ -1377,7 +1392,8 @@ onUnmounted(() => {
   flex-shrink: 0;
   width: 20px;
   height: 20px;
-  border-radius: 0;
+  /* 20×20 的序号色底属控件类表面 → control 档（不做正圆，避免与状态灯/头像混淆） */
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1401,13 +1417,15 @@ onUnmounted(() => {
   }
 
   :deep(.el-input__wrapper) {
-    border-radius: 0;
+    /* 输入框属控件类表面 → control 档 */
+    border-radius: var(--dd-radius-control);
   }
 }
 
 /* 主行动按钮：纯绿色底，去掉渐变与辉光，hover 只加深底色 */
 .primary-cta {
-  border-radius: 0;
+  /* 按钮属控件类表面 → control 档 */
+  border-radius: var(--dd-radius-control);
   height: 38px;
   padding: 0 20px;
   font-weight: 600;
@@ -1443,7 +1461,8 @@ onUnmounted(() => {
   gap: 6px;
   height: 24px;
   padding: 0 10px;
-  border-radius: 0;
+  /* 2FA 开关状态 chip，与 .hero-chip / .dd-status-chip 同类 → pill 档 */
+  border-radius: var(--dd-radius-pill);
   font-size: 11.5px;
   font-weight: 700;
   font-family: var(--dd-font-mono);
@@ -1457,10 +1476,12 @@ onUnmounted(() => {
   }
 }
 
+/* 白名单：形状承载语义 —— 6×6 状态灯，与 .hero-chip-dot / .pulse-dot 同类，
+   方化后认不出是状态灯。两种 shape 模式下都固定圆形。 */
 .twofa-status-dot {
   width: 6px;
   height: 6px;
-  border-radius: 0;
+  border-radius: 50%;
   background: currentColor;
 }
 
@@ -1478,7 +1499,8 @@ onUnmounted(() => {
 }
 
 .danger-outline-btn {
-  border-radius: 0;
+  /* 按钮属控件类表面 → control 档 */
+  border-radius: var(--dd-radius-control);
   height: 38px;
   padding: 0 18px;
   font-weight: 600;
@@ -1507,8 +1529,8 @@ onUnmounted(() => {
   gap: 14px;
   flex-wrap: wrap;
   padding: 18px 22px;
-  /* 直角纯色底：去掉琥珀渐变与阴影，只保留琥珀描边点题 */
-  border-radius: 0;
+  /* 纯色底：去掉琥珀渐变与阴影，只保留琥珀描边点题。工具条是容器类表面 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   border: 1px solid rgba(245, 158, 11, 0.16);
   background: var(--profile-surface);
 }
@@ -1546,13 +1568,15 @@ onUnmounted(() => {
 }
 
 .sponsor-refresh-btn {
-  border-radius: 0;
+  /* 按钮属控件类表面 → control 档 */
+  border-radius: var(--dd-radius-control);
 }
 
 /* ================= Setup dialog ================= */
 :deep(.setup-2fa-dialog) {
   .el-dialog {
-    border-radius: 0;
+    /* 弹窗外壳是容器类表面 → surface 档 */
+    border-radius: var(--dd-radius-surface);
     overflow: hidden;
   }
 
@@ -1580,7 +1604,8 @@ onUnmounted(() => {
 .setup-dialog-badge {
   width: 36px;
   height: 36px;
-  border-radius: 0;
+  /* 36×36 的图标色底属控件类表面 → control 档 */
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1621,7 +1646,8 @@ onUnmounted(() => {
 .step-num {
   width: 22px;
   height: 22px;
-  border-radius: 0;
+  /* 22×22 的步骤序号色底属控件类表面 → control 档 */
+  border-radius: var(--dd-radius-control);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1654,14 +1680,16 @@ onUnmounted(() => {
   width: 220px;
   height: 220px;
   padding: 10px;
-  border-radius: 0;
+  /* 二维码图片容器属容器类表面 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   background: #fff;
   border: 1px solid var(--profile-border);
 }
 
 .secret-box {
   padding: 14px 16px;
-  border-radius: 0;
+  /* 密钥展示区是弹窗内的独立区块 → surface 档 */
+  border-radius: var(--dd-radius-surface);
   background: var(--profile-surface-muted);
   border: 1px dashed var(--profile-border);
   text-align: center;
@@ -1679,7 +1707,8 @@ onUnmounted(() => {
 
 .totp-input {
   :deep(.el-input__wrapper) {
-    border-radius: 0;
+    /* 输入框属控件类表面 → control 档 */
+    border-radius: var(--dd-radius-control);
   }
 
   :deep(.el-input__inner) {

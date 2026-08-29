@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -835,9 +836,12 @@ func restoreBackupManifest(manifest BackupManifest, extractedDir string) error {
 	}
 
 	if selection.TaskViews {
+		// task_views.name 从 v3.1.0 起是唯一索引，归档里的重名要先改名再落库（理由见 restoreNotifyChannels）。
+		// 表在上面已经 deleteAll 清空，所以只需要处理归档内部的重名。
+		usedViewNames := make(map[string]bool, len(manifest.Data.TaskViews))
 		for _, view := range manifest.Data.TaskViews {
 			newView := model.TaskView{
-				Name:      view.Name,
+				Name:      resolveRestoredUniqueName(usedViewNames, view.Name, "任务视图"),
 				Filters:   view.Filters,
 				SortRules: view.SortRules,
 				Hidden:    view.Hidden,
@@ -969,8 +973,36 @@ func restoreUsers(tx *gorm.DB, users []BackupUser) (map[uint]uint, error) {
 	return idMap, nil
 }
 
+// resolveRestoredUniqueName 给恢复中的一条记录挑一个「本次归档里还没被用掉」的名字，
+// 并把改名这件事写进面板日志 —— 用户恢复完发现「我的渠道名怎么多了个 (2)」，得能在日志里找到答案。
+//
+// used 会被就地更新（把最终采用的名字标记为已占用），调用方每张表各传一个 map 即可。
+// label 只参与日志文案。
+func resolveRestoredUniqueName(used map[string]bool, original, label string) string {
+	name := database.NextAvailableName(used, original)
+	if name == "" {
+		// 极端脏数据（同一个名字在归档里重复上万次）时退回原名：
+		// 宁可让 DB 唯一约束把这次恢复挡下来并报错，也不能拿一个空名字盖掉用户数据。
+		name = original
+	}
+	if name != original {
+		log.Printf("恢复备份：归档里存在重名的%s「%s」，已改名为「%s」", label, original, name)
+	}
+	used[name] = true
+	return name
+}
+
 func restoreNotifyChannels(tx *gorm.DB, channels []BackupNotifyChannel) (map[uint]uint, error) {
 	idMap := make(map[uint]uint, len(channels))
+	// notify_channels.name 从 v3.1.0 起是唯一索引，但**归档里的数据永远不会随升级被清洗**：
+	// 用户在 v3.0.10 连点创建出两条都叫「推送」的渠道（当时完全合法）并导出过备份，
+	// 升级后启动迁移只改了活库，那份备份里仍然是两条「推送」。
+	// 不在这里改名的话，第二条 Create 会返回 UNIQUE constraint failed → rollback → 整次恢复全白做，
+	// 用户拿着一份永远恢复不了的备份，且没有任何自救入口。
+	//
+	// 这张表在上面已经被 deleteAll 清空，所以只需要处理**归档内部**的重名。
+	// 改名规则复用 database.NextAvailableName，与启动迁移保持同一套口径。
+	usedChannelNames := make(map[string]bool, len(channels))
 	for _, item := range channels {
 		// 老备份里可能带着被客户端写坏的 config（例如 smtp_ssl 是 JSON 布尔），
 		// 那种渠道恢复回来会直接发不出任何通知。这里顺手归一一次，让它恢复即可用。
@@ -991,8 +1023,10 @@ func restoreNotifyChannels(tx *gorm.DB, channels []BackupNotifyChannel) (map[uin
 			pushScope = model.NotifyPushScopeDefault
 		}
 
+		name := resolveRestoredUniqueName(usedChannelNames, item.Name, "通知渠道")
+
 		channel := model.NotifyChannel{
-			Name:      item.Name,
+			Name:      name,
 			Type:      item.Type,
 			Config:    config,
 			PushScope: pushScope,
@@ -1009,9 +1043,13 @@ func restoreNotifyChannels(tx *gorm.DB, channels []BackupNotifyChannel) (map[uin
 }
 
 func restoreOpenApps(tx *gorm.DB, apps []BackupOpenApp) error {
+	// open_apps.name 从 v3.1.0 起是唯一索引，这里同样要处理归档内部的重名（理由见 restoreNotifyChannels）。
+	// 这条路径比通知渠道更容易踩到：青龙导入会把青龙 app 表原样搬进 Configs.OpenApps，
+	// 而青龙的 app.name 没有任何唯一约束 —— 青龙用户有两个同名应用时，整个导入会直接失败。
+	usedAppNames := make(map[string]bool, len(apps))
 	for _, item := range apps {
 		app := model.OpenApp{
-			Name:      item.Name,
+			Name:      resolveRestoredUniqueName(usedAppNames, item.Name, "OpenAPI 应用"),
 			AppKey:    item.AppKey,
 			AppSecret: item.AppSecret,
 			Scopes:    item.Scopes,
@@ -1161,9 +1199,13 @@ func normalizeRestoredTaskStatus(status float64) float64 {
 
 func restoreSSHKeys(tx *gorm.DB, keys []BackupSSHKey) (map[uint]uint, error) {
 	idMap := make(map[uint]uint, len(keys))
+	// ssh_keys.name 从 v3.1.0 起是唯一索引，同样要处理归档内部的重名（理由见 restoreNotifyChannels）。
+	// 这里失败的代价尤其大：SSH 密钥恢复失败会连带订阅一起 rollback，
+	// 而私钥往往只有备份里这一份。
+	usedKeyNames := make(map[string]bool, len(keys))
 	for _, item := range keys {
 		key := model.SSHKey{
-			Name:       item.Name,
+			Name:       resolveRestoredUniqueName(usedKeyNames, item.Name, "SSH 密钥"),
 			PrivateKey: item.PrivateKey,
 			CreatedAt:  item.CreatedAt,
 			UpdatedAt:  item.UpdatedAt,

@@ -159,7 +159,8 @@ watch(() => props.logs, () => {
 @use './config-card-shared.scss' as *;
 
 .panel-log-card {
-  border-radius: 0;
+  // 卡片本体属容器类表面 → surface 档
+  border-radius: var(--dd-radius-surface);
   border: 1px solid var(--el-border-color-lighter);
 }
 
@@ -175,7 +176,8 @@ watch(() => props.logs, () => {
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
-  border-radius: 0;
+  // 「同步中」状态 chip 是天然胶囊 → pill 档（与 .dd-status-chip 同档）
+  border-radius: var(--dd-radius-pill);
   font-size: 11px;
   font-weight: 600;
   color: var(--el-color-primary);
@@ -199,7 +201,8 @@ watch(() => props.logs, () => {
 
 .panel-log-toolbar__actions {
   padding: 4px;
-  border-radius: 0;
+  // 按钮组的灰底槽 → control 档（与槽内按钮同档，圆角一致才不会露出内外错位的角）
+  border-radius: var(--dd-radius-control);
   background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   display: flex;
   justify-content: flex-end;
