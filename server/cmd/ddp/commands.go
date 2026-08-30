@@ -217,7 +217,14 @@ func runCheck(rt *cliRuntime) error {
 	if planErr == nil && plan.UpdateManager == "watchtower" {
 		// 精简镜像由 Watchtower 托管更新，不应因为没有 Docker CLI 或 docker.sock 报出误导性警告。
 		if plan.WatchtowerManualTriggerSupported {
-			add("更新托管", "OK", "Watchtower HTTP API 已配置，ddp update 可立即触发检查", false)
+			// 只看配置齐不齐会漏掉「配置没问题但 API 根本没在监听」的情况（issue #108：
+			// Watchtower 低于 v1.20.0 时会静默忽略 WATCHTOWER_HTTP_API_ENDPOINTS，端口不会打开），
+			// 所以这里再连一下确认。短超时、不触发更新，失败也只是这一条转红，不影响其余检查项。
+			if reachable, detail := handler.CheckWatchtowerAPIReachable(3 * time.Second); reachable {
+				add("更新托管", "OK", "Watchtower HTTP API 已配置且探活通过，ddp update 可立即触发检查", false)
+			} else {
+				add("更新托管", "FAIL", detail, true)
+			}
 		} else if plan.WatchtowerPeriodicPollsEnabled || plan.WatchtowerSchedule != "" {
 			add("更新托管", "WARN", "Watchtower 定时检查已启用；如需使用 ddp update，请补充 HTTP API 地址和令牌", false)
 		} else {

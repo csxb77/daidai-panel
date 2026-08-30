@@ -774,6 +774,11 @@ onBeforeUnmount(() => {
     margin: 0;
     line-height: 1.7;
     color: #7f1d1d;
+    // 与 UpdateProgressDialog 的错误区块对齐：errorMessage 直接透传后端文案，
+    // 后端诊断类提示是分行的，不保留换行的话 \n 会被 HTML 折叠成空格，逐条步骤会全挤成一行。
+    // 与下面的 word-break 不冲突：pre-wrap 管「保留换行 + 允许软换行」，
+    // word-break 管「给超长无空格串（长路径、长错误串）补断点」，作用在换行决策的不同环节。
+    white-space: pre-wrap;
     word-break: break-word;
   }
 }

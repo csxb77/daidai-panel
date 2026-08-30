@@ -3,13 +3,18 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"daidai-panel/model"
 	"daidai-panel/testutil"
@@ -597,6 +602,215 @@ func TestTriggerWatchtowerUpdateReturnsErrorPayloadMessage(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "watchtower upstream failed") {
 		t.Fatalf("expected error payload message to surface, got %v", err)
+	}
+}
+
+// issue #108：Watchtower 低于 v1.20.0 时不会打开 API 端口，面板必须给出能自查的诊断，
+// 而不是直接抛一句 dial tcp ...: connection refused。
+// 起一个 httptest server 再立刻关掉，就能拿到一个必定连接被拒的地址来复现现场。
+func TestTriggerWatchtowerUpdateExplainsUnreachableAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("closed server must not receive any request")
+	}))
+	apiURL := server.URL
+	server.Close()
+
+	_, err := triggerWatchtowerUpdate(watchtowerRuntimeConfig{
+		Managed:                true,
+		APIURL:                 apiURL,
+		APIToken:               "demo-token",
+		ManualTriggerSupported: true,
+	})
+	if err == nil {
+		t.Fatal("expected unreachable Watchtower API to fail")
+	}
+
+	message := err.Error()
+	for _, keyword := range []string{
+		"没有服务在监听",
+		"v1.20.0",
+		"WATCHTOWER_HTTP_API_ENDPOINTS",
+		"com.centurylinklabs.watchtower.enable=false",
+		"docker compose logs",
+		"docker compose pull",
+		"原始错误：",
+	} {
+		if !strings.Contains(message, keyword) {
+			t.Fatalf("expected actionable diagnosis containing %q, got:\n%s", keyword, message)
+		}
+	}
+	if !strings.Contains(message, "dial tcp") {
+		t.Fatalf("expected the raw dial error to be preserved for advanced troubleshooting, got:\n%s", message)
+	}
+	if strings.Contains(message, "调用 Watchtower 更新接口失败") {
+		t.Fatalf("expected the bare transport error to be replaced by the diagnosis, got:\n%s", message)
+	}
+	if strings.Contains(message, "daidai-watchtower") {
+		t.Fatalf("expected no hardcoded watchtower container name, got:\n%s", message)
+	}
+}
+
+// 「地址不可达」和「服务端返回非 2xx」是两类失败，后者的文案一个字都不该被改动。
+func TestTriggerWatchtowerUpdateKeepsHTTPStatusFailureMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"unauthorized", http.StatusUnauthorized, "Unauthorized"},
+		{"server error", http.StatusInternalServerError, "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+
+			_, err := triggerWatchtowerUpdate(watchtowerRuntimeConfig{
+				Managed:                true,
+				APIURL:                 server.URL,
+				APIToken:               "demo-token",
+				ManualTriggerSupported: true,
+			})
+			if err == nil {
+				t.Fatalf("expected HTTP %d to fail", tc.status)
+			}
+			expected := fmt.Sprintf("Watchtower 更新触发失败: HTTP %d: %s", tc.status, tc.body)
+			if err.Error() != expected {
+				t.Fatalf("expected non-2xx message to stay unchanged as %q, got %q", expected, err.Error())
+			}
+			if strings.Contains(err.Error(), "v1.20.0") {
+				t.Fatalf("expected only unreachable failures to get the version diagnosis, got %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestWatchtowerUnreachableHintUsesConfiguredServiceName(t *testing.T) {
+	// 用户可能把服务名改成别的，自查命令必须跟着 WATCHTOWER_HTTP_API_URL 的 host 走。
+	hint := watchtowerUnreachableHint("http://my-wt:8080", errors.New("dial tcp 172.20.0.2:8080: connect: connection refused"))
+	if !strings.Contains(hint, "docker compose logs my-wt") || !strings.Contains(hint, "docker compose pull my-wt") {
+		t.Fatalf("expected self-check commands to use the configured service name, got:\n%s", hint)
+	}
+	if !strings.Contains(hint, "dial tcp 172.20.0.2:8080") {
+		t.Fatalf("expected the original error to be preserved, got:\n%s", hint)
+	}
+
+	// host 是 IP / localhost 时推不出服务名，必须退回通用说法而不是拼出没法执行的命令。
+	for _, apiURL := range []string{"http://172.20.0.2:8080", "http://localhost:8080"} {
+		fallback := watchtowerUnreachableHint(apiURL, nil)
+		if !strings.Contains(fallback, "<你的 watchtower 服务名>") {
+			t.Fatalf("expected generic wording for %q, got:\n%s", apiURL, fallback)
+		}
+		if strings.Contains(fallback, "原始错误：") {
+			t.Fatalf("expected no empty cause line when there is no underlying error, got:\n%s", fallback)
+		}
+	}
+}
+
+func TestWatchtowerAPIUnreachableOnlyMatchesTransportFailures(t *testing.T) {
+	// 连接层失败：httptest 起完立刻关掉，直接请求就是 connection refused。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	closedURL := server.URL
+	server.Close()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	if _, err := client.Get(closedURL); !watchtowerAPIUnreachable(err) {
+		t.Fatalf("expected connection refused to be treated as unreachable, got %v", err)
+	}
+
+	// 下面几种形态不依赖真实网络，直接按 net 包的错误类型构造，避免测试受环境 DNS 影响。
+	cases := []struct {
+		name        string
+		err         error
+		unreachable bool
+	}{
+		{
+			// DNS 解析不了（no such host）
+			name:        "dns failure",
+			err:         &url.Error{Op: "Post", URL: "http://watchtower:8080", Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "watchtower", IsNotFound: true}}},
+			unreachable: true,
+		},
+		{
+			// 拨号超时（i/o timeout）
+			name:        "dial timeout",
+			err:         &url.Error{Op: "Post", URL: "http://watchtower:8080", Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}},
+			unreachable: true,
+		},
+		{
+			// 连上之后读写才出错 —— 说明 API 其实在监听，不该套用「端口没打开」的诊断
+			name:        "read failure after connect",
+			err:         &url.Error{Op: "Post", URL: "http://watchtower:8080", Err: &net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}},
+			unreachable: false,
+		},
+		{
+			// 普通业务错误不能被误判成「端口没监听」
+			name:        "plain business error",
+			err:         errors.New("Watchtower 更新触发失败: HTTP 401"),
+			unreachable: false,
+		},
+		{
+			name:        "no error",
+			err:         nil,
+			unreachable: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := watchtowerAPIUnreachable(tc.err); got != tc.unreachable {
+				t.Fatalf("expected unreachable=%v for %v, got %v", tc.unreachable, tc.err, got)
+			}
+		})
+	}
+}
+
+func TestCheckWatchtowerAPIReachableCountsAnyHTTPResponse(t *testing.T) {
+	// 探活只关心端口有没有人应答：401 也算通过，且绝不能碰到 /v1/update 真的触发一次更新。
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/v1/update") {
+			t.Fatalf("probe must not trigger an update, got %s", r.URL.String())
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", server.URL)
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "demo-token")
+
+	reachable, detail := CheckWatchtowerAPIReachable(3 * time.Second)
+	if !reachable {
+		t.Fatalf("expected an HTTP response to count as a listening API, got %q", detail)
+	}
+	if detail != "" {
+		t.Fatalf("expected no detail on success, got %q", detail)
+	}
+}
+
+func TestCheckWatchtowerAPIReachableSharesDiagnosisWithUpdate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("closed server must not receive any request")
+	}))
+	apiURL := server.URL
+	server.Close()
+
+	t.Setenv("PANEL_UPDATE_MANAGER", "watchtower")
+	t.Setenv("WATCHTOWER_HTTP_API_URL", apiURL)
+	t.Setenv("WATCHTOWER_HTTP_API_TOKEN", "demo-token")
+
+	reachable, detail := CheckWatchtowerAPIReachable(2 * time.Second)
+	if reachable {
+		t.Fatal("expected a closed port to fail the probe")
+	}
+	// ddp check 与面板一键更新必须给出同一份文案。
+	expected := watchtowerUnreachableHint(apiURL, errors.New("placeholder"))
+	head, _, _ := strings.Cut(expected, "\n原始错误：")
+	if !strings.HasPrefix(detail, head) {
+		t.Fatalf("expected the probe to reuse the shared diagnosis, got:\n%s", detail)
+	}
+	if !strings.Contains(detail, "v1.20.0") || !strings.Contains(detail, "docker compose pull") {
+		t.Fatalf("expected actionable diagnosis from the probe, got:\n%s", detail)
 	}
 }
 

@@ -288,8 +288,27 @@ foreach ($compose in @(
         -or -not $composeText.Contains('http://watchtower:8080')) {
         Fail-Step "$($compose.Name) must expose the stable watchtower service URL only to the panel."
     }
-    if (-not $composeText.Contains($compose.Endpoint) -or $composeText.Contains('--http-api-update')) {
-        Fail-Step "$($compose.Name) must enable the update endpoint without the deprecated --http-api-update flag."
+    # 正向断言（必须含）与负向断言（不得含）拆成两条，不再共用一个 -or 和一句文案。
+    # 原来合并写法有两个毛病：一是失败时看不出到底缺了哪半边；二是正向那半边形同虚设 ——
+    # 谁误删了 WATCHTOWER_HTTP_API_ENDPOINTS 那一行，读到的仍是一句“deprecated flag”，
+    # 与真实原因南辕北辙。
+    #
+    # 匹配用“非注释行 + 子串”，既不做整行精确匹配，也不用裸 Contains：
+    #   - 裸 Contains 会被注释喂饱。compose 里 watchtower 镜像上方写了最低版本说明注释，
+    #     正文必然提到 WATCHTOWER_HTTP_API_ENDPOINTS 与 --http-api-update 这两个名字，
+    #     于是正向检查删掉真配置也全绿、负向检查没人用那个 flag 也照样红。
+    #   - 整行精确匹配则不许行尾追加 YAML 行内注释，多写一句说明就会红。
+    # 一律用 -c* 大小写敏感版本：原来的 .Contains() 是 ordinal 比较，环境变量名对 watchtower
+    # 也是大小写敏感的，换成默认的 -match 会把 watchtower_http_api_endpoints 这种写法放行。
+    $endpointLinePattern = '(?m)^[^#\r\n]*' + [regex]::Escape($compose.Endpoint)
+    if ($composeText -cnotmatch $endpointLinePattern) {
+        # watchtower 只有读到 WATCHTOWER_HTTP_API_ENDPOINTS 才会启动 HTTP API 服务器并监听 8080。
+        # 少了这一行，容器照样正常启动、日志一声不吭，但面板点更新会直接拿到
+        # dial tcp ...:8080: connect: connection refused —— 正是 issue #108 的形态。
+        Fail-Step "$($compose.Name) must keep '$($compose.Endpoint)' on the watchtower service.`nWithout it watchtower never starts its HTTP API listener on 8080: the container still boots and logs nothing unusual, but every panel update fails with 'connect: connection refused' (issue #108)."
+    }
+    if ($composeText -cmatch '(?m)^[^#\r\n]*--http-api-update') {
+        Fail-Step "$($compose.Name) must not pass the deprecated --http-api-update flag; WATCHTOWER_HTTP_API_ENDPOINTS replaces it and the legacy flag is dropped in watchtower v2."
     }
 }
 

@@ -864,6 +864,11 @@ onBeforeUnmount(() => {
     margin: 0;
     line-height: 1.7;
     color: #7f1d1d;
+    // 后端的更新失败诊断是分行文案（判定结论 / 根因 / 逐条自查命令 / 原始错误），
+    // 不保留换行的话 \n 会被 HTML 折叠成空格，编号步骤全挤成一行没法照着做。
+    // 与下面的 word-break 不冲突：pre-wrap 管「保留换行 + 允许软换行」，
+    // word-break 管「给超长无空格串（长 URL、长错误串）补断点」，作用在换行决策的不同环节。
+    white-space: pre-wrap;
     word-break: break-word;
   }
 }
