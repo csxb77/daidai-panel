@@ -24,8 +24,8 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 22 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.1.0` · [更新日志](./docs/release-notes/v3.1.0.md)<br>
-> 本次重点：修掉连点或网络慢时会创建出多条相同记录；界面圆角改为可切换的外观选项，并恢复开关、状态灯、头像等被一刀切削平的形状；PushPlus 补上官方新增的 QQ 机器人渠道并改走 HTTPS；APP 任务页改为虚拟化渲染，任务再多也不卡<br>
+> 最新稳定版：`v3.1.1` · [更新日志](./docs/release-notes/v3.1.1.md)<br>
+> 本次重点：修 Watchtower 托管更新在 watchtower 低于 v1.20.0 时静默失败：面板报错换成能照着做的自诊断，ddp check 补上真探活，文档与参考配置补上最低版本要求<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
 ## 在线演示
@@ -163,7 +163,7 @@ services:
       - com.centurylinklabs.watchtower.enable=true
 
   watchtower:
-    image: nickfedor/watchtower:latest
+    image: nickfedor/watchtower:latest             # 必须是 v1.20.0 或更新的版本，原因见下方提示
     container_name: daidai-watchtower
     restart: unless-stopped
     volumes:
@@ -187,6 +187,20 @@ docker compose up -d
 
 首次访问 `http://localhost:5700` 会进入管理员初始化。
 
+> ⚠️ **Watchtower 必须是 `v1.20.0`（2026-07-21 发布）或更新的版本，否则面板里的「检查系统更新」用不了。**<br>
+> 上面这份配置用的 `WATCHTOWER_HTTP_API_ENDPOINTS=update` 是 `v1.20.0` 才引入的环境变量，更早的版本只认命令行参数 `--http-api-update`。而 Watchtower 遇到不认识的环境变量是**静默忽略**的 —— 容器照常启动、日志也不报错，但 HTTP API 的 8080 端口从头到尾没打开，面板一点更新就只会拿到 `connection refused`。<br>
+> 更容易踩的是第二点：Watchtower 自己打了 `com.centurylinklabs.watchtower.enable=false`（避免自己管自己），**所以它不会自我更新** —— 本地那份 `latest` 是哪天拉的就一直停在哪天的版本。**凡是在 `v1.20.0` 之前就部署过 Watchtower 的用户，升级面板后请先手动拉一次新镜像再重建它**：
+
+```bash
+docker compose pull watchtower
+docker compose up -d watchtower
+
+# 确认版本：Watchtower 启动时会把自己的版本号打进日志
+docker logs daidai-watchtower 2>&1 | head -n 5
+```
+
+> 走国内镜像加速站的话还要留意：加速站上的 `latest` 有可能是很旧的缓存。`pull` 完版本仍然偏低时，可以临时改拉具体版本（例如 `nickfedor/watchtower:1.21.2`），或者临时直连 Docker Hub 拉一次。
+
 <details>
 <summary><b>展开：这份 compose 每一条在做什么 · Docker Hub 太慢怎么换镜像源 · 不想自动更新怎么删掉 Watchtower · docker run 等价写法</b></summary>
 
@@ -198,10 +212,10 @@ docker compose up -d
 2. `docker.sock` 只暴露给 Watchtower，不暴露给面板容器
 3. `DAIDAI_PANEL_IMAGE` 同时控制容器实际镜像和面板记录的 `IMAGE_NAME`，切换标签只改一处
 4. 只有打了 `com.centurylinklabs.watchtower.enable=true` 标签的容器会被自动更新
-5. Watchtower 自己显式打了 `com.centurylinklabs.watchtower.enable=false`，避免被这套规则误纳入管理
-6. `WATCHTOWER_HTTP_API_ENDPOINTS=update` 开放面板所需的更新入口；API 只在 Compose 内部网络使用，没有向宿主机开放端口
+5. Watchtower 自己显式打了 `com.centurylinklabs.watchtower.enable=false`，避免被这套规则误纳入管理；代价是**它不会自我更新**，本地镜像会一直停在最后一次手动 `docker compose pull watchtower` 的版本
+6. `WATCHTOWER_HTTP_API_ENDPOINTS=update` 开放面板所需的更新入口；API 只在 Compose 内部网络使用，没有向宿主机开放端口。**这个环境变量要 Watchtower `v1.20.0`+ 才认识**，更早的版本只认命令行 `--http-api-update`，会把它静默忽略掉：端口不开、日志也不报错
 7. `WATCHTOWER_HTTP_API_PERIODIC_POLLS=true` 保留定时轮询，`--interval 3600` 表示每 1 小时检查一次更新
-8. `--cleanup` 会在更新后清理旧镜像；当前使用 `nickfedor/watchtower:latest` 兼容新版 Docker API
+8. `--cleanup` 会在更新后清理旧镜像；当前使用 `nickfedor/watchtower:latest` 兼容新版 Docker API，但要确认实际拉到的版本不低于 `v1.20.0`（浮动标签在部分国内镜像加速站上可能是陈旧缓存）
 
 如果你不想自动更新，可以删除 `watchtower` 服务、`labels`、`PANEL_UPDATE_MANAGER=watchtower` 和 `WATCHTOWER_HTTP_API_*`，然后改成在宿主机手动执行：
 
@@ -247,6 +261,16 @@ docker run -d \
   --interval 3600
 ```
 
+`docker run` 写法同样要求 **Watchtower `v1.20.0`+**（`WATCHTOWER_HTTP_API_ENDPOINTS` 是那个版本才有的，老版本会静默忽略它、不开 8080 端口）。注意上面只有面板容器带了 `--pull=always`，Watchtower 容器没有，而且它自己也不会自我更新 —— 如果宿主机上早就存在一份旧的 `nickfedor/watchtower:latest`，`docker run` 会直接复用那份旧镜像。所以请先手动拉一次再建容器：
+
+```bash
+docker pull nickfedor/watchtower:latest
+docker rm -f daidai-watchtower          # 已经建过的话先删掉，再重新执行上面那条 docker run
+
+# 建好之后确认版本：Watchtower 启动时会把自己的版本号打进日志
+docker logs daidai-watchtower 2>&1 | head -n 5
+```
+
 </details>
 
 <details>
@@ -278,16 +302,16 @@ docker run -d \
 
 | 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
 |--------------|------------------|----------|--------|----------|----------|
-| `latest` | `3.1.0` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-full` | `3.1.0-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-3.10` | `3.1.0-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
-| `latest-3.11` | `3.1.0-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
-| `latest-all` | `3.1.0-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `3.1.0-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `3.1.0-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `3.1.0-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `3.1.0-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `3.1.0-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `latest` | `3.1.1` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `3.1.1-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `3.1.1-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `3.1.1-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `3.1.1-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `3.1.1-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `3.1.1-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `3.1.1-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `3.1.1-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `3.1.1-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
 
 后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
@@ -311,7 +335,7 @@ docker run -d \
 | `debian3.11` | `debian-3.11` |
 | `debianall` | `debian-all` |
 
-Debian 的旧固定版本格式也保留兼容别名：`3.1.0-debian3.10`、`3.1.0-debian3.11`、`3.1.0-debianall` 分别对应新的 `3.1.0-debian-3.10`、`3.1.0-debian-3.11`、`3.1.0-debian-all`。新部署请直接使用新名称。
+Debian 的旧固定版本格式也保留兼容别名：`3.1.1-debian3.10`、`3.1.1-debian3.11`、`3.1.1-debianall` 分别对应新的 `3.1.1-debian-3.10`、`3.1.1-debian-3.11`、`3.1.1-debian-all`。新部署请直接使用新名称。
 
 #### 切换标签与本地构建
 
@@ -464,7 +488,7 @@ daidai-panel-windows-amd64/
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.1.0 更新日志](./docs/release-notes/v3.1.0.md) |
+| 看这一版改了什么 | [v3.1.1 更新日志](./docs/release-notes/v3.1.1.md) |
 
 ## 端口与反向代理
 
@@ -609,7 +633,8 @@ server {
 进入「系统设置」→「概览」→ 点「检查系统更新」。系统会自动识别当前部署方式：
 
 - **Docker 精简版**：自 `v3.0.0` 起，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
-- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.1.0-full`、`3.1.0-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
+  ⚠️ 这条链路要求 **Watchtower `v1.20.0` 或更新的版本**，版本偏低时点更新会失败并报 `connection refused`。Watchtower 不会自我更新，需要手动 `docker compose pull watchtower && docker compose up -d watchtower`，详见「快速部署」里的版本提示。
+- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.1.1-full`、`3.1.1-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 - **Magisk 模块版**（自 `v3.0.3`）：下载对应架构的 `daidai-linux-*.tar.gz`，只替换容器内的 `daidai-server`、`ddp` 和前端目录，同时写回模块目录并同步 `module.prop` 版本号，保证重启后不回滚。容器 rootfs、apt/apk 系统包、Python venv 与已装依赖、`config.yaml`、`ports.conf` 一概不动，**不需要重启手机**。
   ⚠️ 在线升级**替换不了模块脚本**（`service.sh` / `customize.sh` / `action.sh`），升完之后是「新面板 + 旧模块外壳」，管理器里的版本号会跟着变成新版。所以由模块脚本实现的新能力需要重刷一次 ZIP 才有 —— 例如 `v3.0.4` 的「停止面板服务」，在线升级上来的用户在面板里会看到该按钮被禁用并提示当前外壳版本。只有当新面板**根本无法**在旧外壳上运行时，面板才会在检查更新阶段直接拒绝升级并要求重刷 ZIP。
