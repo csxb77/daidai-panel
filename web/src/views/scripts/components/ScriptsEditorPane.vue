@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onActivated, ref, watch } from "vue";
 import {
   ArrowLeft,
   ArrowRight,
@@ -17,11 +17,10 @@ import {
   Switch,
   VideoPlay,
 } from "@element-plus/icons-vue";
-import MonacoEditor, {
+import CodeEditor, {
   persistEditorWordWrap,
   readStoredEditorWordWrap,
-} from "@/components/MonacoEditor.vue";
-import { getMonacoLoadErrorMessage, loadMonacoEditor } from "@/utils/monaco";
+} from "@/components/CodeEditor.vue";
 
 const fileContent = defineModel<string>("fileContent", { required: true });
 const isEditing = defineModel<boolean>("isEditing", { required: true });
@@ -105,7 +104,7 @@ function startEdit() {
 }
 
 // 自动换行开关与配置文件页共享同一份记忆（dd:editor:word_wrap），
-// 读写统一走 MonacoEditor 导出的那两个函数，两页不各写一遍。
+// 读写统一走 CodeEditor 导出的那两个函数，两页不各写一遍。
 const wordWrap = ref(readStoredEditorWordWrap());
 
 function toggleWordWrap() {
@@ -119,21 +118,9 @@ onActivated(() => {
   wordWrap.value = readStoredEditorWordWrap();
 });
 
-const monacoEditorRef = ref<{ focus?: () => void } | null>(null);
-
-// 空状态（还没选文件）时页面上没有 MonacoEditor 实例，这里提前把加载链路跑起来，
-// 让用户点开第一个脚本时能直接命中已记忆化的结果。
-// 失败只记日志即可：loadMonacoEditor 失败会清空自身记忆化结果，
-// 真正打开文件时 MonacoEditor 会重新加载，并在组件内展示具体原因 + 重试按钮。
-onMounted(() => {
-  void loadMonacoEditor().catch((error) => {
-    const reason = getMonacoLoadErrorMessage(error);
-    console.warn(
-      `Monaco 编辑器预加载失败，将在打开文件时重试。${reason ? `原因：${reason}` : ""}`,
-      error,
-    );
-  });
-});
+// CodeEditor 由 Vite 直接打包、同步 import，没有运行期加载链路，
+// 所以这里不再需要「空状态时提前预热」那一段（也不可能再有加载失败）。
+const codeEditorRef = ref<{ focus?: () => void } | null>(null);
 
 watch(
   () =>
@@ -147,7 +134,7 @@ watch(
   ([editing, focusTicket, loading, binary, file]) => {
     if (!editing || loading || binary || !file || !focusTicket) return;
     void nextTick(() => {
-      monacoEditorRef.value?.focus?.();
+      codeEditorRef.value?.focus?.();
     });
   },
 );
@@ -380,8 +367,8 @@ watch(
             下载」取回文件。
           </p>
         </div>
-        <MonacoEditor
-          ref="monacoEditorRef"
+        <CodeEditor
+          ref="codeEditorRef"
           v-else
           v-model="fileContent"
           :language="editorLanguage"

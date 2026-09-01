@@ -84,6 +84,27 @@ let logFlushTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let hiddenAt: number | null = null
 let pendingScrollRestore: number | null = null
+// latest-log 预取：startStream() 里与 SSE 同时发起，done 分支直接消费这个已经在飞的 promise。
+// 以前是等 done 事件到了才开始第二个往返（JWT + 查库 + 解压 + 全量 ANSI 解析），
+// 在弱机上这段串行开销肉眼可见（issue #109-1 的后半段）。这里只把请求提前，语义完全不变。
+let prefetchedLatestLog: Promise<any> | null = null
+let prefetchedLatestLogTaskId: number | null = null
+let prefetchedLatestLogAt = 0
+// 作废预取时用它掐断在途响应体，见 dropPrefetchedLatestLog
+let prefetchedLatestLogAbort: AbortController | null = null
+// 预取的有效期。超过这个窗口就当它过期、老老实实重发一次请求。
+//
+// 【预取只在一条路径上可以被复用】
+// 预取拿到的是「打开弹窗那一刻」的最近一次日志。只有「任务早就跑完了、服务端立刻回 done、
+// 流里一个字节都没有」这条路径上，done 与预取几乎同时发生、两者内容必然一致——
+// 这正是本次要优化的场景（issue #109-1 的后半段）。
+// 其余任何情况下那份快照都比屏幕上的内容旧，复用它会把刚跑完的日志覆盖成旧的甚至空的。
+//
+// 🔴 挡住误用的**主**手段是 dropPrefetchedLatestLog()：流里一收到真实数据、或收到
+// done:reconnect，立刻作废预取。**不能只靠下面这条 TTL** —— 任务在 1.2s 内跑完时
+// done 到达时预取仍在有效期内；done:reconnect 更可能 150ms 就回来（服务端一发现
+// TinyLog 就 break，并不会等满轮询窗口）。TTL 只是「谁都没作废它、它却放了很久」的兜底。
+const LATEST_LOG_PREFETCH_TTL = 1200
 // reconnect 风暴熔断：连续重连且无新数据时累加，超过上限即按完成处理，避免无限重连+全量重渲染卡顿。
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 5
@@ -202,6 +223,14 @@ async function startStream(isReconnect = false) {
   }
 
   const url = `/api/v1/logs/${props.taskId}/stream`
+  // 与下面的 SSE 并行发起 latest-log 预取，不 await：
+  // 实时数据仍然只走 SSE，这份预取只在「流里没有实时内容、走到 done」那条既有路径上被消费
+  // （见 fetchLatestLog → takeLatestLog），所以不会和流式内容重复渲染。
+  // 重连（isReconnect）时不预取：那条路径最多会重试 5 次，每次都白发一个可能要全量解压的请求，
+  // 反而加重了本来想优化的开销。
+  if (!isReconnect) {
+    prefetchLatestLog(props.taskId!)
+  }
   eventSource = openAuthorizedEventStream(url, {
     onOpen() {
       loading.value = false
@@ -213,6 +242,11 @@ async function startStream(isReconnect = false) {
       }
       // 收到真实日志数据 = 有实质进展，不算空重连风暴，重置熔断计数。
       reconnectAttempts = 0
+      // 🔴 同时作废预取：这一份快照是「打开弹窗那一刻」拍的，比流里正在到达的内容更旧。
+      // 只靠 TTL 挡不住这条路径 —— 任务在 1.2s 内跑完时，done 到达时预取仍在有效期内，
+      // 复用它就会用旧快照（甚至是上一次运行的日志、或一条 content 为空的新记录）
+      // 覆盖掉刚流完的正确输出。预取只服务「服务端立刻回 done、流里一个字节都没有」这一条路径。
+      dropPrefetchedLatestLog()
       pendingSseChunks.push(data)
       scheduleBufferFlush()
     },
@@ -224,6 +258,9 @@ async function startStream(isReconnect = false) {
       done.value = true
       cleanup()
       if (event.data === 'reconnect') {
+        // reconnect 意味着服务端已经找到 TinyLog、任务确实在跑，接下来会重新推一遍历史。
+        // 预取那份快照到这里已经没有意义（而且重连很可能 150ms 就回来，TTL 根本挡不住），直接作废。
+        dropPrefetchedLatestLog()
         reconnectAttempts++
         if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
           // 连续多次重连都没有新数据：判定为无可续流的实时日志，按完成处理，停止重连风暴。
@@ -238,6 +275,16 @@ async function startStream(isReconnect = false) {
         }, delay)
         return
       }
+      // 🔴 done 的三种载荷里，只有 'finished'（服务端 0 等待、任务早就结束、日志早已落库）
+      // 才允许复用并行预取。'finished-late' 说明服务端在短轮询里真的等过 ——
+      // 也就是打开弹窗那一刻任务还在排队/运行，那时按 started_at DESC 取到的很可能是
+      // **上一次运行**的记录、或一条 content 还是空的新记录。复用它会把上次的输出
+      // 渲染成本次结果，或者错误地显示「日志已过期」。
+      // 靠 TTL 挡不住：任务一两百毫秒就跑完时，done 到达时预取仍在有效期内。
+      // 未知载荷按 finished 处理（向后兼容旧服务端与演示站的假流）。
+      if (event.data === 'finished-late') {
+        dropPrefetchedLatestLog()
+      }
       void fetchLatestLog(0, autoScroll.value ? 'bottom' : 'preserve')
     },
     onError() {
@@ -245,13 +292,33 @@ async function startStream(isReconnect = false) {
       loading.value = false
       done.value = true
       cleanup()
+      // 流本身出错时无从判断服务端处于哪条路径，预取一律作废、老老实实重新请求。
+      dropPrefetchedLatestLog()
       void fetchLatestLog(0, hasLogs.value ? 'preserve' : 'top')
     }
   })
 }
 
+// 作废预取。四处在用：流里收到第一段真实数据、收到 done:reconnect、
+// 收到 done:finished-late（服务端等过 = 任务当时正在启动/运行）、以及 latest 模式开场。
+// 判据统一成一句话：只要能证明「服务端这条流不是『任务早就结束、直接收口』」，
+// 那份打开弹窗时拍的旧快照就不能再被消费。
+//
+// 除了置空引用，还要 abort 在途请求：运行中的大日志任务那一份可能是几十 MB，
+// 不 abort 的话 axios 仍会把它下完并在主线程 JSON.parse，白白压在弱机上。
+function dropPrefetchedLatestLog() {
+  prefetchedLatestLogAbort?.abort()
+  prefetchedLatestLogAbort = null
+  prefetchedLatestLog = null
+  prefetchedLatestLogTaskId = null
+  prefetchedLatestLogAt = 0
+}
+
 async function loadLatestOnly() {
   cleanup()
+  // latest 模式自己就是一次性拉取，不做预取；同时丢掉上一次 live 会话可能残留的、没人消费的预取，
+  // 避免这里读到一份旧快照（TTL 之外还多一道保险）。
+  dropPrefetchedLatestLog()
   resetLogOutput()
   done.value = true
   error.value = null
@@ -271,10 +338,43 @@ async function loadLatestOnly() {
   loading.value = false
 }
 
+function prefetchLatestLog(taskId: number) {
+  prefetchedLatestLogTaskId = taskId
+  prefetchedLatestLogAt = Date.now()
+  prefetchedLatestLogAbort = typeof AbortController === 'undefined' ? null : new AbortController()
+  prefetchedLatestLog = taskApi.latestLog(taskId, prefetchedLatestLogAbort?.signal)
+  // 必须就地挂一个空 catch：这是一个「可能压根没人消费」的在途请求，
+  // 没有 rejection handler 的话浏览器会报 unhandled promise rejection。
+  // 真正的错误处理仍在 takeLatestLog / fetchLatestLog 里（退回原来的重发 + 404 重试分支）。
+  // 注意 .catch() 返回的是新 promise，prefetchedLatestLog 仍然指向原始那个。
+  prefetchedLatestLog.catch(() => {})
+}
+
+// 取 latest-log：优先复用 startStream() 里已经在飞的那份预取，拿不到就照原样新发一个请求。
+async function takeLatestLog(): Promise<any> {
+  const pending = prefetchedLatestLog
+  const pendingTaskId = prefetchedLatestLogTaskId
+  const pendingAt = prefetchedLatestLogAt
+  // 一次性消费：404 重试、切回前台补拉这些后续调用都必须拿最新数据，不能反复复用同一份旧快照。
+  prefetchedLatestLog = null
+  prefetchedLatestLogTaskId = null
+  prefetchedLatestLogAt = 0
+
+  if (pending && pendingTaskId === props.taskId && Date.now() - pendingAt <= LATEST_LOG_PREFETCH_TTL) {
+    try {
+      return await pending
+    } catch {
+      // 预取失败（网络抖动、日志还没落库的 404 等）一律静默吞掉，退回原来的行为重新发一次，
+      // 让后面的 catch 按既有分支处理。绝不能让预取本身把弹窗打挂。
+    }
+  }
+  return taskApi.latestLog(props.taskId!)
+}
+
 async function fetchLatestLog(retryCount = 0, scrollMode: 'top' | 'bottom' | 'preserve' = 'top') {
   const previousScrollTop = logContainerRef.value?.scrollTop ?? 0
   try {
-    const res = await taskApi.latestLog(props.taskId!) as any
+    const res = await takeLatestLog() as any
     if (!res) {
       emptyMessage.value = '该任务还没有日志记录'
       return

@@ -128,6 +128,18 @@ func (h *LogHandler) Stream(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 
+	// 先写一条 SSE 注释行并 Flush，把响应头立刻推给客户端。
+	//
+	// 【为什么必须放在所有查库逻辑之前】
+	// gin 在第一次真正写响应体之前不会发响应头，而下面「等 TinyLog」那段最坏还要等 1.5s。
+	// 这期间前端 utils/sse.ts 的 fetch 一直 pending、onOpen 不触发，日志弹窗就是纯白屏转圈——
+	// 服务端明明在正常工作，用户看到的却是「点了没反应」。先把头发出去，弹窗骨架能立刻出来。
+	//
+	// 这一行对前端是零副作用 no-op：sse.ts 的 dispatchEventSegment 对 ":" 开头的行直接 continue，
+	// 整段没有 event/data 字段会被丢弃，和下面已有的 keepalive 心跳完全同形状。
+	fmt.Fprint(c.Writer, ": open\n\n")
+	c.Writer.Flush()
+
 	mgr := service.GetTinyLogManager()
 	tl := mgr.FindByTaskID(uint(taskID))
 
@@ -170,8 +182,52 @@ func (h *LogHandler) Stream(c *gin.Context) {
 	var task model.Task
 	database.DB.First(&task, taskID)
 	if task.Status != model.TaskStatusRunning {
-		time.Sleep(1500 * time.Millisecond)
-		tl = mgr.FindByTaskID(uint(taskID))
+		// 【短轮询等待 TinyLog，替代原来无条件的 time.Sleep(1500ms)】
+		//
+		// 要兜的仍是启动竞态：用户点「运行」后前端马上打开日志弹窗，此刻 runTask 可能还没执行到
+		// GetTinyLogManager().Create()，上面的 FindByTaskID 就会拿到 nil。
+		//
+		// 原来的写法是无条件睡满 1.5s 再复查一次，代价是「点日志看上次跑完的结果」这条最常走的路径
+		// 也被罚满 1.5s（issue #109-1）——任务处于 Disabled(0)/Enabled(1) 时根本没有任何执行在启动，
+		// 等再久也不会有 TinyLog 冒出来，这 1.5s 是纯浪费。
+		//
+		// 改成：只在任务「可能马上产出实时日志」时才等，每 150ms 探一次、封顶 1.5s，一出现立刻停手。
+		// 「可能马上产出」= 排队中(0.5) 或 运行中(2)。反过来，Disabled/Enabled 现在是 0 等待直接收口。
+		//
+		// 手动运行这条主路径是完备的：SchedulerV2.RunNow（scheduler_v2.go:677-681）先 Enqueue、
+		// 再把状态置成 Queued，两步都在 POST /tasks/:id/run 的响应返回之前完成，而前端是拿到该响应
+		// 之后才打开日志流的（tasks/index.vue 的 handleRun 先 await run 再 openLogViewer）。
+		//
+		// ⚠️ 已知的未覆盖窗口（刻意接受，不要当成漏改）：定时触发（scheduler_v2.go:538-542）与
+		// RunNow 同形，也是**先 Enqueue、再置 Queued**，两句之间存在一个极短窗口——请求已经在队列里、
+		// worker 随时可能建 TinyLog，而 tasks.status 还停在 Enabled。用户恰好在这个窗口打开日志弹窗时，
+		// 这里会 0 等待直接判完成。旧的 1.5s 固定 sleep 能兜住它，但代价是所有人每次看日志都罚 1.5s。
+		// 后果只是「显示已完成，重开一次弹窗就正常」，不丢数据、不影响任务本身，所以取速度。
+		pendingStatus := task.Status
+		// waited 记录「本次到底有没有真的等过」。它要回传给前端：
+		// 前端在打开弹窗那一刻并行预取了一份 latest-log 作为提速手段（issue #109-1 的后半段），
+		// 而只要服务端等过，就说明这条任务当时正在启动或运行 —— 那份预取快照必然比
+		// 「等完之后的真实结果」旧（很可能整份是上一次运行的日志），绝不能拿来渲染。
+		// 详见下面 streamDoneEvent 的注释。
+		waited := false
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for tl == nil && time.Now().Before(deadline) &&
+			(pendingStatus == model.TaskStatusQueued || pendingStatus == model.TaskStatusRunning) {
+			waited = true
+			select {
+			case <-c.Request.Context().Done():
+				// 轮询期间客户端完全可能已经走了（关弹窗、切任务、刷新页面），
+				// 不检测的话这条请求还要继续空等到封顶才结束。
+				return
+			case <-time.After(150 * time.Millisecond):
+			}
+			tl = mgr.FindByTaskID(uint(taskID))
+			// 状态也要跟着复查：任务被取消、或者执行得极快已经收尾，状态会退回 Enabled/Disabled，
+			// 这时继续等下去同样是白等，提前跳出。
+			var polled model.Task
+			database.DB.Select("status").First(&polled, taskID)
+			pendingStatus = polled.Status
+		}
 		if tl != nil {
 			history, _ := tl.ReadAll()
 			if len(history) > 0 {
@@ -179,11 +235,10 @@ func (h *LogHandler) Stream(c *gin.Context) {
 				c.Writer.Flush()
 			}
 		}
-		// 启动竞态：打开日志窗时任务可能刚入队、runTask 尚未置运行中/未建 TinyLog。
-		// sleep 后重查真实状态，若已开始运行 → reconnect（前端重连后进入 tl != nil 流式分支），否则才判完成。
+		// 等待结束后重查真实状态：若已开始运行 → reconnect（前端重连后进入 tl != nil 流式分支），否则才判完成。
 		var t model.Task
 		database.DB.Select("status").First(&t, taskID)
-		fmt.Fprintf(c.Writer, "event: done\ndata: %s\n\n", streamDoneEventForStatus(t.Status))
+		fmt.Fprintf(c.Writer, "event: done\ndata: %s\n\n", streamDoneEvent(t.Status, waited))
 		c.Writer.Flush()
 	} else {
 		idleCount := 0
@@ -204,7 +259,7 @@ func (h *LogHandler) Stream(c *gin.Context) {
 			if idleCount >= 120 {
 				// 等满约 60s（120 * 500ms）TinyLog 始终未出现：该任务没有可流式的实时日志
 				// （典型为 conc / SuppressLiveOutput 抑制输出的运行任务）。此处直接发 finished，
-				// 不再用 streamDoneEventForStatus —— 否则 status==running 会回 reconnect，
+				// 不再用 streamDoneEvent —— 否则 status==running 会回 reconnect，
 				// 而前端重连后仍是 tl==nil，60s 后又超时，形成无可续流的无限重连风暴。
 				fmt.Fprintf(w, "event: done\ndata: finished\n\n")
 				c.Writer.Flush()
@@ -227,12 +282,33 @@ func writeSSEData(w io.Writer, data string) {
 	fmt.Fprint(w, "\n")
 }
 
-// streamDoneEventForStatus 根据任务真实状态决定 SSE done 事件的 data 值。
+// streamDoneEvent 根据任务真实状态与「服务端有没有等过」决定 SSE done 事件的 data 值。
 // 任务仍在运行 → "reconnect"，让前端 LogViewer 无缝重连续流，避免误判"已完成"；
 // 其它状态（已结束/排队/禁用等）→ "finished"，前端正常置为"已完成"。
-func streamDoneEventForStatus(status float64) string {
+// streamDoneEvent 决定 done 事件的载荷。三种取值：
+//
+//	reconnect      任务已经在跑，前端重连后进入流式分支
+//	finished       任务早就结束了，服务端一秒没等、直接收口
+//	finished-late  服务端在短轮询里真的等过（打开弹窗时任务处于排队中/运行中）
+//
+// 为什么要把 finished 和 finished-late 分开：
+// 前端为了省掉一个串行往返，会在打开弹窗那一刻**并行**预取一份 latest-log。
+// 只有 finished 这条路径（服务端 0 等待，说明任务早已结束、日志早已落库）
+// 才允许复用那份预取。finished-late 意味着这条任务当时正在启动或运行：
+//   - 预取发出时本次运行的日志行可能还没建出来，按 started_at DESC 取到的是**上一次运行**的记录；
+//   - 或者刚建出来、content 还是空的。
+//
+// 两种情况复用预取都会把「上一次的输出」或「日志已过期」渲染成本次结果。
+// 靠前端那道 TTL 挡不住：任务在一两百毫秒内跑完时，done 到达时预取仍在有效期内。
+//
+// 前端对未知载荷的兜底是「当成 finished 处理」，所以新增这个取值对演示站的假流、
+// 以及独立仓库里的 APP 都是向后兼容的（最坏是退回旧行为，不会报错）。
+func streamDoneEvent(status float64, waited bool) string {
 	if status == model.TaskStatusRunning {
 		return "reconnect"
+	}
+	if waited {
+		return "finished-late"
 	}
 	return "finished"
 }

@@ -195,6 +195,8 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		ForceOverwrite *bool  `json:"force_overwrite"`
 		// 覆盖拉取策略三态，前端只发这个；不传或传脏值都会被 Normalize 归到 inherit（跟随全局）。
 		OverwriteMode  string `json:"overwrite_mode"`
+		// 完整检出：开启后放弃 sparse-checkout，整仓拉取。不传就是 false（走原来的 sparse）。
+		FullCheckout   bool   `json:"full_checkout"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
@@ -260,6 +262,7 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		Alias:          req.Alias,
 		ForceOverwrite: req.ForceOverwrite,
 		OverwriteMode:  model.NormalizeSubscriptionOverwriteMode(req.OverwriteMode),
+		FullCheckout:   req.FullCheckout,
 	}
 
 	if err := database.DB.Create(&sub).Error; err != nil {
@@ -296,6 +299,9 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 		"depend_on": true, "pre_script": true, "hook_script": true, "auto_add_task": true, "auto_del_task": true,
 		"save_dir": true, "sub_path": true, "ssh_key_id": true, "auth_type": true, "auth_username": true, "auth_token": true, "alias": true, "force_overwrite": true,
 		"overwrite_mode": true,
+		// 完整检出开关。Update 走 map 更新，false 也会被写库（map 更新不会跳过零值），
+		// 所以用户在表单里关掉它能正常落库。
+		"full_checkout": true,
 	}
 	updates := make(map[string]interface{})
 	for k, v := range req {
@@ -317,6 +323,14 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if value, exists := updates["overwrite_mode"]; exists {
 		text, _ := value.(string)
 		updates["overwrite_mode"] = model.NormalizeSubscriptionOverwriteMode(text)
+	}
+
+	// 完整检出开关同理：JSON 里可能是 null / 数字 / 字符串，直接 map 更新会把脏值塞进
+	// bool 列。非布尔一律归 false —— 也就是保持既有的 sparse 检出行为，方向安全
+	// （误开成完整检出会让整仓文件落盘，误关只是回到默认行为）。
+	if value, exists := updates["full_checkout"]; exists {
+		flag, _ := value.(bool)
+		updates["full_checkout"] = flag
 	}
 
 	if _, hasAuthType := updates["auth_type"]; hasAuthType || updates["ssh_key_id"] != nil || updates["auth_token"] != nil {

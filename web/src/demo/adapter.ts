@@ -1487,6 +1487,9 @@ route('POST', '/subscriptions', (ctx) => {
     overwrite_mode: ['force', 'preserve'].includes(String(body['overwrite_mode'] ?? ''))
       ? String(body['overwrite_mode'])
       : 'inherit',
+    // 完整检出：缺省即 false（稀疏检出），与后端布尔列的默认值一致。
+    // 演示站不真的 clone 仓库，这里只做「存得住、编辑弹窗能回填」的透传。
+    full_checkout: Boolean(body['full_checkout']),
     created_at: now,
     updated_at: now,
   }
@@ -1562,7 +1565,7 @@ route('PUT', '/subscriptions/:id', (ctx) => {
     'name', 'type', 'url', 'branch', 'schedule', 'whitelist', 'blacklist', 'depend_on',
     'pre_script', 'hook_script', 'auto_add_task', 'auto_del_task', 'enabled', 'sub_path',
     'save_dir', 'ssh_key_id', 'auth_type', 'auth_username', 'alias', 'force_overwrite',
-    'overwrite_mode',
+    'overwrite_mode', 'full_checkout',
   ]
   for (const key of writable) {
     if (body[key] === undefined) continue

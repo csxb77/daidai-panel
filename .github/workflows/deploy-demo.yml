@@ -117,7 +117,7 @@ jobs:
       # build:demo = vite build --mode demo --base=/daidai-panel/
       #   --mode demo 让 web/.env.demo 生效（VITE_DEMO=1），mock 层才会被打进产物；
       #   --base 是 GitHub Pages 项目站的子路径，改仓库名时这里和 package.json 要一起改。
-      # ⚠️ 不要改 outDir：web/scripts/copy-monaco-assets.mjs 把目标写死成 cwd 下的 dist。
+      # ⚠️ 不要改 outDir：web/scripts/copy-spa-fallback.mjs 把目标写死成 cwd 下的 dist。
       - name: 构建 Demo 静态站
         working-directory: web
         env:

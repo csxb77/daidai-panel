@@ -143,6 +143,9 @@ export interface DemoSubscription {
   // 覆盖拉取策略：inherit=跟随全局 / force=强制覆盖 / preserve=保留本地修改。
   // force_overwrite 是 v2.2.15 之前的旧字段，只做只读兼容，真正生效的是这一个。
   overwrite_mode: string
+  // 完整检出：true=放弃 sparse-checkout 拉整个仓库 / false=按子目录、白名单、依赖规则稀疏检出。
+  // 只对 git 仓库订阅有意义，默认 false（与后端 model/subscription.go 的 FullCheckout 一致）。
+  full_checkout: boolean
   created_at: string
   updated_at: string
 }

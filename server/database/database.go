@@ -311,6 +311,10 @@ func EnsureColumns() {
 		// 这里刻意新增一列而不是把 force_overwrite 改成 nullable —— 存量行的 force_overwrite 全是 1，
 		// 复用它会让所有老订阅被解读成「强制覆盖」，把全局关掉的用户升级后静默切回覆盖模式。
 		{"overwrite_mode", "VARCHAR(16) NOT NULL DEFAULT 'inherit'"},
+		// 完整检出开关。NOT NULL DEFAULT 0：老库 ALTER TABLE 补列时存量行一律落成 0，
+		// 也就是「继续走 sparse-checkout」——升级后拉取行为与升级前完全一致，
+		// 不需要任何数据回填。带 NOT NULL 是为了不让 NULL 漏进来（同表 overwrite_mode 的写法）。
+		{"full_checkout", "BOOLEAN NOT NULL DEFAULT 0"},
 	})
 
 	ensureTableColumns("notify_channels", []columnDef{

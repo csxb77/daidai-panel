@@ -4,7 +4,9 @@ import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import type { ScriptVersionRecord } from '../types'
 import { formatDateTime } from '@/utils/datetime'
 
-const MonacoDiffEditor = defineAsyncComponent(() => import('@/components/MonacoDiffEditor.vue'))
+// 差异对比只服务「版本历史 → 对比」这个低频弹窗，而它比普通编辑器多带一套 merge 依赖，
+// 所以仍保持懒加载：不点对比就不下载这块代码。
+const CodeDiffEditor = defineAsyncComponent(() => import('@/components/CodeDiffEditor.vue'))
 
 const showCreateFileDialog = defineModel<boolean>('showCreateFileDialog', { required: true })
 const showCreateDirDialog = defineModel<boolean>('showCreateDirDialog', { required: true })
@@ -260,7 +262,7 @@ watch(showVersionDiffDialog, (visible) => {
           </template>
         </el-empty>
       </div>
-      <MonacoDiffEditor
+      <CodeDiffEditor
         v-else-if="!props.versionDiffLoading"
         :original-value="versionDiffOriginalContent"
         :modified-value="versionDiffModifiedContent"

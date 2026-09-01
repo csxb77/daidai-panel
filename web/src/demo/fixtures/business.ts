@@ -602,6 +602,9 @@ function buildSubscriptions(now: number): DemoSubscription[] {
     force_overwrite: true,
     // 覆盖拉取策略默认跟随全局；下面第 2 条订阅单独设成 preserve，用来展示列表里的策略标签
     overwrite_mode: 'inherit',
+    // 完整检出默认关闭：三条种子订阅都保持稀疏检出，与真实面板的默认值一致
+    // （演示站开着它没有任何可见差异，反而会让编辑弹窗里的开关默认亮起，误导用户以为这是默认档）
+    full_checkout: false,
   }
 
   return [

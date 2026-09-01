@@ -130,7 +130,9 @@ EP 是**通过改变量**实现全屏的，而这里是**直接写 width 且带 
 - `ScriptExecutionDialogs.vue:316-322`——注释里的「用双 class 提高特异性」讲的是
   **覆盖全局进场动画**，块体只有 `animation` 与 `transform-origin`，**没有 width**。
   别去「清理」它：`:324-328` 的注释解释了为何刻意不加 `both/forwards`——残留 transform
-  会成为 Monaco `position:fixed` 补全浮层的包含块，导致弹层错位。
+  会成为编辑器 `position:fixed` 浮层（补全 / 搜索面板）的包含块，导致弹层错位。
+  （v3.2.0 前这里写的是 Monaco 的补全浮层；换成 CodeMirror 6 后这条约束**依然成立**，
+  只是浮层换成了 `.cm-tooltip` / `.cm-panels`。）
 - `LogViewer.vue:1088-1094`——确实重声明了 `&.is-fullscreen`，但**五条全部没有 `!important`**，
   所以其中的 `width: 100%` 一直是死代码，压不过 global 那条。它真正生效的是
   `height` / `max-height` / `border-radius`（用来压住本组件自己的桌面端尺寸）。
@@ -200,74 +202,81 @@ if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
 }
 ```
 
-## Scenario: Monaco 本地静态资源与加载探测
+## Scenario: 代码编辑器（CodeMirror 6）
+
+> v3.2.0（issue #109-2）把编辑器从 Monaco 换成了 CodeMirror 6。
+> **本节整体取代了原来的「Monaco 本地静态资源与加载探测」一节** ——
+> 那一整套「运行期 AMD 加载 + 本地 `/monaco/vs` 资源探测 + CDN 兜底 + 构建后整目录拷贝」
+> 已经随 `web/scripts/copy-monaco-assets.mjs`、`web/src/utils/monaco.ts` 一起删除。
+> 在旧提交、旧发布说明里看到那套契约，那是历史陈述，**不要照着往回加**。
 
 ### 1. Scope / Trigger
-- Trigger: 修改 `web/scripts/copy-monaco-assets.mjs`、`web/src/utils/monaco.ts`、`MonacoEditor.vue`、`MonacoDiffEditor.vue` 时必须看本节。
-- 原因: Monaco 是运行时动态加载资源，不是普通的“构建期 import 即可”。如果只保留 `loader.js`、却删掉 `editor/`、`language/`、`assets/` 等目录，构建仍然会成功，但浏览器里编辑器会直接初始化失败。
+- Trigger: 修改 `web/src/components/CodeEditor.vue`、`CodeDiffEditor.vue`、`web/src/utils/codeEditor.ts`，
+  或它们那 5 个调用点（脚本管理页 / 配置文件页 / 代码运行器 / 调试弹窗 / 版本对比弹窗）时必须看本节。
+- 为什么换：Monaco 是**自绘编辑器** —— 文本渲染在 `.view-lines` 里、原生选择被关掉，
+  选区与光标是它自己画的 DOM 层，触摸事件被内部手势层接管。
+  于是移动端「长按出系统菜单 / 双击出选择手柄 / 按住拖动光标」三条**只要还用 Monaco 渲染就都不可能满足**，
+  不是「少配了某个选项」。CodeMirror 6 的内容区是 `contenteditable`，选区就是原生 `Selection`。
 
 ### 2. Signatures
-- 资源复制脚本: `web/scripts/copy-monaco-assets.mjs`
-- 本地资源探测: `web/src/utils/monaco.ts`
-- 本地资源根路径: `${import.meta.env.BASE_URL}monaco/vs`
+- 共用编辑器: `web/src/components/CodeEditor.vue`
+- 差异编辑器: `web/src/components/CodeDiffEditor.vue`（`@codemirror/merge`）
+- 语言映射 + 主题: `web/src/utils/codeEditor.ts`
+- 依赖: `@codemirror/{state,view,language,commands,search,autocomplete,merge,legacy-modes}` + `@codemirror/lang-*` + `@lezer/highlight`
+- **没有**运行期加载器、没有 CDN 兜底、没有构建后资源拷贝：CodeMirror 由 Vite 直接打包。
 
 ### 3. Contracts
-- `copy-monaco-assets.mjs` 不能再按“带 hash 的具体文件名白名单”删 Monaco 资源。
-- 本地资源探测不能只检查 `loader.js` 是否存在，至少要检查稳定关键入口:
-  - `loader.js`
-  - `editor/editor.main.js`
-  - `editor/editor.main.css`
-  - `language/css/monaco.contribution.js`
-  - `language/html/monaco.contribution.js`
-  - `language/json/monaco.contribution.js`
-  - `language/typescript/monaco.contribution.js`
-- 当本地资源不完整时，允许回退 CDN；但如果本地资源完整，应优先使用本地，避免用户网络无法访问 CDN 时编辑器直接挂掉。
+- **具名导出必须原样保留**：`EditorWordWrap` / `readStoredEditorWordWrap()` / `persistEditorWordWrap()`，
+  localStorage 键固定 `dd:editor:word_wrap`，脚本页与配置文件页共享同一份记忆。
+- **props 契约**：`modelValue` / `language` / `readonly` / `minHeight` / `fillHeight` / `wordWrap`（默认 `'on'`）。
+  根元素 class 固定 `code-editor-wrapper`（+ `--fill`）；差异编辑器是 `code-diff-wrapper`。
+  改类名要连带改调用点页面里那些 `:deep()` 规则 —— 漏改是**构建与类型检查都发现不了的静默失效**。
+- **每次输入即时 `emit('update:modelValue')`**（`EditorView.updateListener` 里判 `docChanged`）。
+  等失焦才 emit 会让「未保存」角标、保存按钮 disabled、调试弹窗的脏标记全部滞后。
+- **可重配的选项一律用 `Compartment`**：`readonly` / `wordWrap` / `language` / 主题。
+  见下面第 7 节那条从 Monaco 时代继承下来的教训。
+- **主题必须吃 `--dd-editor-bg-color` / `--dd-editor-fg-color`**，并监听 `PANEL_APPEARANCE_CHANGE_EVENT` 重绘 ——
+  编辑器底色是设置页的用户可配项（`editor_background_color`），写死颜色等于把这个功能废掉。
+- **移动端三件套不能少**：`spellcheck="false"` / `autocapitalize="off"` / `autocorrect="off"`。
+  手机输入法默认句首大写 + 自动纠错，会**静默改坏脚本内容**。
+- **≤768px 内容区字号提到 16px**：`index.html` 的 viewport 没有 `maximum-scale`（也不该加），
+  14px 输入区在 iOS 上聚焦会自动放大整页。
 
 ### 4. Validation & Error Matrix
-- `loader.js` 存在，但 `editor/editor.main.js` 或 `language/*` 缺失 -> 视为本地资源不可用
-- 构建通过，但浏览器里出现“编辑器加载失败，请检查网络或稍后重试” -> 优先检查 `dist/monaco/vs` 完整性，而不是先怀疑用户网络
-- 本地资源完整 + CDN 不可达 -> 编辑器仍应能正常加载
+- 改了 prop 但没配 Compartment / watch -> 点了开关没反应、按钮还高亮，**构建与 vue-tsc 全绿**
+- 改了根 class 没同步页面 `:deep()` -> 编辑器高度塌陷或移动端 `min-height` 失效，同样全绿
+- 主题写死颜色 -> 设置页自定义底色失效、暗色串色
+- `dist/monaco` 又出现 -> 说明有人把 `copy-monaco-assets.mjs` 加回来了
 
 ### 5. Good/Base/Bad Cases
-- Good: `dist/monaco/vs` 包含 `editor/`、`language/`、`assets/`、`basic-languages/`，用户离线或访问不了 CDN 也能打开编辑器
-- Base: 本地资源缺失时回退 CDN，至少不误判“本地可用”
-- Bad: 只探测 `loader.js`，或者继续按 hash 白名单裁剪 `vs` 目录
+- Good: 新增可配项时「create 的 extensions + Compartment reconfigure + watch」三处一起补
+- Base: 至少保证四个调用点默认值等于改动前行为（调试弹窗与代码运行器不传 `wordWrap`，吃默认 `'on'`）
+- Bad: 只改 `EditorState.create({extensions})`，然后以为改完了
 
 ### 6. Tests Required
-- 前端验证: `cd web && npm run build`
-- 构建后检查:
-  - `web/dist/monaco/vs/editor` 存在
-  - `web/dist/monaco/vs/language` 存在
-  - `web/dist/monaco/vs/assets` 存在
-- 手工回归点:
-  - 脚本编辑页能正常打开 Monaco 编辑器
-  - 断网或阻断 CDN 时，本地编辑器仍能加载
+- 前端验证: `cd web && npm run build`（含 `vue-tsc -b`）
+- 构建后检查: `web/dist` 下**不应**再出现 `monaco` 目录
+- 手工回归点（仓库没有前端测试，这一段是唯一保护）:
+  - 四处编辑器 ×（只读 / 编辑）×（Wrap on / off）
+  - 保存后「未保存」角标消失；退出编辑态后确实改不动
+  - 明暗主题切换、设置页自定义编辑器底色即时生效
+  - **移动端**：长按出系统菜单、双击出选择手柄、按住能拖动光标（这三条就是换引擎的全部目的）
+  - 版本对比弹窗：并排 / 统一两种模式，「忽略空白差异」开关
 
 ### 7. Wrong vs Correct
 #### Wrong
-```js
-const allowedTopLevelVsFiles = new Set([
-  'editor.worker-abc123.js',
-  'ts.worker-def456.js',
-])
-```
-
 ```ts
-return `${import.meta.env.BASE_URL}monaco/vs/loader.js`
+// 只在创建那一刻读一次 —— 挂载后再切 prop 完全没反应，也不报错
+EditorState.create({ extensions: [props.wordWrap === 'on' ? EditorView.lineWrapping : []] })
 ```
 
 #### Correct
-```js
-copyDirectory(sourceDir, targetDir)
-```
-
 ```ts
-const LOCAL_MONACO_REQUIRED_FILES = [
-  'loader.js',
-  'editor/editor.main.js',
-  'editor/editor.main.css',
-  'language/css/monaco.contribution.js',
-]
+const wrapCompartment = new Compartment()
+// create 时：wrapCompartment.of(...)
+watch(() => props.wordWrap, (value) => {
+  view?.dispatch({ effects: wrapCompartment.reconfigure(value === 'on' ? EditorView.lineWrapping : []) })
+})
 ```
 
 ---

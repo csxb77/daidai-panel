@@ -131,7 +131,18 @@ function handleRestoreSubscriptionDefault() {
         <span v-else>最多 {{ task.random_delay_seconds }} 秒</span>
       </el-descriptions-item>
       <el-descriptions-item label="标签" :span="2">
-        <el-tag v-for="label in displayLabels" :key="label" size="small" effect="plain" style="margin-right: 6px">
+        <!--
+          key 必须带下标：display_labels 允许出现同名的两条（例如「自定义标签名 = 订阅名」，
+          后端按类别分别下发），只用标签文字当 key 会触发 Vue 的 Duplicate keys 警告。
+          这里只改 key，本弹窗「显示完整标签、刻意不跟随列表页显示设置」的语义保持不变。
+        -->
+        <el-tag
+          v-for="(label, index) in displayLabels"
+          :key="`${index}-${label}`"
+          size="small"
+          effect="plain"
+          style="margin-right: 6px"
+        >
           {{ label }}
         </el-tag>
         <span v-if="displayLabels.length === 0" style="color: var(--el-text-color-placeholder)">无</span>

@@ -997,3 +997,145 @@ func TestTaskListAppliesViewSortRules(t *testing.T) {
 		t.Fatalf("expected sorted names [task-a task-b], got [%v %v]", firstItem["name"], secondItem["name"])
 	}
 }
+
+// 从任务列表响应里挑出指定名字的那条。下面两条同名标签用例都要用，抽出来免得抄两遍。
+func findTaskListItem(t *testing.T, payload map[string]interface{}, name string) map[string]interface{} {
+	t.Helper()
+
+	items, ok := payload["data"].([]interface{})
+	if !ok {
+		t.Fatalf("expected data array, got %#v", payload["data"])
+	}
+	for _, raw := range items {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if got, ok := item["name"].(string); ok && got == name {
+			return item
+		}
+	}
+	t.Fatalf("expected to find task %q in payload, got %#v", name, items)
+	return nil
+}
+
+// 把响应里的字符串数组字段读成 []string。这两条用例校验的是【条数】，
+// 所以不能像老用例那样只做 contains 判定，必须逐条取出来比。
+func taskListStringField(t *testing.T, item map[string]interface{}, field string) []string {
+	t.Helper()
+
+	raw, ok := item[field].([]interface{})
+	if !ok {
+		t.Fatalf("expected %s array, got %#v", field, item[field])
+	}
+	values := make([]string, 0, len(raw))
+	for _, entry := range raw {
+		value, ok := entry.(string)
+		if !ok {
+			t.Fatalf("expected %s entries to be strings, got %#v", field, entry)
+		}
+		values = append(values, value)
+	}
+	return values
+}
+
+// 订阅名与分组名重名时，display_labels 必须留下两条同名项：一条归分组开关、一条归订阅开关。
+// 合并成一条的话前端「显示设置」里的两个开关就串台成一个，关掉分组会连订阅标签一起藏掉（issue #109-3）。
+func TestTaskListKeepsGroupAndSubscriptionLabelsWhenNamesCollide(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "label-collision-group", "operator")
+	accessToken := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	subscription := &model.Subscription{
+		Name:    "娱乐",
+		Type:    model.SubTypeGitRepo,
+		URL:     "https://example.com/entertainment.git",
+		Enabled: true,
+	}
+	if err := database.DB.Create(subscription).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+
+	task := &model.Task{
+		Name:           "group name equals subscription name",
+		Command:        "task entertainment/main.js",
+		CronExpression: "0 0 * * *",
+		Status:         model.TaskStatusEnabled,
+	}
+	task.SetLabelsFromSlice([]string{"分组:娱乐", "subscription:" + strconv.FormatUint(uint64(subscription.ID), 10)})
+	if err := database.DB.Create(task).Error; err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	rec := performRequest(engine, http.MethodGet, "/api/v1/tasks", map[string]string{
+		"Authorization": "Bearer " + accessToken,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	item := findTaskListItem(t, decodeJSONMap(t, rec), task.Name)
+
+	displayLabels := taskListStringField(t, item, "display_labels")
+	if len(displayLabels) != 2 || displayLabels[0] != "娱乐" || displayLabels[1] != "娱乐" {
+		t.Fatalf("expected display_labels [娱乐 娱乐]（分组一条 + 订阅一条）, got %v", displayLabels)
+	}
+
+	// 订阅那份仍然只有一条：前端靠它的出现次数认领「哪几条属于订阅」，多一条就会把分组那条也算成订阅。
+	subscriptionLabels := taskListStringField(t, item, "subscription_labels")
+	if len(subscriptionLabels) != 1 || subscriptionLabels[0] != "娱乐" {
+		t.Fatalf("expected subscription_labels [娱乐], got %v", subscriptionLabels)
+	}
+}
+
+// 自定义标签与订阅名重名时同样必须留下两条：这两类共用过一个去重集合，
+// 合并后表现为「关掉自定义藏不掉它、关掉订阅反而把它藏了」。
+func TestTaskListKeepsCustomAndSubscriptionLabelsWhenNamesCollide(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "label-collision-custom", "operator")
+	accessToken := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	subscription := &model.Subscription{
+		Name:    "娱乐",
+		Type:    model.SubTypeGitRepo,
+		URL:     "https://example.com/entertainment.git",
+		Enabled: true,
+	}
+	if err := database.DB.Create(subscription).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+
+	task := &model.Task{
+		Name:           "custom label equals subscription name",
+		Command:        "task entertainment/main.js",
+		CronExpression: "0 0 * * *",
+		Status:         model.TaskStatusEnabled,
+	}
+	task.SetLabelsFromSlice([]string{"娱乐", "subscription:" + strconv.FormatUint(uint64(subscription.ID), 10)})
+	if err := database.DB.Create(task).Error; err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	rec := performRequest(engine, http.MethodGet, "/api/v1/tasks", map[string]string{
+		"Authorization": "Bearer " + accessToken,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	item := findTaskListItem(t, decodeJSONMap(t, rec), task.Name)
+
+	displayLabels := taskListStringField(t, item, "display_labels")
+	if len(displayLabels) != 2 || displayLabels[0] != "娱乐" || displayLabels[1] != "娱乐" {
+		t.Fatalf("expected display_labels [娱乐 娱乐]（自定义一条 + 订阅一条）, got %v", displayLabels)
+	}
+
+	subscriptionLabels := taskListStringField(t, item, "subscription_labels")
+	if len(subscriptionLabels) != 1 || subscriptionLabels[0] != "娱乐" {
+		t.Fatalf("expected subscription_labels [娱乐], got %v", subscriptionLabels)
+	}
+}

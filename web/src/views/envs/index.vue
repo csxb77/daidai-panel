@@ -657,6 +657,9 @@ async function handleToggle(row: any) {
  * 「删除」不可撤销，必须留在菜单里并加 divided + danger，绝不能占主体位置。
  * 「置顶 / 取消置顶」是同一个 handleToggleTop 的两面，用 visible 按 row 状态互斥，
  * 避免出现「已置顶的行菜单里还挂着置顶」。
+ *
+ * 🔴 这里【不要】再补「启用 / 禁用」：它已经外置成操作列里的一级按钮（谁上了一级谁就不在菜单里），
+ * 补进来就会变成「点了外面的禁用，展开 ▾ 里还挂着一个禁用」。
  */
 function buildEnvActionItems(row: any): SplitButtonItem[] {
   const pinned = isTopPinned(row)
@@ -984,6 +987,16 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                   </button>
                   <el-checkbox :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
                   <div class="env-name-wrap">
+                    <!-- 状态圆点：卡片里原来的「状态」字段（switch + 文字）已删掉，
+                         启用/禁用改由名称前这枚 8×8 圆点 + 操作区的启用/禁用按钮承载，
+                         与桌面表格完全同一套东西。title / aria-label 的必要性见下方 .env-status-dot 的注释。 -->
+                    <span
+                      class="env-status-dot"
+                      :class="{ 'is-enabled': row.enabled }"
+                      role="img"
+                      :title="row.enabled ? '已启用' : '已禁用'"
+                      :aria-label="row.enabled ? '已启用' : '已禁用'"
+                    />
                     <span class="env-name">{{ row.name }}</span>
                     <span v-if="isTopPinned(row)" class="pinned-chip">
                       <el-icon><Top /></el-icon>
@@ -1024,22 +1037,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                 <span class="dd-mobile-card__label">备注</span>
                 <span class="dd-mobile-card__value env-remarks-text">{{ row.remarks || '-' }}</span>
               </div>
-              <div class="dd-mobile-card__field">
-                <span class="dd-mobile-card__label">状态</span>
-                <div class="dd-mobile-card__value env-status-inline">
-                  <el-switch :model-value="row.enabled" size="small" @change="handleToggle(row)" />
-                  <!-- 与桌面状态列同一套过渡，key 同样绑状态值 -->
-                  <Transition name="dd-status-switch" mode="out-in">
-                    <span
-                      :key="row.enabled ? 'enabled' : 'disabled'"
-                      class="env-status-text"
-                      :class="{ enabled: row.enabled }"
-                    >
-                      {{ row.enabled ? '启用' : '禁用' }}
-                    </span>
-                  </Transition>
-                </div>
-              </div>
+              <!-- 原来这里还有一格「状态」（switch + 启用/禁用文字），已删除：状态改由标题行的圆点表达、
+                   切换改由下面操作区的「启用 / 禁用」按钮执行，与桌面端同源。
+                   少一格不影响布局：.dd-mobile-card__grid 基态是 2 列，但 ≤768px 那条媒体查询把它压成
+                   单列，而移动卡片本身只在 isMobile（width ≤ 768）时才渲染 ⇒ 实际永远是单列纵向堆叠，
+                   剩下的「值 / 备注 / 更新时间」照旧一行一格。 -->
               <div class="dd-mobile-card__field">
                 <span class="dd-mobile-card__label">更新时间</span>
                 <span class="dd-mobile-card__value time-text">{{ formatDateTime(row.updated_at) }}</span>
@@ -1048,6 +1050,17 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
             <div class="dd-mobile-card__actions env-card__actions">
               <el-button size="small" type="primary" @click="openEdit(row)">编辑</el-button>
+              <!-- 与桌面操作列同一个按钮、同一套 type/plain 组合、同一个 handleToggle：
+                   启用态显示「禁用」= danger plain，禁用态显示「启用」= 不写 type（EP default 白底）。
+                   移动端原来用 el-switch，桌面改成按钮后两端就成了两套东西，必须跟着换。 -->
+              <el-button
+                size="small"
+                :type="row.enabled ? 'danger' : 'default'"
+                :plain="row.enabled"
+                @click="handleToggle(row)"
+              >
+                {{ row.enabled ? '禁用' : '启用' }}
+              </el-button>
               <el-button size="small" @click="openDuplicate(row)">复制</el-button>
               <el-button
                 size="small"
@@ -1056,7 +1069,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
               >
                 {{ isTopPinned(row) ? '取消置顶' : '置顶' }}
               </el-button>
-              <el-button size="small" type="danger" plain @click="handleDelete(row.id)">删除</el-button>
+              <!-- 删除必须是【实心】danger：同一张卡片里「禁用」已经占了 danger + plain，
+                   删除若也写 plain，两个红描边白底按钮外观逐字相同，用户分不出哪个不可逆。
+                   与本页工具栏「批量禁用（plain）/ 批量删除（实心）」以及 design-system §4.2
+                   是同一条层级规则：一组按钮里最醒目的永远留给不可逆的那个。 -->
+              <el-button size="small" type="danger" @click="handleDelete(row.id)">删除</el-button>
             </div>
           </div>
         </div>
@@ -1099,9 +1116,23 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         style="width: 100%"
       >
         <el-table-column type="selection" width="44" />
-        <el-table-column prop="name" label="名称" min-width="188">
+        <!-- min-width 188 → 204：名称前多了一枚 8px 圆点 + 8px gap = 16px。
+             .env-name-wrap 是 flex + gap:8px，多插一个子元素就多出一份 gap，
+             所以净增是「圆点自身 8px」+「新增的那一份 gap 8px」，不是只有圆点的 8px；
+             不补回来的话名称的可见宽度会净减 16px，长变量名的省略号会提前出现。 -->
+        <el-table-column prop="name" label="名称" min-width="204">
           <template #default="{ row }">
             <div class="env-name-wrap">
+              <!-- 状态圆点：独立的「状态」列已删除，启用/禁用状态改由这枚圆点表达
+                   （筛选仍由工具栏的 .status-tabs 承担，切换由操作列的按钮执行）。
+                   title / aria-label 的必要性见下方 .env-status-dot 的注释。 -->
+              <span
+                class="env-status-dot"
+                :class="{ 'is-enabled': row.enabled }"
+                role="img"
+                :title="row.enabled ? '已启用' : '已禁用'"
+                :aria-label="row.enabled ? '已启用' : '已禁用'"
+              />
               <span class="env-name">{{ row.name }}</span>
               <span v-if="isTopPinned(row)" class="pinned-chip">
                 <el-icon><Top /></el-icon>
@@ -1148,29 +1179,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
             <el-icon class="env-drag-handle"><Rank /></el-icon>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="92" align="center">
-          <template #default="{ row }">
-            <div class="env-status-cell">
-              <el-switch
-                :model-value="row.enabled"
-                size="small"
-                @change="handleToggle(row)"
-              />
-              <!-- 启用 ⇄ 禁用 之间隔着「确认框 → 请求 → 整表重载」，硬切之后用户不确定
-                   这一行到底改没改。out-in 淡出淡入给一次明确的「它变了」。
-                   key 必须绑状态值（不是 row.id），绑 id 的话行不变、过渡永远不触发。 -->
-              <Transition name="dd-status-switch" mode="out-in">
-                <span
-                  :key="row.enabled ? 'enabled' : 'disabled'"
-                  class="env-status-text"
-                  :class="{ enabled: row.enabled }"
-                >
-                  {{ row.enabled ? '启用' : '禁用' }}
-                </span>
-              </Transition>
-            </div>
-          </template>
-        </el-table-column>
+        <!-- 原来这里是一整列「状态」（92px：switch + 启用/禁用文字），已删除：
+             状态由名称列前的圆点表达、切换由操作列的「启用 / 禁用」按钮执行，一处状态一处开关。
+             筛选口径不变，仍由工具栏的 .status-tabs（全部 / 已启用 / 已禁用）承担。 -->
         <el-table-column label="更新时间" width="168" align="center">
           <template #default="{ row }">
             <span class="time-text">{{ formatDateTime(row.updated_at) }}</span>
@@ -1179,10 +1190,27 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         <!-- 原来是 4 个纯图标按钮，每个各套一层 el-tooltip：图标本身不自解释，
              而且「删除」和「编辑」同尺寸并排、误点代价完全不同。
              改成 Split Button：主体是最常用且可逆的「编辑」，其余收进菜单，
-             删除标红并用分隔线隔开，置顶/取消置顶靠 visible 互斥。列宽 176 → 110。 -->
-        <el-table-column label="操作" width="110" align="center">
+             删除标红并用分隔线隔开，置顶/取消置顶靠 visible 互斥。
+
+             列宽 172（v3.2.0 从 110 重算，与定时任务页取同一个值）：
+             EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 172 - 24 = 148px。
+             这一格现在是两个元素：左边 Split Button（编辑 ▾），右边外置的「禁用 / 启用」普通按钮。
+             实测口径（size="small"，浏览器量出来的，不是估的）：
+               主体 = 中文字数 × 12（字宽）+ 22（EP small 的 padding 5px 11px）+ 2（边框）
+               caret = 32，且【不受 size 影响】：EP 的 el-dropdown 根节点只挂 `el-dropdown` + `is-disabled`，
+                 不带 size 修饰类，`.el-dropdown--small .el-dropdown__caret-button{width:24px}` 根本匹配不上。
+                 ⚠️ 本文件旧注释按那条规则算成 24px，是错的（会系统性偏小约 14px），此处一并订正 ——
+                 别再照 24px 把列宽收窄回去。
+               el-button-group 组内相邻按钮还有 -1px 的负边距
+             「编辑」= 2×12+22+2 = 48 → 48+32-1 = 79px；「禁用」/「启用」同为 2 字 = 48px；
+             中间 gap 4px（.action-btns 已把 EP 的 `.el-button + .el-button` 外边距清零，间距只由 gap 决定，
+             不会两份叠加）。合计 79 + 4 + 48 = 131px，148 - 131 = 17px 余量。
+             按钮组一旦超出可用宽，.cell 就会变成可滚动容器，点右边的按钮时整行会被滚偏且不复位。
+
+             fixed="right"：与定时任务页一致，窄窗口横向滚动时操作列常驻可见。 -->
+        <el-table-column label="操作" width="172" fixed="right" align="center">
           <template #default="{ row }">
-            <div class="action-group">
+            <div class="action-btns">
               <DdSplitButton
                 label="编辑"
                 type="primary"
@@ -1191,6 +1219,24 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                 @click="openEdit(row)"
                 @command="(key: string) => onEnvAction(key, row)"
               />
+              <!-- 「启用 / 禁用」外置成一级按钮：状态列删掉后这是唯一的切换入口，埋进 ▾ 菜单要点两下。
+                   两个状态互斥（谁上了一级谁就不在菜单里），buildEnvActionItems 里因此没有同名项。
+                   type/plain 组合与工具栏的「批量启用 / 批量禁用」逐字一致：
+                   禁用 = danger + plain（白底红字红描边），启用 = default（EP 白底）。
+                   直接复用 handleToggle —— 二次确认、错误提示、loadData 全在里面，不要再写一份。
+
+                   ⚠️ design-system §4.2 的内容约定是「危险按钮不放最外侧」（甩到边缘的光标最容易落在最外那个）。
+                   这里是用户在 #109-4 里明确要求的位置，属于一次有意识的让步，理由：
+                   handleToggle 带 ElMessageBox 二次确认，点错的代价是按一下 Esc；
+                   真正不可逆的「删除」仍然待在 Split 菜单里（danger + divided），没有被提到外侧。 -->
+              <el-button
+                size="small"
+                :type="row.enabled ? 'danger' : 'default'"
+                :plain="row.enabled"
+                @click="handleToggle(row)"
+              >
+                {{ row.enabled ? '禁用' : '启用' }}
+              </el-button>
             </div>
           </template>
         </el-table-column>
@@ -1462,19 +1508,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   visibility: hidden;
 }
 
-// 状态文字切换（桌面状态列 + 移动卡片同用）：
-// 严格只动 opacity，一个像素的位移都不能有——本页表格行由 Sortable.js 拖拽，
-// 行上的内联 translate3d 与任何自写的 transform/transition 冲突会直接毁掉跟手；
-// 且单元格内的位移在表格里看起来就是整行在晃。
-.dd-status-switch-enter-active,
-.dd-status-switch-leave-active {
-  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
-}
-
-.dd-status-switch-enter-from,
-.dd-status-switch-leave-to {
-  opacity: 0;
-}
+// 本页原来有一份 .dd-status-switch-* 过渡（服务于状态列/移动卡片里「启用 ⇄ 禁用」那段文字的淡入淡出），
+// 随状态列与移动端 switch 一起删除。其余用到同名过渡的页面（tasks / logs / deps / users /
+// subscriptions / notifications / config-file）各自在自己的 scoped 样式里定义了一份，不受影响。
 
 /* ---- Table Card ---- */
 // 表格卡：无阴影，仅用 1px 边框与页面底色区分（dd-fixed-page 下的 flex + 内部滚动由全局规则接管）
@@ -1698,6 +1734,13 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   min-width: 0;
 }
 
+// 移动卡片的操作区分栏：一行三个（gap 8px ⇒ 基准宽 33.33% - 6px 差不多正好三列）。
+// v3.2.0 起按钮从 4 个变成 5 个（编辑 / 禁用·启用 / 复制 / 置顶 / 删除），排成 3 + 2 两行，
+// 第二行两个靠 flex-grow 各自摊到约一半——比原来 ≤768px 那条 `calc(50% - 4px)` 的
+// 2 + 2 + 1 好看：那样第 5 个会孤零零地占满一整行，而落在第 5 位的正好是 danger 的「删除」，
+// 视觉重量最重的按钮反而最显眼。所以 ≤768px 那条覆写已删除，两档共用这一条。
+// 极窄机型（320px）核算：卡片内容宽约 296px，三列每列约 93px，
+// 最长的「取消置顶」= 4×12 + 22（EP small 内边距）= 70px，仍放得下。
 .env-card__actions > * {
   flex: 1 1 calc(33.33% - 6px);
 }
@@ -1709,22 +1752,13 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Cell Styles ---- */
-// 表格操作列：对齐定时任务页/依赖管理页 .action-btns 的写法——
-// 居中排布 + 4px 间隙 + 紧凑内边距。现在列里只剩一个 DdSplitButton（编辑 ▾），
-// gap 对单个子元素不生效，保留是为了与其余三页写法一致、日后加第二个按钮不用再补。
-.action-group {
+// 表格操作列：类名与定时任务页/依赖管理页统一叫 .action-btns（原来叫 .action-group，
+// 是本页独有的一个名字，改名只是为了三页一致，行为不变）——居中排布 + 4px 间隙。
+.action-btns {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 4px;
-
-  // 这条 padding 收窄同时作用于 split button 的主体与 caret：
-  // 主体「编辑」= 24px 字 + 16px 内边距 + 2px 描边 ≈ 42px，
-  // caret 由 `.el-dropdown--small .el-dropdown__caret-button` 固定成 24px（padding 不参与，
-  // .el-button 是 border-box），合计约 66px，落在 110px 列宽的 86px 可用区里。
-  :deep(.el-button) {
-    padding: 4px 8px;
-  }
 
   // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在上面的 flex gap 上。
   // 撑破列宽后 .cell 的 overflow:hidden 变成可滚动容器，点右侧按钮会触发 scrollIntoView
@@ -1733,9 +1767,15 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   //
   // Split Button 内部就是相邻的两个 .el-button（主体 + caret），这条选择器照样命中；
   // EP 的 el-button-group 自己也置 0，两处一致，任何一处改动都不会让 caret 被推开。
+  // 现在格子里还多了外置的「禁用 / 启用」，它与 Split Button 之间的间距也只由 gap:4px 决定。
   :deep(.el-button + .el-button) {
     margin-left: 0;
   }
+
+  // 原来这里还有一条 `:deep(.el-button) { padding: 4px 8px }` 的收窄覆写，是当年为了把
+  // Split Button 塞进 110px 列宽才加的。列宽已按 172 重算（见上方操作列注释），
+  // 定时任务页也在 v3.0.x 去掉了同一条，这里跟着删掉、改回 EP small 档默认的 5px 11px ——
+  // 列宽估算用的正是这个默认值，把它改回收窄档会让上面那笔账对不上。
 }
 
 .env-name-wrap {
@@ -1793,18 +1833,21 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   color: var(--el-text-color-primary);
 }
 
+// 值列的复制按钮：常驻显示（v3.2.0 / #109-4）。
+// 原来是 `opacity: 0` + 一条 `:deep(.el-table__row:hover) .env-copy-btn { opacity: 1 }`，
+// 即整页唯一一个「鼠标移上去才出现」的控件，两条已一并删除：
+//   1) 触摸屏没有 hover，平板/触屏笔记本上这个按钮根本摸不出来；
+//   2) opacity:0 的元素照常进 Tab 焦点序，键盘用户会聚焦到一个看不见的按钮上；
+//   3) 移动端卡片里的同款复制按钮本来就是常驻的，两端不一致。
+// 顺带说明：本页操作栏（.action-btns）一直就是常驻的，没有任何 hover/opacity 门控 ——
+// 那是要守住的不变量，别顺手给它加 hover 显隐。
 .env-copy-btn {
   flex-shrink: 0;
-  opacity: 0;
-  // 原来写死 0.2s：写死的毫秒数绕过 prefers-reduced-motion 降级，
-  // 令牌在降级媒体查询里会被压到 1ms，写死的不会。统一吃令牌。
-  transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
   color: var(--el-text-color-secondary);
   padding: 2px;
-}
-
-:deep(.el-table__row:hover) .env-copy-btn {
-  opacity: 1;
+  // 只留颜色过渡（EP link 按钮 hover 换色）。时长走令牌而不是写死毫秒数：
+  // 写死的会绕过 prefers-reduced-motion 降级，令牌在降级媒体查询里会被压到 1ms。
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
 .env-remarks-text {
@@ -1870,28 +1913,34 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   flex-shrink: 0;
 }
 
-.env-status-cell {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
+// 环境变量状态灯：名称前的 8×8 圆点，绿 = 已启用 / 红 = 已禁用（桌面表格与移动卡片同用）。
+// 它接替了原来那一整列「状态」（el-switch + 启用/禁用文字），随之删掉的还有
+// .env-status-cell / .env-status-inline / .env-status-text 三个类和本页那份
+// .dd-status-switch-* 过渡（切换动效跟着 switch 一起没了，其余页面各有自己的一份，不受影响）。
+//
+// 🔴 固定 50%：这是 design-system §1 的「状态圆点」白名单，不是漏改，圆角扫描别把它当漏网点改掉。
+//    两个理由：
+//    a) 圆点 = 运行状态是全行业约定；而同一格里 7×7 的 .group-dot 反过来刻意写死 2px 方角来表达
+//       「分类」（见它自己那段注释）。两者一圆一方，正是靠形状把「分类色标」与「状态灯」分开的，
+//       任何一边改形状都会让它俩撞脸。
+//    b) 就算改成吃 control(6px) 也是白改：8×8 的盒子上，一条边两个半径之和 12px > 边长 8px，
+//       会触发 CSS 圆角等比收缩、全部夹到 4px = 还是正圆，绕远路得到同一结果还多一次误改机会。
+//
+// 取色用 --el-color-success / --el-color-danger 两个语义令牌，暗色主题自动适配；
+// 不要写死 #10b981 / #ef4444 之类，写死的在暗色下不跟随、会串色。
+// 红绿是最典型的色觉障碍撞色对，只靠颜色传达状态对红绿色盲用户等于没有状态，
+// 所以模板上必须同时挂 title（鼠标悬停）与 role="img" + aria-label（读屏）——
+// role 不能省：光有 aria-label 的裸 <span> 不是可访问对象，读屏一般不会念出来。
+.env-status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-danger);
 }
 
-.env-status-inline {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.env-status-text {
-  font-size: 11px;
-  line-height: 1;
-  color: var(--el-text-color-placeholder);
-}
-
-.env-status-text.enabled {
-  color: var(--el-color-success);
+.env-status-dot.is-enabled {
+  background: var(--el-color-success);
 }
 
 .time-text {
@@ -1921,8 +1970,17 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Pinned Row ---- */
-// 置顶行：整行纯色淡橙底（原来的横向渐变已去掉），左缘 4px 橙色标识保留
-:deep(.env-row-pinned > td) {
+// 置顶行：整行纯色淡橙底（原来的横向渐变已去掉），左缘 4px 橙色标识保留。
+//
+// 🔴 选择器里的 `.el-table` 不是可有可无的层级修饰，是为了压过 EP 的固定列规则，别顺手删掉：
+// 操作列加 fixed="right" 之后，EP 会给这一格补上
+// `.el-table__body-wrapper tr td.el-table-fixed-column--right { background: inherit }`（特异性 0,2,2），
+// 而本规则原来是 `:deep(.env-row-pinned > td)` = `[data-v-x] .env-row-pinned > td`（0,2,1），
+// 类数相同、元素数少一个 ⇒ 输给 EP，置顶行最右边那一格会退回普通行底色，整行淡橙底缺一块。
+// 加上 `.el-table` 后是 (0,3,1)，类数 3 > 2 直接赢下 EP 那条。
+// 同时它仍然【输给】EP 的行 hover（`.el-table__body tr.hover-row > td.el-table__cell` = 0,3,2），
+// 所以置顶行悬停仍会正常变成 hover 底色，与改动前一致。
+:deep(.el-table .env-row-pinned > td) {
   background: color-mix(in srgb, #ffd66b 12%, var(--el-table-tr-bg-color));
 }
 
@@ -2046,9 +2104,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     justify-content: space-between;
   }
 
-  .env-card__actions > * {
-    flex: 1 1 calc(50% - 4px);
-  }
+  // 原来这里有一条 `.env-card__actions > * { flex: 1 1 calc(50% - 4px) }`（4 个按钮排成 2×2），
+  // 按钮加到 5 个后已删除，统一走基态的 33.33%（3 + 2），理由见 .env-card__actions 那段注释。
 }
 
 // ===== 入场动画 =====

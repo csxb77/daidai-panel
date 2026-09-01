@@ -29,6 +29,59 @@ mkdir -p \
 mkdir -p /tmp
 chmod 1777 /tmp
 
+# --- 青龙脚本兼容层（/ql） ---------------------------------------------------
+# 青龙生态的脚本基本都写成 QL_DIR=${QL_DIR:-"/ql"}，再按 $QL_DIR/shell、
+# $QL_DIR/data/repo 拼后续路径。容器里没有 /ql 时，这些脚本第一步
+# `touch "$dir_shell/env.sh"` 就直接报错。这里把青龙布局软链到面板真实目录。
+#
+# 【为什么 entrypoint 必须也做一遍，不能只靠 Go 侧 EnsureQingLongCompatLayout】
+# 配了 PUID 之后 daidai-server 是降权跑的，它去 mkdir /ql 必然 EACCES 且只留一行日志。
+# 这一段跑在降权之前、以 root 身份执行，是容器里唯一能建出 /ql 的时机。
+# Go 侧那一份仍然保留：用户自定义了 scripts_dir / log_dir 时，
+# 这里按默认布局猜的目标会不对，Go 侧会在启动时把指错的软链重建过去。
+#
+# 【全程 || true】只读根、异常挂载下建不出来，后果只是青龙脚本跑不了；
+# 裸写会被开头的 set -e 直接带出容器，用户看到的是「容器起不来、日志一行没有」。
+link_ql_path() {
+  # $1=软链位置 $2=目标目录
+  # 已经是真实目录/文件（例如用户把自己的青龙 /ql 挂进了容器）就原样保留：
+  # 对一个真实目录执行 ln -sfn 会把链接建到那个目录**里面**去，反而制造脏数据。
+  if [ -e "$1" ] && [ ! -L "$1" ]; then
+    return 0
+  fi
+  ln -sfn "$2" "$1" 2>/dev/null || true
+}
+
+# 🔴 记下 /ql 里本来是不是就有东西。下面 PUID 那段的 chown 要靠它做判据：
+# 用户把宿主机上真实的青龙 /ql 挂进容器时（就是上面 link_ql_path 注释设想的场景），
+# 去动它的属主就是在改人家整棵青龙数据（repo/scripts/log/config/db），
+# 而我们这边因为 `|| true` 一个字都不会说。
+#
+# 判据必须是「存在**且非空**」而不是「存在」：容器编排、tmpfs 挂载点、
+# 甚至 docker 为一个卷预创建的空目录，都会让 /ql 提前存在但里面什么都没有 ——
+# 那种情况下 chown 我们自己刚建的那几个节点完全无害，不该被误伤跳过。
+if [ -d /ql ] && [ -n "$(ls -A /ql 2>/dev/null)" ]; then
+  QL_PREEXISTING=1
+else
+  QL_PREEXISTING=0
+fi
+
+if mkdir -p /ql/shell /ql/data 2>/dev/null; then
+  link_ql_path /ql/data/repo "${DATA_DIR}/scripts"
+  link_ql_path /ql/data/scripts "${DATA_DIR}/scripts"
+  link_ql_path /ql/scripts "${DATA_DIR}/scripts"
+  link_ql_path /ql/data/log "${DATA_DIR}/logs"
+  link_ql_path /ql/log "${DATA_DIR}/logs"
+  # config.sh 就在数据目录根下，所以 config 指的是 DATA_DIR 本身而不是它的子目录。
+  link_ql_path /ql/data/config "${DATA_DIR}"
+  link_ql_path /ql/config "${DATA_DIR}"
+  link_ql_path /ql/data/deps "${DATA_DIR}/deps"
+  # 空占位文件：脚本会 source 它，塞任何内容都可能改变脚本行为；已存在就一个字节都不碰。
+  [ -f /ql/shell/env.sh ] || touch /ql/shell/env.sh 2>/dev/null || true
+else
+  log "创建 /ql 青龙兼容目录失败（只读根或权限不足），青龙生态脚本可能无法运行，其余功能不受影响"
+fi
+
 # --- PUID/PGID 支持（LinuxServer.io 风格，opt-in） ---------------------------
 # 飞牛 OS / 群晖等 NAS 用户通常需要让容器以宿主机用户跑，方便 SMB/NFS 共享。
 # 仅当显式传入 PUID 才切换用户；保持对历史部署（默认 root）的兼容。
@@ -112,6 +165,20 @@ if [ -n "${PUID}" ] || [ -n "${PGID}" ]; then
 
       log "应用 PUID=${TARGET_UID} PGID=${TARGET_GID}（运行用户 ${TARGET_USER}，HOME=${DAIDAI_HOME}），正在调整数据目录所有权..."
       chown -R "${TARGET_UID}:${TARGET_GID}" "${DATA_DIR}" /tmp 2>/dev/null || true
+      # /ql 也要让降权后的 daidai 能写：青龙脚本第一步就是 touch "$QL_DIR/shell/env.sh"，
+      # Go 侧还要能重建指错的软链。
+      #
+      # 🔴 但**绝不能 chown -R /ql**，而且只在 /ql 是我们自己建出来时才动它：
+      #   1) 用户可能把宿主机上真实的青龙 /ql 挂进来（link_ql_path 的注释就设想了这个场景）。
+      #      对它 chown -R 会递归改写人家整棵青龙数据（repo/scripts/log/config/db）的属主，
+      #      青龙容器随后写自己的数据就 EACCES，得手动 chown 回去才能救；而这里带着 `|| true`，
+      #      面板日志一个字都不会说。
+      #   2) 即使 /ql 是我们建的，里面除 shell、data 外全是软链，busybox 的 chown -R 递归时
+      #      会解引用软链，等于把 DATA_DIR 又扫一遍 —— 纯浪费。
+      # 所以：非递归、只覆盖面板自己真正要写的那三个真实节点。
+      if [ "${QL_PREEXISTING}" = "0" ]; then
+        chown "${TARGET_UID}:${TARGET_GID}" /ql /ql/shell /ql/data /ql/shell/env.sh 2>/dev/null || true
+      fi
       RUN_AS_USER="${TARGET_USER}"
 
       # 降权时必须把 gid 一起显式传给 su-exec / gosu，不能只传用户名。

@@ -270,7 +270,12 @@ const taskGroupLabelPrefix = "分组:"
 func buildPreparedTaskLabels(labels []string, subscriptionNames map[uint]string) ([]string, []string) {
 	displayLabels := make([]string, 0, len(labels))
 	subscriptionLabels := make([]string, 0, len(labels))
-	seen := make(map[string]struct{})
+	// 展示标签的去重按【类别】分开，绝不共用一个集合：
+	// 自定义标签可能和订阅名重名（自建标签「娱乐」+ 名为「娱乐」的订阅），共用去重集合会把两条合并成一条，
+	// 前端「自定义标签 / 订阅标签」两个开关就同时作用在同一条上 ——
+	// 表现为「关掉自定义藏不掉它、关掉订阅反而把它藏了」（issue #109-3 的姊妹 bug）。
+	// 分组名不参与这里任何一个集合（它在函数末尾单独 unshift），与订阅名重名时同样各留一条。
+	seenCustom := make(map[string]struct{})
 	seenSubscriptions := make(map[string]struct{})
 	groupName := ""
 
@@ -279,22 +284,11 @@ func buildPreparedTaskLabels(labels []string, subscriptionNames map[uint]string)
 		if label == "" {
 			return
 		}
-		if _, exists := seen[label]; exists {
+		if _, exists := seenCustom[label]; exists {
 			return
 		}
-		seen[label] = struct{}{}
+		seenCustom[label] = struct{}{}
 		displayLabels = append(displayLabels, label)
-	}
-	addSubscriptionLabel := func(label string) {
-		label = strings.TrimSpace(label)
-		if label == "" {
-			return
-		}
-		if _, exists := seenSubscriptions[label]; exists {
-			return
-		}
-		seenSubscriptions[label] = struct{}{}
-		subscriptionLabels = append(subscriptionLabels, label)
 	}
 
 	for _, label := range labels {
@@ -318,14 +312,19 @@ func buildPreparedTaskLabels(labels []string, subscriptionNames map[uint]string)
 			continue
 		}
 
-		if subName := subscriptionNames[uint(subID)]; subName != "" {
-			addLabel(subName)
-			addSubscriptionLabel(subName)
+		// 订阅源被删掉后 subscriptionNames 里查不到名字，退回字面量，用户仍能看出这是订阅任务
+		subName := subscriptionNames[uint(subID)]
+		if subName == "" {
+			subName = "订阅任务"
+		}
+		// 两个数组用同一个订阅去重集合、同一次判定，保证 display_labels 里的订阅项
+		// 与 subscription_labels 逐条对得上（前端按出现次数认领类别，多一条少一条都会错位）。
+		if _, exists := seenSubscriptions[subName]; exists {
 			continue
 		}
-
-		addLabel("订阅任务")
-		addSubscriptionLabel("订阅任务")
+		seenSubscriptions[subName] = struct{}{}
+		displayLabels = append(displayLabels, subName)
+		subscriptionLabels = append(subscriptionLabels, subName)
 	}
 
 	if groupName != "" {

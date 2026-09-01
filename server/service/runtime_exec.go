@@ -228,6 +228,18 @@ func BuildManagedRuntimeEnvMapWithScriptToken(workDir, scriptsDir string, defaul
 	}
 
 	loadConfigShellVars(envMap)
+	// 青龙兼容变量（#110）：只在 key 还不存在时才写。
+	//
+	// ⚠️ 这与紧接着下面的 TZ、以及 DAIDAI_* 那批「保留名」语义**完全相反**，不要顺手统一掉：
+	// QL_DIR 等不是面板独占的名字，用户完全可能已经在环境变量页（或 config.sh 里）
+	// 手建了一个 QL_DIR 指向他自己的青龙路径，脚本也早就照那个值跑通了。
+	// 无条件覆盖等于静默改掉现有行为，而且用户在页面上看到自己设的值、实际却不生效，
+	// 排查起来毫无线索。这批变量的定位是「用户没配就给个能用的默认值」。
+	for key, value := range buildQingLongCompatEnv() {
+		if _, exists := envMap[key]; !exists {
+			envMap[key] = value
+		}
+	}
 	// 面板时区是全局运行时配置，优先级高于普通环境变量，避免任务脚本继续继承 UTC。
 	envMap["TZ"] = CurrentPanelTimezone()
 

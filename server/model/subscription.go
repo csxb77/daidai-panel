@@ -50,6 +50,11 @@ type Subscription struct {
 	// —— 详见 task.go SubscriptionLocked 的注释。
 	// 上面那个 ForceOverwrite 是 v2.2.15 之后就没人维护的旧列，只做只读兼容，不再参与判定。
 	OverwriteMode string `gorm:"size:16;not null;default:'inherit'" json:"overwrite_mode"`
+	// FullCheckout 完整检出：开启后放弃 sparse-checkout，把整个仓库拉下来。
+	// 默认 false = 继续走既有的 sparse 逻辑，存量订阅补列后行为逐字节不变。
+	// 存在的理由：青龙生态里 BiliBiliToolPro 这类脚本会去读仓库自己的 src/ 源码编译，
+	// 只检出白名单命中的那几个 .sh 根本跑不起来。代价是整仓体积，所以默认关。
+	FullCheckout bool `gorm:"not null;default:false" json:"full_checkout"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
@@ -87,6 +92,7 @@ func (s *Subscription) ToDict() map[string]interface{} {
 		// 真正生效的是下面的 overwrite_mode，前端读的也是它。
 		"force_overwrite": s.ForceOverwrite == nil || *s.ForceOverwrite,
 		"overwrite_mode":  NormalizeSubscriptionOverwriteMode(s.OverwriteMode),
+		"full_checkout":   s.FullCheckout,
 		"created_at":      s.CreatedAt,
 		"updated_at":      s.UpdatedAt,
 	}

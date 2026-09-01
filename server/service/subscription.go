@@ -407,8 +407,16 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 	emit(fmt.Sprintf("[git clone] %s -> %s", authCfg.DisplayURL, saveDir))
 	os.MkdirAll(destDir, 0755)
 	args := []string{"clone", "--depth", "1"}
-	// 告警统一在 applySparseCheckout 里 emit，这里只关心「要不要延后检出」。
-	sparsePatterns, _ := buildSubscriptionSparseCheckoutPatterns(sub)
+	// 告警**不能**在这里丢掉：applySparseCheckout 是唯一 emit 它们的地方，
+	// 而下面 len(sparsePatterns) > 0 不成立时（完整检出、或规则全空）那一整段会被跳过 ——
+	// 于是首次 clone 这条路径上一条提示都打不出来，用户第一次看到「整仓文件全落盘、
+	// 白名单像是失效了」时反而没有任何线索，第二次增量拉取才会有。
+	sparsePatterns, sparseWarnings := buildSubscriptionSparseCheckoutPatterns(sub)
+	if len(sparsePatterns) == 0 {
+		for _, warning := range sparseWarnings {
+			emit(warning)
+		}
+	}
 	if len(sparsePatterns) > 0 {
 		// 有指定子目录/白名单时，先不检出工作区，避免 clone 阶段把整个仓库文件落盘。
 		// --filter=blob:none 对 GitHub 这类支持 partial clone 的远端能少下载无关 blob；
@@ -511,6 +519,33 @@ func formatSubscriptionFileList(files []string, limit int) string {
 func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns []string, warnings []string) {
 	if sub == nil {
 		return nil, nil
+	}
+
+	// 完整检出：用户明确要整个仓库（青龙生态里那些要读仓库 src/ 自行编译的脚本）。
+	// 返回空规则之后有两处顺带生效，不用再各写一遍开关：
+	//   1. applySparseCheckout 看到空规则会把已有的 sparse-checkout 关掉，
+	//      所以「先开着 sparse 拉过、再打开这个开关」也能自动恢复成完整仓库；
+	//   2. pullGitRepoWithCallback 首次 clone 那条 --filter=blob:none --no-checkout
+	//      分支的条件是 len(sparsePatterns) > 0，这里返回空自然就跳过了。
+	// 白名单/黑名单仍然照常参与「建不建定时任务」的筛选，只是不再限制落盘范围。
+	//
+	// 这里必须带一条告警回去：用户同时填了指定子目录/白名单/黑名单又打开完整检出时，
+	// 看到的现象是整仓文件全落盘、那些规则像是失效了；一声不吭的话没人能把现象和开关对上。
+	// 与本函数其它几条「退回完整检出」的分支保持同一套做法（见函数末尾调用方的注释：
+	// 这类问题的杀伤力全在「静默」）。
+	//
+	// 但三项都留空时**不打这条提示**：那种订阅本来就是整仓检出（下面几条分支会自己说明），
+	// 开不开这个开关结果完全一样。无条件打的话，用户会照着提示去设置里找一个
+	// 自己从来没配过的白名单，或误以为曾经配过、被这个开关吞掉了。
+	if sub.FullCheckout {
+		if strings.TrimSpace(sub.SubPath) == "" &&
+			strings.TrimSpace(sub.Whitelist) == "" &&
+			strings.TrimSpace(sub.Blacklist) == "" {
+			return nil, nil
+		}
+		return nil, []string{
+			"[提示] 已按订阅设置检出整个仓库：指定子目录/白名单/黑名单本次都不限制落盘范围，但仍然照常决定给哪些脚本建定时任务",
+		}
 	}
 
 	seen := map[string]bool{}
@@ -1365,7 +1400,41 @@ func shouldManageSubscriptionFile(sub *model.Subscription, filePath string, allo
 	if !allowedExts[ext] {
 		return false
 	}
+	if !matchesFullCheckoutSubPathScope(sub, filePath) {
+		return false
+	}
 	return matchesSubscriptionFilters(sub, filePath)
+}
+
+// matchesFullCheckoutSubPathScope 是「完整检出」开关的配套护栏：把建任务的范围重新限回「指定子目录」。
+//
+// 为什么需要它：`sub_path` 在整个 service 里**只有 sparse-checkout 那一处引用**——
+// 它对「哪些文件会被建成定时任务」的约束，一直是靠「不在子目录里的文件根本不落盘」间接实现的。
+// 打开完整检出后整仓文件都落盘了，这条间接约束随之消失：
+// 一个填了 `sub_path=qinglong/DefaultTasks`、白名单留空、开了自动建任务的订阅，
+// 会把仓库里每一个 .sh/.js/.py（含 tools/、examples/、ci/ 下的）都建成定时任务并真的按 cron 跑起来，
+// 而 auto_del_task 不会帮用户收回去。用户的感受是「只开了一个检出开关，任务列表凭空多出几十条」。
+//
+// 这个开关的语义是「多落一些文件到磁盘上给脚本自己读」，不是「多建一堆任务」，所以这里补回来。
+//
+// 优先级刻意与 buildSubscriptionSparseCheckoutPatterns 的 switch 保持一致：
+// 子目录含 git 元字符（risky）时那边本来就退回整仓检出、不做任何限制，这里也不加约束，
+// 否则会出现「文件全落盘、任务却一个都不建」这种更难查的不对称。
+func matchesFullCheckoutSubPathScope(sub *model.Subscription, filePath string) bool {
+	if sub == nil || !sub.FullCheckout {
+		return true
+	}
+	safe, risky := splitSubscriptionSparseTargets(sub.SubPath)
+	if len(risky) > 0 || len(safe) == 0 {
+		return true
+	}
+	rel := strings.TrimPrefix(filepath.ToSlash(filePath), "./")
+	for _, target := range safe {
+		if rel == target || strings.HasPrefix(rel, target+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // collectSubscriptionTaskCandidates 返回任务候选，以及「仅因依赖规则落盘、刻意不建任务」

@@ -3,7 +3,7 @@ import { computed, onActivated, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, CopyDocument, Document, Refresh, Switch } from '@element-plus/icons-vue'
 import { configScriptApi } from '@/api/system'
-import MonacoEditor, { persistEditorWordWrap, readStoredEditorWordWrap } from '@/components/MonacoEditor.vue'
+import CodeEditor, { persistEditorWordWrap, readStoredEditorWordWrap } from '@/components/CodeEditor.vue'
 import { copyText } from '@/utils/clipboard'
 
 const content = ref('')
@@ -13,9 +13,9 @@ const loading = ref(false)
 const saving = ref(false)
 const copying = ref(false)
 
-// 自动换行开关必须活在页面级 ref 里：下面的 MonacoEditor 挂在 v-if="!loading" 上，
+// 自动换行开关必须活在页面级 ref 里：下面的 CodeEditor 挂在 v-if="!loading" 上，
 // 点一次「刷新」编辑器实例就整个重建，状态若只活在编辑器内部会被一起丢掉。
-// 这份记忆与脚本页共享（同一个 dd:editor:word_wrap），所以读写走 MonacoEditor 导出的那两个函数。
+// 这份记忆与脚本页共享（同一个 dd:editor:word_wrap），所以读写走 CodeEditor 导出的那两个函数。
 const wordWrap = ref(readStoredEditorWordWrap())
 
 function toggleWordWrap() {
@@ -163,10 +163,10 @@ async function copyConfigScript() {
           </div>
         </template>
 
-        <!-- Monaco 初始化较重，等接口返回后再挂载，避免先闪一下空内容。 -->
+        <!-- 等接口返回后再挂载编辑器，避免先闪一下空内容。 -->
         <!-- fill-height：桌面双栏下由 .config-layout → .editor-card → .el-card__body 的 flex 链撑满剩余高度；
              窄屏/移动端父级没有确定高度，改由本页 media query 给 560px 下限，行为与改造前一致。 -->
-        <MonacoEditor
+        <CodeEditor
           v-if="!loading"
           v-model="content"
           language="shell"
@@ -468,7 +468,7 @@ code {
 
   // 单栏/移动端父级高度不确定，fill-height 拿不到可撑满的高度，
   // 这里给回改造前的 560px 下限（选择器带 .editor-card，特异性高于组件内的默认规则）
-  .editor-card :deep(.monaco-editor-wrapper) {
+  .editor-card :deep(.code-editor-wrapper) {
     min-height: 560px;
   }
 }
@@ -506,12 +506,12 @@ code {
 // delay 被全局补丁归零，等效关闭。
 //
 // fill-mode 用 backwards 而不是列表页惯用的 both：
-// 编辑器卡里装着 Monaco，both 会把 `transform: translateY(0)` 永久留在 .editor-card 上，
-// 让它成为 Monaco 内部 position:fixed 浮层（右键菜单 / 补全 / 悬浮提示）的包含块 → 弹层错位，
+// 编辑器卡里装着代码编辑器，both 会把 `transform: translateY(0)` 永久留在 .editor-card 上，
+// 让它成为编辑器内部 position: fixed 浮层（搜索面板 / 补全 / 悬浮提示）的包含块 → 弹层错位，
 // 与 ScriptExecutionDialogs.vue 里那条「不加 both」的注释是同一个坑。
 // backwards 只在 delay 期间铺 from 帧，动画结束后回到自然样式（opacity 1、无 transform），
 // 末态与 to 帧完全一致，视觉上没有区别。
-// 只动 opacity + translateY、不碰 height：容器高度全程稳定，Monaco 的首次 layout 不受影响。
+// 只动 opacity + translateY、不碰 height：容器高度全程稳定，编辑器的首次布局不受影响。
 @keyframes dd-configfile-rise-in {
   from {
     opacity: 0;

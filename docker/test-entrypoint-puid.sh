@@ -49,6 +49,14 @@ if [ -e /app ] && [ -n "$(ls -A /app 2>/dev/null)" ]; then
   exit 2
 fi
 
+# entrypoint 的青龙兼容层会在【根目录】建 /ql 并把它 chown 给降权用户。
+# mount namespace 只隔离挂载点、不隔离对根文件系统的写，所以不额外挂一份 tmpfs 的话，
+# 直接在开发机 / CI runner 上跑本脚本会在宿主真实根目录留下一个属主被改掉的 /ql。
+if [ -e /ql ] && [ -n "$(ls -A /ql 2>/dev/null)" ]; then
+  echo "!! /ql 已存在且非空（本机可能真的在跑青龙），为避免误伤直接退出"
+  exit 2
+fi
+
 # 账号不受 mount namespace 隔离，收尾时要 userdel。所以本机上已经存在的
 # daidai 账号绝不能碰 —— 仓库自己推荐的二进制部署方式
 # （packaging/linux/daidai-panel.service 的 User=daidai）就会建这么一个服务账号，
@@ -59,21 +67,35 @@ if id -u daidai >/dev/null 2>&1 || getent group daidai >/dev/null 2>&1; then
   exit 2
 fi
 
-mount -t tmpfs tmpfs /tmp || { echo "!! 无法在私有命名空间里挂 tmpfs 到 /tmp"; exit 2; }
-mkdir -p /app
-mount -t tmpfs tmpfs /app || { echo "!! 无法挂 tmpfs 到 /app"; exit 2; }
+# 🔴 先记下 /app、/ql 这两个挂载点是不是本脚本自己建的，收尾只删自己建的那些。
+# 上面的守卫只拦「已存在且非空」，所以宿主上一个【已存在但为空】的 /ql 是放行的 ——
+# 而那恰恰是「用户准备把青龙数据 bind-mount 到 /ql」或「fstab 里 /ql 是个当前未挂载的挂载点」
+# 的典型形态。无条件 rmdir 会把人家的挂载点删掉，下次 mount 直接报 mount point does not exist。
+APP_CREATED=0
+QL_CREATED=0
 
-WORK=$(mktemp -d)
-FAILED=0
-
+# trap 必须在第一次 mkdir/mount 之前注册：否则下面任何一条 mount 失败走 exit 2，
+# 宿主根目录会留下刚建出来的空 /app 与 /ql 而收尾根本不会跑。
 cleanup() {
   umount /app 2>/dev/null
-  rmdir /app 2>/dev/null
+  [ "$APP_CREATED" = "1" ] && rmdir /app 2>/dev/null
+  umount /ql 2>/dev/null
+  [ "$QL_CREATED" = "1" ] && rmdir /ql 2>/dev/null
   # 账号不受 mount namespace 隔离，必须显式清理
   id -u daidai >/dev/null 2>&1 && userdel daidai 2>/dev/null
   getent group daidai >/dev/null 2>&1 && groupdel daidai 2>/dev/null
+  return 0
 }
 trap cleanup EXIT
+
+mount -t tmpfs tmpfs /tmp || { echo "!! 无法在私有命名空间里挂 tmpfs 到 /tmp"; exit 2; }
+[ -d /app ] || { mkdir -p /app && APP_CREATED=1; }
+mount -t tmpfs tmpfs /app || { echo "!! 无法挂 tmpfs 到 /app"; exit 2; }
+[ -d /ql ] || { mkdir -p /ql && QL_CREATED=1; }
+mount -t tmpfs tmpfs /ql || { echo "!! 无法挂 tmpfs 到 /ql"; exit 2; }
+
+WORK=$(mktemp -d)
+FAILED=0
 
 echo "被测脚本: $SRC"
 tr -d '\r' < "$SRC" > "$WORK/entrypoint.sh"
@@ -181,6 +203,19 @@ expect_owner() {
   fi
 }
 
+# 软链断言：$1=软链位置 $2=期望指向。用 readlink 只读链接本身，
+# 不用 [ -d ]（目标存在与否都不该影响「链接建对了没有」这个判定）。
+expect_symlink() {
+  local got
+  got=$(readlink "$1" 2>/dev/null)
+  if [ "$got" = "$2" ]; then
+    echo "  [PASS] $1 -> $got"
+  else
+    echo "  [FAIL] $1 want-> $2 got-> ${got:-不是软链或不存在}"
+    FAILED=1
+  fi
+}
+
 # ---- 1. 全新降权 -----------------------------------------------------------
 run_case "PUID=5000 PGID=5000（全新）" PUID=5000 PGID=5000
 expect_rc0
@@ -188,6 +223,12 @@ expect "以 5000 身份运行"             "SERVER uid=5000 gid=5000"
 expect "HOME 指向数据目录下的 .home"  "HOME=$LAST_DATA/.home"
 expect "npm cache 可写"               "SERVER npm-cache-writable=yes"
 expect_owner "$LAST_DATA/.home" "5000:5000"
+# 青龙兼容层（issue #110）：软链要建对，且 /ql 必须跟着 chown 给降权用户 ——
+# 青龙脚本第一步就是 touch "$QL_DIR/shell/env.sh"，属主不对它就直接退出码 1。
+expect_symlink /ql/data/repo "$LAST_DATA/scripts"
+expect_symlink /ql/data/config "$LAST_DATA"
+expect_symlink /ql/data/log "$LAST_DATA/logs"
+expect_owner /ql/shell/env.sh "5000:5000"
 userdel daidai 2>/dev/null; groupdel daidai 2>/dev/null
 
 # ---- 2. UID/GID 撞车 -------------------------------------------------------

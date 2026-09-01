@@ -108,6 +108,10 @@ const editForm = ref({
   // 这个字段要在四个地方同步：这里的初值、openCreate、openEdit 回填、handleSave 提交，
   // 漏掉任意一处的表现都是「设了但存不住」。
   overwrite_mode: "inherit",
+  // 完整检出：true = 跳过 sparse-checkout 拉整个仓库，false = 按白名单/子目录/依赖规则稀疏检出。
+  // 默认必须是 false —— 存量订阅升级后行为要完全不变，见后端同名字段 full_checkout。
+  // 同样要在四处同步（这里的初值、openCreate、openEdit 回填、handleSave 提交）。
+  full_checkout: false,
 });
 
 const sshKeys = ref<any[]>([]);
@@ -301,6 +305,7 @@ function openCreate() {
     has_auth_token: false,
     alias: "",
     overwrite_mode: "inherit",
+    full_checkout: false,
   };
   showEditDialog.value = true;
 }
@@ -477,6 +482,9 @@ function parseQLCommand() {
     editForm.value.blacklist = blacklist || "";
     editForm.value.branch = branch || "";
     editForm.value.depend_on = dependOn || "";
+    // 刻意不设 full_checkout：青龙 ql repo 的位置参数（url / 白名单 / 黑名单 / 依赖 / 分支…）
+    // 里没有「完整检出」的对位概念，硬猜一个值只会让识别结果和用户粘贴的命令不符。
+    // 它保持 openCreate 给的 false（稀疏检出），需要整仓的用户自己去开那个开关。
     if (hookScript) editForm.value.hook_script = hookScript;
     editForm.value.auto_add_task = true;
     ElMessage.success("已识别 ql repo 命令");
@@ -553,6 +561,9 @@ function openEdit(row: any) {
     alias: row.alias || "",
     // 老库或老接口没有这个字段时回落 inherit（跟随全局），与后端归一口径一致。
     overwrite_mode: row.overwrite_mode || "inherit",
+    // 同理：老库/老接口没有 full_checkout 时 row.full_checkout 是 undefined，
+    // 用 !! 归一成 false（稀疏检出），保持存量订阅的既有行为。
+    full_checkout: !!row.full_checkout,
   };
   showEditDialog.value = true;
   // 「（当前：X）」展示的是全局开关：别的管理员在别处改过之后，本页那个值一旦读到就不会自己回落，
@@ -601,6 +612,10 @@ async function handleSave() {
       // 单文件订阅没有 git 工作区，覆盖策略对它无意义（后端也不会读），
       // 存成 inherit 免得用户先在 git 模式选了强制覆盖、改成单文件后还留着一个假设置。
       data.overwrite_mode = "inherit";
+      // 完整检出同理：单文件订阅根本没有 clone / sparse-checkout 这一步，
+      // 表单里也不显示这个开关，所以先在 git 模式打开、再改成单文件时要一并复位，
+      // 免得库里留下一个永远不会生效、改回 git 仓库时却会突然生效的值。
+      data.full_checkout = false;
     } else if (data.auth_type === "ssh") {
       data.auth_username = "";
       data.auth_token = "";
@@ -1655,6 +1670,43 @@ function viewLogDetail(log: any) {
           </div>
         </el-form-item>
         <!--
+          完整检出。紧挨着白名单/黑名单/依赖规则，因为它们是同一类「检出什么」的设置——
+          前三个是做减法（只捞命中的文件），这个是一键取消减法（整仓拉下来）。
+
+          只对 git 仓库出现，理由同下面的「覆盖拉取」：单文件订阅压根没有
+          clone / sparse-checkout 这一步，显示出来只会让人以为它有用。
+
+          说明文字里那句「三项都留空时开关没有区别」不是废话，是对齐后端实现：
+          buildSubscriptionSparseCheckoutPatterns 在子目录/白名单/黑名单都为空时返回空规则
+          （见 server/service/subscription.go，依赖规则此时也只会打一条「本次检出完整仓库」的提示），
+          也就是这类订阅本来就是整仓落盘。不写清楚的话，按第一句理解的用户开了开关后
+          会发现磁盘占用和拉取行为纹丝不动，只会怀疑功能没生效。
+        -->
+        <el-form-item
+          v-if="editForm.type === 'git-repo'"
+          label="完整检出"
+          class="form-item--full"
+        >
+          <el-switch
+            v-model="editForm.full_checkout"
+            inline-prompt
+            active-text="开"
+            inactive-text="关"
+          />
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            默认关闭，只把命中「指定子目录 / 白名单 / 依赖规则」的文件检出到本地；如果「指定子目录」「白名单」「黑名单」<strong>都留空</strong>，这条订阅本来就不产生任何检出过滤规则、拉的就是整个仓库，此时开不开这个开关都没有区别。开启后会<strong>拉取整个仓库</strong>——源码、资源、文档全都落盘，<strong>体积可能很大</strong>，仅在脚本运行时需要读取仓库里脚本之外的其它文件（如
+            src 源码、配置、模板）时才开启。开启<strong>不改变建任务的规则</strong>：仍然只有命中「指定子目录 +
+            白名单」的脚本会被建成定时任务，落盘的其它文件只是给脚本自己读。
+          </div>
+        </el-form-item>
+        <!--
           覆盖拉取策略（订阅级三态）。只对 git 仓库出现——单文件订阅没有工作区，
           后端在拉取分支里也压根不看这个值，显示出来只会让人以为它有用。
           用单选而不是开关：开关只有两态，表达不了「跟随全局」这个默认档。
@@ -2356,7 +2408,9 @@ function viewLogDetail(log: any) {
 
     // 跨满两列的字段。判定口径：内容天然放不进半列（一键识别的输入框+按钮、URL、
     // 钩子 textarea、仓库鉴权的三个 radio），或说明文字在半列宽下会超过 2 行
-    // （白名单、依赖规则、鉴权用户名）。「指定子目录」能在半列内放下，故不跨列。
+    // （白名单、依赖规则、鉴权用户名、完整检出）。「指定子目录」能在半列内放下，故不跨列。
+    // 注意「完整检出」的控件本身只有一个 switch、明明放得进半列，跨列是为了那段说明文字：
+    // 它要讲清「拉整个仓库」的代价，半列宽下会挤成四五行。
     :deep(.form-item--full) {
       grid-column: 1 / -1;
     }

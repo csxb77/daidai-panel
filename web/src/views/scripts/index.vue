@@ -346,7 +346,7 @@ async function handleCancelEdit() {
   /* 整张目录树卡是容器类表面 → surface 档 */
   border-radius: var(--dd-radius-surface);
   /* 折叠动画只动宽度，【绝不能用 transform】：
-     残留 transform 会让这张卡成为 Monaco 内部 position:fixed 浮层（补全 / 右键菜单 /
+     残留 transform 会让这张卡成为编辑器内部 position:fixed 浮层（补全 / 搜索面板 /
      悬浮提示）的包含块，弹层会飘位 —— 与文末入场动画那条「只能 backwards」是同一个坑。
      border-width 也要一起过渡：box-sizing 是 border-box，1px 边框压不掉，
      只收 flex-basis 的话完全折叠后会留下一条 2px 竖线。 */
@@ -491,8 +491,8 @@ async function handleCancelEdit() {
 // .scripts-workspace 的 `flex + min-height: 0 + height: 0` 内嵌滚动链完全不受影响。
 //
 // fill-mode 用 backwards 而不是列表页惯用的 both：
-// 编辑器卡里装着 Monaco，both 会把 `transform: translateY(0)` 永久留在 .scripts-editor 上，
-// 让它成为 Monaco 内部 position:fixed 浮层（右键菜单 / 补全 / 悬浮提示）的包含块 → 弹层错位，
+// 编辑器卡里装着代码编辑器，both 会把 `transform: translateY(0)` 永久留在 .scripts-editor 上，
+// 让它成为编辑器内部 position:fixed 浮层（搜索面板 / 补全 / 悬浮提示）的包含块 → 弹层错位，
 // 与 ScriptExecutionDialogs.vue 里那条「不加 both」的注释是同一个坑。
 // backwards 只在 delay 期间铺 from 帧，动画结束后回到自然样式（opacity 1、无 transform），
 // 末态与 to 帧完全一致，视觉上没有区别。

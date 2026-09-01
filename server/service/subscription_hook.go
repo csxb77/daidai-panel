@@ -54,12 +54,8 @@ func runSubscriptionInlineScript(sub *model.Subscription, rawScript, label, logP
 
 func buildSubscriptionHookEnv(sub *model.Subscription, workDir string) map[string]string {
 	dataDir := strings.TrimSpace(config.C.Data.Dir)
-	qlDir := dataDir
-	if strings.EqualFold(filepath.Base(dataDir), "data") {
-		qlDir = filepath.Dir(dataDir)
-	}
 
-	return map[string]string{
+	env := map[string]string{
 		"SUB_ID":            strconv.FormatUint(uint64(sub.ID), 10),
 		"SUB_NAME":          sub.Name,
 		"SUB_TYPE":          sub.Type,
@@ -71,8 +67,24 @@ func buildSubscriptionHookEnv(sub *model.Subscription, workDir string) map[strin
 		"SCRIPTS_DIR":       config.C.Data.ScriptsDir,
 		"PANEL_DATA_DIR":    dataDir,
 		"PANEL_SCRIPTS_DIR": config.C.Data.ScriptsDir,
-		"QL_DIR":            qlDir,
 	}
+
+	// 青龙那批变量（QL_DIR / QL_BRANCH / QL_REPO_PATH / dir_repo / …）与任务执行链路
+	// 共用同一个来源（见 qinglong_compat.go），保证「钩子里能用的」和「任务里能用的」是同一套。
+	//
+	// 这一整块原来只有一个 QL_DIR，且是一段「dataDir 末段叫 data 就取父目录」的启发式：
+	// Docker 下（dataDir=/app/Dumb-Panel）算出 /app，钩子里的 $QL_DIR/data/repo 永远是死路径。
+	// 只补 QL_DIR 还不够——docs/script-api.md §9 把这批变量整表下发给用户，
+	// 用户照着在拉取后钩子里写 `find "$dir_repo" ...`，dir_repo 为空会展开成 `find ""`，
+	// 钩子非零退出、整次订阅拉取被判失败。
+	//
+	// 用「不覆盖已有键」的写法：上面那些 SUB_*/SCRIPTS_DIR 是钩子的专属契约，优先级更高。
+	for key, value := range buildQingLongCompatEnv() {
+		if _, exists := env[key]; !exists {
+			env[key] = value
+		}
+	}
+	return env
 }
 
 func normalizeSubscriptionHookScript(sub *model.Subscription) string {

@@ -271,24 +271,20 @@ function buildDisplayLabels(labels: string[]): { display: string[]; subscription
   const current = db()
   const display: string[] = []
   const subscription: string[] = []
-  const seen = new Set<string>()
-  // 订阅名单独一个去重集合（与后端 seenSubscriptions 对齐）：订阅名可能和某个自定义标签重名，
-  // 共用 seen 的话订阅名会被当成重复项丢掉，subscription 里就少一条、该标签也就隐藏不掉。
+  // 展示标签的去重按【类别】分开，绝不共用一个集合（与后端 seenCustom / seenSubscriptions 对齐）：
+  // 自定义标签可能和订阅名重名（自建标签「娱乐」+ 名为「娱乐」的订阅），共用一个集合会把两条合并成一条，
+  // 前端「自定义标签 / 订阅标签」两个开关就同时作用在同一条上 ——
+  // 表现为「关掉自定义藏不掉它、关掉订阅反而把它藏了」。
+  // 分组名不参与这两个集合（它在 return 里单独前插），与订阅名重名时同样各留一条。
+  const seenCustom = new Set<string>()
   const seenSubscription = new Set<string>()
   let groupName = ''
 
   const push = (label: string) => {
     const value = label.trim()
-    if (!value || seen.has(value)) return
-    seen.add(value)
+    if (!value || seenCustom.has(value)) return
+    seenCustom.add(value)
     display.push(value)
-  }
-
-  const pushSubscription = (label: string) => {
-    const value = label.trim()
-    if (!value || seenSubscription.has(value)) return
-    seenSubscription.add(value)
-    subscription.push(value)
   }
 
   for (const raw of labels) {
@@ -304,9 +300,14 @@ function buildDisplayLabels(labels: string[]): { display: string[]; subscription
     }
     const subId = Number.parseInt(label.slice('subscription:'.length), 10)
     const matched = current.subscriptions.find((item) => item.id === subId)
-    const subName = matched?.name || '订阅任务'
-    push(subName)
-    pushSubscription(subName)
+    // 订阅源被删掉后查不到名字，退回字面量（与后端一致）
+    const subName = (matched?.name ?? '').trim() || '订阅任务'
+    // 两个数组用同一个订阅去重集合、同一次判定，保证 display 里的订阅项与 subscription 逐条对得上
+    // （前端 classifyDisplayTaskLabels 按出现次数认领类别，多一条少一条都会错位）。
+    if (seenSubscription.has(subName)) continue
+    seenSubscription.add(subName)
+    display.push(subName)
+    subscription.push(subName)
   }
 
   return { display: groupName ? [groupName, ...display] : display, subscription }

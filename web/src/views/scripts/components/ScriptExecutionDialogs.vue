@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { Edit, RefreshRight, Select, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
-import { computed, defineAsyncComponent } from 'vue'
+import { computed } from 'vue'
 import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
-
-const MonacoEditor = defineAsyncComponent(() => import('@/components/MonacoEditor.vue'))
+// 这里原来是 defineAsyncComponent 懒加载，但那层包装其实一直没带来收益：
+// 旧的 MonacoEditor 靠 utils/monaco.ts 在运行期用 AMD loader 去拉 /monaco/vs 下的资源，
+// 那几 MB 从来没被 Vite 打进任何 chunk，异步组件既挡不住它、也没什么可挡。
+// 换成 CodeEditor 之后代码确实由 Vite 打包了，但同路由的 ScriptsEditorPane 已经静态引入了它，
+// 这里再切一个异步块也分不出去，只会多一次模块往返，所以直接静态 import。
+// （同目录 ScriptManageDialogs.vue 里的 CodeDiffEditor 仍保留 defineAsyncComponent，
+//  那个是有理由的：@codemirror/merge 只有「版本对比」弹窗用得到，懒加载能把它挡在主 chunk 外。）
+import CodeEditor from '@/components/CodeEditor.vue'
 
 const showCodeRunner = defineModel<boolean>('showCodeRunner', { required: true })
 const runnerCode = defineModel<string>('runnerCode', { required: true })
@@ -63,7 +69,7 @@ function markDebugCodeChanged() {
           </el-select>
         </div>
         <div class="panel-content" style="padding: 0">
-          <MonacoEditor
+          <CodeEditor
             v-if="showCodeRunner"
             v-model="runnerCode"
             :language="runnerLanguage === 'shell' ? 'shell' : runnerLanguage"
@@ -120,7 +126,7 @@ function markDebugCodeChanged() {
           <el-tag v-if="debugCodeChanged" type="warning" size="small" effect="plain">已修改</el-tag>
         </div>
         <div class="panel-content" style="padding: 0">
-          <MonacoEditor
+          <CodeEditor
             v-if="showDebugDialog"
             v-model="debugCode"
             :language="editorLanguage"
@@ -192,7 +198,7 @@ function markDebugCodeChanged() {
 
 /*
   整屏滑入后，内部两块面板错落淡入，营造层次感。
-  只用 opacity，不用 transform：.debug-code-panel 内含 Monaco，残留 transform
+  只用 opacity，不用 transform：.debug-code-panel 内含代码编辑器，残留 transform
   会成为其 fixed 浮层的包含块导致错位；opacity 结束为 1 不产生层叠上下文，安全。
 */
 .debug-code-panel {
@@ -344,8 +350,8 @@ function markDebugCodeChanged() {
 
 /*
   不加 both / forwards：动画收尾后 transform 自然清空。
-  否则残留 transform 会让 .el-overlay-dialog 成为 Monaco 内部 position:fixed 浮层
-  （补全/悬浮提示）的包含块，导致弹层错位。to 为单位变换，视觉无跳变。
+  否则残留 transform 会让 .el-overlay-dialog 成为编辑器内部 position:fixed 浮层
+  （搜索面板/补全/悬浮提示）的包含块，导致弹层错位。to 为单位变换，视觉无跳变。
 */
 @keyframes dd-script-sheet-up {
   from {

@@ -178,6 +178,9 @@ func main() {
 	}
 	// 启动时先隔离脚本目录中的异常污染目录，避免继续影响脚本管理、备份和统计链路。
 	service.QuarantineUnexpectedScriptEntriesOnStartup()
+	// 每次启动都重建 /ql 兼容层：Magisk 重刷 zip、容器重建都会让它整个消失，
+	// 带「只跑一次」的标记反而会让重建后永远修不回来。全程 best-effort，不会阻塞启动。
+	service.EnsureQingLongCompatLayout()
 	service.CleanupManagedPythonArtifactsOnStartup()
 
 	service.InitSchedulerV2()
@@ -293,7 +296,7 @@ func setupStaticFrontend(engine *gin.Engine, webDir string) {
 	//
 	// "fonts" 是自托管 Web 字体（web/public/fonts/），Docker 部署走 nginx 的
 	// try_files 不受影响，但内嵌二进制部署（无 nginx）依赖这一条。
-	for _, sub := range []string{"assets", "fonts", "monaco", "sponsor-portal"} {
+	for _, sub := range []string{"assets", "fonts", "sponsor-portal"} {
 		subDir := filepath.Join(absDir, sub)
 		if info, err := os.Stat(subDir); err == nil && info.IsDir() {
 			engine.Static("/"+sub, subDir)

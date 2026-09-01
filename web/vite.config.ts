@@ -3,11 +3,9 @@ import path from 'node:path'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import type { Plugin, ResolvedConfig } from 'vite'
+import type { Plugin } from 'vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
-
-const localMonacoSourceDir = path.resolve(process.cwd(), 'node_modules/monaco-editor/min')
 
 // 发布版的值，真正生效的那份写在 web/index.html 里；这里留一份只为报错时提示。
 const RELEASE_ROBOTS = 'noindex, nofollow, noarchive, nosnippet'
@@ -53,60 +51,6 @@ function robotsMetaPlugin(isDemoBuild: boolean): Plugin {
 
         return html.replace(metaRe, `<meta name="robots" content="${DEMO_ROBOTS}" />`)
       }
-    }
-  }
-}
-
-function normalizeBase(base: string) {
-  return base === '/' ? '' : base.replace(/\/$/, '')
-}
-
-function getContentType(filePath: string) {
-  switch (path.extname(filePath)) {
-    case '.css':
-      return 'text/css; charset=utf-8'
-    case '.js':
-      return 'application/javascript; charset=utf-8'
-    case '.json':
-    case '.map':
-      return 'application/json; charset=utf-8'
-    case '.svg':
-      return 'image/svg+xml'
-    case '.ttf':
-      return 'font/ttf'
-    default:
-      return 'application/octet-stream'
-  }
-}
-
-function localMonacoAssetsPlugin(): Plugin {
-  let resolvedConfig: ResolvedConfig
-
-  return {
-    name: 'local-monaco-assets',
-    apply: 'serve',
-    configResolved(config) {
-      resolvedConfig = config
-    },
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        const requestUrl = req.url?.split('?')[0] || ''
-        const prefix = `${normalizeBase(resolvedConfig.base)}/monaco/`
-        if (!requestUrl.startsWith(prefix)) {
-          next()
-          return
-        }
-
-        const relativePath = requestUrl.slice(prefix.length)
-        const filePath = path.resolve(localMonacoSourceDir, relativePath)
-        if (!filePath.startsWith(localMonacoSourceDir) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-          next()
-          return
-        }
-
-        res.setHeader('Content-Type', getContentType(filePath))
-        fs.createReadStream(filePath).pipe(res)
-      })
     }
   }
 }
@@ -170,7 +114,6 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [
       vue(),
-      localMonacoAssetsPlugin(),
       robotsMetaPlugin(isDemoBuild),
       selfHostedFontsPlugin(),
       Components({
@@ -192,8 +135,14 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id: string) {
-            if (id.includes('node_modules/@monaco-editor/loader')) return 'monaco-loader'
-            if (id.includes('node_modules/@monaco-editor')) return 'monaco-loader'
+            // CodeMirror 全家桶（含 @lezer 的各语言语法）单独成块：
+            // 它只有编辑器相关的四个页面用得上，不该压进首屏的 vendor 里。
+            // 只匹配 @codemirror/* 与 @lezer/*：本仓从来没有 import 过那个叫 codemirror 的
+            // meta 包（依赖里也已经移除），再留一条 'node_modules/codemirror/' 判断是恒假的死代码。
+            if (
+              id.includes('node_modules/@codemirror') ||
+              id.includes('node_modules/@lezer')
+            ) return 'codemirror'
             if (id.includes('node_modules/echarts')) return 'echarts'
             if (id.includes('node_modules/zrender')) return 'zrender'
             if (id.includes('node_modules/qrcode')) return 'qrcode'

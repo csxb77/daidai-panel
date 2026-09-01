@@ -15,6 +15,7 @@ import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 import { getDisplayTaskLabels, classifyDisplayTaskLabels } from './taskLabels'
+import type { DisplayTaskLabelKind } from './taskLabels'
 import { splitTaskCommandDisplay } from './taskCommand'
 import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
@@ -453,22 +454,26 @@ function toggleNameLabelPref(key: keyof TaskNameLabelPrefs) {
   nameLabelPrefs.value = next
 }
 
-// 按「显示设置」过滤后的名称标签。用 filter 而不是把分类结果拼回去，是为了保住后端下发的原始顺序
-// （分组在最前、订阅名在最后），否则关掉一类再打开，剩下标签的先后会莫名其妙地变。
-// 三类全开时直接短路返回，绝大多数用户走的都是这条路，不做任何多余计算。
-function visibleTaskLabels(task: any) {
-  const all = displayTaskLabels(task)
-  const prefs = nameLabelPrefs.value
-  if (prefs.subscription && prefs.group && prefs.custom) return all
+// 三类标签的悬浮说明。订阅名与分组名重名时会并排出现两个一模一样的文字，
+// 光看文案用户无法判断「显示设置」里该关哪个开关，配色 + title 一起把类别说清楚。
+const taskLabelKindTitles: Record<DisplayTaskLabelKind, string> = {
+  group: '分组标签',
+  subscription: '订阅标签',
+  custom: '自定义标签',
+}
 
-  const { group, subscription } = classifyDisplayTaskLabels(all, task?.labels || [], task?.subscription_labels)
-  const groupSet = new Set(group)
-  const subscriptionSet = new Set(subscription)
-  return all.filter((label: string) => {
-    if (groupSet.has(label)) return prefs.group
-    if (subscriptionSet.has(label)) return prefs.subscription
-    return prefs.custom
-  })
+// 按「显示设置」过滤后的名称标签，返回带类别的条目（不是纯字符串）。
+// 用 filter 而不是把分类结果拼回去，是为了保住后端下发的原始顺序
+// （分组在最前、订阅名在最后），否则关掉一类再打开，剩下标签的先后会莫名其妙地变。
+//
+// ⚠️ 这里【不能】再按「三类全开就短路返回原数组」来省一次分类：
+// 模板要靠 entry.kind 上色、靠 entry.key 做 :key，全开时同样需要这份分类结果。
+// 判别也必须按下标走 entry.kind，不能再按字符串成员判定 —— 同名标签会串台（issue #109-3）。
+function visibleTaskLabels(task: any) {
+  const entries = classifyDisplayTaskLabels(displayTaskLabels(task), task?.labels || [], task?.subscription_labels)
+  const prefs = nameLabelPrefs.value
+  if (prefs.subscription && prefs.group && prefs.custom) return entries
+  return entries.filter(entry => prefs[entry.kind])
 }
 
 function ensureCanOperate(message = '当前账号没有操作任务权限') {
@@ -1075,15 +1080,19 @@ async function handleImport(event: Event) {
                 <el-icon><Lock /></el-icon>
                 已锁定
               </el-tag>
-              <!-- 与桌面表格共用同一份「显示设置」开关（分组 / 订阅 / 自定义三类分项过滤） -->
+              <!-- 与桌面表格共用同一份「显示设置」开关（分组 / 订阅 / 自定义三类分项过滤）。
+                   :key 用 entry.key（带下标）而不是标签文字：订阅名与分组名重名时会并排两条同名标签，
+                   用文字当 key 会触发 Vue 重复 key 警告。 -->
               <el-tag
-                v-for="label in visibleTaskLabels(row)"
-                :key="label"
+                v-for="entry in visibleTaskLabels(row)"
+                :key="entry.key"
                 size="small"
                 effect="plain"
                 class="task-label"
+                :class="`task-label--${entry.kind}`"
+                :title="taskLabelKindTitles[entry.kind]"
               >
-                {{ label }}
+                {{ entry.label }}
               </el-tag>
             </div>
 
@@ -1223,15 +1232,19 @@ async function handleImport(event: Event) {
                     已锁定
                   </el-tag>
                   <!-- 分组 / 订阅 / 自定义三类标签按工具栏「显示设置」分项过滤。
-                       任务详情弹窗（TaskDetail.vue）刻意不跟随，那里必须能看到完整标签。 -->
+                       任务详情弹窗（TaskDetail.vue）刻意不跟随，那里必须能看到完整标签。
+                       :key 用 entry.key（带下标）而不是标签文字：订阅名与分组名重名时会并排两条同名标签，
+                       用文字当 key 会触发 Vue 重复 key 警告。 -->
                   <el-tag
-                    v-for="label in visibleTaskLabels(row)"
-                    :key="label"
+                    v-for="entry in visibleTaskLabels(row)"
+                    :key="entry.key"
                     size="small"
                     effect="plain"
                     class="task-label"
+                    :class="`task-label--${entry.kind}`"
+                    :title="taskLabelKindTitles[entry.kind]"
                   >
-                    {{ label }}
+                    {{ entry.label }}
                   </el-tag>
                 </div>
               </div>
@@ -1721,6 +1734,25 @@ async function handleImport(event: Event) {
     color: var(--el-color-primary);
     border-color: transparent;
   }
+
+  // 分组 / 订阅 两类各给一套语义色。订阅名与分组名重名时会并排出现两个一模一样的文字，
+  // 不上色的话用户只会当成「多了个重复标签」，也判断不出「显示设置」里该关哪个开关。
+  // 配色全部吃 EP 语义色令牌 + color-mix，暗色主题下自动跟着变，不写死色值（design-system 硬规则 1）。
+  &--group {
+    background: color-mix(in srgb, var(--el-color-success) 12%, transparent);
+    color: var(--el-color-success);
+    border-color: transparent;
+  }
+
+  &--subscription {
+    background: color-mix(in srgb, var(--el-color-warning) 12%, transparent);
+    color: var(--el-color-warning);
+    border-color: transparent;
+  }
+
+  // `--custom` 刻意不写规则：自定义标签是绝大多数任务的常态，保持 el-tag plain 的中性外观，
+  // 整列才不会花成一片。类名照样挂上去，一是给「哪一条是自定义」留可查的 DOM 证据，
+  // 二是以后要给它单独上色时有现成的挂点 —— 不是漏写。
 }
 
 .command-text {

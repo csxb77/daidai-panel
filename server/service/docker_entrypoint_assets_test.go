@@ -165,6 +165,75 @@ func TestDockerEntrypointSurvivesUidGidCollision(t *testing.T) {
 	}
 }
 
+// 青龙兼容层（#110）在容器里必须由 entrypoint 以 root 身份建：
+// 配了 PUID 之后 daidai-server 是降权跑的，Go 侧 MkdirAll("/ql") 必然 EACCES 静默失败。
+// 这条同样只是静态字符串断言，防的是「这一段被顺手删掉 / 改回旧写法」。
+func TestDockerEntrypointCreatesQingLongCompatLayout(t *testing.T) {
+	text := readDockerEntrypoint(t)
+
+	// 必须在 PUID 守卫之前：不设 PUID 的默认 root 部署同样需要 /ql。
+	guardIdx := strings.Index(text, `if [ -n "${PUID}" ] || [ -n "${PGID}" ]; then`)
+	if guardIdx < 0 {
+		t.Fatal("entrypoint.sh 找不到 PUID/PGID 的 opt-in 守卫")
+	}
+	mkdirIdx := strings.Index(text, `mkdir -p /ql/shell /ql/data`)
+	if mkdirIdx < 0 {
+		t.Fatal("entrypoint.sh 必须创建 /ql/shell 与 /ql/data 两个真实目录")
+	}
+	if mkdirIdx > guardIdx {
+		t.Fatalf("/ql 兼容层必须建在 PUID 守卫之前，否则默认 root 部署拿不到 (idx=%d guard=%d)", mkdirIdx, guardIdx)
+	}
+
+	// 软链映射表必须与 Go 侧 ensureQingLongCompatLayoutAt 一一对应，
+	// 少一条就是「面板里能跑的青龙脚本，换个部署方式就跑不了」。
+	for _, snippet := range []string{
+		`link_ql_path /ql/data/repo "${DATA_DIR}/scripts"`,
+		`link_ql_path /ql/data/scripts "${DATA_DIR}/scripts"`,
+		`link_ql_path /ql/scripts "${DATA_DIR}/scripts"`,
+		`link_ql_path /ql/data/log "${DATA_DIR}/logs"`,
+		`link_ql_path /ql/log "${DATA_DIR}/logs"`,
+		`link_ql_path /ql/data/config "${DATA_DIR}"`,
+		`link_ql_path /ql/config "${DATA_DIR}"`,
+		`link_ql_path /ql/data/deps "${DATA_DIR}/deps"`,
+	} {
+		if !strings.Contains(text, snippet) {
+			t.Fatalf("entrypoint.sh 缺少青龙兼容软链: %q", snippet)
+		}
+	}
+
+	// 青龙脚本的第一处报错点就是 touch "$dir_shell/env.sh"。
+	if !strings.Contains(text, `[ -f /ql/shell/env.sh ] || touch /ql/shell/env.sh`) {
+		t.Fatal("entrypoint.sh 必须准备 /ql/shell/env.sh 空占位文件（青龙脚本第一步就 touch 它）")
+	}
+
+	// link_ql_path 必须先判「已经是真实目录就不动」：对真实目录执行 ln -sfn
+	// 会把链接建到那个目录**里面**去（用户把自己的青龙 /ql 挂进容器时就会撞上）。
+	if !strings.Contains(text, `if [ -e "$1" ] && [ ! -L "$1" ]; then`) {
+		t.Fatal("link_ql_path 必须跳过已经是真实路径的位置，否则 ln 会把链接建进目录内部")
+	}
+
+	// 降权时 /ql 也要交给运行用户，否则青龙脚本 touch env.sh 会 EACCES。
+	// 🔴 但必须是【非递归】、且【只在 /ql 是我们自己建出来时】才做：
+	// 用户可以把宿主机上真实的青龙 /ql 挂进容器（link_ql_path 的注释就设想了这个场景），
+	// 对它 chown -R 会递归改写人家整棵青龙数据的属主，而这里带着 `|| true`，一个字都不会报。
+	// 这条断言就是防「后人图省事又把 /ql 塞回上面那条 chown -R 里」。
+	if !strings.Contains(text, `chown "${TARGET_UID}:${TARGET_GID}" /ql /ql/shell /ql/data /ql/shell/env.sh`) {
+		t.Fatal("降权时必须把 /ql 的三个真实节点 chown 给运行用户（非递归），否则青龙脚本写不进 /ql/shell/env.sh")
+	}
+	if strings.Contains(text, `chown -R "${TARGET_UID}:${TARGET_GID}" "${DATA_DIR}" /tmp /ql`) {
+		t.Fatal("不能对 /ql 做 chown -R：用户挂载真实青龙 /ql 时会递归改写整棵青龙数据的属主")
+	}
+	if !strings.Contains(text, `if [ "${QL_PREEXISTING}" = "0" ]; then`) {
+		t.Fatal("必须用 QL_PREEXISTING 判据把「用户自己挂进来的 /ql」排除在 chown 之外")
+	}
+	// 判据必须是「存在且非空」：只判 `[ -e /ql ]` 会被 tmpfs 挂载点、
+	// 编排预创建的空目录误伤，结果是我们自己建的 /ql/shell/env.sh 也不 chown，
+	// 降权后的青龙脚本第一步 touch 就 EACCES（这条正是回归脚本实测抓到过的）。
+	if !strings.Contains(text, `if [ -d /ql ] && [ -n "$(ls -A /ql 2>/dev/null)" ]; then`) {
+		t.Fatal("QL_PREEXISTING 必须按「存在且非空」判定，只判存在会把空挂载点也当成用户数据")
+	}
+}
+
 // 只设 PGID 不设 PUID 时 TARGET_UID 会取到 0，
 // 原来会造出一个 uid=0 的假 daidai：看起来降了权、实际仍是 root。
 func TestDockerEntrypointRejectsRootPuid(t *testing.T) {

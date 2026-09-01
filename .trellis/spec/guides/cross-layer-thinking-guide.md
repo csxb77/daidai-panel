@@ -165,7 +165,9 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
   答不出这条命令，就又回到了上一条说的空转门禁。
 
 > 另一半的解法是让两种构建**互不覆盖**（各写各的 outDir）。
-> 本项目没这么做，是因为 `scripts/copy-monaco-assets.mjs` 把目标写死成 cwd 下的 `dist`。
+> 本项目没这么做：历史原因是 `scripts/copy-monaco-assets.mjs` 把目标写死成 cwd 下的 `dist`
+> （v3.2.0 换成 CodeMirror 6 后该脚本已删除），但 `clean-dist.mjs` / `copy-spa-fallback.mjs`
+> 以及 `Magisk/build.sh`、`deploy-demo.yml` 仍然一律按 `web/dist` 取产物。
 > 既然目录必须共用，那分辨的责任就落到每个复用方头上。
 
 ### 前端静态目录 ↔ Go 静态白名单 ↔ nginx
@@ -174,7 +176,8 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
 漏改的表现是**静默失效，不是 404**。
 
 `server/main.go` 的 `setupStaticFrontend()` 挂的是**白名单**
-（子目录 `assets` / `fonts` / `monaco` / `sponsor-portal`，外加单文件路由 `favicon-512.webp`）。
+（子目录 `assets` / `fonts` / `sponsor-portal`，外加单文件路由 `favicon-512.webp`）。
+v3.2.0 前名单里还有一个 `monaco`，随编辑器换成 CodeMirror 6（由 Vite 直接打包、不再有运行期资源目录）一并删掉。
 不在名单里的路径会掉进 `NoRoute` 的 SPA fallback，回一份 **200 + `text/html` 的 index.html**：
 
 - 样式表 / 字体：浏览器按 MIME 拒绝使用，整套字体失效，Console 里只有一条不起眼的 MIME 警告；

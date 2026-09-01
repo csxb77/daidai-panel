@@ -42,7 +42,8 @@ const DEFAULT_LOG_TEXT_COLOR_DARK = '#e2e8f0'
 
 /**
  * 面板外观（编辑器/日志底色等）变更事件。
- * Monaco 主题是在挂载时一次性 defineTheme 的，切主题或改配置后必须靠这个事件重新定义并 setTheme，
+ * 代码编辑器的主题是在挂载时一次性构建的（CodeMirror 的 extensions 只在建 state 时读一次），
+ * 切主题或改配置后必须靠这个事件重新构建主题并通过 Compartment 换上去，
  * 否则已挂载的编辑器不会跟着变色。
  */
 export const PANEL_APPEARANCE_CHANGE_EVENT = 'dd:panel-appearance-change'
@@ -211,7 +212,7 @@ export function applyPanelAppearance(settings?: PanelAppearanceSettings | null) 
   // 圆角刻度：本次带了合法值就更新，没带就沿用上一次的（理由见 lastAppliedShape）
   applyPanelShapeStyle(effective?.panel_shape_style)
 
-  // CSS 变量已经写完，通知已挂载的 Monaco 实例重新 defineTheme + setTheme
+  // CSS 变量已经写完，通知已挂载的代码编辑器实例重新构建并换上主题
   if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent(PANEL_APPEARANCE_CHANGE_EVENT))
   }
