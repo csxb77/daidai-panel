@@ -77,6 +77,16 @@ if (-not (Test-Path $releaseNotePath)) {
 }
 
 Assert-FileContains -Path $releaseNotePath -Pattern '<!--\s*release-title:\s*.+?\s*-->' -Description "release notes title marker"
+# 只校验「注释存在」是不够的：release.yml 那条 grep 曾经因为用了可变长度后顾断言而
+# 直接报错、被 `|| true` 吞掉，于是 v3.0.0~v3.2.0 每一版的 Release 标题都静默退化成裸 tag，
+# 而这道守卫全程是绿的。所以这里要按 release.yml 的**同一条正则**再抽一次，
+# 抽不出非空摘要就判红 —— 守的是「标题真能生成」，不是「注释真存在」。
+$releaseNoteText = Get-Content -Path $releaseNotePath -Raw -Encoding UTF8
+$titleMatch = [regex]::Match($releaseNoteText, '<!--\s*release-title:\s*(?<summary>.*?)\s*-->')
+if (-not $titleMatch.Success -or [string]::IsNullOrWhiteSpace($titleMatch.Groups['summary'].Value)) {
+    Fail-Step "release-title marker exists but yields an empty summary; GitHub Release title would fall back to the bare tag."
+}
+Write-Host ("  release title -> {0}：{1}" -f $tagVersion, $titleMatch.Groups['summary'].Value)
 $readmeContent = Get-Content -Path (Join-Path $repoRoot "README.md") -Raw -Encoding UTF8
 if (($readmeContent -notmatch [regex]::Escape($tagVersion)) -or ($readmeContent -notmatch [regex]::Escape("./docs/release-notes/$tagVersion.md"))) {
     Fail-Step "README latest version block not synced."

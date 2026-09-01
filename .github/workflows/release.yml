@@ -59,9 +59,20 @@ jobs:
 
           for candidate in "${candidates[@]}"; do
             if [[ -f "$candidate" ]]; then
-              summary="$(grep -oPm1 '(?<=<!--\s*release-title:\s).*?(?=\s*-->)' "$candidate" || true)"
+              # 🔴 这里【不能】用 (?<=<!--\s*release-title:\s) 那种后顾断言：
+              # `\s*` 让后顾变成可变长度，PCRE 直接拒绝并报
+              # `grep: lookbehind assertion is not fixed length`，
+              # 而外面那个 `|| true` 会把报错吞掉 —— 于是 summary 恒为空、
+              # 标题静默退化成裸 tag。v3.0.0 到 v3.2.0 每一版都是这么发出去的，
+              # 而 preflight 只校验「注释存在」，校验不到「抽得出来」，所以一直没人发现。
+              # 改用 \K 重置匹配起点：不需要后顾断言，量词爱多长多长。
+              summary="$(grep -oPm1 '<!--\s*release-title:\s*\K.*?(?=\s*-->)' "$candidate" || true)"
               if [[ -n "$summary" ]]; then
                 RELEASE_TITLE="${GITHUB_REF_NAME}：${summary}"
+              else
+                # 抽不出来不阻断发版（标题只是观感），但必须**出声**。
+                # 上一次就是因为静默才连坏了好几个版本。
+                echo "::warning::未能从 ${candidate} 抽出 release-title，Release 标题退化为裸 tag ${GITHUB_REF_NAME}"
               fi
               echo "file=$candidate" >> "$GITHUB_OUTPUT"
               echo "title=$RELEASE_TITLE" >> "$GITHUB_OUTPUT"
