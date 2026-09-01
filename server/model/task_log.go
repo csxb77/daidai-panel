@@ -44,6 +44,10 @@ func (l *TaskLog) ToDict() map[string]interface{} {
 	}
 	if l.Task != nil {
 		result["task_name"] = l.Task.Name
+		// APP 的日志详情页要用它反推「这条日志跑的是哪个脚本」，再跳到脚本编辑页
+		// （Dumb-Panel-APP issue #5）。面板没有 GET /tasks/:id，日志正文和 log_path
+		// 里也都没有脚本路径，所以只能从这里下发。
+		result["command"] = l.Task.Command
 		result["task_type"] = l.Task.GetTaskType()
 		result["labels"] = l.Task.GetLabels()
 		result["task"] = map[string]interface{}{
