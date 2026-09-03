@@ -46,7 +46,17 @@ func (l *TinyLog) Write(p []byte) (n int, err error) {
 		return 0, io.ErrClosedPipe
 	}
 
-	data := append(l.remainder, p...)
+	// 【必须用新的底层数组拼，不能写成 append(l.remainder, p...)】
+	// 那种写法在 l.remainder 还有富余容量时会【原地】追加，于是 data 与 l.remainder
+	// 共用同一块底层数组。接着下面 UTF-8 收尾那段做的是
+	// `l.remainder = l.remainder[:0]` 再 `append(l.remainder, data[i:]...)`，
+	// 等于把切下来的尾巴拷回同一块数组的开头，把 data 的头部字节直接覆写掉 ——
+	// 最终 l.writer.Write(data) 写出去的是被污染的内容（日志前几个字节变成上一段的尾巴）。
+	// 只在「上一次留了不完整 UTF-8 尾巴」时才触发，所以平时看不出来，一旦触发就是内容错乱。
+	// 这里先分配一块新数组再拼，data 与 l.remainder 从此互不相干，对外行为完全不变。
+	data := make([]byte, 0, len(l.remainder)+len(p))
+	data = append(data, l.remainder...)
+	data = append(data, p...)
 	l.remainder = l.remainder[:0]
 
 	if len(data) > 0 && !utf8.Valid(data) {

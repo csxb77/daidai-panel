@@ -505,11 +505,13 @@ func TestRestoreBackupManifestReplacesCoreBusinessData(t *testing.T) {
 					{Key: "panel_title", Value: "备份里的标题"},
 				},
 			},
-			Tasks: []model.Task{
+			Tasks: []BackupTask{
 				{
-					Name:    "restored-task",
-					Command: "python3 restored.py",
-					Status:  model.TaskStatusEnabled,
+					Task: model.Task{
+						Name:    "restored-task",
+						Command: "python3 restored.py",
+						Status:  model.TaskStatusEnabled,
+					},
 				},
 			},
 			EnvVars: []BackupEnvVar{

@@ -25,6 +25,7 @@ import {
   nowIso,
   paginate,
   reorderEnv,
+  reorderTask,
   saveScriptContent,
   sortEnvs,
   splitEnvGroups,
@@ -551,6 +552,9 @@ function createTask(body: Record<string, any>): DemoTask {
     notify_on_abort: Boolean(body['notify_on_abort']),
     notification_channel_id: body['notification_channel_id'] ?? null,
     depends_on: body['depends_on'] ?? null,
+    // 与服务端 model 的 `default:0` 一致：新任务不参与已有的拖拽编号（那一桶被拖过的话是 10/20/30…），
+    // 0 比它们都小 ⇒ 新任务照旧排在最前面
+    list_order: 0,
     // 新建的任务排在最前面：服务端默认排序里 sort_order 越小越靠前
     sort_order: -1,
     is_pinned: false,
@@ -788,6 +792,27 @@ route('PUT', '/tasks/batch', (ctx) => {
       break
   }
   return { message: `已处理 ${ids.length} 个任务`, count: ids.length }
+})
+
+/**
+ * 列表拖拽排序。
+ *
+ * ⚠️ 必须注册在 /tasks/:id 之前：/tasks/sort 是静态路径、会先进 exactRoutes 被 O(1) 命中，
+ *    但本文件的既有约定就是「静态段路由写在 /:id 前面」（见 /tasks/views/reorder 那段注释），
+ *    以后有人把它改成带变量的形状时才不会被 /tasks/:id 抢走。
+ * ⚠️ 这里必须真的改数据顺序（db.reorderTask 会重排整桶的 list_order）。
+ *    只回一句成功而不动数据的话，页面下一次 loadTasks 会把行弹回原位，就是「拖了个寂寞」。
+ */
+route('PUT', '/tasks/sort', (ctx) => {
+  const body = bodyObject(ctx)
+  const targetRaw = body['target_id']
+  const result = reorderTask(
+    Number(body['source_id']),
+    targetRaw === undefined || targetRaw === null ? undefined : Number(targetRaw),
+    body['position'] === undefined || body['position'] === null ? undefined : String(body['position']),
+  )
+  if (!result.ok) return notFound(result.error)
+  return { message: '排序更新成功' }
 })
 
 route('POST', '/tasks', (ctx) => {

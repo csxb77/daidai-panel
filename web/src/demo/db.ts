@@ -343,24 +343,99 @@ export function toTaskDict(task: DemoTask): Record<string, unknown> {
   return item
 }
 
-/** 默认排序：置顶优先 → 启用/运行 在前、禁用在后 → sort_order → 创建时间倒序 */
-export function sortTasks(rows: DemoTask[]): DemoTask[] {
-  const group = (status: number) => {
-    if (status === TASK_STATUS_DISABLED) return 1
-    return status === TASK_STATUS_ENABLED || status === TASK_STATUS_RUNNING || status === 0.5 ? 0 : 2
-  }
+/**
+ * 任务的状态分组，复刻 server/handler/task_query.go 的 taskSortGroup：
+ * 启用/运行中/排队中一组、禁用一组、其余一组。
+ * 默认排序和拖拽的「桶」判定都用它，两处必须是同一份口径。
+ */
+export function taskSortGroup(status: number): number {
+  if (status === TASK_STATUS_DISABLED) return 1
+  return status === TASK_STATUS_ENABLED || status === TASK_STATUS_RUNNING || status === 0.5 ? 0 : 2
+}
 
+/** 默认排序：置顶优先 → 启用/运行 在前、禁用在后 → list_order → sort_order → 创建时间倒序 */
+export function sortTasks(rows: DemoTask[]): DemoTask[] {
   return [...rows].sort((left, right) => {
     if (left.is_pinned !== right.is_pinned) return left.is_pinned ? -1 : 1
-    const groupDiff = group(left.status) - group(right.status)
+    const groupDiff = taskSortGroup(left.status) - taskSortGroup(right.status)
     if (groupDiff !== 0) return groupDiff
+    // list_order（拖拽顺序）插在 sort_order 之前，与服务端一致。
+    // 存量数据全是 0 ⇒ 这一步全平手、顺序完全由 sort_order 决定，行为与加这个字段之前一致。
+    if (left.list_order !== right.list_order) return left.list_order - right.list_order
     if (left.sort_order !== right.sort_order) return left.sort_order - right.sort_order
     if (left.created_at !== right.created_at) return right.created_at.localeCompare(left.created_at)
     return right.id - left.id
   })
 }
 
-/** 复刻服务端的 keyword / status / label 过滤（filters + sort_rules 那套高级筛选不在 Demo 范围内） */
+/**
+ * 「最后运行 / 下次运行」两列的排序，复刻服务端 sortPreparedTaskListItems 的内存排序分支。
+ *
+ * next_run_at 不是库里的列、是按 cron 现算的快照，所以只能在内存里排；这里直接复用 estimateNextRun，
+ * 生效条件（非禁用 + cron 类型 + 表达式非空）与 toTaskDict 保持一致，
+ * 否则会出现「列表里显示有下次运行、排序却把它当成空值沉底」。
+ *
+ * 🔴 空值语义：从未运行 / 没有下次运行的任务【恒排最后，不随 asc/desc 翻转】。
+ *    这段判定必须写在方向翻转【之前】——写在后面的话降序时一堆 `-` 会全冒到最前面。
+ */
+function sortTasksByTimeField(
+  rows: DemoTask[],
+  field: 'last_run_at' | 'next_run_at',
+  direction: 'asc' | 'desc',
+): DemoTask[] {
+  const now = Date.now()
+  // 先把值算出来存下：estimateNextRun 要遍历时间窗口，放进比较器里每次比较都算一遍会明显卡顿
+  const values = new Map<number, number | null>()
+  for (const task of rows) {
+    if (field === 'last_run_at') {
+      values.set(task.id, task.last_run_at ? new Date(task.last_run_at).getTime() : null)
+      continue
+    }
+    if (task.status === TASK_STATUS_DISABLED || task.task_type !== 'cron' || !task.cron_expression) {
+      values.set(task.id, null)
+      continue
+    }
+    const next = estimateNextRun(task.cron_expression, now)
+    values.set(task.id, next ? new Date(next).getTime() : null)
+  }
+
+  return [...rows].sort((left, right) => {
+    const leftValue = values.get(left.id) ?? null
+    const rightValue = values.get(right.id) ?? null
+    if (leftValue === null && rightValue === null) return right.id - left.id
+    if (leftValue === null) return 1
+    if (rightValue === null) return -1
+    if (leftValue !== rightValue) return direction === 'desc' ? rightValue - leftValue : leftValue - rightValue
+    return right.id - left.id
+  })
+}
+
+/**
+ * 解析 sort_rules 里的第一条规则。
+ *
+ * Demo 只认「最后运行 / 下次运行」这两个字段（任务页的列排序与工具栏排序下拉），
+ * 其余字段（视图那套 name / command / labels…）仍回落默认排序 —— 与服务端「未知 field 静默回落」的口径一致，
+ * 不报错、不空列表。
+ */
+function parseTaskSortRule(raw: string): { field: 'last_run_at' | 'next_run_at'; direction: 'asc' | 'desc' } | null {
+  const text = raw.trim()
+  if (!text) return null
+  try {
+    const rules = JSON.parse(text)
+    if (!Array.isArray(rules) || rules.length === 0) return null
+    const first = rules[0] ?? {}
+    const field = String(first.field ?? '')
+    if (field === 'last_run_at' || field === 'next_run_at') {
+      // 与服务端一致：direction 只认 desc，其它一律按 asc
+      return { field, direction: String(first.direction ?? '') === 'desc' ? 'desc' : 'asc' }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/** 复刻服务端的 keyword / status / label 过滤（filters 那套高级筛选不在 Demo 范围内） */
 export function filterTasks(params: Record<string, string>): DemoTask[] {
   let rows = db().tasks
 
@@ -382,7 +457,60 @@ export function filterTasks(params: Record<string, string>): DemoTask[] {
     rows = rows.filter((task) => task.labels.some((item) => includesIgnoreCase(item, label)))
   }
 
+  const rule = parseTaskSortRule(params['sort_rules'] ?? '')
+  if (rule) return sortTasksByTimeField(rows, rule.field, rule.direction)
+
   return sortTasks(rows)
+}
+
+/**
+ * 拖拽排序：把 sourceId 插到 targetId 之前（position='after' 时插到之后）；targetId 为空表示移到本区末尾。
+ * 复刻 server/handler/task_sort.go。
+ *
+ * ⚠️ 这里必须【真的改顺序】。只回一句 `{message:'排序更新成功'}` 而不动数据，
+ *    页面重新加载列表后会把行弹回原位，看起来像拖拽功能坏了。
+ * ⚠️ 改的是 list_order，不能碰 sort_order（那是开机任务的执行顺序）。
+ */
+export function reorderTask(
+  sourceId: number,
+  targetId?: number,
+  position?: string,
+): { ok: true } | { ok: false; error: string } {
+  const current = db()
+  const source = current.tasks.find((task) => task.id === sourceId)
+  if (!source) return { ok: false, error: '任务不存在' }
+  if (targetId !== undefined && targetId === sourceId) return { ok: true }
+
+  const sameBucket = (task: DemoTask) =>
+    task.is_pinned === source.is_pinned && taskSortGroup(task.status) === taskSortGroup(source.status)
+
+  if (targetId !== undefined) {
+    const target = current.tasks.find((task) => task.id === targetId)
+    if (!target) return { ok: false, error: '目标任务不存在' }
+    if (!sameBucket(target)) {
+      return { ok: false, error: '置顶任务与普通任务、启用与禁用任务请分别排序，跨区移动请用置顶 / 启用按钮' }
+    }
+  }
+
+  // 兄弟列表取【整桶】而不是当前页，所以跨页拖拽也有效
+  const bucket = sortTasks(current.tasks.filter(sameBucket))
+  const rest = bucket.filter((task) => task.id !== source.id)
+
+  let insertIndex = rest.length
+  if (targetId !== undefined) {
+    const found = rest.findIndex((task) => task.id === targetId)
+    if (found === -1) return { ok: false, error: '目标任务不存在' }
+    // position 只认 after，其余一律按 before（与服务端同口径）
+    insertIndex = position === 'after' ? found + 1 : found
+  }
+
+  const ordered = [...rest.slice(0, insertIndex), source, ...rest.slice(insertIndex)]
+  // 整桶重编号，步长 10 与服务端 (idx+1)*10 一致；其它桶保持原值
+  ordered.forEach((task, index) => {
+    task.list_order = (index + 1) * 10
+  })
+
+  return { ok: true }
 }
 
 // ---------------------------------------------------------------------------

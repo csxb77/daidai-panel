@@ -2,7 +2,10 @@ package service
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,6 +190,167 @@ func TestManagedHelperContentIncludesUsageDocs(t *testing.T) {
 	}
 	if !strings.Contains(managedSendNotifyJSContent, "@param {object} params") {
 		t.Fatalf("expected js helper JSDoc params")
+	}
+}
+
+// issue #111 守卫：托管标记里的 " v1" 绝对不能升成 v2 或别的值。
+// ensureManagedHelperFile 是靠「文件正文里有没有这枚 token」来区分
+// 「面板自己写的托管文件」和「用户手写的同名文件」的。
+// 磁盘上已经存在的 v1 文件里当然不含 "v2" 字串，一旦把 token 改掉，
+// 这些老文件全都会被误判成用户自定义而**永久停止更新** —— 比 502 更隐蔽的回归。
+func TestManagedNotifyHelperTokenStaysV1(t *testing.T) {
+	if !strings.HasSuffix(managedNotifyHelperToken, " v1") {
+		t.Fatalf("managedNotifyHelperToken 必须仍以 \" v1\" 结尾，当前为 %q", managedNotifyHelperToken)
+	}
+	// 两份托管正文都必须带上这枚 token，否则面板自己写出去的文件下次也会被当成用户自定义。
+	if !strings.Contains(managedNotifyPyContent, managedNotifyHelperToken) {
+		t.Fatalf("expected managed token inside notify.py content")
+	}
+	if !strings.Contains(managedSendNotifyJSContent, managedNotifyHelperToken) {
+		t.Fatalf("expected managed token inside sendNotify.js content")
+	}
+}
+
+// issue #111：面板开代理后，urllib 会把发往面板自身 127.0.0.1:<端口> 的通知请求
+// 也一并交给代理，代理直接回 502。修法是显式 opener + **只对回环豁免**：
+// request_notify 支持 url= 覆盖成外网地址，无条件关代理会把那种用法在
+// 「只能走代理出网」的环境里直接打断。
+func TestManagedNotifyPyDisablesProxyOnlyForLoopback(t *testing.T) {
+	if !strings.Contains(managedNotifyPyContent, "import urllib.parse") {
+		t.Fatalf("expected `import urllib.parse` in notify.py content")
+	}
+	if !strings.Contains(managedNotifyPyContent, "urllib.request.build_opener(urllib.request.ProxyHandler({}))") {
+		t.Fatalf("expected loopback branch to build an opener with ProxyHandler({})")
+	}
+	// 必须留着 else 分支的裸 build_opener()：只有 ProxyHandler({}) 一条路就等于无条件关代理。
+	if !strings.Contains(managedNotifyPyContent, "        opener = urllib.request.build_opener()") {
+		t.Fatalf("expected non-loopback branch to keep the default proxy-aware opener")
+	}
+	// 三种回环写法都要覆盖到：127.x.x.x / localhost / ::1。
+	for _, want := range []string{"\"localhost\", \"::1\"", "host.startswith(\"127.\")"} {
+		if !strings.Contains(managedNotifyPyContent, want) {
+			t.Fatalf("expected loopback host check to contain %q", want)
+		}
+	}
+	// urlopen 用的是模块级默认 opener，回环豁免根本不会生效，必须换成 opener.open。
+	if strings.Contains(managedNotifyPyContent, "urllib.request.urlopen(") {
+		t.Fatalf("expected urlopen to be replaced by the explicit opener")
+	}
+	if !strings.Contains(managedNotifyPyContent, "with opener.open(request, timeout=timeout_seconds) as response:") {
+		t.Fatalf("expected the request to go through the explicit opener")
+	}
+	// 绝不能退回 CIDR 写法：127.0.0.1/32 这类 Python 的代理白名单一律匹配不上（已实测）。
+	// 只查真正的代码行 —— 注释里恰恰要写着「别用 CIDR」来警告后来人，
+	// 一刀切地匹配整份内容会把那条警告注释本身判成违规。
+	for _, line := range strings.Split(managedNotifyPyContent, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if strings.Contains(line, "127.0.0.1/") {
+			t.Fatalf("CIDR 写法在 Python 侧无效，不要用它做回环白名单，问题行: %s", line)
+		}
+	}
+	// 报错分支是脚本作者排障的唯一线索，改 opener 时不能顺手丢掉。
+	if !strings.Contains(managedNotifyPyContent, "except urllib.error.HTTPError as err:") ||
+		!strings.Contains(managedNotifyPyContent, "except urllib.error.URLError as err:") {
+		t.Fatalf("expected HTTPError / URLError branches to be preserved")
+	}
+}
+
+// 真跑一次：把托管 notify.py 落到临时目录，在「代理环境变量指向一个死端口」的前提下
+// 让它给本机 httptest 假面板发通知。修复前请求会被丢给死代理而失败。
+// 顺带把 Go 字面量拼出来的 Python 缩进也验了 —— 缩进写坏 python 直接语法错。
+func TestManagedNotifyPyReachesLoopbackPanelWithProxyEnv(t *testing.T) {
+	// Windows 上 python3.exe 常常是应用商店的占位程序，LookPath 找得到但跑不了，
+	// 所以每个候选都要先用 --version 验一遍能不能真跑；Linux 镜像里则可能只有 python3。
+	pythonBin := ""
+	for _, candidate := range []string{"python", "python3"} {
+		found, lookErr := exec.LookPath(candidate)
+		if lookErr != nil {
+			continue
+		}
+		if runErr := exec.Command(found, "--version").Run(); runErr != nil {
+			continue
+		}
+		pythonBin = found
+		break
+	}
+	if pythonBin == "" {
+		t.Skip("python not found or not usable")
+	}
+
+	// httptest 默认就监听 127.0.0.1，正好是要豁免的回环地址。
+	const wantMessage = "panel-ok-9f3a"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"message":%q}`, wantMessage)
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, notifyPyFilename), []byte(managedNotifyPyContent+"\n"), 0o644); err != nil {
+		t.Fatalf("write managed notify.py: %v", err)
+	}
+	// control 分支走原始的 urlopen 写法，用来确认「代理环境变量在本机真的生效」；
+	// 不做这个对照，本机若自带 bypass 规则，这条用例会假绿。
+	driver := `import os
+import sys
+import urllib.request
+
+if sys.argv[1] == "control":
+    request = urllib.request.Request(
+        os.environ["DAIDAI_NOTIFY_URL"],
+        data=b"{}",
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        response.read()
+    print("CONTROL-REACHED-SERVER")
+    sys.exit(0)
+
+import notify
+
+print(notify.request_notify("t", "c").get("message", ""))
+`
+	if err := os.WriteFile(filepath.Join(dir, "check.py"), []byte(driver), 0o644); err != nil {
+		t.Fatalf("write driver script: %v", err)
+	}
+
+	// 127.0.0.1:1 上不可能有人监听，所以「请求被交给代理」等价于「立刻失败」。
+	// no_proxy 显式置空，避免本机既有的 no_proxy 让对照组失去意义。
+	const deadProxy = "http://127.0.0.1:1"
+	runEnv := append(os.Environ(),
+		"DAIDAI_NOTIFY_URL="+server.URL,
+		"DAIDAI_NOTIFY_TOKEN=test-token",
+		"DAIDAI_NOTIFY_TIMEOUT=5000",
+		"http_proxy="+deadProxy,
+		"HTTP_PROXY="+deadProxy,
+		"https_proxy="+deadProxy,
+		"HTTPS_PROXY="+deadProxy,
+		"all_proxy="+deadProxy,
+		"ALL_PROXY="+deadProxy,
+		"no_proxy=",
+		"NO_PROXY=",
+		"PYTHONDONTWRITEBYTECODE=1",
+	)
+
+	control := exec.Command(pythonBin, "check.py", "control")
+	control.Dir = dir
+	control.Env = runEnv
+	if out, err := control.CombinedOutput(); err == nil && strings.Contains(string(out), "CONTROL-REACHED-SERVER") {
+		t.Skipf("本机代理环境变量对回环地址不生效，用例失去对照意义: %s", strings.TrimSpace(string(out)))
+	}
+
+	cmd := exec.Command(pythonBin, "check.py", "notify")
+	cmd.Dir = dir
+	cmd.Env = runEnv
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("managed notify.py 在开代理时没能直连面板: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), wantMessage) {
+		t.Fatalf("expected panel response %q in output, got %q", wantMessage, string(out))
 	}
 }
 

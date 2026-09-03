@@ -586,7 +586,12 @@ func enrichManifestFromQingLongDB(dbPath string, manifest *BackupManifest) error
 	}
 	if len(tasks) > 0 {
 		manifest.Selection.Tasks = true
-		manifest.Data.Tasks = tasks
+		// 青龙的标签解析后落在 model.Task.Labels 逗号串里，
+		// 转成备份形态时必须把它拎成数组，否则清单序列化会把标签整列丢掉（issue #112 同一个坑）。
+		manifest.Data.Tasks = make([]BackupTask, 0, len(tasks))
+		for _, task := range tasks {
+			manifest.Data.Tasks = append(manifest.Data.Tasks, backupTaskFromModel(task))
+		}
 	}
 
 	subs, err := loadQingLongSubscriptions(db)
@@ -595,7 +600,11 @@ func enrichManifestFromQingLongDB(dbPath string, manifest *BackupManifest) error
 	}
 	if len(subs) > 0 {
 		manifest.Selection.Subscriptions = true
-		manifest.Data.Subscriptions = subs
+		// 青龙订阅没有 PAT 概念，转换后 auth_token 恒为空；这里只是把类型对齐。
+		manifest.Data.Subscriptions = make([]BackupSubscription, 0, len(subs))
+		for _, sub := range subs {
+			manifest.Data.Subscriptions = append(manifest.Data.Subscriptions, backupSubscriptionFromModel(sub))
+		}
 	}
 
 	deps, err := loadQingLongDependencies(db)

@@ -57,12 +57,23 @@ func (m *LogStreamManager) Write(filePath, data string) error {
 	if err != nil {
 		return err
 	}
-	f.Sync()
+	// 【为什么这里不再 f.Sync()】
+	// 原来每写一个输出片段就 fsync 一次，而这一整段是持着【全局】 m.mu 的：
+	// 一个输出两万行的脚本 = 两万次串行 fsync 压在脚本输出的同步路径上，
+	// 期间所有并发任务的日志写入都要排队等这把锁，慢盘上能把整个面板拖成龟速。
+	//
+	// 去掉它是安全的：WriteString 走的是 write(2)，数据写完就已经在内核页缓存里，
+	// 面板进程自己 panic、被 kill、容器重启都不会丢，只有【整机断电】才可能丢尾巴 ——
+	// 任务日志不值得为这个概率付上面那份代价。
+	// 任务结束时 task_executor.go 的 defer 会调 CloseStream 把文件 Close 掉，
+	// 而那个 defer 注册在结算 defer 之后、按 LIFO 先执行，所以前端收到 done 事件时
+	// 文件已经完整关闭，之后再去读文件拿到的内容是全的。
+	//
+	// O_APPEND 与「超限写一次可见标记后停写」的语义都保持原样，只去掉 fsync。
 	m.fileSizes[filePath] += int64(n)
 
 	if m.fileSizes[filePath] >= m.maxSize {
 		f.WriteString("\n[日志文件已达到大小限制，停止写入]")
-		f.Sync()
 	}
 
 	return nil

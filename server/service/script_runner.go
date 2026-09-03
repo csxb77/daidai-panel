@@ -619,6 +619,26 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		if onOutput != nil {
 			onOutput(msg)
 		}
+	} else if signalName := describeTerminationSignal(waitErr); signalName != "" {
+		// 【进程被信号杀掉时，给用户一个能看懂的解释】
+		// 被信号终止的进程在 Go 里 ExitCode() 恒为 -1，日志里只会留下「退出码 -1」，
+		// 用户完全不知道是内存超限被 OOM Killer 杀了、还是自己点了停止、还是被外部脚本 kill 了。
+		// 这一行就是把这个静默现象变成可诊断的。
+		//
+		// 🔴 【必须先排除 timedOut，顺序不能反】
+		// 超时分支自己会 KillProcessGroup 发 SIGKILL，waitErr 里同样是「被信号终止」。
+		// 不排除的话一次超时会同时打出「任务超时」和「被信号终止」两行互相矛盾的解释，
+		// 而且超时分支已经把退出码硬置成 -1，再解释一遍毫无信息量。
+		//
+		// 写法照抄上面的超时分支（同时写 outputBuilder 和 onOutput），
+		// 所以 conc 模式下它和超时提示形状一致：会被 prefixedOutput 加上 [EnvName#N] 前缀，
+		// 开头那个 \n 让前缀单独占一行 —— 这是既有行为，不在本次改动范围内。
+		// Windows 上 describeTerminationSignal 恒返回空串，这个分支永远不会进。
+		msg := fmt.Sprintf("\n[脚本进程被信号终止：%s（退出码 -1）。常见原因：内存超限被系统 OOM Killer 杀掉、面板或用户手动停止、外部 kill]", signalName)
+		outputBuilder.WriteString(msg)
+		if onOutput != nil {
+			onOutput(msg)
+		}
 	}
 	if readErr != nil && readErr != io.EOF && totalSize < maxLogSize && !truncated {
 		if !isBenignProcessPipeReadError(readErr) {
@@ -821,21 +841,33 @@ func runConcurrentCommand(plan *CommandExecutionPlan, timeout int, envVars map[s
 		outputMu.Lock()
 		defer outputMu.Unlock()
 
+		// 【为什么要先算一份 text，两条路径写同一份】
+		// 进来的东西有两种：
+		//   a) conc 自己生成的行（开始执行 / 执行完成 / 执行错误 / 截断标记），末尾【没有】换行；
+		//   b) prefixedOutput 转发的脚本原始输出片段，末尾本来就带 \n 或裸 \r。
+		// 老写法是无条件给 outputBuilder 补一个 "\n"、却完全不给 onOutput 补，两边都不对：
+		//   - 实时流（onOutput）里 a 类行会和紧跟其后的脚本输出粘成一行；
+		//   - 落盘（outputBuilder）里 b 类片段后面又多出一个空行。
+		// 现在统一成「本来就以换行/裸 \r 收尾就不动，否则才补一个 \n」，
+		// 既修掉粘行，也不会写重 \n；裸 \r 保持原样，进度条的覆盖刷新语义不受影响。
+		text := line
+		if !strings.HasSuffix(text, "\n") && !strings.HasSuffix(text, "\r") {
+			text += "\n"
+		}
+
 		if totalSize < maxLogSize {
-			outputBuilder.WriteString(line)
-			outputBuilder.WriteString("\n")
-			totalSize += len(line) + 1
+			outputBuilder.WriteString(text)
+			totalSize += len(text)
 			if onOutput != nil {
-				onOutput(line)
+				onOutput(text)
 			}
 			return
 		}
 
 		if !truncated {
 			truncated = true
-			msg := "[日志已截断，超过最大大小限制]"
+			msg := "[日志已截断，超过最大大小限制]\n"
 			outputBuilder.WriteString(msg)
-			outputBuilder.WriteString("\n")
 			if onOutput != nil {
 				onOutput(msg)
 			}

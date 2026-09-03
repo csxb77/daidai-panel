@@ -44,20 +44,30 @@ go test ./...
 
 ### 1. Scope / Trigger
 
-- 触发：修改 `server/handler/task_query.go` 中任务列表默认排序、`is_pinned`、`status`、`sort_order` 相关逻辑时必须看本节。
+- 触发：修改 `server/handler/task_query.go` 中任务列表默认排序、`is_pinned`、`status`、`list_order`、`sort_order` 相关逻辑，或改动 `PUT /api/tasks/sort` 拖拽排序时必须看本节。
 - 原因：置顶是用户主动设置的展示优先级。如果默认排序先按启用 / 禁用状态分组，再按 `is_pinned` 排序，禁用后的置顶任务会被普通启用任务挤到后面，表现为“禁用任务不能保持置顶”。
 
 ### 2. Contracts
 
 - 默认任务列表排序必须先尊重 `is_pinned DESC`，再按任务状态分组。
 - 已置顶任务即使状态变为禁用，也必须继续保留在置顶区域。
-- 置顶区内部再按状态分组、`sort_order`、创建时间和 ID 保持稳定顺序。
+- 置顶区内部再按状态分组、`list_order`、`sort_order`、创建时间和 ID 保持稳定顺序。
 - 自定义视图排序没有命中差异时，最终兜底排序也必须使用同一套默认规则，避免默认列表和视图列表表现不一致。
+- **`list_order` 和 `sort_order` 是两个互不影响的字段，禁止合并成一个：**
+  - `tasks.list_order` 管**列表展示顺序**，任务页的拖拽排序写的就是它；
+  - `tasks.sort_order` 继续管**开机任务的执行顺序**（见「场景：任务并发闸门与执行槽位」），拖拽绝不能碰它。
+
+  拿 `sort_order` 去接列表拖拽会静默改写用户的开机编排，而守着开机顺序的那条用例因为自己显式设值**抓不到**这种回归 —— 这正是必须新开一列的原因。
+- 默认排序里 `list_order` 排在 `sort_order` **之前**，完整顺序是：`is_pinned` → 状态分组 → **`list_order`** → `sort_order` → `created_at DESC` → `id DESC`。
+- 存量行的 `list_order` 一律补 0（`EnsureColumns` 里 `INTEGER NOT NULL DEFAULT 0`），所以升级后默认列表顺序与升级前**逐字节一致**，不会因为加了一列就把用户看惯的顺序打乱。
+- **SQL 下推路径与内存排序路径必须用同一套口径**：任何一处漏加 `list_order`，分页结果与整表顺序就会对不上，表现为「翻页时任务重复出现或漏掉」。
 
 ### 3. Tests Required
 
 - 禁用但已置顶任务应排在普通启用任务前面。
 - 运行中 / 排队中 / 启用状态变化不能打乱同组内 `sort_order` 的稳定顺序。
+- 存量数据（`list_order` 全为 0）时默认列表顺序与加列之前完全一致。
+- 拖拽写入 `list_order` 后，同桶内顺序按 `list_order` 生效，且 `sort_order` 一个字节都没被改动。
 - 修改排序时至少运行：
 
 ```bash
@@ -180,6 +190,7 @@ database.DB.
 - **调小只能在两次任务之间收 worker**：退休判断必须放在 worker 取下一个请求**之前**，绝不能打断正在执行的任务。因此调小是最终一致的，测试必须轮询断言，不能用固定 sleep。
 - **「超编就退休」必须在同一把锁内判断 + 减计数**：`desiredWorkers` / `liveWorkers` 刻意用普通 int + `workerLock`，不用 atomic。atomic 会让这个 check-then-act 出现多个 worker 同时判定自己该退出，最终退得比该退的多。
 - **调小必须唤醒空闲 worker**：空闲 worker 阻塞在 `taskQueue` 上，不通过 `resizeCh` 叫醒就发现不了自己已经超编；队列长期空闲时调小会完全不生效。唤醒信号必须非阻塞发送，且 worker 回到循环顶部要重新判断（不能信任信号本身），这样并发数被连续改动时也能自愈。
+- **开机任务的执行顺序只认 `sort_order`，与列表展示顺序完全解耦**：任务列表页的拖拽排序写的是另一列 `tasks.list_order`（见「场景：定时任务默认列表排序与置顶优先级」）。这是刻意的双向隔离 —— 用户拖列表不会静默打乱开机编排，反过来改 `sort_order` 也不会挪动列表位置。要改开机编排必须改 `sort_order`（任务表单 / `PUT /tasks/:id`），拖列表没有任何效果。
 
 ### 4. Validation & Error Matrix
 
@@ -210,6 +221,7 @@ database.DB.
 - `AllowMultipleInstances=false` 执行中重复触发 -> 第二次被拒绝，`startedCount == 1`。
 - `AllowMultipleInstances=true` -> 可并行，峰值 == 2。
 - 开机任务在并发数 1 下按 `sort_order` 升序执行，且区间不重叠。
+  ⚠️ 这条用例自己会显式给每个任务设 `sort_order`，所以它**抓不到**「有人把列表拖拽接到 `sort_order` 上」这类回归 —— 那条防线在 `list_order` 那一节，不要以为这里绿了就安全。
 - 执行中 `GetRunningCount() == 1`，结束后 == 0。
 - 有延迟时 worker 不占槽位（延迟期间其他任务可正常执行）。
 - 准备失败 / 准备阶段 panic -> 槽位都必须归还，且后续任务仍能被同一个 worker 执行。
@@ -931,6 +943,76 @@ if err := tx.Create(&env).Error; err != nil {
 if shouldRestoreDisabled {
     return tx.Model(&model.EnvVar{}).Where("id = ?", env.ID).Update("enabled", false).Error
 }
+```
+
+---
+
+## 场景：备份恢复任务标签
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/backup_types.go`、`server/service/backup_runtime.go`、`server/service/backup_qinglong.go`，或往 `BackupPayload` / `BackupConfigBundle` 里**新增 / 调整任何直连或嵌入 `model.X` 的字段**时必须看本节。
+- 原因：`model.Task.Labels` 打的是 `json:"-"`（它在数据库里存成逗号串，对外一律以数组形态下发）。备份清单以前直接 `Find(&manifest.Data.Tasks)` 拿 `[]model.Task` 序列化，标签整列被静默丢掉 —— 这就是 issue #112。同一个机制还丢了 `model.Subscription.AuthToken`。这类丢失**没有任何报错**：导出成功、恢复成功，只是数据少了一块，用户往往在恢复很久之后才发现。
+
+### 2. Signatures
+
+- 备份任务：`BackupTask` = 嵌入 `model.Task` + 备份专用的 `Labels []string`（json tag `labels`）
+- 备份订阅：`BackupSubscription` = 嵌入 `model.Subscription` + 备份专用的 `AuthToken string`（json tag `auth_token`）
+- 清单字段：`BackupPayload.Tasks []BackupTask` / `BackupPayload.Subscriptions []BackupSubscription`
+- 订阅恢复：`restoreSubscriptions(...) (map[uint]uint, error)`（返回 **旧 ID -> 新 ID** 映射）
+- 标签重映射：`remapSubscriptionLabels(...)`
+- 护栏测试：`TestBackupPayloadModelsHaveNoJSONHiddenFields`
+
+### 3. Contracts
+
+- **核心不变量**：`BackupPayload` / `BackupConfigBundle` 里凡是直连或嵌入 `model.X` 的字段，`model.X` **不得存在未被外层覆盖的 `json:"-"` 字段**。一旦存在，就必须建一个 `Backup*` 包装结构，把该字段以显式 json tag 提出来。
+- 包装结构建好后，**导出、恢复、青龙导入三处必须共用同一套转换**。只改其中一处是最常见的漏网：漏了 `backup_qinglong.go` 的 `manifest.Data.Tasks = tasks`，走青龙路径进来的任务照样静默丢标签。
+- 外层字段层级更浅，会遮蔽被嵌入提升的同名字段；落进清单的必须是与 `/api/tasks/export` 和 `ToDict()` **一致的数组形态**，不能一个接口给逗号串、另一个给数组。
+- 用**嵌入**而不是平铺列字段：平铺意味着 `model.Task` 每加一个字段都要手工跟一次，漏跟同样是静默丢数据。嵌入的已知代价（以后再加 `json:"-"` 字段又会静默丢）由上面那条护栏测试兜住。
+- **不得为了绕开这条不变量去改 `model` 层的 tag**（例如把 `model.Task.Labels` 从 `json:"-"` 改成 `json:"labels"`）：同一个 key 会同时出现「逗号串」和「数组」两种形态，老 manifest 反序列化直接报错，而恢复是全事务的，一条读不出来整次恢复回滚。
+- 老备份缺这些新键 -> 反序列化为零值 -> 必须等价于升级前的行为（`labels` 缺失 = 空标签，`auth_token` 缺失 = 空令牌），**不得报错**。
+- `BackupManifest.Version` 全仓只写不读，**不得**引入按版本分叉的恢复逻辑。
+- **恢复时 `subscription:<id>` 标签必须按 旧 ID -> 新 ID 重映射。** 恢复流程会给订阅重新分配主键（`item.ID = 0`），而 `deleteAll` 只 `DELETE FROM`、不重置 `sqlite_sequence`，驱动建的是 `integer PRIMARY KEY AUTOINCREMENT`，语义就是**不复用已删除的 ROWID**。把旧 ID 原样写回，标签就可能挂到**另一个不相干的订阅**头上。
+- 重映射规则三条，缺一不可：
+  1. 命中 old->new 映射 -> 改写成 `subscription:<新 ID>`；
+  2. 没命中（订阅没被一起恢复 / 备份里就没有那个订阅）-> **丢弃该条 `subscription:` 标签**，绝不保留旧 ID；
+  3. 非 `subscription:` 前缀的标签（含 `分组:` 与用户自定义）**一律原样保留**。
+- 重映射**不得复用** `handler/task_labels.go` 的 `sanitizeIncomingLabels`：那是给用户输入用的，会把 `subscription:` 前缀整条洗掉。
+- 订阅恢复排在任务恢复之后时，采用**后置 pass**（订阅恢复完再回头改任务标签，照同文件 `pendingDepends` 的写法），不要为此调整既有恢复顺序。
+
+### 4. Validation & Error Matrix
+
+- 任务有标签 -> 导出的 manifest 里 `tasks[].labels` 是数组，恢复后 `tasks.labels` 逐字一致
+- 老备份没有 `labels` 键 -> 恢复后标签为空，不报错（等价于升级前行为）
+- 订阅有 `AuthToken` -> 导出带上，恢复后可继续拉私有仓库
+- 老备份没有 `auth_token` 键 -> 恢复后为空串，不报错
+- 标签 `subscription:7`，7 号订阅本次一起恢复并拿到新 ID 12 -> 标签改写成 `subscription:12`
+- 标签 `subscription:7`，但本次只勾了任务没勾订阅（映射为空）-> 该标签被丢弃，同一任务上的其它标签原样保留
+- 往 `BackupPayload` / `BackupConfigBundle` 新加一个含未覆盖 `json:"-"` 字段的 `model.X` -> `TestBackupPayloadModelsHaveNoJSONHiddenFields` 必须变红
+- 恢复过程中任一步失败 -> 整个事务回滚，不留半套数据
+
+### 5. Good/Base/Bad Cases
+
+- Good：备份 -> 清库 -> 恢复，任务的分组标签、用户自定义标签、订阅归属标签全部还原，订阅也能继续拉取。
+- Base：加这两个字段之前导出的老备份包，恢复后任务无标签、订阅无令牌，与升级前行为逐字一致，不报错。
+- Bad：`Find(&manifest.Data.Tasks)` 直接把 `[]model.Task` 序列化进清单 —— 导出、恢复都「成功」，标签静默消失，备份页文案还写着「包含标签」。
+- Bad：恢复时把 `subscription:<旧 ID>` 原样写回。旧 ID 很可能已经属于另一个订阅，而订阅同步的 autoDelete 分支会对「认领到但不在候选集里」的任务执行 `RemoveJob` + 删 task_logs + `Delete(&task)` —— **物理删除**。修 bug 反而比原 bug 严重得多。
+- Bad：只改导出侧，忘了青龙导入那条路径，一半用户的标签照丢。
+- Bad：把 `AuthToken` 带进备份却不提醒用户 —— PAT 会以**明文**进入备份包，发布说明与 issue 回复必须写明「别把备份文件外发」。
+
+### 6. Tests Required
+
+- `TestBackupPayloadModelsHaveNoJSONHiddenFields`：用 reflect 遍历 `BackupPayload` / `BackupConfigBundle` 里所有直连或嵌入的 `model.X`，发现 `json:"-"` 字段而外层没有同名覆盖字段就 fail。这是**唯一**能挡住「以后再加字段又静默丢」的护栏，不得删、不得改成只检查已知字段的白名单。
+- 导出用例：断言 manifest 里 `tasks[].labels`、`subscriptions[].auth_token` 存在且正确。
+- 恢复用例：断言标签与令牌逐字还原；断言老格式（无这两个键）恢复后不报错且落到零值。
+- 重映射用例：订阅 ID 变化后标签变成 `subscription:<新 ID>`；映射未命中时该标签被丢弃、同任务其它标签保留。
+- 青龙导入用例：断言走 `backup_qinglong.go` 进来的任务同样带上标签。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestBackupPayload|TestRestoreBackupManifest|TestCreateBackup|TestBuildQingLongManifest" -count=1
+go test ./...
 ```
 
 ---

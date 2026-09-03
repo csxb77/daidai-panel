@@ -48,6 +48,14 @@ export const taskApi = {
     return request.put(`/tasks/${id}/unpin`) as Promise<{ message: string }>
   },
 
+  // 列表拖拽排序：把 sourceId 挪到 targetId 前面（position='after' 时挪到后面）；
+  // targetId 留空 = 移到本区末尾。这里的「区」= 置顶状态相同且状态分组（启用/禁用）相同的一批任务，
+  // 跨区拖后端直接回 400，前端在 onEnd 里已经先拦过一道。
+  // ⚠️ 它改的是 list_order（列表展示顺序），不是 sort_order（开机任务的执行顺序），两者互不影响。
+  sort(sourceId: number, targetId?: number, position?: 'before' | 'after') {
+    return request.put('/tasks/sort', { source_id: sourceId, target_id: targetId, position }) as Promise<{ message: string }>
+  },
+
   copy(id: number) {
     return request.post(`/tasks/${id}/copy`) as Promise<{ message: string; data: any }>
   },

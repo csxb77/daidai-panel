@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"daidai-panel/database"
 	"daidai-panel/model"
@@ -33,6 +34,12 @@ type preparedTaskListItem struct {
 	displayLabels          []string
 	subscriptionLabels     []string
 	notificationChannelMap map[uint]taskNotificationChannelInfo
+	// nextRunAt 是 prepareTaskListItems 里算 next_run_at 时顺手留下的同一份快照。
+	// 下次运行不是数据库列，只能在响应期按 cron 现算，所以按它排序只能走内存路径；
+	// 存这一份是为了排序时绝不第二次解析 cron —— 再算一次不但更慢，
+	// 拿到的时间点还可能已经跨过一个周期，导致排序结果和下发给前端的 next_run_at 对不上。
+	// 值为 nil 表示「算不出下次运行」（已禁用 / 非 cron 任务 / cron 表达式为空）。
+	nextRunAt *time.Time
 }
 
 func (h *TaskHandler) List(c *gin.Context) {
@@ -136,6 +143,10 @@ func applyDefaultTaskListOrdering(query *gorm.DB) *gorm.DB {
 		// 置顶是用户主动设置的展示优先级，禁用任务如果已经置顶，也必须继续留在置顶区。
 		Order("is_pinned DESC").
 		Order("CASE WHEN status IN (1, 0.5, 2) THEN 0 WHEN status = 0 THEN 1 ELSE 2 END ASC").
+		// 拖拽顺序插在 sort_order 之前：拖拽是用户对这一列表最直接的表达，
+		// 而 sort_order 是开机执行顺序，只在没拖过的桶里继续兜底。
+		// 存量数据 list_order 全是 0，这一层比较等价于不存在，升级后顺序不变。
+		Order("list_order ASC").
 		Order("sort_order ASC").
 		Order("created_at DESC").
 		Order("id DESC")
@@ -176,10 +187,13 @@ func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string,
 				item["notification_channel_enabled"] = channel.Enabled
 			}
 		}
+		var nextRunAt *time.Time
 		if task.Status != model.TaskStatusDisabled && task.UsesCronSchedule() && task.CronExpression != "" {
 			nextTimes := panelcron.NextRunTimesForExpressions(task.CronExpression, 1)
 			if len(nextTimes) > 0 {
 				item["next_run_at"] = nextTimes[0]
+				// 顺手把同一份快照留给排序用，绝不在排序里第二次解析 cron。
+				nextRunAt = &nextTimes[0]
 			}
 		}
 
@@ -188,6 +202,7 @@ func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string,
 			item:               item,
 			displayLabels:      displayLabels,
 			subscriptionLabels: subscriptionLabels,
+			nextRunAt:          nextRunAt,
 		})
 	}
 	return prepared
@@ -213,6 +228,11 @@ func defaultTaskListLess(left, right model.Task) bool {
 	rightGroup := taskSortGroup(right.Status)
 	if leftGroup != rightGroup {
 		return leftGroup < rightGroup
+	}
+	// 内存路径的比较口径必须和 applyDefaultTaskListOrdering 的 SQL 完全一致：
+	// list_order 在前、sort_order 在后，两条路径漂了就会出现「带筛选和不带筛选顺序不一样」。
+	if left.ListOrder != right.ListOrder {
+		return left.ListOrder < right.ListOrder
 	}
 	if left.SortOrder != right.SortOrder {
 		return left.SortOrder < right.SortOrder
@@ -520,6 +540,18 @@ func sortPreparedTaskListItems(items []preparedTaskListItem, sortRules []taskLis
 		right := items[j]
 
 		for _, rule := range sortRules {
+			// last_run_at / next_run_at 允许没有值：从未运行过、已禁用、非 cron 任务都算不出时间。
+			// 这类任务一律沉到最后，且【不跟随 asc/desc 翻转】——
+			// 所以空值判定必须写在下面翻转 direction 之前。写在后面的话，
+			// 用户点「按下次运行倒序」想看最晚要跑的，结果一整屏全是压根不会跑的禁用任务。
+			if rule.Field == "last_run_at" || rule.Field == "next_run_at" {
+				leftTime := preparedTaskRuleTime(left, rule.Field)
+				rightTime := preparedTaskRuleTime(right, rule.Field)
+				if (leftTime == nil) != (rightTime == nil) {
+					return rightTime == nil
+				}
+			}
+
 			comparison := comparePreparedTaskByRule(left, right, rule)
 			if comparison == 0 {
 				continue
@@ -557,9 +589,36 @@ func comparePreparedTaskByRule(left, right preparedTaskListItem, rule taskListSo
 			return 1
 		}
 		return 0
+	case "last_run_at", "next_run_at":
+		// 走到这里时空值情况已经在 sortPreparedTaskListItems 里判掉了（恒排最后、不随方向翻转），
+		// 剩下的要么两边都有值、要么两边都为空 —— 后者按相等处理，退回默认序。
+		leftTime := preparedTaskRuleTime(left, rule.Field)
+		rightTime := preparedTaskRuleTime(right, rule.Field)
+		if leftTime == nil || rightTime == nil {
+			return 0
+		}
+		if leftTime.Before(*rightTime) {
+			return -1
+		}
+		if leftTime.After(*rightTime) {
+			return 1
+		}
+		return 0
 	default:
+		// 未知字段静默回落默认序，不报 400：存量任务视图里可能存着面板已经不认的字段，
+		// 报错会让那些视图直接打不开。
 		return 0
 	}
+}
+
+// preparedTaskRuleTime 取排序字段对应的时间值，nil 表示没有值。
+// last_run_at 是数据库列，next_run_at 是响应期按 cron 现算的快照（prepareTaskListItems 里存的那份），
+// 两个取值口径只写这一处，免得空值判定和大小比较各拿一套。
+func preparedTaskRuleTime(item preparedTaskListItem, field string) *time.Time {
+	if field == "next_run_at" {
+		return item.nextRunAt
+	}
+	return item.task.LastRunAt
 }
 
 func compareFloat64(left, right float64) int {

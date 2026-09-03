@@ -273,6 +273,11 @@ func EnsureColumns() {
 		{"python_version", "VARCHAR(16) DEFAULT ''"},
 		// DEFAULT 0：存量任务升级后一律未加锁，首次拉取行为与升级前完全一致。
 		{"subscription_locked", "BOOLEAN DEFAULT 0"},
+		// 列表拖拽排序用的展示顺序，与上面的 sort_order（开机任务执行顺序）各管各的。
+		// NOT NULL DEFAULT 0：存量行补列后全落 0，而默认排序里 list_order 排在 sort_order 之前，
+		// 全 0 时等价于这一层比较不存在 —— 升级后列表顺序逐字节不变。
+		// SQLite 的 ADD COLUMN 写 NOT NULL 必须同时给 DEFAULT，否则整条 ALTER 会失败。
+		{"list_order", "INTEGER NOT NULL DEFAULT 0"},
 	})
 	migrateLegacyTaskPIDColumn()
 	unlockNonSubscriptionTasks()

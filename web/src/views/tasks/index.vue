@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, onActivated, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { taskApi } from '@/api/task'
 import { depsApi, type PythonRuntimeInfo } from '@/api/deps'
@@ -145,10 +145,25 @@ const logFilesTaskId = ref<number | null>(null)
 const logFilesTaskName = ref('')
 const viewFilters = ref<TaskViewFilter[]>([])
 const viewSortRules = ref<TaskViewSortRule[]>([])
-// 工具栏快捷排序：null 表示走后端默认排序（置顶+状态分组），非空时优先于视图自带排序
+// 工具栏快捷排序：null 表示走后端默认排序（置顶+状态分组），非空时优先于视图自带排序。
+// 「最后运行 / 下次运行」两列的表头点击排序也写在这一条状态上，不另起一份，
+// 否则表头箭头与工具栏按钮文案会各说各话。
 const quickSort = ref<{ field: string; direction: 'asc' | 'desc' } | null>(null)
 const canOperateTasks = computed(() => canOperate(authStore.user?.role))
-const canPollTaskStatus = computed(() => hasRunningTasks.value && isPageActive.value && selectedIds.value.length === 0)
+
+// ---- 拖拽排序（整套照抄 web/src/views/envs/index.vue，差异点见各处注释）----
+const isDragging = ref(false)
+let sortableInstance: any = null
+let sortableLoader: Promise<any> | null = null
+let dragPointerY = 0
+let dragAutoScrollFrame = 0
+let sortableInitFrame = 0
+
+// 🔴 拖拽期间必须停轮询：这一页有 3 秒一轮的状态轮询，它会整体替换 tasks.value，
+// 正在被拖的那一行会连同 DOM 一起换掉，拖拽当场断在半空（envs 页没有轮询，照抄时最容易漏这条）。
+const canPollTaskStatus = computed(
+  () => hasRunningTasks.value && isPageActive.value && selectedIds.value.length === 0 && !isDragging.value
+)
 const desktopTableHeight = computed(() => (isMobile.value ? undefined : '100%'))
 
 function handleViewChange(filters: TaskViewFilter[], sortRules: TaskViewSortRule[]) {
@@ -157,6 +172,8 @@ function handleViewChange(filters: TaskViewFilter[], sortRules: TaskViewSortRule
   viewFilters.value = filters
   viewSortRules.value = sortRules
   page.value = 1
+  // 快捷排序被清掉了，表头箭头也要一起收回去，否则会出现「表头还指着最后运行、实际按视图规则排」
+  syncTableSortIndicator()
   void loadTasks()
 }
 
@@ -178,14 +195,38 @@ function getCronExpressions(task: any) {
 
 const hasRunningTasks = computed(() => tasks.value.some(t => t.status === 2))
 
-// 快捷排序可选项：value 为 null 表示恢复默认排序，其余对应后端 sort_rules 的单条规则
+// 可以点表头排序的两列。表头点击与下拉选项写的是同一条 quickSort 状态，
+// 这份名单用来判断「当前排序该不该在表头上画箭头」。
+const taskColumnSortFields = ['last_run_at', 'next_run_at']
+
+// 快捷排序可选项：value 为 null 表示恢复默认排序，其余对应后端 sort_rules 的单条规则。
+// 「最后运行 / 下次运行」四项是表头排序的替代入口：窄桌面（<1600px）「最后运行」整列被 v-if 掉了，
+// 没有这几项的话那档视口下根本点不到这个排序。
 const quickSortOptions: { key: string; label: string; value: { field: string; direction: 'asc' | 'desc' } | null }[] = [
   { key: 'default', label: '默认排序', value: null },
   { key: 'name_asc', label: '名称 A→Z', value: { field: 'name', direction: 'asc' } },
   { key: 'name_desc', label: '名称 Z→A', value: { field: 'name', direction: 'desc' } },
   { key: 'created_desc', label: '创建时间（最新优先）', value: { field: 'created_at', direction: 'desc' } },
   { key: 'created_asc', label: '创建时间（最早优先）', value: { field: 'created_at', direction: 'asc' } },
+  { key: 'last_run_desc', label: '最后运行（最近优先）', value: { field: 'last_run_at', direction: 'desc' } },
+  { key: 'last_run_asc', label: '最后运行（最早优先）', value: { field: 'last_run_at', direction: 'asc' } },
+  { key: 'next_run_asc', label: '下次运行（最快到来）', value: { field: 'next_run_at', direction: 'asc' } },
+  { key: 'next_run_desc', label: '下次运行（最晚到来）', value: { field: 'next_run_at', direction: 'desc' } },
 ]
+
+// 排序字段的中文名。原来这里是 `field === 'name' ? '名称' : '创建时间'` 的三目，
+// 字段一多就会把未知字段错标成「创建时间」（视图自带排序也走这个按钮文案），改成查表 + 回落。
+const quickSortFieldLabels: Record<string, string> = {
+  name: '名称',
+  command: '命令',
+  cron_expression: '定时规则',
+  status: '状态',
+  labels: '标签',
+  subscription: '订阅',
+  created_at: '创建时间',
+  last_run_at: '最后运行',
+  next_run_at: '下次运行',
+}
 
 // 当前选中的快捷排序项 key，用于下拉菜单高亮；未选中（默认排序）时返回 'default'
 const activeQuickSortKey = computed(() => {
@@ -200,7 +241,7 @@ const activeQuickSortKey = computed(() => {
 const quickSortButtonText = computed(() => {
   if (!quickSort.value) return '排序'
   const arrow = quickSort.value.direction === 'asc' ? '↑' : '↓'
-  const fieldText = quickSort.value.field === 'name' ? '名称' : '创建时间'
+  const fieldText = quickSortFieldLabels[quickSort.value.field] || '自定义'
   return `排序：${fieldText} ${arrow}`
 })
 
@@ -208,11 +249,293 @@ const quickSortButtonText = computed(() => {
 function handleQuickSortSelect(value: { field: string; direction: 'asc' | 'desc' } | null) {
   quickSort.value = value
   page.value = 1
+  syncTableSortIndicator()
   void loadTasks()
+}
+
+// el-table 的 sort() 会反过来抛一次 @sort-change。同步表头箭头时用这个闸拦住那一次回调，
+// 否则「下拉选排序 → 同步箭头 → 回调再发一次请求」会白发一遍列表请求。
+let syncingTableSort = false
+
+/**
+ * 把 quickSort 同步到表头箭头。
+ *
+ * 只有「最后运行 / 下次运行」两列画得出箭头，其余排序（含默认排序、视图自带排序）一律 clearSort()——
+ * 不收回去的话表头会一直指着上一次点的那一列，和实际排序对不上。
+ * clearSort 内部是 silent 提交，不会触发 @sort-change，可以直接调。
+ *
+ * ⚠️ 「最后运行」列在窄桌面被 v-if 掉了，此时 el-table 里根本没有这一列，
+ *    sort() 找不到列会静默什么都不做（连箭头都不画），所以先判一次列是否真的渲染出来。
+ */
+function syncTableSortIndicator() {
+  const table = taskTableRef.value
+  if (!table) return
+  const field = quickSort.value?.field || ''
+  const columnRendered = field === 'next_run_at' || (field === 'last_run_at' && !isNarrowDesktop.value)
+  if (taskColumnSortFields.includes(field) && columnRendered) {
+    syncingTableSort = true
+    table.sort?.(field, quickSort.value?.direction === 'desc' ? 'descending' : 'ascending')
+    syncingTableSort = false
+    return
+  }
+  table.clearSort?.()
+}
+
+// 点表头排序。第三次点会把 order 置空 = 取消该列排序，回落到后端默认排序（置顶 → 状态 → 手工顺序）。
+function handleTableSortChange(payload: { prop?: string; order?: string | null }) {
+  if (syncingTableSort) return
+  const prop = payload?.prop || ''
+  const order = payload?.order || ''
+  if (!prop || !order) {
+    quickSort.value = null
+  } else {
+    quickSort.value = { field: prop, direction: order === 'ascending' ? 'asc' : 'desc' }
+  }
+  page.value = 1
+  void loadTasks()
+}
+
+/**
+ * 拖拽是否可用。三种情况直接禁掉手柄（并用 tooltip 说明原因）：
+ *   1) 正在按列 / 按快捷项排序 —— 展示顺序由排序字段决定，拖出来的位置刷新就弹回去；
+ *   2) 当前视图自带排序规则 —— 同上；
+ *   3) 列表不足两行 —— 没有可换的位置。
+ * 观察者（没有操作权限）连拖拽列都不渲染，这里的判定只是兜底。
+ */
+const dragSortDisabledReason = computed(() => {
+  if (!canOperateTasks.value) return '当前账号没有排序任务权限'
+  if (quickSort.value) return '当前正在按列排序，先切回「默认排序」再拖拽'
+  if (viewSortRules.value.length > 0) return '当前视图自带排序规则，切到不带排序的视图再拖拽'
+  if (tasks.value.length < 2) return '至少两条任务才能拖拽排序'
+  return ''
+})
+const sortableEnabled = computed(() => dragSortDisabledReason.value === '')
+const dragSortHint = computed(() => dragSortDisabledReason.value || '按住拖动可调整任务顺序')
+
+// 任务的排序桶：与后端 handler/task_query.go 的 taskSortGroup 同一口径 ——
+// 启用/运行中/排队中算一组、禁用一组、其余一组。拖拽只允许在同一个桶内进行（置顶状态也要相同）。
+function taskSortGroupOf(status: number) {
+  if (status === 0) return 1
+  if (status === 1 || status === 2 || status === 0.5) return 0
+  return 2
+}
+
+function inSameTaskBucket(left: any, right: any) {
+  return Boolean(left?.is_pinned) === Boolean(right?.is_pinned)
+    && taskSortGroupOf(Number(left?.status)) === taskSortGroupOf(Number(right?.status))
+}
+
+function loadSortable() {
+  if (!sortableLoader) {
+    sortableLoader = import('sortablejs').then((mod) => mod.default)
+  }
+  return sortableLoader
+}
+
+function updateDragPointer(evt: any) {
+  const pointerEvent = evt?.originalEvent || evt
+  if (typeof pointerEvent?.clientY === 'number') {
+    dragPointerY = pointerEvent.clientY
+    return
+  }
+
+  const touch = pointerEvent?.touches?.[0] || pointerEvent?.changedTouches?.[0]
+  if (touch && typeof touch.clientY === 'number') {
+    dragPointerY = touch.clientY
+  }
+}
+
+function startDragAutoScroll() {
+  stopDragAutoScroll()
+
+  const tick = () => {
+    // 本页表格带 :height="100%"，EP 会把表体套进 el-scrollbar，真正滚动的是 .el-scrollbar__wrap
+    // （envs 页表格没设高度、靠整页滚动，所以那边直接取 .el-table__body-wrapper）。
+    // 取不到就退回 body-wrapper 本身：拿不到滚动容器时下面的 canScrollTable 判定自然为假，
+    // 只剩整页滚动兜底，不会抛错。
+    const bodyWrapper = (
+      document.querySelector('.task-table .el-table__body-wrapper .el-scrollbar__wrap')
+      || document.querySelector('.task-table .el-table__body-wrapper')
+    ) as HTMLElement | null
+    const tableThreshold = 72
+    const viewportThreshold = 88
+    const tableScrollStep = 22
+    const pageScrollStep = 18
+
+    if (bodyWrapper) {
+      const rect = bodyWrapper.getBoundingClientRect()
+      const canScrollTable = bodyWrapper.scrollHeight > bodyWrapper.clientHeight + 4
+      if (canScrollTable) {
+        if (dragPointerY < rect.top + tableThreshold && bodyWrapper.scrollTop > 0) {
+          bodyWrapper.scrollTop -= tableScrollStep
+        } else if (
+          dragPointerY > rect.bottom - tableThreshold &&
+          bodyWrapper.scrollTop + bodyWrapper.clientHeight < bodyWrapper.scrollHeight
+        ) {
+          bodyWrapper.scrollTop += tableScrollStep
+        }
+      }
+    }
+
+    if (dragPointerY < viewportThreshold) {
+      window.scrollBy({ top: -pageScrollStep, behavior: 'auto' })
+    } else if (dragPointerY > window.innerHeight - viewportThreshold) {
+      window.scrollBy({ top: pageScrollStep, behavior: 'auto' })
+    }
+
+    dragAutoScrollFrame = window.requestAnimationFrame(tick)
+  }
+
+  dragAutoScrollFrame = window.requestAnimationFrame(tick)
+}
+
+function stopDragAutoScroll() {
+  if (dragAutoScrollFrame) {
+    window.cancelAnimationFrame(dragAutoScrollFrame)
+    dragAutoScrollFrame = 0
+  }
+}
+
+function clearQueuedSortableInit() {
+  if (sortableInitFrame) {
+    window.cancelAnimationFrame(sortableInitFrame)
+    sortableInitFrame = 0
+  }
+}
+
+function queueSortableInit() {
+  if (typeof window === 'undefined') return
+  if (!sortableEnabled.value) {
+    if (sortableInstance) {
+      sortableInstance.destroy()
+      sortableInstance = null
+    }
+    return
+  }
+  clearQueuedSortableInit()
+  sortableInitFrame = window.requestAnimationFrame(() => {
+    sortableInitFrame = 0
+    void initSortable()
+  })
+}
+
+// 拖拽时把被拖行每个单元格宽度锁成固定 px，避免 forceFallback 克隆行脱离表格后列宽塌陷
+function lockRowCellWidths(row: HTMLElement | null) {
+  if (!row) return
+  row.querySelectorAll<HTMLElement>('td').forEach((cell) => {
+    const w = cell.offsetWidth
+    cell.style.width = `${w}px`
+    cell.style.minWidth = `${w}px`
+    cell.style.maxWidth = `${w}px`
+    cell.style.boxSizing = 'border-box'
+  })
+}
+
+function unlockRowCellWidths(row: HTMLElement | null) {
+  if (!row) return
+  row.querySelectorAll<HTMLElement>('td').forEach((cell) => {
+    cell.style.width = ''
+    cell.style.minWidth = ''
+    cell.style.maxWidth = ''
+    cell.style.boxSizing = ''
+  })
+}
+
+async function initSortable() {
+  if (sortableInstance) {
+    sortableInstance.destroy()
+    sortableInstance = null
+  }
+  // 移动端渲染的是卡片列表、压根没有表格，本轮拖拽排序只做桌面表格
+  if (isMobile.value || loading.value || !sortableEnabled.value) return
+  const el = document.querySelector('.task-table .el-table__body-wrapper tbody')
+  if (!el) return
+  try {
+    const Sortable = await loadSortable()
+    sortableInstance = Sortable.create(el as HTMLElement, {
+      animation: 220,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      dragClass: 'sortable-drag',
+      forceFallback: true,
+      fallbackOnBody: true,
+      scroll: true,
+      bubbleScroll: true,
+      scrollSensitivity: 100,
+      scrollSpeed: 18,
+      handle: '.task-drag-handle',
+      delay: 0,
+      touchStartThreshold: 4,
+      onChoose: (evt: any) => {
+        lockRowCellWidths(evt.item)
+      },
+      onUnchoose: (evt: any) => {
+        unlockRowCellWidths(evt.item)
+      },
+      onStart: (evt: any) => {
+        // 置位后 canPollTaskStatus 立刻变假，watch 会把 3 秒轮询停掉（理由见 canPollTaskStatus 的注释）
+        isDragging.value = true
+        lockRowCellWidths(evt.item)
+        updateDragPointer(evt)
+        startDragAutoScroll()
+      },
+      onMove: (evt: any) => {
+        updateDragPointer(evt)
+      },
+      onEnd: async (evt: any) => {
+        // 放在最前面复位：后面每一条早退分支都要恢复轮询，写在末尾会漏掉
+        isDragging.value = false
+        unlockRowCellWidths(evt.item)
+        stopDragAutoScroll()
+        updateDragPointer(evt)
+
+        const { oldIndex, newIndex } = evt
+        if (oldIndex === newIndex) return
+
+        const sourceItem = tasks.value[oldIndex]
+        if (!sourceItem) return
+
+        // 先在本地把行挪到位（乐观更新），请求失败再 loadTasks 弹回原位。
+        // 不这么做的话松手瞬间 Vue 会按旧数据把行画回原位置，等请求回来又跳一次。
+        const movedItem = tasks.value.splice(oldIndex, 1)[0]
+        tasks.value.splice(newIndex, 0, movedItem)
+
+        // 桶判定：后端只允许「置顶状态相同 + 状态分组相同」的任务互拖，跨桶回 400。
+        // 落点前后两侧都不是同桶 ⇒ 真的拖进别的区了，先拦下并弹回原位；
+        // 只有后一条不同桶（前一条同桶）⇒ 落点就是本区末尾，target 留空即可 ——
+        // 后端约定「target_id 缺省 = 移到本区末尾」，语义正好对上。
+        const nextRow = tasks.value[newIndex + 1]
+        const prevRow = tasks.value[newIndex - 1]
+        const nextSameBucket = !!nextRow && inSameTaskBucket(sourceItem, nextRow)
+        const prevSameBucket = !!prevRow && inSameTaskBucket(sourceItem, prevRow)
+        if (!nextSameBucket && !prevSameBucket) {
+          ElMessage.warning('置顶任务与普通任务、启用与禁用任务请分别排序，跨区移动请用置顶 / 启用按钮')
+          void loadTasks()
+          return
+        }
+
+        try {
+          await taskApi.sort(sourceItem.id, nextSameBucket ? nextRow.id : undefined)
+        } catch (err: any) {
+          ElMessage.error(err?.response?.data?.error || err?.message || '排序失败')
+          void loadTasks()
+        }
+      }
+    })
+  } catch {
+    ElMessage.error('拖拽排序组件加载失败')
+  }
 }
 
 watch(pageSize, (value) => {
   persistTaskPageSize(value)
+})
+
+// 拖拽可用性或端形态变了就重挂实例：从「禁用」翻成「可用」时表格里才刚长出手柄，
+// 只靠 loadTasks 末尾那一次挂载会漏掉（比如清掉列排序但不刷新列表的场景）。
+watch([sortableEnabled, isMobile], () => {
+  void nextTick(() => queueSortableInit())
 })
 
 // 显示设置集中在这里写回：toggleNameLabelPref 每次都整体换一个新对象，所以不需要 deep
@@ -252,6 +575,10 @@ function startStatusPolling() {
     }
     try {
       const res = await taskApi.list(buildTaskListParams())
+      // await 之后必须再判一次：停轮询只清掉了定时器，挡不住**已经在飞**的这一次请求。
+      // 拖拽开始时若上一轮 tick 的响应还在路上，回来后无条件覆盖 tasks.value
+      // 会把正在拖的那一行连同 DOM 一起换掉，onEnd 再按下标取值就取到了新数组的行。
+      if (!canPollTaskStatus.value) return
       tasks.value = res.data
       total.value = res.total
       syncStatusPolling()
@@ -288,6 +615,10 @@ async function loadTasks() {
   } finally {
     loading.value = false
   }
+
+  // 行是整批换掉的，拖拽实例要跟着重挂（initSortable 里会先 destroy 旧的）
+  await nextTick()
+  queueSortableInit()
 }
 
 async function loadNotificationChannels() {
@@ -379,6 +710,12 @@ onActivated(async () => {
 
 onBeforeUnmount(() => {
   stopStatusPolling()
+  stopDragAutoScroll()
+  clearQueuedSortableInit()
+  if (sortableInstance) {
+    sortableInstance.destroy()
+    sortableInstance = null
+  }
 })
 
 function handleSearch() {
@@ -1187,12 +1524,27 @@ async function handleImport(event: Event) {
         v-loading="loading"
         :data="tasks"
         :height="desktopTableHeight"
+        class="task-table"
+        row-key="id"
         @selection-change="handleSelectionChange"
+        @sort-change="handleTableSortChange"
         style="width: 100%"
         :header-cell-style="{ background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '13px' }"
         :row-style="{ cursor: 'pointer' }"
       >
         <el-table-column v-if="canOperateTasks" type="selection" width="40" />
+        <!-- 拖拽列：40px，与环境变量页同宽同形（那边是 .env-drag-col）。
+             只对有操作权限的账号渲染 —— 观察者拖不动，也不该白吃这 40px 列宽
+             （窄桌面三个弹性列已经在抢像素了）。
+             手柄按 sortableEnabled 置灰：按列排序 / 视图自带排序 / 只有一行时，
+             拖出来的位置刷新就会被排序规则覆盖回去，所以直接禁掉并用 tooltip 说明原因。 -->
+        <el-table-column v-if="canOperateTasks" width="40" align="center" class-name="task-drag-col">
+          <template #default>
+            <el-tooltip :content="dragSortHint" placement="top">
+              <el-icon class="task-drag-handle" :class="{ 'is-disabled': !sortableEnabled }"><Rank /></el-icon>
+            </el-tooltip>
+          </template>
+        </el-table-column>
         <!-- 三个弹性列按 min-width 的比例瓜分剩余宽度（EP 的分配规则）。
              窄桌面改成 90 : 70 : 95：cron 表达式长度固定且短，全显出来价值最高；
              命令是长路径，任何窄宽度下都得省略，让它少分一点最划算。 -->
@@ -1294,14 +1646,31 @@ async function handleImport(event: Event) {
           </template>
         </el-table-column>
         <!-- 窄桌面隐藏「最后运行」「耗时」：这两列固定占 250px，是把弹性列压到下限的主因。
-             信息没丢——任务详情弹窗里都有，「下次运行」「上次结果」这两个更常看的仍然保留。 -->
-        <el-table-column v-if="!isNarrowDesktop" label="最后运行" width="160" align="center">
+             信息没丢——任务详情弹窗里都有，「下次运行」「上次结果」这两个更常看的仍然保留。
+             ⚠️ 这一列被 v-if 掉时表头上就没有「最后运行」可点了，替代入口在工具栏排序下拉里
+             （quickSortOptions 的 last_run_* 两项），改这里记得同步那边。
+             sortable="custom" = 只出箭头、排序交给后端；prop 就是后端 sort_rules 的 field 名，
+             @sort-change 把它写进 quickSort（不另起一份排序状态）。 -->
+        <el-table-column
+          v-if="!isNarrowDesktop"
+          prop="last_run_at"
+          label="最后运行"
+          width="160"
+          align="center"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <span v-if="row.last_run_at" class="time-text">{{ formatTime(row.last_run_at) }}</span>
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="下次运行" width="160" align="center">
+        <el-table-column
+          prop="next_run_at"
+          label="下次运行"
+          width="160"
+          align="center"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <span v-if="row.next_run_at" class="time-text">{{ formatTime(row.next_run_at) }}</span>
             <span v-else class="text-muted">-</span>
@@ -2045,5 +2414,70 @@ async function handleImport(event: Event) {
 .table-card,
 .dd-mobile-list {
   animation-delay: 60ms;
+}
+
+// 桌面拖拽手柄（与环境变量页 .env-drag-handle 同款）
+.task-drag-handle {
+  cursor: grab;
+  color: var(--el-text-color-placeholder);
+  font-size: 16px;
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  &:hover {
+    color: var(--el-text-color-secondary);
+  }
+
+  &:active {
+    cursor: grabbing;
+  }
+
+  // 禁用态只改观感、不改 DOM：手柄要留在原地才能挂 tooltip 说明为什么拖不了。
+  // 真正的「拖不动」由 queueSortableInit 直接销毁 sortable 实例保证，不是靠这几行 CSS。
+  &.is-disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+
+    &:hover {
+      color: var(--el-text-color-placeholder);
+    }
+  }
+}
+
+:deep(.task-drag-col) {
+  padding: 0 !important;
+}
+</style>
+
+<style lang="scss">
+/* 这些类由 sortablejs 在运行时动态加到 el-table 行 / body 上的拖拽克隆上，
+   不在本组件 scoped 作用域内，必须用全局样式才能命中。
+
+   ⚠️ 与 web/src/views/envs/index.vue 末尾那一段【内容完全相同】，属于有意重复：
+   组件样式是随组件模块按需注入的，只进任务页不进环境变量页时那一份根本不会被加载，
+   不自带一份的话拖起来的行会是一片透明、看不出落点。选择器与声明逐字一致，两份同时在也不会互相打架。 */
+
+/* 被拖起的克隆行：不做放大与投影，改为实底 + 主色描边标出正在拖动的行。
+   用 outline 而不是 border：el-table 是 border-collapse: separate，tr 上的 border 不会绘制。 */
+.sortable-drag {
+  background: var(--el-bg-color);
+  opacity: 1 !important;
+  border-radius: 0;
+  cursor: grabbing;
+  outline: 1px solid var(--el-color-primary);
+  outline-offset: -1px;
+}
+
+/* 落点占位：高亮"插槽"，清楚指示会落到哪 */
+.sortable-ghost {
+  background: var(--el-color-primary-light-9) !important;
+  border-radius: 0;
+}
+.sortable-ghost > td {
+  opacity: 0.25;
+}
+
+/* 被选中的原行 */
+.sortable-chosen {
+  cursor: grabbing;
 }
 </style>

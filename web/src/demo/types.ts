@@ -50,6 +50,14 @@ export interface DemoTask {
   notify_on_abort: boolean
   notification_channel_id: number | null
   depends_on: number | null
+  /**
+   * 列表拖拽顺序，越小越靠前（server/model/task.go 的 ListOrder）。
+   *
+   * 与 sort_order 是两码事，别混用：sort_order 是【开机运行任务的执行顺序】契约，
+   * 拿它做列表拖拽会静默改写用户的开机编排。默认排序里 list_order 排在 sort_order 之前，
+   * 存量数据全是 0 ⇒ 整体顺序与加这个字段之前逐条一致。
+   */
+  list_order: number
   sort_order: number
   is_pinned: boolean
   /** 用户手动改过订阅任务的名称/定时后置真，列表页显示「已锁定」标签 */

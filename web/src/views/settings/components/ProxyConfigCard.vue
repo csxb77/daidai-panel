@@ -139,6 +139,12 @@ const binaryProxyOptions = [
         <p class="proxy-help-note">
           这里填写的是“面板服务器能访问到的代理地址”。如果面板运行在 Docker 容器内，127.0.0.1 指的是容器内部，不是宿主机；宿主机代理通常需要填写宿主机在容器内可访问的地址。
         </p>
+        <!-- issue #111：开代理后 Python 的 notify.py 把发往面板自身的回调请求也交给了代理，代理回 502。
+             修复方式是给脚本注入的 NO_PROXY / no_proxy 里合并追加回环地址，这里把这条行为讲清楚，
+             免得用户以为“填了代理连本机接口也要走代理”。 -->
+        <p class="proxy-help-note">
+          面板会自动为 localhost / 127.0.0.1 / ::1 放行直连，脚本回调面板自身不经过代理。这三条是面板强制注入的：你在“环境变量”页设置的 NO_PROXY 会与它们合并（你的值不会被覆盖，但也无法把这三条移除）；确实要让某个本机服务走代理，需要在脚本内部自行指定 proxies。
+        </p>
       </div>
       <template #footer>
         <el-button type="primary" @click="proxyHelpDialogVisible = false">知道了</el-button>

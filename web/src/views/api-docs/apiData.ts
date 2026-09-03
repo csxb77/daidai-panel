@@ -481,7 +481,7 @@ panel.add_or_update_env(
           { name: 'page_size', type: 'integer', description: '每页数量，默认 20', example: '20' },
           { name: 'label', type: 'string', description: '按标签模糊匹配（labels LIKE %值%）。分组要连前缀一起传，例如「分组:日常」，只传「日常」会把普通标签也捞进来' },
           { name: 'filters', type: 'string', description: '任务视图的筛选规则，JSON 字符串数组 [{field,operator,value}]。field 可选 command / name / cron_expression / status / labels / subscription；operator 可选 contains / not_contains / equals / not_equals；匹配一律先 trim 再转小写、不是正则；多条之间是 AND。status 的 value 用 1（已启用）/ 0（已禁用）/ 2（运行中）/ 0.5（排队中）。value 为空的规则会被整条丢弃，JSON 解析失败则静默降级为不筛选', example: '[{"field":"command","operator":"contains","value":"jd"}]' },
-          { name: 'sort_rules', type: 'string', description: '任务视图的排序规则，JSON 字符串数组 [{field,direction}]。field 可选 name / command / cron_expression / status / labels / subscription / created_at；direction 只认 desc，其它一律按 asc；多条按先后做 tie-break，全平手回落默认排序（置顶 > 状态 > 手工顺序）', example: '[{"field":"name","direction":"asc"}]' },
+          { name: 'sort_rules', type: 'string', description: '任务视图的排序规则，JSON 字符串数组 [{field,direction}]。field 可选 name / command / cron_expression / status / labels / subscription / created_at / last_run_at / next_run_at；direction 只认 desc，其它一律按 asc；多条按先后做 tie-break，全平手回落默认排序（置顶 > 状态 > 拖拽顺序 > 手工顺序）。last_run_at（最后运行）与 next_run_at（下次运行）是任务列表页两列的点击排序：next_run_at 不是数据库列，是按 cron 现算的快照，只能在内存里排；这两个字段的空值（从未运行、已禁用或非 cron 因而没有下次运行）一律排在最后，不随 asc/desc 翻转。未知 field 静默回落默认排序，不报 400', example: '[{"field":"next_run_at","direction":"asc"}]' },
         ],
         responseExample: JSON.stringify({
           data: [{
@@ -573,6 +573,20 @@ panel.add_or_update_env(
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '任务 ID' }],
         responseExample: JSON.stringify({ message: '任务已停止' }, null, 2),
+      },
+      {
+        id: 'tasks-sort',
+        method: 'PUT',
+        path: '/api/tasks/sort',
+        title: '调整任务列表顺序',
+        description: '任务列表页的拖拽排序，需要 operator 及以上角色。把 source_id 挪到 target_id 前面（position=after 时挪到后面）；不传 target_id 表示移到本区末尾。这里改的是 list_order（列表展示顺序），不是 sort_order（开机运行任务的执行顺序），两者互不影响。只允许同一「区」内互拖：区 = 置顶状态相同 且 状态分组相同（启用/运行中/排队中算一组、禁用一组），跨区返回 400「置顶任务与普通任务、启用与禁用任务请分别排序，跨区移动请用置顶 / 启用按钮」。兄弟任务取的是整个区（不是当前页），所以跨页拖拽同样有效；一次调用会把该区整体按 10 的步长重编号，其它区的值不动。注意 GET /api/tasks 带了 sort_rules 时展示顺序由排序规则决定，list_order 不参与，此时拖拽没有意义。',
+        auth: 'jwt',
+        bodyParams: [
+          { name: 'source_id', type: 'integer', required: true, description: '被拖动的任务 ID', example: '12' },
+          { name: 'target_id', type: 'integer', description: '落点任务 ID；不传表示移到本区末尾', example: '34' },
+          { name: 'position', type: 'string', description: '相对落点的位置，只认 after（插到目标之后），其余一律按 before', example: 'before' },
+        ],
+        responseExample: JSON.stringify({ message: '排序更新成功' }, null, 2),
       },
       {
         id: 'task-views-list',

@@ -298,6 +298,10 @@ function buildTasks(now: number): DemoTask[] {
       notify_on_abort: false,
       notification_channel_id: seed.channelId ?? null,
       depends_on: null,
+      // 全部落 0，与真实库里「升级后存量行默认 0」的状态一致：
+      // 默认排序里 list_order 排在 sort_order 之前，全平手时顺序完全由下面的 sort_order 决定，
+      // 也就是加这个字段前后演示站的初始列表逐条不变。拖一次之后这一桶才会被重编号成 10/20/30…
+      list_order: 0,
       sort_order: index,
       is_pinned: seed.pinned ?? false,
       subscription_locked: seed.locked ?? false,

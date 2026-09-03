@@ -135,8 +135,15 @@ func buildBackupManifest(selection BackupSelection) (BackupManifest, error) {
 	}
 
 	if selection.Tasks {
-		if err := database.DB.Order("id ASC").Find(&manifest.Data.Tasks).Error; err != nil {
+		// 不能直接 Find(&manifest.Data.Tasks)：清单里存的是 BackupTask，标签要单独拎成数组。
+		// 形态照下面紧邻的 EnvVars 分支。
+		var tasks []model.Task
+		if err := database.DB.Order("id ASC").Find(&tasks).Error; err != nil {
 			return BackupManifest{}, fmt.Errorf("load tasks: %w", err)
+		}
+		manifest.Data.Tasks = make([]BackupTask, 0, len(tasks))
+		for _, task := range tasks {
+			manifest.Data.Tasks = append(manifest.Data.Tasks, backupTaskFromModel(task))
 		}
 	}
 
@@ -152,8 +159,14 @@ func buildBackupManifest(selection BackupSelection) (BackupManifest, error) {
 	}
 
 	if selection.Subscriptions {
-		if err := database.DB.Order("id ASC").Find(&manifest.Data.Subscriptions).Error; err != nil {
+		// 同上：清单里存的是 BackupSubscription，auth_token 要单独带出来。
+		var subscriptions []model.Subscription
+		if err := database.DB.Order("id ASC").Find(&subscriptions).Error; err != nil {
 			return BackupManifest{}, fmt.Errorf("load subscriptions: %w", err)
+		}
+		manifest.Data.Subscriptions = make([]BackupSubscription, 0, len(subscriptions))
+		for _, subscription := range subscriptions {
+			manifest.Data.Subscriptions = append(manifest.Data.Subscriptions, backupSubscriptionFromModel(subscription))
 		}
 
 		var sshKeys []model.SSHKey
@@ -600,6 +613,19 @@ func restoreLegacyJSONBytes(data []byte) error {
 		}
 	}
 
+	// 老 JSON 备份里 tasks / subscriptions 存的是 model.X 原样序列化的结果，
+	// 本来就没有 labels / auth_token 这两个键（它们在 model 上是 json:"-"）。
+	// 这里只是把类型对齐到新的 BackupTask / BackupSubscription，标签与令牌仍为空 ——
+	// 老备份的恢复行为逐字节不变。
+	legacyTasks := make([]BackupTask, 0, len(legacy.Tasks))
+	for _, task := range legacy.Tasks {
+		legacyTasks = append(legacyTasks, backupTaskFromModel(task))
+	}
+	legacySubscriptions := make([]BackupSubscription, 0, len(legacy.Subs))
+	for _, subscription := range legacy.Subs {
+		legacySubscriptions = append(legacySubscriptions, backupSubscriptionFromModel(subscription))
+	}
+
 	manifest := BackupManifest{
 		Format:    "daidai-panel-backup",
 		Version:   legacy.Version,
@@ -618,9 +644,9 @@ func restoreLegacyJSONBytes(data []byte) error {
 			Configs: BackupConfigBundle{
 				SystemConfigs: legacy.Configs,
 			},
-			Tasks:         legacy.Tasks,
+			Tasks:         legacyTasks,
 			EnvVars:       legacy.EnvVars,
-			Subscriptions: legacy.Subs,
+			Subscriptions: legacySubscriptions,
 		},
 	}
 
@@ -725,6 +751,8 @@ func restoreBackupManifest(manifest BackupManifest, extractedDir string) error {
 	var createdDependencies []model.Dependency
 	taskIDMap := map[uint]uint{}
 	sshKeyIDMap := map[uint]uint{}
+	// 订阅恢复会重新分配主键，任务上的 subscription:<旧ID> 标签要靠这份映射回头改写，见下面的后置 pass。
+	subscriptionIDMap := map[uint]uint{}
 
 	rollback := func(err error) error {
 		tx.Rollback()
@@ -816,7 +844,18 @@ func restoreBackupManifest(manifest BackupManifest, extractedDir string) error {
 		if err != nil {
 			return rollback(err)
 		}
-		if err := restoreSubscriptions(tx, manifest.Data.Subscriptions, sshKeyIDMap); err != nil {
+		subscriptionIDMap, err = restoreSubscriptions(tx, manifest.Data.Subscriptions, sshKeyIDMap)
+		if err != nil {
+			return rollback(err)
+		}
+	}
+
+	// 后置 pass：恢复顺序是先任务后订阅，等订阅拿到新主键之后再回头改任务标签，
+	// 照上面 restoreTasks 里 pendingDepends 那套写法，不动既有恢复顺序。
+	// 只勾选任务不勾选订阅时 subscriptionIDMap 为空 → 所有 subscription: 标签被丢弃，
+	// 等价于今天（标签整列丢失）的行为。
+	if selection.Tasks {
+		if err := remapSubscriptionLabels(tx, subscriptionIDMap); err != nil {
 			return rollback(err)
 		}
 	}
@@ -1148,11 +1187,39 @@ func restoreEnvVars(tx *gorm.DB, envVars []BackupEnvVar) error {
 	return nil
 }
 
-func restoreTasks(tx *gorm.DB, tasks []model.Task, notifyChannelIDMap map[uint]uint) (map[uint]uint, error) {
+// backupTaskFromModel 把库里的 Task 转成备份形态：标签单独拎成数组，
+// 否则 model.Task.Labels 上的 json:"-" 会让整列标签在写 manifest.json 时被丢掉（issue #112）。
+func backupTaskFromModel(item model.Task) BackupTask {
+	// GetLabels 在空标签时返回 []string{} 而不是 nil，所以清单里恒为 JSON 数组，
+	// 与 /api/tasks/export 和 ToDict() 的形态一致。
+	return BackupTask{Task: item, Labels: item.GetLabels()}
+}
+
+// modelTaskFromBackup 把备份形态转回落库用的 model.Task。
+// 外层的 Labels 数组是唯一权威：老备份没有这个键 → nil → 拼出空串，与升级前完全一致。
+func modelTaskFromBackup(item BackupTask) model.Task {
+	task := item.Task
+	task.SetLabelsFromSlice(item.Labels)
+	return task
+}
+
+// backupSubscriptionFromModel / modelSubscriptionFromBackup 同理，处理 AuthToken（订阅 PAT）。
+func backupSubscriptionFromModel(item model.Subscription) BackupSubscription {
+	return BackupSubscription{Subscription: item, AuthToken: item.AuthToken}
+}
+
+func modelSubscriptionFromBackup(item BackupSubscription) model.Subscription {
+	subscription := item.Subscription
+	subscription.AuthToken = item.AuthToken
+	return subscription
+}
+
+func restoreTasks(tx *gorm.DB, tasks []BackupTask, notifyChannelIDMap map[uint]uint) (map[uint]uint, error) {
 	idMap := make(map[uint]uint, len(tasks))
 	pendingDepends := make(map[uint]uint)
 
-	for _, item := range tasks {
+	for _, backupTask := range tasks {
+		item := modelTaskFromBackup(backupTask)
 		oldID := item.ID
 		oldDepends := item.DependsOn
 		oldNotificationChannelID := item.NotificationChannelID
@@ -1218,8 +1285,14 @@ func restoreSSHKeys(tx *gorm.DB, keys []BackupSSHKey) (map[uint]uint, error) {
 	return idMap, nil
 }
 
-func restoreSubscriptions(tx *gorm.DB, subscriptions []model.Subscription, sshKeyIDMap map[uint]uint) error {
-	for _, item := range subscriptions {
+// restoreSubscriptions 返回「备份里的订阅 ID → 恢复后新 ID」的映射，
+// 写法照 restoreSSHKeys / restoreNotifyChannels —— 以前只有它把映射扔了，
+// 于是任务上的 subscription:<旧ID> 标签没法跟着改（见 remapSubscriptionLabels）。
+func restoreSubscriptions(tx *gorm.DB, subscriptions []BackupSubscription, sshKeyIDMap map[uint]uint) (map[uint]uint, error) {
+	idMap := make(map[uint]uint, len(subscriptions))
+	for _, backupSubscription := range subscriptions {
+		item := modelSubscriptionFromBackup(backupSubscription)
+		oldID := item.ID
 		item.ID = 0
 		item.Status = 0
 		if item.SSHKeyID != nil {
@@ -1231,6 +1304,70 @@ func restoreSubscriptions(tx *gorm.DB, subscriptions []model.Subscription, sshKe
 			}
 		}
 		if err := tx.Create(&item).Error; err != nil {
+			return nil, err
+		}
+		// 老备份里可能没有 id（青龙以外的历史格式），0 不是合法订阅 ID，不进映射表，
+		// 免得把 subscription:0 这类脏标签误指到某个真订阅上。
+		if oldID != 0 {
+			idMap[oldID] = item.ID
+		}
+	}
+	return idMap, nil
+}
+
+// remapSubscriptionLabels 把恢复后的任务标签里 subscription:<旧ID> 改写成 subscription:<新ID>。
+//
+// 为什么必须做：恢复流程给订阅重新分配主键（restoreSubscriptions 里 item.ID = 0，
+// 而 deleteAll 只 DELETE FROM 不重置 sqlite_sequence，主键是 AUTOINCREMENT、语义上不复用已删除 ROWID），
+// 把旧 ID 原样写回可能挂到**另一个不相干的订阅**头上；而订阅同步的 autoDelete 分支会对
+// 「认领到但不在候选集里」的任务执行 RemoveJob + 删 task_logs + Delete(&task) —— 是物理删除，
+// 比标签丢失严重得多。
+//
+// 规则：
+//  1. 命中 old→new 映射 → 改写成 subscription:<新ID>；
+//  2. 没命中（订阅没被一起恢复 / 备份里就没有那个订阅 / ID 解析不出来）→ 丢弃该条 subscription: 标签，
+//     绝不保留旧 ID；
+//  3. 非 subscription: 前缀的标签（含 分组: 与用户自定义）一律原样保留；
+//  4. 绝不复用 handler/task_labels.go 的 sanitizeIncomingLabels —— 那是给用户输入用的，会把内部前缀洗掉。
+//
+// 只在 selection.Tasks 时调用：那种情况下 tasks 表已被 deleteAll 清空并重建，
+// 表里的行恰好就是本次恢复出来的任务，所以这里可以直接按 labels 过滤全表。
+func remapSubscriptionLabels(tx *gorm.DB, subscriptionIDMap map[uint]uint) error {
+	// 与 subscriptionTaskLabel 生成的形态一一对应。
+	const labelPrefix = "subscription:"
+
+	// LIKE 只是个粗筛（"my-subscription:foo" 这类用户自建标签也会被捞出来），
+	// 真正的边界判定在下面按标签逐条做前缀匹配。
+	var tasks []model.Task
+	if err := tx.Where("labels LIKE ?", "%"+labelPrefix+"%").Find(&tasks).Error; err != nil {
+		return err
+	}
+
+	for _, task := range tasks {
+		labels := task.GetLabels()
+		remapped := make([]string, 0, len(labels))
+		for _, label := range labels {
+			// GetLabels 只按逗号切分、不做 trim，历史脏数据里可能是 " subscription:1"，
+			// 与 handler 的 hasSubscriptionLabel 对齐，先 TrimSpace 再判前缀。
+			trimmed := strings.TrimSpace(label)
+			if !strings.HasPrefix(trimmed, labelPrefix) {
+				remapped = append(remapped, label)
+				continue
+			}
+			oldID, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(trimmed, labelPrefix)), 10, 64)
+			if err != nil {
+				continue
+			}
+			if newID := subscriptionIDMap[uint(oldID)]; newID != 0 {
+				remapped = append(remapped, subscriptionTaskLabel(newID))
+			}
+		}
+
+		newLabels := strings.Join(remapped, ",")
+		if newLabels == task.Labels {
+			continue
+		}
+		if err := tx.Model(&model.Task{}).Where("id = ?", task.ID).Update("labels", newLabels).Error; err != nil {
 			return err
 		}
 	}

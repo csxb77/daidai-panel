@@ -272,14 +272,53 @@ func (h *LogHandler) Stream(c *gin.Context) {
 	}
 }
 
+// writeSSEData 把一段原始脚本输出写成 SSE 帧。
+//
+// 【裸 \r 必须原样保留，但绝不能埋在一条 data 行的中间】
+//
+// 终端进度条用裸 \r 回到行首覆盖当前行，这个语义要一路传到前端，所以不能像 \r\n 那样
+// 归一成 \n（.trellis/spec/backend/logging-guidelines.md 明令禁止，
+// log_stream_regression_test.go 有断言守着）。
+//
+// 但 SSE 的线格式里 CR 本身就是【行终止符】：`data: 10%\r20%\r30%` 在标准解析器
+// （浏览器原生 EventSource、各语言 SSE 客户端、独立仓库里的 APP）眼里是三行，
+// 后两行 `20%` / `30%` 没有字段名，会被静默丢弃 —— 连报错都没有。
+// 而这个函数在打开日志弹窗时会被喂进【整份历史日志】，里面往往有成百上千个裸 \r，
+// 等于一份带进度条的日志在标准解析器下只剩第一个 \r 之前那一点点。
+//
+// 修法是不动字符、只改分帧：每碰到一个后面还有内容的裸 \r，就把它作为当前帧最后一条
+// data 行的结尾，剩下的内容另起一帧。这样 \r 永远落在行末，谁来解析都不会丢内容。
+//
+// 对本仓前端完全等价，多帧拼起来与改动前的单帧【逐字节一致】：
+//   - web/src/utils/sse.ts 的 dispatchEventSegment 对 data 行末尾的 \r 刻意不做 trim；
+//   - LogViewer.vue / logs/index.vue 拿到相邻消息是直接首尾相接 append 的，
+//     不会在两条消息之间补换行（LogViewer.vue 里「不把每个 SSE 消息结束当成真实换行」那段注释）；
+//   - 这里只做切分，不增删任何字符，所以 append 回去还是原来那串。
+//
+// ⚠️ 不要图省事改成「一帧里多条 data 行、每条以 \r 结尾」：SSE 规定同一帧的多条 data
+// 行要用 \n 拼接，那样裸 \r 会变成 \r\n，前端 ansi.ts 把 \r\n 当真实换行，进度条立刻刷屏。
 func writeSSEData(w io.Writer, data string) {
-	// SSE 分帧只需要保证每个 data: 行本身不跨物理换行。
-	// 这里保留裸 \r，避免终端进度条的覆盖刷新语义在传输层被抹掉。
 	data = strings.ReplaceAll(data, "\r\n", "\n")
-	for _, line := range strings.Split(data, "\n") {
-		fmt.Fprintf(w, "data: %s\n", line)
+
+	// 用「先写一帧、再看有没有剩余」的写法（而不是 for len(data) > 0），
+	// 是为了让空字符串仍然写出一帧 `data: \n\n`，与改动前的行为保持一致。
+	for {
+		segment := data
+		rest := ""
+		// idx+1 == len(data) 表示 \r 已经在整段末尾，本来就落在行末，不用再切。
+		if idx := strings.IndexByte(data, '\r'); idx >= 0 && idx+1 < len(data) {
+			segment = data[:idx+1]
+			rest = data[idx+1:]
+		}
+		for _, line := range strings.Split(segment, "\n") {
+			fmt.Fprintf(w, "data: %s\n", line)
+		}
+		fmt.Fprint(w, "\n")
+		if rest == "" {
+			return
+		}
+		data = rest
 	}
-	fmt.Fprint(w, "\n")
 }
 
 // streamDoneEvent 根据任务真实状态与「服务端有没有等过」决定 SSE done 事件的 data 值。
