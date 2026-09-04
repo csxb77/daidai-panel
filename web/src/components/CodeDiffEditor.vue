@@ -1,19 +1,31 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from "vue";
-import { EditorState } from "@codemirror/state";
-import { EditorView, highlightSpecialChars, lineNumbers } from "@codemirror/view";
-import { Change, MergeView, diff, unifiedMergeView } from "@codemirror/merge";
+import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from "vue";
 import {
-  buildCodeEditorTheme,
-  resolveCodeEditorLanguage,
-} from "@/utils/codeEditor";
-import { PANEL_APPEARANCE_CHANGE_EVENT } from "@/utils/panelAppearance";
+  EDITOR_ENGINE_CHANGE_EVENT,
+  readStoredEditorEngine,
+  resolveEditorEngine,
+} from "@/utils/editorEngine";
 
 /**
- * 版本对比编辑器（CodeMirror 6 的 @codemirror/merge）。
+ * 版本对比编辑器（分发层）。
  *
- * 对外 props 与被它取代的 MonacoDiffEditor.vue 逐字一致（含默认值），
- * 调用点（脚本页的「版本对比」弹窗）只需要换个组件名。
+ * 本组件自己不画任何东西，只负责按引擎偏好在两个实现之间二选一：
+ *   - CodeMirrorDiffEditor.vue：默认实现，也是移动端唯一实现；
+ *   - MonacoDiffEditor.vue：桌面端可选。
+ * 判定规则（含「触摸设备硬回落 CodeMirror」）全在 utils/editorEngine.ts 里，这里不重复判断。
+ *
+ * props 与两个实现逐字一致，无 emit、无具名导出、无 defineExpose ——
+ * 版本对比是只读的一次性视图，调用点（ScriptManageDialogs.vue 的「版本对比」弹窗）
+ * 只往里传值，不从里面取任何东西。
+ *
+ * 🔴 模板必须是**单个** `<component :is>` 根节点：不套 wrapper `<div>`，也**不在根上放注释**
+ * （dev 构建会保留注释节点，根就变成 Fragment，$attrs 透传要靠 DEV_ROOT_FRAGMENT 那套
+ * dev 专用机制兜，平白让 dev 与 prod 走两条不同的路径；同样的约束见 CodeEditor.vue）。
+ * 理由：调用点是 `<CodeDiffEditor class="version-diff-editor" />`，而那个类挂着
+ * `flex: 1 1 0` / `min-height: 0` 这类只对「弹窗 flex 容器的直接子元素」成立的规则。
+ * 套一层的话类落在中间那层 div 上，真正的编辑器拿到的是没有高度约束的父容器，
+ * 表现是对比区被压成一条或者把弹窗顶穿。
+ * 同理本组件不写 `<style>`：布局由调用点给，配色由两个实现各自给。
  */
 const props = withDefaults(
   defineProps<{
@@ -36,246 +48,46 @@ const props = withDefaults(
   },
 );
 
-/** 行首尾要抹掉的空白。\r 也算：顺带让 CRLF 与 LF 两种换行不被判成差异。 */
-function isEdgeWhitespace(char: string | undefined) {
-  return char === " " || char === "\t" || char === "\r";
-}
+// 两个实现都异步引入：Monaco 那份必须懒加载（不切过去的用户一个字节都不该下载），
+// CodeMirror 那份也顺手切出去 —— @codemirror/merge 只有这个弹窗用得到。
+// 本组件在调用点本来就是 defineAsyncComponent 引入的，再切一层不会多出一次可感知的等待。
+const CodeMirrorDiffEditor = defineAsyncComponent(
+  () => import("./CodeMirrorDiffEditor.vue"),
+);
+const MonacoDiffEditor = defineAsyncComponent(
+  () => import("./MonacoDiffEditor.vue"),
+);
+
+const engine = ref(resolveEditorEngine(readStoredEditorEngine()));
 
 /**
- * 抹掉每一行**首尾**的空白，同时给出「抹掉后的下标 → 原文下标」的映射表。
- * 映射表长度是抹掉后文本长度 + 1：Change 的 to 是开区间右端，可能正好等于文本长度。
- *
- * 为什么是 trim（首尾都抹）而不是只抹行尾：这是在对齐 Monaco 的 ignoreTrimWhitespace 语义 ——
- * 它按 trim 比较，而缩进正是行首的空白。开关文案是「忽略空白差异」、说明写的是
- * 「只检测到空格、缩进或换行变化」，所以「一处真实改动 + 一段重新缩进」的版本对比里，
- * 只改了缩进的那段在开着开关时必须不算差异；只抹行尾会让它重新被标红，
- * 属于换引擎带来的、没在发布说明里声明过的行为回退。
+ * 用户在齿轮菜单里切了引擎。
+ * 换引擎必然意味着换实现组件，Vue 会拆掉旧实例重建新的，对比视图重新渲染一遍即可 ——
+ * 它是只读视图，没有未保存内容会丢。
  */
-function stripLineEdgeWhitespace(text: string) {
-  let stripped = "";
-  const map: number[] = [];
-  let lineStart = 0;
-
-  for (;;) {
-    const newlineAt = text.indexOf("\n", lineStart);
-    const lineEnd = newlineAt === -1 ? text.length : newlineAt;
-    let contentEnd = lineEnd;
-    while (contentEnd > lineStart && isEdgeWhitespace(text[contentEnd - 1])) {
-      contentEnd -= 1;
-    }
-    // 行首必须在 contentEnd 算完之后再往前收，且以 contentEnd 为界：
-    // 整行都是空白时两个游标会停在同一处，slice 出空串、map 也不会塞进倒序下标，
-    // 从而保住「map 单调递增、长度 = stripped.length + 1」这两条不变量。
-    let contentStart = lineStart;
-    while (contentStart < contentEnd && isEdgeWhitespace(text[contentStart])) {
-      contentStart += 1;
-    }
-    // map 只记「被保留下来的字符」的原文下标，行首被抹掉的那几个下标直接跳过
-    for (let i = contentStart; i < contentEnd; i += 1) {
-      map.push(i);
-    }
-    stripped += text.slice(contentStart, contentEnd);
-    if (newlineAt === -1) {
-      break;
-    }
-    map.push(newlineAt);
-    stripped += "\n";
-    lineStart = newlineAt + 1;
-  }
-
-  map.push(text.length);
-  return { text: stripped, map };
-}
-
-/**
- * 「忽略空白差异」的自定义 diff。
- *
- * CodeMirror 的 diff 没有 Monaco 那个内置的 ignoreTrimWhitespace 开关，
- * 只能通过 diffConfig.override 整个接管：先把两侧每行首尾的空白抹掉再比，
- * 再把结果下标映射回原文——这样显示出来的仍然是原文（不动用户的内容），
- * 但纯粹的缩进 / 行尾空白改动不会被算成差异。
- *
- * 这里刻意用 diff 而不是 presentableDiff：override 的返回值会被调用方
- * （Chunk.build）再跑一遍 makePresentable，先跑一次纯属重复劳动。
- */
-function diffIgnoringLineEdgeWhitespace(a: string, b: string) {
-  const strippedA = stripLineEdgeWhitespace(a);
-  const strippedB = stripLineEdgeWhitespace(b);
-  return diff(strippedA.text, strippedB.text, { scanLimit: 500 }).map(
-    (change) =>
-      new Change(
-        strippedA.map[change.fromA]!,
-        strippedA.map[change.toA]!,
-        strippedB.map[change.fromB]!,
-        strippedB.map[change.toB]!,
-      ),
-  );
-}
-
-const containerRef = ref<HTMLElement>();
-let mergeView: MergeView | null = null;
-let unifiedView: EditorView | null = null;
-
-function destroyView() {
-  mergeView?.destroy();
-  mergeView = null;
-  unifiedView?.destroy();
-  unifiedView = null;
-  // destroy() 只负责拆编辑器自身，外层 DOM 是我们传 parent 时挂上去的，
-  // 不清干净的话重建时会在同一个容器里叠出两份。
-  if (containerRef.value) {
-    containerRef.value.innerHTML = "";
-  }
-}
-
-/**
- * 整体重建。
- *
- * 这里刻意不做「按 prop 逐项 reconfigure」：本组件是只读的一次性对比视图，
- * 每次 prop 变化基本都意味着换了一对要比的内容（选了另一个历史版本、切了移动端布局），
- * 重建比维护 6 个 Compartment 简单得多，代价只是丢掉滚动位置。
- */
-function buildView() {
-  destroyView();
-  const container = containerRef.value;
-  if (!container) return;
-
-  const diffConfig = props.ignoreTrimWhitespace
-    ? { scanLimit: 500, override: diffIgnoringLineEdgeWhitespace }
-    : { scanLimit: 500 };
-  // margin 对应 Monaco 的 contextLineCount（差异块上下各保留几行上下文）；
-  // minSize 是 CodeMirror 独有的「至少这么多行才值得折叠」，取它的默认值 4。
-  const collapseUnchanged = props.hideUnchangedRegions
-    ? { margin: props.contextLineCount, minSize: 4 }
-    : undefined;
-
-  const shared = [
-    lineNumbers(),
-    highlightSpecialChars(),
-    // 改造前 Monaco 侧是 wordWrap/diffWordWrap 都为 'on'，这里保持一致
-    EditorView.lineWrapping,
-    resolveCodeEditorLanguage(props.language),
-    ...buildCodeEditorTheme(),
-  ];
-
-  if (props.renderSideBySide) {
-    mergeView = new MergeView({
-      parent: container,
-      a: {
-        doc: props.originalValue,
-        // 左侧是历史版本，任何时候都不可编辑（改造前 Monaco 侧是 originalEditable: false）
-        extensions: [
-          ...shared,
-          EditorState.readOnly.of(true),
-          EditorView.editable.of(false),
-        ],
-      },
-      b: {
-        doc: props.modifiedValue,
-        extensions: [
-          ...shared,
-          EditorState.readOnly.of(props.readonly),
-          EditorView.editable.of(!props.readonly),
-        ],
-      },
-      gutter: true,
-      highlightChanges: true,
-      diffConfig,
-      collapseUnchanged,
-    });
-    return;
-  }
-
-  // renderSideBySide=false（移动端）走统一视图：只有一个编辑器，
-  // 删除的内容以只读小部件的形式插在新内容上方。
-  unifiedView = new EditorView({
-    parent: container,
-    doc: props.modifiedValue,
-    extensions: [
-      ...shared,
-      EditorState.readOnly.of(props.readonly),
-      EditorView.editable.of(!props.readonly),
-      unifiedMergeView({
-        original: props.originalValue,
-        // 只读的版本对比，不需要逐块「接受 / 拒绝」按钮
-        mergeControls: false,
-        gutter: true,
-        highlightChanges: true,
-        diffConfig,
-        collapseUnchanged,
-      }),
-    ],
-  });
+function syncEngine() {
+  engine.value = resolveEditorEngine(readStoredEditorEngine());
 }
 
 onMounted(() => {
-  // 明暗切换与「自定义编辑器底色」都走这个事件（见 stores/theme.ts 与 utils/panelAppearance.ts）。
-  // 这里直接重建，理由同 buildView 的注释：代价只有滚动位置，而改主题时本来也没在滚。
-  window.addEventListener(PANEL_APPEARANCE_CHANGE_EVENT, buildView);
-  buildView();
+  window.addEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEngine);
 });
 
-watch(
-  [
-    () => props.originalValue,
-    () => props.modifiedValue,
-    () => props.language,
-    () => props.readonly,
-    () => props.renderSideBySide,
-    () => props.ignoreTrimWhitespace,
-    () => props.hideUnchangedRegions,
-    () => props.contextLineCount,
-  ],
-  () => {
-    buildView();
-  },
-);
-
 onBeforeUnmount(() => {
-  window.removeEventListener(PANEL_APPEARANCE_CHANGE_EVENT, buildView);
-  destroyView();
+  window.removeEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEngine);
 });
 </script>
 
 <template>
-  <div class="code-diff-wrapper">
-    <div ref="containerRef" class="code-diff-container"></div>
-  </div>
+  <component
+    :is="engine === 'monaco' ? MonacoDiffEditor : CodeMirrorDiffEditor"
+    :original-value="props.originalValue"
+    :modified-value="props.modifiedValue"
+    :language="props.language"
+    :readonly="props.readonly"
+    :render-side-by-side="props.renderSideBySide"
+    :ignore-trim-whitespace="props.ignoreTrimWhitespace"
+    :hide-unchanged-regions="props.hideUnchangedRegions"
+    :context-line-count="props.contextLineCount"
+  />
 </template>
-
-<style scoped>
-.code-diff-wrapper {
-  width: 100%;
-  height: 100%;
-  min-height: 420px;
-  position: relative;
-  overflow: hidden;
-  font-size: 14px;
-  background: var(--dd-editor-bg-color, #111827);
-}
-
-.code-diff-container {
-  width: 100%;
-  height: 100%;
-}
-
-/* 并排模式：滚动条在 .cm-mergeView 上（它自带 overflow-y: auto），
-   内部两个 .cm-editor 被 merge 的基础主题强制成 height:auto !important，不用也不能再管。 */
-.code-diff-container :deep(.cm-mergeView) {
-  height: 100%;
-}
-
-/* 统一模式没有 .cm-mergeView 外壳，就是一个普通编辑器，得自己撑满 */
-.code-diff-container :deep(.cm-editor) {
-  height: 100%;
-}
-
-/* iOS Safari 在可编辑区字号小于 16px 时聚焦会放大整页。
-   对比视图默认只读、一般不会聚焦，但移动端走的是统一视图、内容区仍是 contenteditable，
-   与 CodeEditor.vue 保持同一套规避方式。 */
-@media (max-width: 768px) {
-  .code-diff-wrapper {
-    font-size: 16px;
-  }
-}
-</style>

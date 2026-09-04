@@ -42,61 +42,121 @@ export function persistEditorWordWrap(value: EditorWordWrap) {
     // 写失败只是这次记不住，不影响本次切换效果，静默忽略
   }
 }
+
+/**
+ * 三个「视图类」开关（issue #114-1/2/3）：缩略图、缩进参考线、空白符。
+ *
+ * 这三个和上面的自动换行是同一类东西（个人编辑习惯、每浏览器独立、脚本页与配置文件页共享），
+ * 但**没有**照抄成三组「常量 + 读 + 写」—— 那是 6 个逐字雷同的函数。
+ * 上面自动换行那组保持原样不动，是因为它的具名导出写进了组件契约（见
+ * spec/frontend/component-guidelines.md），不能改签名。
+ *
+ * 默认值刻意各不相同，判据是「打开它会不会打扰到不需要它的人」：
+ *   - 缩进参考线：默认开。它就是为了让缩进层级一眼看清，噪声极低。
+ *   - 缩略图：默认关。它要占掉正文右侧 64px，窄屏尤其肉疼。
+ *   - 空白符：默认关。每个空格一个灰点，读配置文件时纯属干扰。
+ */
+export type EditorViewOption = "minimap" | "indent_guides" | "whitespace";
+
+const EDITOR_VIEW_OPTION_KEYS: Record<EditorViewOption, string> = {
+  minimap: "dd:editor:minimap",
+  indent_guides: "dd:editor:indent_guides",
+  whitespace: "dd:editor:whitespace",
+};
+
+const EDITOR_VIEW_OPTION_DEFAULTS: Record<EditorViewOption, boolean> = {
+  minimap: false,
+  indent_guides: true,
+  whitespace: false,
+};
+
+export function readStoredEditorViewOption(name: EditorViewOption): boolean {
+  const fallback = EDITOR_VIEW_OPTION_DEFAULTS[name];
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  try {
+    // 只认写死的 'on' / 'off' 两个值，其余（没写过、被人改成脏值、读不到）一律回落默认，
+    // 这样「用户从没碰过这个开关」和「存储被清掉了」表现一致。
+    const raw = window.localStorage.getItem(EDITOR_VIEW_OPTION_KEYS[name]);
+    if (raw === "on") return true;
+    if (raw === "off") return false;
+    return fallback;
+  } catch {
+    // 隐私模式 / 禁用站点存储时 getItem 会抛错，不能让它把调用方的 setup 整块炸掉
+    return fallback;
+  }
+}
+
+export function persistEditorViewOption(name: EditorViewOption, value: boolean) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      EDITOR_VIEW_OPTION_KEYS[name],
+      value ? "on" : "off",
+    );
+  } catch {
+    // 写失败只是这次记不住，不影响本次切换效果，静默忽略
+  }
+}
 </script>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from "vue";
-import { Compartment, EditorState } from "@codemirror/state";
 import {
-  EditorView,
-  highlightActiveLine,
-  highlightActiveLineGutter,
-  highlightSpecialChars,
-  keymap,
-  lineNumbers,
-} from "@codemirror/view";
+  computed,
+  defineAsyncComponent,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+} from "vue";
+import CodeMirrorEditor from "./CodeMirrorEditor.vue";
 import {
-  defaultKeymap,
-  history,
-  historyKeymap,
-  indentWithTab,
-} from "@codemirror/commands";
-import {
-  bracketMatching,
-  foldGutter,
-  foldKeymap,
-  indentOnInput,
-  indentUnit,
-} from "@codemirror/language";
-import {
-  highlightSelectionMatches,
-  search,
-  searchKeymap,
-} from "@codemirror/search";
-import {
-  autocompletion,
-  closeBrackets,
-  closeBracketsKeymap,
-  completionKeymap,
-} from "@codemirror/autocomplete";
-import {
-  buildCodeEditorTheme,
-  resolveCodeEditorLanguage,
-} from "@/utils/codeEditor";
-import { PANEL_APPEARANCE_CHANGE_EVENT } from "@/utils/panelAppearance";
+  EDITOR_ENGINE_CHANGE_EVENT,
+  readStoredEditorEngine,
+  resolveEditorEngine,
+} from "@/utils/editorEngine";
 
 /**
- * 代码编辑器（CodeMirror 6）。
+ * 代码编辑器（引擎分发层）。
  *
- * 为什么不是 Monaco：Monaco 是自绘编辑器，文本画在 .view-lines 里、原生选择被关掉，
- * 触摸事件由它内部的手势层接管，所以「长按出系统菜单 / 双击出选择手柄 / 按住拖动光标」
- * 这三条在手机上**无论怎么配都做不到**。CodeMirror 的内容区是 contenteditable、
- * 选区就是原生 Selection，这三条天然可用。
+ * 本组件自己**不渲染任何编辑器**，只负责按用户的引擎偏好在两份实现之间二选一：
+ *   - CodeMirrorEditor.vue：默认引擎，也是**移动端唯一**引擎。内容区是 contenteditable、
+ *     选区就是原生 Selection，「长按出系统菜单 / 双击出选择手柄 / 按住拖动光标」天然可用。
+ *   - MonacoEditor.vue：桌面端可选。多光标、列选、JSON 语言服务那套更强，
+ *     但它是自绘编辑器，上面三条**无论怎么配都做不到**。
+ * 两份实现的 props / emit / defineExpose / 根 class 逐字相同，调用点感知不到拿到的是哪一个。
  *
- * ⚠️ 正因如此，这里刻意**没有**启用 CodeMirror 的 drawSelection ——
- * 那个扩展会把原生选区藏起来改成自绘，等于把 Monaco 的毛病原样搬过来。
- * 后人要加多光标之类的功能时请先想清楚这一点。
+ * 上面那个普通 `<script>` 块里的 6 个具名导出（自动换行与三个视图开关各一组「类型 + 读 + 写」）
+ * 刻意**留在本文件**：
+ * 它们是写进 spec/frontend/component-guidelines.md 的组件契约，两个页面按名字引用。
+ * 两个引擎实现**不从这里 import 任何东西**（这些偏好的值是页面读出来、当 prop 传进去的），
+ * 所以「分发层 import 实现、实现 import 分发层」的循环依赖不存在。
+ *
+ * 🔴 模板是**单个** `<component :is>` 根节点，不套 wrapper `<div>`、也不在根上放注释
+ * （dev 构建会保留注释节点，根就变成 Fragment，透传要靠 DEV_ROOT_FRAGMENT 那套 dev 专用机制兜，
+ * 平白让 dev 与 prod 走两条不同的路径）。理由：
+ *   - 三个调用点靠 $attrs 穿透给编辑器根节点加样式 —— ScriptsEditorPane 传
+ *     `class="code-editor"`（scoped 规则 `.code-editor { flex: 1; height: 100%; min-height: 0 }`），
+ *     调试弹窗与代码运行器传内联 `style="height: 100%; min-height: 0"`。
+ *     套一层 div 之后这些 class / style 会落在那层 div 上，真正的编辑器根节点一点样式都拿不到，
+ *     表现是编辑器高度塌陷，而构建与类型检查全绿。
+ *   - 同理本文件刻意**没有** `<style>` 块：scoped 样式只能命中子组件的根节点，
+ *     `.code-editor-container` 和那几条 `:deep(.cm-*)` 都命中不到，它们必须跟着各自的实现走。
+ *
+ * 模板里 props 一个个显式列出而不是 `v-bind="props"`：逐个列 vue-tsc 才能逐个查类型，
+ * 一把梭传下去的话，两边 prop 名写歪了也发现不了。
  */
+
+// Monaco 用异步组件引入，这是「不切过去的用户一个字节都不下载」的落点：
+// 静态 import 会让 Rollup 把 MB 级的 monaco chunk 提升成入口的静态依赖，
+// 构建全绿、页面能用，纯静默劣化。CodeMirror 是默认引擎、绝大多数会话都要用，静态引入即可。
+// 刻意不给 loadingComponent：Monaco chunk 是同源本地资源，解析通常在一帧内完成，
+// 塞个骨架屏反而会闪一下。
+const MonacoEditor = defineAsyncComponent(() => import("./MonacoEditor.vue"));
+
+// ⚠️ props 必须与两份实现**逐字相同**，并且下面模板里要一个个显式传下去。
 const props = withDefaults(
   defineProps<{
     modelValue: string;
@@ -114,281 +174,101 @@ const props = withDefaults(
      * 不传该 prop 的调用点（调试弹窗 / 代码运行器）行为零变化。
      */
     wordWrap?: "on" | "off";
+    /**
+     * 右侧代码缩略图。默认 false。
+     * ⚠️ 下面三个 prop 的默认值一律等于「加这些功能之前的行为」，
+     * 所以不传它们的调用点（调试弹窗 / 代码运行器）一个像素都不会变。
+     * 脚本页与配置文件页会显式传各自记住的偏好。
+     */
+    minimap?: boolean;
+    /** 缩进参考线。默认 false（同上，偏好本身的默认值是开，由页面侧决定） */
+    indentGuides?: boolean;
+    /** 显示空白符：空格画灰点、Tab 画箭头、行尾空白标底色。默认 false */
+    showWhitespace?: boolean;
   }>(),
   {
     wordWrap: "on",
+    minimap: false,
+    indentGuides: false,
+    showWhitespace: false,
   },
 );
 
+// emit 必须显式声明：不声明的话 update:modelValue 会退化成透传的 $attrs 事件，
+// 调用点 v-model 的类型检查当场失效（值类型变成 any，写错了也查不出来）。
 const emit = defineEmits<{
   "update:modelValue": [value: string];
 }>();
 
-const editorRef = ref<HTMLElement>();
-let view: EditorView | null = null;
-
-// 四个运行期可变的配置各占一个 Compartment。
-// CodeMirror 的 extensions 只在 EditorState.create() 那一刻读一次，
-// 想在挂载之后改就必须走 Compartment.reconfigure —— 直接改 prop 是**完全没反应且不报错**的，
-// 构建和类型检查都发现不了（design-system.md 里专门为这条写过一则 Don't）。
-const languageCompartment = new Compartment();
-const readonlyCompartment = new Compartment();
-const wordWrapCompartment = new Compartment();
-const themeCompartment = new Compartment();
-
-// 只读必须两条一起给：
-// EditorState.readOnly 挡住事务写入，EditorView.editable 关掉 contenteditable。
-// 只写前者的话光标仍能落进去、手机输入法照样弹出来，用户会以为能改，改不动又不知道为什么。
-function buildReadonlyExtension(readonly: boolean) {
-  return [EditorState.readOnly.of(readonly), EditorView.editable.of(!readonly)];
+/** 两个引擎实现共同暴露的方法集，与它们各自 defineExpose 的四个键逐字对应。 */
+interface EditorEngineExposed {
+  focus: () => void;
+  getValue: () => string;
+  setValue: (value: string) => void;
+  format: () => void;
 }
 
-function buildWordWrapExtension(wordWrap: "on" | "off") {
-  return wordWrap === "on" ? EditorView.lineWrapping : [];
-}
+const engineRef = ref<EditorEngineExposed | null>(null);
 
-// 明暗切换、以及用户在系统设置里改编辑器底色，都会走 PANEL_APPEARANCE_CHANGE_EVENT
-// （切主题那一路见 stores/theme.ts：toggle 完立刻 applyPanelAppearance()）。
-// 底色本身是 CSS 变量、不用管；但行号色 / 选区色 / 语法配色是按明暗二选一的，必须重建主题。
-function syncEditorTheme() {
-  view?.dispatch({
-    effects: themeCompartment.reconfigure(buildCodeEditorTheme()),
-  });
-}
+// 挂载时解析一次。auto 的设备判定（coarse pointer / 窄屏硬回落 CodeMirror）在
+// utils/editorEngine.ts 里，本文件不重复一份判断。
+const engine = ref(resolveEditorEngine(readStoredEditorEngine()));
 
-function replaceDoc(value: string) {
-  if (!view) return;
-  if (view.state.doc.toString() === value) return;
-  view.dispatch({
-    changes: { from: 0, to: view.state.doc.length, insert: value },
-  });
+// 菜单里切引擎 → persistEditorEngine 派发 EDITOR_ENGINE_CHANGE_EVENT → 这里重新解析。
+// 这就是「切一下，已经开着的编辑器跟着换」的全部机制；少了它的表现是
+// 「菜单里选了、当前这个编辑器纹丝不动，要刷新页面才生效」，不报错。
+// 重新读一遍 localStorage 而不是从事件里取值：偏好可能是在另一个组件里改的，
+// 存储才是唯一真源。
+function syncEngine() {
+  engine.value = resolveEditorEngine(readStoredEditorEngine());
 }
 
 onMounted(() => {
-  window.addEventListener(PANEL_APPEARANCE_CHANGE_EVENT, syncEditorTheme);
-  if (!editorRef.value) return;
-
-  view = new EditorView({
-    parent: editorRef.value,
-    state: EditorState.create({
-      doc: props.modelValue,
-      extensions: [
-        lineNumbers(),
-        highlightActiveLineGutter(),
-        highlightActiveLine(),
-        highlightSpecialChars(),
-        history(),
-        indentOnInput(),
-        bracketMatching(),
-        // 下面这三条是 Monaco 时代默认就开着、换引擎时被顺手丢掉的编辑能力。
-        // 它们都不碰选区绘制，与本组件「保住原生选区」的取舍毫无冲突，所以补回来：
-        //   - foldGutter：行号右侧的折叠箭头。它自带 codeFolding()（见 @codemirror/language
-        //     的 foldGutter 实现），不用再单独引折叠状态字段；放在 lineNumbers() 之后
-        //     才会渲染在行号右侧，顺序不能随便挪。
-        //   - closeBrackets：输入 ( [ { " ' 时自动补上右半边。
-        //   - autocompletion：补全弹窗。补全项来自各语言扩展注册的 language data
-        //     （js/ts/python/json/html/css 有，shell 走的是 legacy-modes 流式模式、没有源，
-        //     表现就是不弹框，属于正常）。
-        foldGutter(),
-        closeBrackets(),
-        autocompletion(),
-        // 缩进 2 空格，与改造前 Monaco 的 tabSize: 2 对齐。
-        // indentUnit 管「命令插入多少」，tabSize 管「已有的 \t 显示多宽」，两条都要。
-        indentUnit.of("  "),
-        EditorState.tabSize.of(2),
-        search({ top: true }),
-        highlightSelectionMatches(),
-        keymap.of([
-          // closeBracketsKeymap 只有一条 Backspace（在 `()` 正中间时把整对一起删掉），
-          // 必须排在 defaultKeymap 前面，否则 Backspace 会先被 defaultKeymap 接走、这条永远不生效。
-          // 它在非成对场景返回 false 会继续往下派发，所以不会挤掉 defaultKeymap 的删除行为。
-          ...closeBracketsKeymap,
-          ...defaultKeymap,
-          ...historyKeymap,
-          ...searchKeymap,
-          // 折叠快捷键（Ctrl-Shift-[ / ]、Ctrl-Alt-[ / ]），与上面几套没有键位冲突
-          ...foldKeymap,
-          // completionKeymap 排在最后是安全的：autocompletion() 内部已经用 Prec.highest
-          // 装了同一份绑定（默认 defaultKeymap: true），补全弹窗开着时 Enter / ↑↓ 一定先走它，
-          // 不会被 defaultKeymap 的换行吃掉。这里再显式列一次是与官方 basicSetup 对齐，
-          // 也兜住「日后给 autocompletion 传 defaultKeymap: false」时快捷键整套消失的情况。
-          ...completionKeymap,
-          indentWithTab,
-        ]),
-        // 移动端必补的三条：手机输入法默认句首大写 + 自动纠错 + 拼写检查，
-        // 会**静默改坏脚本内容**（把 const 改成 Const、把变量名纠成英文单词），
-        // 而且用户根本不会意识到是输入法干的。
-        EditorView.contentAttributes.of({
-          spellcheck: "false",
-          autocapitalize: "off",
-          autocorrect: "off",
-        }),
-        EditorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
-          const value = update.state.doc.toString();
-          // 和外部 modelValue 相同，说明这次变更是下面那个 watch 同步进来的，
-          // 再 emit 一次就和父组件转成回环了。
-          if (value === props.modelValue) return;
-          // 每次输入即时 emit，不能等失焦：
-          // 「未保存」角标、保存按钮 disabled、调试弹窗的 markDebugCodeChanged 全靠它。
-          emit("update:modelValue", value);
-        }),
-        languageCompartment.of(resolveCodeEditorLanguage(props.language)),
-        readonlyCompartment.of(buildReadonlyExtension(props.readonly || false)),
-        wordWrapCompartment.of(buildWordWrapExtension(props.wordWrap)),
-        themeCompartment.of(buildCodeEditorTheme()),
-      ],
-    }),
-  });
+  window.addEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEngine);
 });
-
-watch(
-  () => props.modelValue,
-  (newValue) => {
-    replaceDoc(newValue);
-  },
-);
-
-// 脚本页切换文件会换语言，必须重配，否则一直停在第一次打开那个文件的高亮上
-watch(
-  () => props.language,
-  (newLanguage) => {
-    view?.dispatch({
-      effects: languageCompartment.reconfigure(
-        resolveCodeEditorLanguage(newLanguage),
-      ),
-    });
-  },
-);
-
-// 漏了这条就是「只读态还能改」：改完污染 hasChanges，退出编辑时弹出幽灵「有未保存改动」
-watch(
-  () => props.readonly,
-  (newReadonly) => {
-    view?.dispatch({
-      effects: readonlyCompartment.reconfigure(
-        buildReadonlyExtension(newReadonly || false),
-      ),
-    });
-  },
-);
-
-// 漏了这条就是「点了自动换行按钮没反应」，且不报错、构建与类型检查都发现不了
-watch(
-  () => props.wordWrap,
-  (newWordWrap) => {
-    view?.dispatch({
-      effects: wordWrapCompartment.reconfigure(
-        buildWordWrapExtension(newWordWrap),
-      ),
-    });
-  },
-);
 
 onBeforeUnmount(() => {
-  window.removeEventListener(PANEL_APPEARANCE_CHANGE_EVENT, syncEditorTheme);
-  view?.destroy();
-  view = null;
+  window.removeEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEngine);
 });
+
+// 引擎变了 → 组件类型变了 → Vue 会卸载旧实例、挂载新实例（不用额外给 key）。
+// 撤销历史与滚动位置会丢，这是换引擎不可避免的代价，也符合用户「我要换一个编辑器」的预期。
+const engineComponent = computed(() =>
+  engine.value === "monaco" ? MonacoEditor : CodeMirrorEditor,
+);
+
+// 显式转发而不是让 v-model 事件走 $attrs：上面声明了 emits，事件就不在 $attrs 里了。
+// 写成具名函数（而不是模板里的 `emit('update:modelValue', $event)`）是为了给 $event 一个
+// 确定的类型 —— 动态组件上的事件参数会被推成隐式 any。
+function onInnerUpdate(value: string) {
+  emit("update:modelValue", value);
+}
 
 defineExpose({
-  focus: () => view?.focus(),
-  getValue: () => view?.state.doc.toString() || "",
-  setValue: (value: string) => replaceDoc(value),
-  // 全仓没有调用点：格式化走后端 scriptApi.format，前端不做本地格式化。
-  // 保留同名方法只是为了不改动对外契约，故意留空。
-  format: () => {},
+  focus: () => engineRef.value?.focus(),
+  // ⚠️ 必须用 props.modelValue 兜底，不能写成 `?? ""`：
+  // Monaco 是异步组件，chunk 还没 resolve 时 engineRef 是 null，返回空串会让调用方
+  // 以为「文档是空的」并据此覆盖掉真实内容。回落到 modelValue 才是当下真正的文档。
+  getValue: () => engineRef.value?.getValue() ?? props.modelValue,
+  setValue: (value: string) => engineRef.value?.setValue(value),
+  // 全仓没有调用点，两份实现里也都是空的；这里只做转发，保持对外契约不变。
+  format: () => engineRef.value?.format(),
 });
-
-function resolveMinHeight(value: string | number | undefined) {
-  if (typeof value === "number") {
-    return `${value}px`;
-  }
-  if (typeof value === "string" && value.trim()) {
-    return value;
-  }
-  // 撑满模式下高度由父级决定，默认不设下限；普通模式仍需要一个固定高度兜底
-  return props.fillHeight ? "0px" : "400px";
-}
 </script>
 
 <template>
-  <div
-    class="code-editor-wrapper"
-    :class="{ 'code-editor-wrapper--fill': props.fillHeight }"
-    :style="{ '--code-editor-min-height': resolveMinHeight(props.minHeight) }"
-  >
-    <div ref="editorRef" class="code-editor-container"></div>
-  </div>
+  <component
+    :is="engineComponent"
+    ref="engineRef"
+    :model-value="props.modelValue"
+    :language="props.language"
+    :readonly="props.readonly"
+    :min-height="props.minHeight"
+    :fill-height="props.fillHeight"
+    :word-wrap="props.wordWrap"
+    :minimap="props.minimap"
+    :indent-guides="props.indentGuides"
+    :show-whitespace="props.showWhitespace"
+    @update:model-value="onInnerUpdate"
+  />
 </template>
-
-<style scoped>
-.code-editor-wrapper {
-  width: 100%;
-  min-height: var(--code-editor-min-height, 400px);
-  height: var(--code-editor-min-height, 400px);
-  position: relative;
-  /* 编辑器基准字号写在这里而不是主题里：下面那条移动端媒体查询只要改这一处，
-     行号、正文、滚动条度量会一起跟着变，不会出现字大了行号还是小的错位。 */
-  font-size: 14px;
-}
-
-/* 双类选择器：靠特异性压过上面的固定高度，不依赖样式表书写顺序 */
-.code-editor-wrapper.code-editor-wrapper--fill {
-  flex: 1 1 auto;
-  height: 100%;
-}
-
-.code-editor-container {
-  width: 100%;
-  height: 100%;
-  /* 普通卡片没有固定父级高度时，内层容器必须继承最小高度，否则会被算成 0 高度，
-     只剩一条横线且无法输入。 */
-  min-height: inherit;
-  overflow: hidden;
-  background: var(--dd-editor-bg-color, #111827);
-  /* 固定 0、不吃 --dd-radius-*：这是一整块代码面，四角由外层卡片自己裁，
-     这里再加圆角只会和卡片的圆角叠出双层圆角。改造前也是 0，保持不变。 */
-  border-radius: 0;
-}
-
-.code-editor-container :deep(.cm-editor) {
-  height: 100%;
-}
-
-/* 触摸滚动惯性：手机上编辑长脚本时没有它会明显发涩 */
-.code-editor-container :deep(.cm-scroller) {
-  -webkit-overflow-scrolling: touch;
-}
-
-/* 折叠箭头：字色继承 .cm-gutters（主题里按明暗算好的行号色），
-   这里只压一点不透明度，免得比行号本身还抢眼。故意不写具体颜色 —— 编辑器底色是用户可配项，
-   写死的颜色在深色底或自定义底色上会串色。 */
-.code-editor-container :deep(.cm-foldGutter span) {
-  opacity: 0.65;
-}
-
-.code-editor-container :deep(.cm-foldGutter span:hover) {
-  opacity: 1;
-}
-
-/* 折叠后的「…」占位块。必须自己覆盖：CodeMirror 基础主题把它写死成浅色
-   （#eee 底 + #ddd 边 + #888 字，见 @codemirror/language 的 baseTheme），
-   深色编辑器上会糊出一块亮斑。改成透明底 + currentColor 描边后，
-   颜色完全跟着 --dd-editor-fg-color 走，明暗与用户自定义底色都不会串。 */
-.code-editor-container :deep(.cm-foldPlaceholder) {
-  background: transparent;
-  border: 1px solid currentColor;
-  color: inherit;
-  opacity: 0.7;
-}
-
-/* iOS Safari 在可编辑区字号小于 16px 时，聚焦会自动把整页放大。
-   index.html 的 viewport 刻意没有 maximum-scale（加了会禁掉用户手动缩放，不可接受），
-   所以只能反过来把移动端的编辑器字号提到 16px 来规避。 */
-@media (max-width: 768px) {
-  .code-editor-wrapper {
-    font-size: 16px;
-  }
-}
-</style>

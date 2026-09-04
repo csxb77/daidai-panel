@@ -135,6 +135,26 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id: string) {
+            // Vite 的 preload helper 是虚拟模块（\0vite/preload-helper）。不显式指派的话，
+            // Rollup 会把它折进某个 manual chunk；一旦折进 monaco，入口就变成【静态】import monaco chunk，
+            // index.html 里随之冒出 <link rel="modulepreload" .../assets/monaco-*.js> 外加 monaco 的
+            // <link rel="stylesheet">，懒加载当场失效——而且构建成功、页面能用，纯静默劣化。
+            // 钉到 app-core 上：它必然是首屏 chunk（main.ts 顶层就 import vue/router/pinia）。
+            // 🔴 这条不是冗余，删掉 Monaco 会立刻回到首屏。checks.yml 里有一条反向断言守着它。
+            if (
+              id.includes('vite/preload-helper') ||
+              id.includes('vite/modulepreload-polyfill')
+            ) {
+              return 'app-core'
+            }
+
+            // Monaco 单独成块，且**只能**由 utils/monacoEngine.ts 动态 import 进来（见那个文件的说明）。
+            // 必须排在下面那条 node_modules 兜底【之前】，否则整个 Monaco 会被吞进首屏的 vendor chunk
+            // （vendor 在 index.html 里是 modulepreload 的）。
+            if (id.includes('node_modules/monaco-editor')) {
+              return 'monaco'
+            }
+
             // CodeMirror 全家桶（含 @lezer 的各语言语法）单独成块：
             // 它只有编辑器相关的四个页面用得上，不该压进首屏的 vendor 里。
             // 只匹配 @codemirror/* 与 @lezer/*：本仓从来没有 import 过那个叫 codemirror 的

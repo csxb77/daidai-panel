@@ -176,6 +176,38 @@ jobs:
           fi
           echo "OK：发布版产物包含 Element Plus 中文 locale"
 
+      # Monaco 是【第二个可切换编辑器引擎】，默认引擎与移动端引擎仍然是 CodeMirror 6。
+      # 它整块约 1 MiB，唯一的导入边界是 web/src/utils/monacoEngine.ts，
+      # 其余地方一律 `await import('@/utils/monacoEngine')` —— 没切过去的用户
+      # 一个字节都不该下载。这条约束没有任何运行期表现，只能由产物门禁来守。
+      #
+      # 【为什么必须成对】
+      #   - 正向那条保证 monaco chunk 真的在产物里。少了它，下面的反向 grep 在
+      #     「Monaco 压根没被打包」时也是 0 命中 ⇒ 恒真的空转门禁，和 Demo 哨兵
+      #     那一对是同一个道理。
+      #   - 反向那条保证它没被塞进首屏。最常见的成因是有人删掉了 vite.config.ts 里
+      #     把 vite/preload-helper 钉到 app-core 的那条 manualChunks 规则：删掉之后
+      #     Rollup 会把 preload helper 折进 monaco chunk，入口随之变成【静态】
+      #     import monaco，index.html 里冒出 monaco 的 modulepreload 与 stylesheet。
+      #     这种劣化【构建成功、页面照常能用】，只是所有人白下 ~1 MiB，
+      #     肉眼验收绝对发现不了，只有这条断言抓得住。
+      #
+      # 位置必须排在下面的 build:demo 之前：那一步会先清空 dist 再重建。
+      - name: 断言 Monaco 已打包且未进首屏（懒加载没被破坏）
+        working-directory: web
+        run: |
+          set -euo pipefail
+          test -f dist/index.html
+          ls dist/assets/monaco-*.js >/dev/null 2>&1 || {
+            echo "::error::找不到 monaco chunk：Monaco 没被打进产物。要么 monacoEngine.ts 的动态 import 断了，要么 vite.config.ts 里那条 'node_modules/monaco-editor' -> monaco 的分块规则没了；此时下面那条反向断言也已经失去意义"
+            exit 1
+          }
+          if grep -qE '<link[^>]+(modulepreload|stylesheet)[^>]+/assets/monaco-' dist/index.html; then
+            echo "::error::Monaco 被打进首屏：懒加载失效，没切引擎的用户也要白下约 1 MiB。先检查 vite.config.ts 里把 vite/preload-helper 钉到 app-core 的那条 manualChunks 规则是否被删"
+            exit 1
+          fi
+          echo "OK：Monaco 单独成块，且未出现在首屏的 modulepreload / stylesheet 里"
+
       # Demo 站点的实际部署在 .github/workflows/deploy-demo.yml
       # （发版时由 release.yml 调用，另外也可手动 workflow_dispatch 触发），
       # 但构建放在这里跑：前端改动把 mock 层或子路径构建搞坏时，PR 阶段就能变红，

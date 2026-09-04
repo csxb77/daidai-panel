@@ -130,6 +130,46 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
 > 通用原则：**一条永远为真的断言等于没有断言。**
 > 加门禁时顺手问一句「我怎么让它失败一次」，答不上来就说明它没有牙。
 
+### 打包器的虚拟模块归属 ↔ 首屏依赖图 ↔ 懒加载
+
+> v3.2.2 把 Monaco 作为可切换的第二引擎加回来时踩到的。
+
+「某个重型依赖只在用户切过去时才下载」这件事，源码侧看起来只是一句 `await import()`，
+但它成不成立取决于**打包器最终把哪些模块分到了哪个 chunk**——而这是源码里看不见的一层。
+
+Vite 的模块预加载辅助函数是一个**虚拟模块**（`\0vite/preload-helper`），它不属于任何真实文件。
+`rollupOptions.output.manualChunks` 如果不显式指派它的归属，Rollup 可以把它折进任意一个手动 chunk。
+一旦折进了 `monaco` 那块，**入口就变成了静态 import monaco chunk**：
+`dist/index.html` 里随之冒出 `<link rel="modulepreload" .../assets/monaco-*.js>` 和 monaco 的
+`<link rel="stylesheet">`，懒加载当场失效，所有人白下约 1 MiB。
+
+这件事的阴险之处正是本文档反复出现的那一类：
+
+- **构建成功**，`vue-tsc` 全绿；
+- **页面完全能用**，功能一个不少；
+- **控制台没有任何输出**，Network 里也只是多了一条正常的 200。
+
+也就是说它**没有任何运行期表现**，肉眼验收绝对发现不了，只能由产物门禁来守。
+
+本项目的做法是两条一起上：
+
+- `web/vite.config.ts` 把 `vite/preload-helper` / `vite/modulepreload-polyfill` **显式钉到 `app-core`**
+  （它必然是首屏 chunk，`main.ts` 顶层就 import vue/router/pinia）。这条规则看着冗余，删掉就立刻回退。
+- `.github/workflows/checks.yml` 里配一对**正反断言**：
+  正向 `ls dist/assets/monaco-*.js` 保证 Monaco 真的被打包了，
+  反向 `grep -qE '<link[^>]+(modulepreload|stylesheet)[^>]+/assets/monaco-' dist/index.html` 保证它没进首屏。
+  没有正向那条的话，「Monaco 压根没被打包」时反向 grep 同样 0 命中——又是一条恒真的空转门禁，
+  和上一节 Demo 哨兵那一对是同一个道理。
+
+所以，新增「按需加载的重型依赖」时要问：
+
+- 它在产物里**真的是独立 chunk** 吗？（不是「我写了 `await import()` 所以它一定是」）
+- 入口 HTML 里**有没有**指向它的 `modulepreload` / `stylesheet`？
+- 这两件事各有一条能失败的断言守着吗？
+- 源码侧有没有唯一的导入边界？（本项目：`from 'monaco-editor/...'` 只允许出现在
+  `web/src/utils/monacoEngine.ts`；别处引用类型时漏写 `import type` 的 `type` 关键字，
+  就等于加了一条静态 import，效果与上面完全一样）
+
 ### 同一个输出目录被两种构建模式共用
 
 **一旦两条构建往同一个目录写产物，任何「复用已存在产物」的脚本都必须能分辨它是哪一种。**
@@ -169,6 +209,11 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
 > （v3.2.0 换成 CodeMirror 6 后该脚本已删除），但 `clean-dist.mjs` / `copy-spa-fallback.mjs`
 > 以及 `Magisk/build.sh`、`deploy-demo.yml` 仍然一律按 `web/dist` 取产物。
 > 既然目录必须共用，那分辨的责任就落到每个复用方头上。
+>
+> v3.2.2 把 Monaco 作为可切换的第二引擎加回来时**没有**把那个脚本加回来，`web/scripts/` 至今只有
+> `clean-dist.mjs` / `copy-spa-fallback.mjs` / `fetch-fonts.mjs` 三个：
+> 新方案是裁剪 ESM + 动态 import，chunk 与 worker 由 Vite 直接产出，**没有任何构建后拷贝步骤**。
+> 也就是说这段历史陈述仍然只是历史 —— 别把它读成「所以现在可以再加一个拷贝脚本」。
 
 ### 前端静态目录 ↔ Go 静态白名单 ↔ nginx
 
@@ -178,6 +223,14 @@ APP 把全局 `validateStatus` 收紧成 `< 400` 后，这个信号在读到 bod
 `server/main.go` 的 `setupStaticFrontend()` 挂的是**白名单**
 （子目录 `assets` / `fonts` / `sponsor-portal`，外加单文件路由 `favicon-512.webp`）。
 v3.2.0 前名单里还有一个 `monaco`，随编辑器换成 CodeMirror 6（由 Vite 直接打包、不再有运行期资源目录）一并删掉。
+
+> v3.2.2 把 Monaco 作为可切换的第二引擎加了回来，**但这条没有失效、后端一行都不用改**：
+> 新方案是裁剪 ESM + 动态 import，chunk（`monaco-*.js`）、两个 worker、图标字体 `codicon-*.ttf`
+> 全部由 Vite 产出在 `dist/assets/` 下，已被名单里的 `assets` 覆盖。
+> 判断「要不要动白名单」的唯一标准是**产物有没有新增顶层目录**，不是「引入了哪个库」。
+> （`docker/nginx.conf` 那边则确实要跟：缓存正则补了 `ttf`、`gzip_types` 补了 `font/ttf` ——
+> 这正是下面那条「漏了不会坏，只是静默丢掉 `expires/immutable`」的现成例子。）
+
 不在名单里的路径会掉进 `NoRoute` 的 SPA fallback，回一份 **200 + `text/html` 的 index.html**：
 
 - 样式表 / 字体：浏览器按 MIME 拒绝使用，整套字体失效，Console 里只有一条不起眼的 MIME 警告；

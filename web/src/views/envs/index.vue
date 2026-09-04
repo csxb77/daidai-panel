@@ -597,8 +597,16 @@ function isTopPinned(row: any) {
   return Number(row.sort_order || 0) > 0
 }
 
+// 置顶与禁用是两个正交状态，返回空格分隔的多类名。
+// Element Plus 把 row-class-name 的返回值整串作为**一项** push 进 Vue 的 class 数组，
+// Vue 再把数组各项拼成最终的 class 字符串（只做拼接、不拆空格，也不需要拆：
+// 空格分隔的多类名写进 class 属性本来就天然生效），
+// 所以「又置顶又禁用」的行两个类都会挂上（谁的底色赢由样式表里的书写顺序决定，见 .env-row-disabled）。
 function getRowClassName({ row }: { row: any }) {
-  return isTopPinned(row) ? 'env-row-pinned' : ''
+  const classes: string[] = []
+  if (isTopPinned(row)) classes.push('env-row-pinned')
+  if (!row.enabled) classes.push('env-row-disabled')
+  return classes.join(' ')
 }
 
 async function handleToggleTop(row: any) {
@@ -970,7 +978,10 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
           v-for="row in filteredEnvList"
           :key="row.id"
           class="dd-mobile-card env-card"
-          :class="{ 'env-card--pinned': isTopPinned(row) }"
+          :class="{
+            'env-card--pinned': isTopPinned(row),
+            'env-card--disabled': !row.enabled
+          }"
         >
           <div class="dd-mobile-card__header">
             <div class="dd-mobile-card__title-wrap">
@@ -1745,6 +1756,16 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   flex: 1 1 calc(33.33% - 6px);
 }
 
+// 禁用移动卡：与桌面禁用行同一套弱化（浅底 + 文本降一档），完整理由见下方
+// 「---- Disabled Row ----」那段注释。
+// global.scss 的 `.dd-mobile-card { background: var(--el-bg-color) }` 是 (0,1,0)，
+// 这条 scoped 之后是 (0,2,0)，压得过。刻意排在 .env-card--pinned 之前：
+// 那条目前只改 border-color / box-shadow、不改 background，当前虽不冲突，
+// 但保持与桌面一致的「置顶写在后面、置顶赢」顺序，以后给置顶加底色时不用再回来调。
+.env-card--disabled {
+  background: var(--el-fill-color-lighter);
+}
+
 // 置顶移动卡（特有元素）：只保留置顶语义的橙色左缘标识，不再叠加环境光阴影
 .env-card--pinned {
   border-color: rgba(245, 166, 35, 0.28);
@@ -1967,6 +1988,52 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 :deep(.env-drag-col) {
   padding: 0 !important;
+}
+
+/* ---- Disabled Row ---- */
+// 禁用行的整行弱化（issue #109 追评：「禁用的变量文字淡一点，更突出已禁用状态，
+// 但不确定会不会影响可读性」）。提出者的担心是对的，所以这里**不写整行 opacity**，
+// 下面是实算的数据：
+//
+// 明色下表格行底是 --el-fill-color-blank(#fff)，按 WCAG 相对亮度算出的基线对比度是
+//   .env-name        --el-color-primary(#409eff)      2.78:1  ← 本来就不到 AA 的 4.5:1
+//   .env-value-text  --el-text-color-primary(#303133) 13.02:1
+//   .env-remarks-text / .time-text
+//                    --el-text-color-regular(#606266)  6.11:1
+// 整行叠 opacity 之后（前景与白底混合再算）：
+//   α=0.75 → primary 5.88 / regular 3.49
+//   α=0.85 → primary 8.08 / regular 4.33   ← 备注仍然不到 4.5，已经破线
+//   α=0.90 → primary 9.51 / regular 4.84   ← 到这一档人眼已经看不出「淡了」
+// 也就是「看得出被调暗」和「读得清」在明色下不能同时成立。暗色余量很大，
+// 但不能为暗色牺牲明色。
+//
+// 改用【浅底 + 文本降一档语义令牌】：弱化感来自「彩色 → 中性灰」的色相变化，不是变淡。
+//   名称 --el-color-primary(2.78:1) → --el-text-color-regular(在 #fafafa 上 5.85:1)，对比度反而升了
+//   值   --el-text-color-primary(12.47:1) → --el-text-color-regular(5.85:1)，明显降一档且仍过 AA
+//   备注 / 更新时间 已经是 regular = 触底，不再往下压（降到 secondary 只有 2.95:1）
+// 红点与操作列的「启用」按钮保持原样，它们仍是主要的状态载体；
+// 分组标签 / 复制按钮 / 拖拽手柄一律不动 —— 前者与启用状态正交，
+// 后两者在禁用行上仍然可点，调暗一个能点的控件会误导用户以为它失效了。
+//
+// 🔴 绝不要改成给 tr / td 写 opacity：操作列是 fixed="right"，EP 的固定列是
+//    `position: sticky !important` + z-index，`opacity < 1` 会造出新的层叠上下文、打乱固定列层级。
+// 🔴 选择器里的 `.el-table` 与下面置顶行那条同理，是为了压过 EP 的
+//    `td.el-table-fixed-column--right { background: inherit }`(0,2,2)，别删。
+// 🔴 本块必须排在 `.env-row-pinned` **之前**：两者特异性同为 (0,3,1)，靠书写顺序让置顶赢
+//    —— 既置顶又禁用的行仍显示橙色底（置顶是用户主动标记，语义优先级更高）。
+// 🔴 不要用 --el-fill-color-light：那正是 EP 的行 hover 底色，用了会让禁用行看起来像被永久悬停。
+// 悬停禁用行时 EP 的 hover 底(0,3,2；暗色下还带 !important)会盖过这条 —— 与置顶行一致，
+// 是期望行为，别去 !important 强压，强压会让用户失去「鼠标停在哪一行」的反馈。
+:deep(.el-table .env-row-disabled > td) {
+  background: var(--el-fill-color-lighter);
+}
+
+// 桌面与移动共用同一条文本降档规则（两端本来就共用 .env-name / .env-value-text 两个类）
+:deep(.env-row-disabled) .env-name,
+:deep(.env-row-disabled) .env-value-text,
+.env-card--disabled .env-name,
+.env-card--disabled .env-value-text {
+  color: var(--el-text-color-regular);
 }
 
 /* ---- Pinned Row ---- */

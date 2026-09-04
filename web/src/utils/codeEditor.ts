@@ -164,6 +164,19 @@ function readRootCssVar(name: string) {
 }
 
 /**
+ * 编辑器底色是不是深色。
+ *
+ * 主题、以及那些没法用 var() 表达的配色（比如版本对比标尺上的红/绿刻度）共用这一条判断：
+ * 底色是**用户可配项**，明暗规则只能有一处，否则改了默认底色只同步到一边，
+ * 表现是「浅色底上一条深色标尺」。
+ */
+export function isCodeEditorDark() {
+  const background =
+    readRootCssVar(EDITOR_BACKGROUND_VAR) || getDefaultEditorBackgroundColor(isPanelDarkMode())
+  return isDarkColor(background)
+}
+
+/**
  * 按当前配色构建编辑器主题（外观 + 语法高亮）。
  *
  * 底色/前景色刻意写成 `var(--dd-editor-bg-color, <本次解析值>)` 而不是直接写死解析结果：
@@ -189,6 +202,14 @@ export function buildCodeEditorTheme(): Extension[] {
   const gutterColor = dark ? '#6b7280' : '#94a3b8'
   const caretColor = dark ? '#34d399' : '#2563eb'
   const panelBorder = dark ? '#374151' : '#e2e8f0'
+  // 缩进参考线的颜色。刻意不从 --dd-editor-fg-color 派生：那是用户可配的任意颜色，
+  // 想在它基础上叠透明度只能靠 color-mix()，旧一点的移动端浏览器不认、会静默变成没有线。
+  // 改用「底色深就叠白、底色浅就叠黑」的低透明度覆盖 —— 和上面 activeLine / selectionMatch
+  // 用的是同一套办法，对任意自定义底色都成立。
+  const indentGuideColor = dark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(15, 23, 42, 0.12)'
+  // 空白符标记与行号同色：行号色本来就是按「底色是深是浅」算出来的，
+  // 用户改底色 / 切明暗时跟着主题一起重建，不用额外接线。
+  const whitespaceMarkColor = gutterColor
 
   // ⚠️ 下面每条后代选择器都刻意多写一个 `.cm-editor`（`&` 会被换成本主题的生成类名，
   // 于是变成 `.主题类.cm-editor .cm-xxx`，三个类）。
@@ -203,7 +224,13 @@ export function buildCodeEditorTheme(): Extension[] {
       // 两边的高度策略不同，各自在组件的 scoped 样式里定，主题只管配色。
       '&': {
         color: foregroundValue,
-        backgroundColor: backgroundValue
+        backgroundColor: backgroundValue,
+        // 缩进参考线的颜色。写在这里（而不是 indentGuides.ts 的 baseTheme 里）是因为
+        // 主题本来就会在 PANEL_APPEARANCE_CHANGE_EVENT 时整块重建：明暗切换、用户改编辑器底色
+        // 都会自动跟着换色，参考线那边不用再挂一次监听。自定义属性会继承到 .cm-line。
+        // ⚠️ 别为它另起一个 '&.cm-editor .cm-content' 键 —— 下面已经有同名键了，
+        // JS 对象字面量里重复键是后者覆盖前者且不报错，会把字体/内边距/光标色一起吃掉。
+        '--dd-indent-guide-color': indentGuideColor
       },
       // CodeMirror 基础主题会在聚焦时画一圈点状 outline，Monaco 时代没有这个东西，去掉。
       // 聚焦与否靠原生光标就能看出来，不影响可访问性。
@@ -277,6 +304,22 @@ export function buildCodeEditorTheme(): Extension[] {
       },
       '&.cm-editor .cm-specialChar': {
         color: dark ? '#f87171' : '#dc2626'
+      },
+      // ⚠️ 下面三条只覆盖 backgroundImage / backgroundColor，**绝不能写 background 简写**：
+      // CodeMirror 基础主题把 backgroundSize(.4em) 与 backgroundPosition 写成了独立长写属性，
+      // 用简写会把这两条一并重置，灰点会变成铺满整格的一大坨、且位置错位。
+      '&.cm-editor .cm-highlightSpace': {
+        backgroundImage: `radial-gradient(circle at 50% 55%, ${whitespaceMarkColor} 20%, transparent 0)`
+      },
+      '&.cm-editor .cm-highlightTab': {
+        backgroundImage:
+          `url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="200" height="20">` +
+          `<path stroke="${encodeURIComponent(whitespaceMarkColor)}" stroke-width="1" fill="none" ` +
+          `d="M1 10H196L190 5M190 15L196 10M197 4L197 16"/></svg>')`
+      },
+      // 基础主题这条写死成 #ff332255（一片红），在用户自选底色上会串色，必须自己给
+      '&.cm-editor .cm-trailingSpace': {
+        backgroundColor: dark ? 'rgba(248, 113, 113, 0.16)' : 'rgba(220, 38, 38, 0.12)'
       }
     },
     { dark }
@@ -285,4 +328,272 @@ export function buildCodeEditorTheme(): Extension[] {
   // dark 标志除了给我们自己用，@codemirror/merge 的内置差异配色也靠它区分明暗两套，
   // 传错了会出现「浅色底上一片深色的删除块」。
   return [theme, syntaxHighlighting(buildHighlightStyle(dark))]
+}
+
+/* ==========================================================================
+ * 以下是 Monaco 引擎侧的对应物。
+ *
+ * 放在同一个文件里、而不是新起一个 monacoTheme.ts：语言别名表与调色板是**两个引擎共用的
+ * 那一份**，拆开就一定会出现「在这边补了个新别名、忘了同步那边」，
+ * 而那种漏配的表现是「同一个文件换个引擎高亮就没了」，不报错。
+ *
+ * ⚠️ 这里刻意**没有** import 任何 monaco-editor 的东西（连 `import type` 都没有）。
+ * 本文件被 CodeMirror 那条路径直接静态 import，一旦沾上 monaco 的模块说明符，
+ * 就有把 monaco chunk 提升成首屏静态依赖的风险 —— 详见 utils/monacoEngine.ts 顶部。
+ * ========================================================================== */
+
+/**
+ * 语言名 → Monaco 语言 id。
+ *
+ * 与上面的 resolveCodeEditorLanguage **逐条对齐**（别名 js / ts / py / sh / bash / yml / md
+ * 一个不少）。两个引擎认的别名不一致时，表现是「同一个文件换个引擎高亮就没了」，不报错，
+ * 所以两边只能一起改。
+ *
+ * 目标 id 全是恒等映射，跟 utils/monacoEngine.ts 里注册的那批语言一一对应。
+ * 注意 shell 的 id 就叫 `shell`（不是 bash），这是 0.56 的
+ * languages/definitions/shell/register.js 里写死的。
+ *
+ * 认不出来的值回落 'plaintext'：Monaco 与 CodeMirror 不同，它必须拿到一个**存在的**语言 id，
+ * 给空字符串会让模型创建失败。
+ */
+export function resolveMonacoLanguage(language?: string): string {
+  switch ((language || '').trim().toLowerCase()) {
+    case 'javascript':
+    case 'js':
+      return 'javascript'
+    case 'typescript':
+    case 'ts':
+      return 'typescript'
+    case 'python':
+    case 'py':
+      return 'python'
+    case 'shell':
+    case 'bash':
+    case 'sh':
+      return 'shell'
+    case 'go':
+      return 'go'
+    case 'json':
+      return 'json'
+    case 'yaml':
+    case 'yml':
+      return 'yaml'
+    case 'markdown':
+    case 'md':
+      return 'markdown'
+    case 'html':
+      return 'html'
+    case 'css':
+      return 'css'
+    case 'xml':
+      return 'xml'
+    default:
+      return 'plaintext'
+  }
+}
+
+/** defineMonacoTheme 的返回值：主题名给 setTheme 用，底色/前景色给外层容器用。 */
+export interface MonacoThemeDescriptor {
+  background: string
+  foreground: string
+  base: 'vs' | 'vs-dark'
+  themeName: string
+}
+
+/**
+ * 我们构造的主题数据。结构对齐 Monaco 的 IStandaloneThemeData，
+ * 但**不** import 它的类型（理由见 defineMonacoTheme 的入参说明）。
+ */
+interface MonacoThemeData {
+  base: 'vs' | 'vs-dark'
+  inherit: boolean
+  rules: Array<{ token: string; foreground?: string; fontStyle?: string }>
+  colors: Record<string, string>
+}
+
+/**
+ * defineMonacoTheme 的入参：只要求「有个能定义主题的 editor」。
+ *
+ * 刻意不写成 `import type { MonacoApi } from './monacoEngine'`：
+ * 那行今天会被 TS 擦掉（verbatimModuleSyntax 下 `import type` 不产生运行时导入），
+ * 但它离「有人顺手删掉 type 关键字」只差一个词，而本文件是 CodeMirror 路径的静态依赖 ——
+ * 真变成值导入的那一刻，monaco chunk 就被提升进首屏，构建全绿、页面能用，纯静默劣化。
+ * 用结构化最小类型把这条路彻底堵死，代价只是这一个 interface。
+ */
+interface MonacoThemeHost {
+  editor: {
+    defineTheme(themeName: string, themeData: MonacoThemeData): void
+  }
+}
+
+/**
+ * CSS 颜色 → Monaco 认的十六进制；认不出来回落 fallback。
+ *
+ * Monaco 的 colors 表只吃 `#RGB` / `#RGBA` / `#RRGGBB` / `#RRGGBBAA`
+ * （base/common/color.js 的 parseHex），认不出来时 `Color.fromHex` 兜成 **Color.red** ——
+ * 表现是那块区域变成一片正红，不报错。
+ * 更糟的是 `editor.background` / `editor.foreground` 这两条会被 standaloneThemeService
+ * 反手塞进一条 token 规则，那边的正则是严格的 `^#?[0-9a-f]{6}([0-9a-f]{2})?$`，
+ * 三位简写会直接 **throw**（Illegal value for token color），把编辑器创建整个炸掉。
+ *
+ * 两类输入都必须先过这里：
+ *   - 用户可配的编辑器底色/前景色：系统设置里那是自由文本，utils/panelAppearance.ts 的
+ *     parseColor 明确支持 `#fff` 与 `rgb()/rgba()`，也就是说这两种写法是**合法输入**；
+ *     而自定义属性的计算值不会被浏览器归一化，用户写什么这里读到什么。
+ *   - 我们自己那几条带透明度的叠加色：CodeMirror 侧写成 rgba() 更好读，这里换成 8 位 hex。
+ *
+ * CodeMirror 侧不需要这一层：那边的值直接进 CSS，浏览器什么都认。
+ *
+ * fallback 只有用户可配的那两条需要显式传（传内置默认色）：宁可丢掉用户的自定义色，
+ * 也不能让编辑器崩掉或变红。我们自己写死的调色板必然能解析，用默认的黑就够了。
+ */
+function toMonacoColor(value: string, fallback = '#000000'): string {
+  return parseMonacoHex(value) ?? parseMonacoHex(fallback) ?? '#000000'
+}
+
+function parseMonacoHex(value: string): string | null {
+  const text = (value || '').trim().toLowerCase()
+
+  const hexMatch = /^#([0-9a-f]{3,8})$/.exec(text)
+  if (hexMatch) {
+    const digits = hexMatch[1] ?? ''
+    // #RGB / #RGBA：colors 表认，但上面说的那条 token 规则正则不认，统一展开成长写
+    if (digits.length === 3 || digits.length === 4) {
+      return `#${digits.replace(/./g, (ch) => ch + ch)}`
+    }
+    if (digits.length === 6 || digits.length === 8) {
+      return `#${digits}`
+    }
+    // 5 位 / 7 位是打错了，交给 fallback
+    return null
+  }
+
+  const rgbMatch = /^rgba?\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*(?:,\s*([0-9.]+)\s*)?\)$/.exec(text)
+  if (!rgbMatch) {
+    return null
+  }
+
+  const toByte = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, '0')
+  const channel = (raw: string | undefined) => toByte(Number.parseInt(raw ?? '', 10) || 0)
+  const alphaRaw = rgbMatch[4]
+  // 没写 alpha 就不补末两位：`rgb()` 本来就是全不透明，8 位写法与 6 位等价，短的更好读
+  const alpha = alphaRaw === undefined ? '' : toByte(Math.round((Number.parseFloat(alphaRaw) || 0) * 255))
+  return `#${channel(rgbMatch[1])}${channel(rgbMatch[2])}${channel(rgbMatch[3])}${alpha}`
+}
+
+/**
+ * 按当前配色定义并注册 Monaco 主题，返回描述符。
+ *
+ * 与 buildCodeEditorTheme() 是同一件事的两个引擎版本，取值全部从那边抄过来（见下面每条注释），
+ * 目标是**两个引擎看起来是同一个编辑器**，而不是「Monaco 保持它自己那套 vs / vs-dark」。
+ * 这一点是**刻意偏离**改造前的 defineMonacoTheme —— 那时候 rules 是空数组、纯靠 inherit，
+ * 语法色就是 Monaco 默认那套；现在既然两个引擎并存、还能随时互切，颜色不一致会非常刺眼。
+ * inherit 仍然保留（true），用来兜住我们没覆盖到的 token，而 DARK_SYNTAX / LIGHT_SYNTAX
+ * 两份调色板本来就是照着 vs / vs-dark 抄的，兜底值和我们写的值本来就同一路数。
+ *
+ * ⚠️ 与 CodeMirror 侧唯一的**实质**差别：Monaco 只吃字面 hex，
+ * 塞 `var(--dd-editor-bg-color, ...)` 进去不是「静默忽略」，是被解析成 Color.red（一片正红）。
+ * 于是「用户只改了编辑器底色、没切明暗」这种情况：
+ *   - CodeMirror 侧靠 var() 自动重绘，主题都不用重建；
+ *   - Monaco 侧**必须重新 defineTheme**（同名覆盖即可，Monaco 会刷新已挂载实例）。
+ * 所以两个引擎的调用方都得监听 PANEL_APPEARANCE_CHANGE_EVENT 才算覆盖完整。
+ *
+ * 入参是结构化最小类型而不是 MonacoApi，理由见 MonacoThemeHost。
+ */
+export function defineMonacoTheme(monaco: MonacoThemeHost): MonacoThemeDescriptor {
+  // 明暗判定复用 isCodeEditorDark()：底色是用户可配项，这条规则只能有一处（见那个函数的说明）
+  const dark = isCodeEditorDark()
+  const rawBackground =
+    readRootCssVar(EDITOR_BACKGROUND_VAR) || getDefaultEditorBackgroundColor(isPanelDarkMode())
+  const rawForeground = readRootCssVar(EDITOR_FOREGROUND_VAR) || getReadableTextColor(rawBackground)
+
+  // 下面这几条的字面值与 buildCodeEditorTheme() 里的同名局部变量**逐字相同**，改一边就要改另一边，
+  // 否则表现是「换个引擎缩进参考线/选区就变色了」。带 rgba() 的那几条由 toMonacoColor 转成 8 位 hex。
+  const selectionColor = dark ? '#134e4acc' : '#bfdbfe'
+  const activeLineColor = dark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.04)'
+  const gutterColor = dark ? '#6b7280' : '#94a3b8'
+  const caretColor = dark ? '#34d399' : '#2563eb'
+  const indentGuideColor = dark ? 'rgba(255, 255, 255, 0.14)' : 'rgba(15, 23, 42, 0.12)'
+  // 对应 CodeMirror 侧的 .cm-selectionMatch
+  const selectionMatchColor = dark ? 'rgba(52, 211, 153, 0.18)' : 'rgba(37, 99, 235, 0.12)'
+  // 对应 .cm-searchMatch（非当前项）与 .cm-searchMatch-selected（当前项）
+  const searchMatchColor = dark ? 'rgba(234, 179, 8, 0.28)' : 'rgba(234, 179, 8, 0.35)'
+  const searchMatchSelectedColor = dark ? 'rgba(234, 179, 8, 0.5)' : 'rgba(234, 179, 8, 0.6)'
+  // 空白符标记与行号同色，与 buildCodeEditorTheme() 里的 whitespaceMarkColor 同源
+  const whitespaceMarkColor = gutterColor
+
+  const background = toMonacoColor(rawBackground, getDefaultEditorBackgroundColor(dark))
+  const foreground = toMonacoColor(rawForeground, getReadableTextColor(rawBackground))
+
+  const color = dark ? DARK_SYNTAX : LIGHT_SYNTAX
+  // token 规则里的 foreground 按 Monaco 惯例写成不带 `#` 的 6 位裸 hex。
+  // 截到 6 位是防御性的：调色板目前全是 6 位，将来谁加一条带透明度的进来，
+  // 8 位虽然那条正则也认，但 token 颜色本来就不支持透明度，截掉更符合预期。
+  const hex = (value: string) => toMonacoColor(value).slice(1, 7)
+
+  const themeName = dark ? 'dd-editor-dark' : 'dd-editor-light'
+  const base: 'vs' | 'vs-dark' = dark ? 'vs-dark' : 'vs'
+
+  const themeData: MonacoThemeData = {
+    base,
+    // 兜住我们没列到的 token（Monarch 各语言会吐出一大堆细分 token 名）
+    inherit: true,
+    // 与 buildHighlightStyle() 的那张表一一对应。左边是 Monaco/Monarch 的 token 名，
+    // 右边是两个引擎共用的调色板字段。
+    // 注：调色板里的 functionName 在这边用不上 —— Monarch 语法不区分「函数名」这个 token，
+    // 函数名会落到 identifier 上，硬给它编一个 token 名只会写出一条永不命中的规则。
+    rules: [
+      { token: 'comment', foreground: hex(color.comment), fontStyle: 'italic' },
+      { token: 'keyword', foreground: hex(color.keyword) },
+      { token: 'keyword.control', foreground: hex(color.controlKeyword) },
+      { token: 'string', foreground: hex(color.string) },
+      { token: 'number', foreground: hex(color.number) },
+      { token: 'type', foreground: hex(color.typeName) },
+      { token: 'type.identifier', foreground: hex(color.typeName) },
+      { token: 'identifier', foreground: hex(color.variableName) },
+      { token: 'constant', foreground: hex(color.constant) },
+      { token: 'operator', foreground: hex(color.operator) },
+      { token: 'delimiter', foreground: hex(color.operator) },
+      { token: 'tag', foreground: hex(color.tagName) },
+      { token: 'attribute.name', foreground: hex(color.attributeName) },
+      { token: 'regexp', foreground: hex(color.regexp) },
+      { token: 'metatag', foreground: hex(color.meta) },
+      { token: 'annotation', foreground: hex(color.meta) },
+      { token: 'invalid', foreground: hex(color.invalid) }
+    ],
+    colors: {
+      'editor.background': background,
+      'editor.foreground': foreground,
+      'editorLineNumber.foreground': toMonacoColor(gutterColor),
+      // 当前行的行号。对应 CodeMirror 侧 buildCodeEditorTheme() 里的
+      // `'&.cm-editor .cm-activeLineGutter': { color: foregroundValue }` —— 那边用的是**正文色**，
+      // 所以这里直接给 foreground（它已经过 toMonacoColor，是可用的字面 hex）。
+      // ⚠️ 不给这条不是「跟着 editorLineNumber.foreground 走」，而是回落到 base 主题的默认值：
+      // vs 是 #0B216F（深蓝）、vs-dark 是 #c6c6c6，在我们这套浅灰行号里会突兀地跳出来。
+      'editorLineNumber.activeForeground': foreground,
+      'editorCursor.foreground': toMonacoColor(caretColor),
+      'editor.selectionBackground': toMonacoColor(selectionColor),
+      // CodeMirror 侧只有一档选区色（用的是原生 ::selection，本来就不区分聚焦与否），
+      // 这里两条给同一个值，免得「点到别处去选区就变了个颜色」成为两个引擎的又一处差异。
+      'editor.inactiveSelectionBackground': toMonacoColor(selectionColor),
+      'editor.lineHighlightBackground': toMonacoColor(activeLineColor),
+      'editorIndentGuide.background1': toMonacoColor(indentGuideColor),
+      'editorWhitespace.foreground': toMonacoColor(whitespaceMarkColor),
+      'editor.selectionHighlightBackground': toMonacoColor(selectionMatchColor),
+      // ⚠️ 这两条的语义与 CodeMirror 侧**是反的**，别照着名字对：
+      // Monaco 的 findMatch 指【当前那一个】匹配（对应 .cm-searchMatch-selected），
+      // findMatchHighlight 才是其余匹配（对应 .cm-searchMatch）。接反了不报错，只是深浅颠倒。
+      'editor.findMatchBackground': toMonacoColor(searchMatchSelectedColor),
+      'editor.findMatchHighlightBackground': toMonacoColor(searchMatchColor)
+    }
+  }
+
+  // 同名重复定义是合法的：Monaco 会替换旧数据，并在该主题正是当前主题时自动刷新已挂载的实例
+  // （standaloneThemeService.defineTheme 末尾那句 setTheme）。
+  // 所以「用户只改了编辑器底色」时调用方重调本函数就够了。
+  // 但**明暗切换时主题名会变**（dd-editor-dark ⇄ dd-editor-light），那种情况下调用方还必须
+  // 拿返回的 themeName 再调一次 monaco.editor.setTheme()，否则新主题定义了却没被用上。
+  monaco.editor.defineTheme(themeName, themeData)
+
+  return { background, foreground, base, themeName }
 }

@@ -2142,6 +2142,7 @@ if !ok {
 - **启动前必须 `cd` 到数据目录**。否则 `appboot.ResolveConfigPath()` 四个候选全落空，`main.go` 直接 `log.Fatalf`。
 - **二进制必须 rename 覆盖**，不能直接写正在执行的文件（`ETXTBSY`）。
 - **前端换完必须重启进程**，不能指望热生效：`main.go` 只在启动时对白名单里的几个子目录调 `engine.Static`（`assets` / `fonts` / `sponsor-portal`；v3.2.0 前还有一个 `monaco`，随编辑器换成 CodeMirror 6 删掉），新版 dist 多出顶层目录时不重启会走 SPA fallback，静态资源等于坏掉。
+  - v3.2.2 把 Monaco 作为可切换的第二引擎加了回来，**白名单不用动、后端零改动**：新方案是裁剪 ESM + 动态 `import()`，chunk / worker / 图标字体全部落在 `dist/assets/` 下，已被 `assets` 覆盖。这里的判据始终是「**新版 dist 有没有多出顶层目录**」，不是「前端引入了哪个库」——升级前端时按目录清单对一遍即可，不必逐个依赖去猜。
 - **运行态判定只校验目录、不校验文件名**：`ddp` 装在 `/usr/local/bin/ddp`，写死 `daidai-server` 会让 CLI 分支全成死代码。相应地 plan 必须记录真正的面板 PID，CLI 发起时由 helper 显式 `kill -TERM`，且此时**不得**自杀（会截断 CLI 输出）。
 - **`os.Executable()` 要剥掉 `" (deleted)"` 后缀**：二进制被替换后 `/proc/self/exe` 会带这个后缀。
 - **外壳版本是两个常量，别当成一个**：

@@ -14,13 +14,23 @@ import {
   MagicStick,
   MoreFilled,
   Plus,
+  Setting,
   Switch,
   VideoPlay,
 } from "@element-plus/icons-vue";
 import CodeEditor, {
+  persistEditorViewOption,
   persistEditorWordWrap,
+  readStoredEditorViewOption,
   readStoredEditorWordWrap,
 } from "@/components/CodeEditor.vue";
+import type { EditorViewOption } from "@/components/CodeEditor.vue";
+import {
+  persistEditorEngine,
+  readStoredEditorEngine,
+  resolveEditorEngine,
+} from "@/utils/editorEngine";
+import type { EditorEngine } from "@/utils/editorEngine";
 
 const fileContent = defineModel<string>("fileContent", { required: true });
 const isEditing = defineModel<boolean>("isEditing", { required: true });
@@ -112,10 +122,64 @@ function toggleWordWrap() {
   persistEditorWordWrap(wordWrap.value);
 }
 
+// 三个视图开关（缩略图 / 缩进参考线 / 空白符）与自动换行同一套语义：每浏览器一份、两页共享。
+// 但它们**没有**写成三组 ref + 三个 toggle —— 那是三段逐字雷同的代码，
+// 收成「一个对象 + 一个按名字读写的 toggle」后，以后再加一项只需要在对象里补一行。
+// 默认值不在这里定（minimap/whitespace 关、indent_guides 开），全部由 CodeEditor 那两个函数负责，
+// 页面这边只管读到什么用什么，两页才不会各写一份默认值然后慢慢漂移。
+const viewOptions = ref({
+  minimap: readStoredEditorViewOption("minimap"),
+  indent_guides: readStoredEditorViewOption("indent_guides"),
+  whitespace: readStoredEditorViewOption("whitespace"),
+});
+
+function toggleViewOption(name: EditorViewOption) {
+  const next = !viewOptions.value[name];
+  viewOptions.value[name] = next;
+  persistEditorViewOption(name, next);
+}
+
+// 引擎偏好（auto / codemirror / monaco）：和上面几个开关一样是「每浏览器一份、两页共享」，
+// 但它**不是**同一档设置，所以在菜单里被 divided 分成了独立一组 ——
+// 上面三项是「同一个编辑器怎么显示」，改一下只是重配一个 Compartment；
+// 引擎是「换一个编辑器」，切一次要把实例整块拆掉重建，撤销历史、光标、滚动位置全丢
+// （正文本身不丢，它活在这里的 fileContent 里，重建后会重新灌进去）。
+const editorEngine = ref(readStoredEditorEngine());
+
+// 只做展示：告诉用户「自动」这一档在这台设备上落到哪个引擎，
+// 否则选了 auto 的人完全看不出自己在用什么。
+// 刻意不响应窗口尺寸变化（resolveEditorEngine 内部读的是 window.innerWidth 快照）：
+// auto 本来就只在编辑器挂载时解析一次，标签跟着拖窗口跳来跳去反而与实际用的引擎对不上。
+const autoEngineLabel = computed(() =>
+  resolveEditorEngine("auto") === "monaco" ? "Monaco" : "CodeMirror",
+);
+
+// 底部状态条读的是**解析后**的引擎而不是偏好值：用户关心的是「现在跑的是哪个」，
+// 选了 auto 的人看到「auto」等于什么都没告诉他。
+const activeEngineLabel = computed(() =>
+  resolveEditorEngine(editorEngine.value) === "monaco" ? "Monaco" : "CM",
+);
+
+function selectEditorEngine(next: EditorEngine) {
+  if (editorEngine.value === next) return;
+  editorEngine.value = next;
+  persistEditorEngine(next); // 内部会派发 EDITOR_ENGINE_CHANGE_EVENT，已挂载的编辑器跟着换
+}
+
 // 脚本页被 keep-alive 缓存，第二次进来只触发 onActivated 不触发 onMounted。
 // 不在这里补读一次的话，「在配置文件页改了开关、切回脚本页却没变」——共享就名存实亡了。
+// 三个视图开关同理，漏掉任何一个就是那一项单独失去共享（而且构建和类型检查都发现不了）。
 onActivated(() => {
   wordWrap.value = readStoredEditorWordWrap();
+  viewOptions.value = {
+    minimap: readStoredEditorViewOption("minimap"),
+    indent_guides: readStoredEditorViewOption("indent_guides"),
+    whitespace: readStoredEditorViewOption("whitespace"),
+  };
+  // 引擎偏好同样两页共享，漏掉这一行的表现是「在配置文件页切了引擎、切回脚本页菜单里还是旧的」——
+  // 编辑器实例其实已经被 EDITOR_ENGINE_CHANGE_EVENT 换掉了，只有菜单勾选和状态条读数在骗人，
+  // 比单纯不生效更难查。
+  editorEngine.value = readStoredEditorEngine();
 });
 
 // CodeEditor 由 Vite 直接打包、同步 import，没有运行期加载链路，
@@ -322,6 +386,109 @@ watch(
             </el-button>
           </el-tooltip>
 
+          <!-- 三个视图开关（缩略图 / 缩进参考线 / 空白符）收在齿轮下拉里，不并排加按钮。
+               .hero-actions 是 flex-shrink: 0 且祖先 .scripts-editor 带 overflow: hidden，
+               桌面端装不下不会换行、也不会出滚动条，而是从右边缘被静默裁掉；
+               1025~1280 这一档本来就已经在收 Wrap 的文字腾宽度（见下面那条 media query），
+               再并排塞 3 个按钮必然裁掉最右侧的「更多」。齿轮本身是纯图标，只多占一个按钮的宽。
+               :hide-on-click="false" 是必须的：这三项经常连着切，点一下就收菜单会逼用户反复重开。 -->
+          <el-dropdown
+            trigger="click"
+            placement="bottom-end"
+            :hide-on-click="false"
+          >
+            <el-button
+              class="action-btn"
+              :size="isMobile ? 'small' : 'default'"
+              aria-label="编辑器选项"
+            >
+              <el-icon><Setting /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item @click="toggleViewOption('minimap')">
+                  <span class="opt-row">
+                    <span>代码缩略图</span>
+                    <span
+                      class="opt-state"
+                      :class="{ 'is-on': viewOptions.minimap }"
+                      >{{ viewOptions.minimap ? "ON" : "OFF" }}</span
+                    >
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item @click="toggleViewOption('indent_guides')">
+                  <span class="opt-row">
+                    <span>缩进参考线</span>
+                    <span
+                      class="opt-state"
+                      :class="{ 'is-on': viewOptions.indent_guides }"
+                      >{{ viewOptions.indent_guides ? "ON" : "OFF" }}</span
+                    >
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item @click="toggleViewOption('whitespace')">
+                  <span class="opt-row">
+                    <span>显示空白符</span>
+                    <span
+                      class="opt-state"
+                      :class="{ 'is-on': viewOptions.whitespace }"
+                      >{{ viewOptions.whitespace ? "ON" : "OFF" }}</span
+                    >
+                  </span>
+                </el-dropdown-item>
+
+                <!-- 引擎切换：用 divided 单独起一组，不和上面三项混排。
+                     上面三项是「同一个编辑器怎么显示」，切一下只是重配一个 Compartment，代价为零；
+                     引擎是「换一个编辑器」，切一次整块重建实例，撤销历史 / 光标 / 滚动位置全丢
+                     （正文本身不丢，它活在本组件的 fileContent 里）。两者不是同一档，
+                     并排放会让人以为引擎也是个随手可以来回拨的显示开关。
+
+                     做成三项单选而不是一个「Monaco ON/OFF」开关：auto 既是默认值也是推荐值，
+                     二值开关表达不了「跟着设备走」这个第三态，而这第三态正是
+                     「触摸设备永远不给 Monaco」这条硬约束的落点 —— Monaco 是自绘编辑器，
+                     长按系统菜单 / 选择手柄 / 拖动光标三条做不到，这也是当初换引擎的全部理由。
+
+                     状态标写「当前」而不是沿用 ON/OFF：ON/OFF 是布尔读数，
+                     放进三选一里会让人以为三个引擎能各自开关、甚至同时开着。
+                     未选中的项不出标（而不是出一枚灰的「否」），三项里只有一枚标，
+                     「哪个在生效」一眼可读，也不必再解释另外两枚是什么意思。
+
+                     没有为这组新加按钮或新开一个「编辑器设置」入口：.hero-actions 是
+                     flex-shrink: 0 且祖先 .scripts-editor 带 overflow: hidden，1025~1280 那一档
+                     已经在收 Wrap 的文字腾宽度，再加按钮会被静默从右边缘裁掉；
+                     何况同一页出现两个编辑器设置入口本身就是坏设计。 -->
+                <el-dropdown-item divided @click="selectEditorEngine('auto')">
+                  <span class="opt-row">
+                    <span>引擎：自动（{{ autoEngineLabel }}）</span>
+                    <span v-if="editorEngine === 'auto'" class="opt-state is-on"
+                      >当前</span
+                    >
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item @click="selectEditorEngine('codemirror')">
+                  <span class="opt-row">
+                    <span>引擎：CodeMirror</span>
+                    <span
+                      v-if="editorEngine === 'codemirror'"
+                      class="opt-state is-on"
+                      >当前</span
+                    >
+                  </span>
+                </el-dropdown-item>
+                <el-dropdown-item @click="selectEditorEngine('monaco')">
+                  <span class="opt-row">
+                    <span>引擎：Monaco</span>
+                    <span
+                      v-if="editorEngine === 'monaco'"
+                      class="opt-state is-on"
+                      >当前</span
+                    >
+                  </span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+
           <el-dropdown trigger="click" placement="bottom-end">
             <el-button
               class="action-btn"
@@ -374,6 +541,9 @@ watch(
           :language="editorLanguage"
           :readonly="!isEditing"
           :word-wrap="wordWrap"
+          :minimap="viewOptions.minimap"
+          :indent-guides="viewOptions.indent_guides"
+          :show-whitespace="viewOptions.whitespace"
           class="code-editor"
         />
       </div>
@@ -394,8 +564,30 @@ watch(
         <div class="status-group">
           <span class="status-item">UTF-8</span>
           <span class="status-item">LF</span>
+          <!-- 当前引擎读数。和下面那几个视图开关不同，它是**常驻**的：
+               引擎藏在齿轮下拉的第二组里，菜单一收起就完全看不出正在用哪个，
+               而两个引擎的手感差别（多光标、折叠、触摸选区）远大于「空白符开没开」，
+               「切了却看不出切没切」是最糟的一种反馈缺失，所以不做「非默认才显示」的省略。
+
+               位置取舍：排在 UTF-8 / LF 之后、Wrap 与开关镜像之前。
+               .status-group 带 overflow: hidden，装不下是从右边缘直接裁掉、不换行也不滚动，
+               而最右侧的「编辑中/只读」是这条状态条上最要紧的一项 —— 任何常驻项都会挤它。
+               所以这里按语义就近排（UTF-8 / LF / 引擎都是「这份文件正被什么处理」的静态事实，
+               后面几个才是开关镜像），并把默认引擎的标签压到最短的 CM：
+               默认档是 CodeMirror，常态下只多两个字符加一个间隙，
+               只有主动切到 Monaco 的桌面用户才会多付那 4 个字符的宽度。 -->
+          <span class="status-item">{{ activeEngineLabel }}</span>
           <!-- 镜像 hero 上那个 Wrap 按钮的状态：窄屏按钮收成纯图标后，这里是唯一能读出开关的地方 -->
           <span class="status-item">Wrap {{ wordWrap === "on" ? "ON" : "OFF" }}</span>
+          <!-- 三个视图开关藏在齿轮下拉里，菜单一收起同样看不出开关状态，所以这里也镜像一份。
+               但和 Wrap 的写法不同：**只在开启时**渲染一个短标记，关闭时整段不渲染。
+               状态条本来就是一根窄条（.status-group 带 overflow: hidden，装不下是直接裁掉不是换行），
+               并排常驻 `Map OFF / Guide ON / Space OFF` 三段会把右边的「编辑中/只读」顶出去 ——
+               那可是这条状态条上最要紧的一项。开启才显示的代价是「关闭态读不到」，
+               但关闭态本来就是默认态（三项里两项默认关），常态下这里一个字都不多。 -->
+          <span v-if="viewOptions.minimap" class="status-item">Map</span>
+          <span v-if="viewOptions.indent_guides" class="status-item">Guide</span>
+          <span v-if="viewOptions.whitespace" class="status-item">Space</span>
           <span
             class="status-item"
             :class="{ 'status-item--accent': isEditing }"
@@ -708,10 +900,53 @@ watch(
 /* 1025~1280 这一档：还没进 compact（按钮仍带文字），但编辑器卡被 300px 目录树挤到只剩 ~450px。
    .hero-actions 是 flex-shrink: 0，装不下不会换行，而是直接被卡片的 overflow: hidden 从右边裁掉。
    Wrap 是这排里唯一「不看文字也知道状态」的按钮（底部状态条镜像了 Wrap ON/OFF，还有 tooltip），
-   所以这一档优先收掉它的文字，把宽度让给动作类按钮。目录树收起后编辑器多出 314px，更不会紧张。 */
+   所以这一档优先收掉它的文字，把宽度让给动作类按钮。目录树收起后编辑器多出 314px，更不会紧张。
+   齿轮（编辑器选项）没参与这条规则：它本来就是纯图标、没有文字可收，
+   三个视图开关全塞在它的下拉里，正是为了在这一档只多占一个按钮的宽度。 */
 @media screen and (min-width: 1025px) and (max-width: 1280px) {
   .wrap-btn-label {
     display: none;
+  }
+}
+
+/* 齿轮下拉里的视图开关项：左侧标题、右侧一枚 ON/OFF 状态标。
+   下拉菜单项没有 EP 现成的选中态可用，只画一个对勾的话「没对勾」既可能是关、
+   也可能是没渲染上，读不出确定状态，所以两种状态都出字。
+   配置文件页（views/config-file/index.vue）有一份长相相同的规则：两边都是 scoped 样式、
+   隔着组件边界互相够不到，只能各写一份，数值要改就两边一起改。 */
+.opt-row {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.opt-state {
+  flex-shrink: 0;
+  padding: 0 6px;
+  height: 16px;
+  line-height: 16px;
+  // 跟着它所在的下拉菜单项走 control 档（令牌表里「下拉/浮层菜单项」就是这一档）：
+  // 菜单项是方角时里面嵌一颗胶囊会看出错位。它也不是状态灯（那类走 pill 档），
+  // 只是把开关状态写成字的静态读数，和同页 .file-pill 的取舍一致。
+  border-radius: var(--dd-radius-control);
+  font-family: var(--dd-font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  // 关闭态用 regular 而不是更淡的 placeholder：这枚标是开关状态的唯一读数，
+  // 10px 的小字再配 placeholder（明色下约 2.5:1）就没法读了，等于白做一个状态标。
+  // 与开启态的主色 + 主色淡底相比，它已经靠「无彩色 + 灰底」退到次要位置，不需要再靠压低对比度区分。
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color);
+  transition: background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  &.is-on {
+    color: var(--el-color-primary);
+    background: color-mix(in srgb, var(--el-color-primary) 12%, transparent);
   }
 }
 
