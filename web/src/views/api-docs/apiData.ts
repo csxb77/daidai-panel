@@ -1199,12 +1199,25 @@ if __name__ == '__main__':
         method: 'GET',
         path: '/api/deps',
         title: '获取依赖列表',
-        description: '按类型获取依赖列表',
+        description: '按类型获取依赖列表。响应里的 failed_by_type 是各类型安装失败数的全量汇总，不受 type / python_version 筛选影响。',
         auth: 'jwt',
         queryParams: [
           { name: 'type', type: 'string', required: true, description: '依赖类型：nodejs / python / linux', example: 'python' },
+          { name: 'python_version', type: 'string', description: 'Python 版本，仅在 type=python 时生效；不传则用默认版本', example: '3.12' },
         ],
-        responseExample: JSON.stringify({ data: [{ id: 1, type: 'python', name: 'requests', status: 'installed' }], total: 1 }, null, 2),
+        responseExample: JSON.stringify({
+          data: [{ id: 1, type: 'python', name: 'requests', status: 'installed' }],
+          total: 1,
+          failed_by_type: { nodejs: 2, python: 5, linux: 2 },
+        }, null, 2),
+        responseFields: [
+          { name: 'data', type: 'array', description: '依赖列表，仅包含 type（以及 python_version）筛选命中的记录' },
+          { name: 'total', type: 'integer', description: 'data 的条数' },
+          { name: 'failed_by_type', type: 'object', description: '各类型安装失败的依赖数，nodejs / python / linux 三个键恒定存在（无失败时为 0）。与筛选参数无关，永远是全量统计；其中 python 跨所有 Python 版本汇总，因此三者之和等于侧栏「依赖管理」角标的数字' },
+          { name: 'failed_by_type.nodejs', type: 'integer', description: 'Node.js 依赖中 status=failed 的条数' },
+          { name: 'failed_by_type.python', type: 'integer', description: 'Python 依赖中 status=failed 的条数，含所有 Python 版本' },
+          { name: 'failed_by_type.linux', type: 'integer', description: 'Linux 依赖中 status=failed 的条数' },
+        ],
       },
       {
         id: 'deps-create',

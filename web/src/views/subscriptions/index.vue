@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from "vue";
+import { ref, onMounted, onBeforeUnmount, onActivated, computed } from "vue";
 import { subscriptionApi } from "@/api/subscription";
 import { sshKeyApi } from "@/api/notification";
 import { configApi } from "@/api/system";
@@ -10,6 +10,7 @@ import {
 } from "@/utils/sse";
 import { useResponsive } from "@/composables/useResponsive";
 import { useAuthStore } from "@/stores/auth";
+import { useBadgesStore } from "@/stores/badges";
 import { canAdminister } from "@/utils/roles";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
 import { formatDuration } from "@/utils/duration";
@@ -29,6 +30,7 @@ const { isMobile, dialogFullscreen } = useResponsive();
 const typeFilter = ref<"" | "git-repo" | "single-file" | "disabled">("");
 
 const authStore = useAuthStore();
+const badgesStore = useBadgesStore();
 // 本页路由的 minRole 是 operator，而 GET /configs 是 JWTAuth() + RequireAdmin() 的管理员接口。
 // 不按角色 gate 的话，每个 operator 每次进这个页面都会打一次注定 403 的请求
 // （被 catch 静默吞掉、不弹错，但白白多一次调用）。
@@ -252,9 +254,18 @@ async function loadGlobalOverwriteDefault() {
 }
 
 onMounted(() => {
+  // 进页即把侧栏的「订阅管理」失败角标标记为已读——用户已经站在这一页上了，再红着没有意义
+  badgesStore.ackSubsFailed();
   loadData();
   loadSSHKeys();
   loadGlobalOverwriteDefault();
+});
+
+onActivated(() => {
+  // 必须和 onMounted 两处都写：MainLayout 的 keep-alive 是 :max="14"，
+  // 第二次以后进本页只触发 onActivated、不再触发 onMounted，只写一处会只有首访生效。
+  // 这里刻意只清角标、不重新拉列表，保持本页原有的「缓存页不自动刷新」行为不变。
+  badgesStore.ackSubsFailed();
 });
 
 onBeforeUnmount(() => {

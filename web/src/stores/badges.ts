@@ -22,6 +22,20 @@ const RESUME_DELAY = 300
  */
 const LOGS_ACKED_KEY = 'dd:badges:logs_acked'
 
+/**
+ * 依赖 / 订阅失败角标的已读水位 key，值是 `{ u: 用户名, n: 已读到的失败数 }`。
+ *
+ * 【为什么这两个不带 d（日期）】
+ * logs 那个带日期，是因为服务端的 logs_failed_today 本身按天统计、跨天会归零，
+ * 旧水位的基数随之失效。而依赖安装失败、订阅拉取失败都是**持久状态**——
+ * 不修好就一直是失败。按天作废会变成「今天点掉了、明天又亮起来」，等于没修。
+ * 所以这两个只按用户名隔离，永不过期。
+ *
+ * 三个 key 各自独立，互不覆盖。
+ */
+const DEPS_ACKED_KEY = 'dd:badges:deps_acked'
+const SUBS_ACKED_KEY = 'dd:badges:subs_acked'
+
 /** 已读水位按用户隔离。拿不到用户时用空串——它必然与存档里的名字对不上，等价于「没读过」。 */
 function currentUsername(): string {
   return useAuthStore().user?.username || ''
@@ -30,19 +44,24 @@ function currentUsername(): string {
 /**
  * 读取失败角标的已读水位。
  *
- * 只认「同一个用户 + 同一个本地日期」的存档，对不上一律当 0：
- * 宁可多提醒一次，也不要因为沿用了别人的/昨天的水位而漏掉真实失败。
+ * 只认「同一个用户」的存档，对不上一律当 0：
+ * 宁可多提醒一次，也不要因为沿用了别人的水位而漏掉真实失败。
+ *
+ * `day` 传本地日期字符串 = 这条水位【跨天作废】（logs 用），传空串 = 只按用户隔离、
+ * 永不过期（deps / subs 用，理由见 DEPS_ACKED_KEY 上的说明）。
  * 日期用 utils/datetime 的 formatDate，与全站同一套本地时区口径。
  */
-function loadLogsAcked(username: string): number {
+function loadAcked(key: string, username: string, day: string): number {
   if (typeof window === 'undefined') return 0
   try {
-    const raw = window.localStorage.getItem(LOGS_ACKED_KEY)
+    const raw = window.localStorage.getItem(key)
     if (!raw) return 0
     // JSON.parse 的结果可能是 null / 数字 / 结构完全对不上的旧值，
     // 下面每一步都按「取不到就当没读过」处理，不额外做类型断言
     const saved = JSON.parse(raw) as { u?: string; d?: string; n?: number } | null
-    if (!saved || saved.u !== username || saved.d !== formatDate(new Date())) return 0
+    if (!saved || saved.u !== username) return 0
+    // day 为空串时刻意不校验日期：存档里就算残留着 d 也一律忽略，不让它把水位判废
+    if (day && saved.d !== day) return 0
     const n = Number(saved.n)
     // 存档可能被手工改过或是旧版本写的，非数字/负数一律退回 0
     return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
@@ -53,13 +72,11 @@ function loadLogsAcked(username: string): number {
   }
 }
 
-function saveLogsAcked(username: string, n: number) {
+function saveAcked(key: string, username: string, day: string, n: number) {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.setItem(
-      LOGS_ACKED_KEY,
-      JSON.stringify({ u: username, d: formatDate(new Date()), n })
-    )
+    // 不按天失效的那两个不写 d，免得将来有人看到这个字段又给加回校验
+    window.localStorage.setItem(key, JSON.stringify(day ? { u: username, d: day, n } : { u: username, n }))
   } catch {
     // 隐私模式 / 存储配额满：写失败只意味着刷新后角标会再提醒一次，不值得打断用户
   }
@@ -113,11 +130,25 @@ export const useBadgesStore = defineStore('badges', () => {
   const logsFailedAcked = ref(0)
 
   /**
+   * 依赖 / 订阅失败角标的「已读水位」，语义与上面那条完全一致：
+   * 显示值 = max(0, 失败数 − 水位)，进过页面就不再红，之后只报**新增**的失败。
+   *
+   * 【为什么这两个也要有】
+   * 原来它们直接用 deps_failed / subs_failed 的实时计数，只有把失败的依赖修好或删掉
+   * 才会消——用户进了页面看过一遍，角标还红着，与执行日志的行为也不一致。
+   */
+  const depsFailedAcked = ref(0)
+  const subsFailedAcked = ref(0)
+
+  /**
    * 「进过执行日志页，但那一刻角标数据还没拉到」。
    * 直接 F5 停在执行日志页时会走到这里：页面的 onMounted 比 badges 的首发请求早，
    * 此刻 counts 还全是 0，按 0 记水位等于没记，第一发数据回来角标照样会亮。
    */
   let ackLogsPending = false
+  /** 同上，分别对应依赖页与订阅页（F5 直接停在这两页时同样会踩到）。 */
+  let ackDepsPending = false
+  let ackSubsPending = false
 
   let timer: ReturnType<typeof setInterval> | null = null
   let resumeTimer: ReturnType<typeof setTimeout> | null = null
@@ -127,7 +158,18 @@ export const useBadgesStore = defineStore('badges', () => {
   /** 已读水位的唯一写入口：内存与存档必须成对更新，否则 F5 后水位会回到旧值。 */
   function setLogsAcked(n: number) {
     logsFailedAcked.value = n
-    saveLogsAcked(currentUsername(), n)
+    saveAcked(LOGS_ACKED_KEY, currentUsername(), formatDate(new Date()), n)
+  }
+
+  /** 依赖 / 订阅的水位存档不带日期，第三个参数固定传空串（见 loadAcked 的说明）。 */
+  function setDepsAcked(n: number) {
+    depsFailedAcked.value = n
+    saveAcked(DEPS_ACKED_KEY, currentUsername(), '', n)
+  }
+
+  function setSubsAcked(n: number) {
+    subsFailedAcked.value = n
+    saveAcked(SUBS_ACKED_KEY, currentUsername(), '', n)
   }
 
   async function refresh() {
@@ -151,6 +193,23 @@ export const useBadgesStore = defineStore('badges', () => {
           // 今日失败数只会在跨零点归零、或用户删掉失败日志时变小。
           // 这时水位必须跟着降下来，否则第二天要攒够超过昨天的数量才会重新提醒。
           setLogsAcked(counts.value.logs_failed_today)
+        }
+
+        // 依赖 / 订阅同理：前半段补记「进页时首发数据还没到」的那一笔，
+        // 后半段是失败数变小（用户修好或删掉了几个）时水位跟着降——不降的话，
+        // 要再攒够超过历史峰值的失败数才会重新提醒，等于漏报。
+        if (ackDepsPending) {
+          ackDepsPending = false
+          setDepsAcked(counts.value.deps_failed)
+        } else if (counts.value.deps_failed < depsFailedAcked.value) {
+          setDepsAcked(counts.value.deps_failed)
+        }
+
+        if (ackSubsPending) {
+          ackSubsPending = false
+          setSubsAcked(counts.value.subs_failed)
+        } else if (counts.value.subs_failed < subsFailedAcked.value) {
+          setSubsAcked(counts.value.subs_failed)
         }
       }
     } catch {
@@ -196,7 +255,10 @@ export const useBadgesStore = defineStore('badges', () => {
     // 恢复上次的已读水位。不恢复的话 F5 等于「全部未读」，刚清掉的角标又会亮起来。
     // 放在 start() 而不是 store 创建时：路由守卫已在布局挂载前 await 过 fetchUser，
     // 到这里才拿得到用户名，否则存档必然按「用户对不上」被丢弃。
-    logsFailedAcked.value = loadLogsAcked(currentUsername())
+    const username = currentUsername()
+    logsFailedAcked.value = loadAcked(LOGS_ACKED_KEY, username, formatDate(new Date()))
+    depsFailedAcked.value = loadAcked(DEPS_ACKED_KEY, username, '')
+    subsFailedAcked.value = loadAcked(SUBS_ACKED_KEY, username, '')
     void refresh()
     startTimer()
     if (typeof document !== 'undefined') {
@@ -221,7 +283,11 @@ export const useBadgesStore = defineStore('badges', () => {
     // 已读水位一并清掉：换个账号登入不该继承上一个人的「看过了」。
     // 存档本身按用户名隔离，所以不用删 localStorage——同一个人再登回来仍然记得。
     logsFailedAcked.value = 0
+    depsFailedAcked.value = 0
+    subsFailedAcked.value = 0
     ackLogsPending = false
+    ackDepsPending = false
+    ackSubsPending = false
   }
 
   /** 由调用过 checkUpdate 的页面回填，见上方 updateAvailable 的说明。 */
@@ -245,6 +311,27 @@ export const useBadgesStore = defineStore('badges', () => {
   }
 
   /**
+   * 「失败的依赖已经看过了」。由依赖页在进入时回填。
+   * ⚠️ 同 ackLogsFailed：onMounted 与 onActivated 两处都要调，只写一处会只有首访生效。
+   */
+  function ackDepsFailed() {
+    if (!loaded.value) {
+      ackDepsPending = true
+      return
+    }
+    setDepsAcked(counts.value.deps_failed)
+  }
+
+  /** 「失败的订阅已经看过了」。由订阅页在进入时回填，注意事项同上。 */
+  function ackSubsFailed() {
+    if (!loaded.value) {
+      ackSubsPending = true
+      return
+    }
+    setSubsAcked(counts.value.subs_failed)
+  }
+
+  /**
    * 侧栏菜单路径 → 角标配置的映射。
    *
    * `dot` 表示「只提示有事发生、不报数字」——依赖正在安装、面板有新版本属于这类，
@@ -253,9 +340,10 @@ export const useBadgesStore = defineStore('badges', () => {
    *
    * 严重级 `danger` 用于失败类（需要用户处理），`primary` 用于进行中（只是告知）。
    *
-   * 执行日志那一支的语义是【未读的新失败】而不是【今日失败总数】：进过页面就算看过了，
-   * 之后只报新增的部分，数到 0 就整条不放进 map——展开态的数字与收起态的方点都靠
-   * `badgeOf(path)` 是否存在来决定渲染，一起消失才不会剩个孤零零的红点。
+   * 三支失败类（执行日志 / 依赖 / 订阅）的语义都是【未读的新失败】而不是【失败总数】：
+   * 进过对应页面就算看过了，之后只报新增的部分，数到 0 就整条不放进 map——
+   * 展开态的数字与收起态的方点都靠 `badgeOf(path)` 是否存在来决定渲染，
+   * 一起消失才不会剩个孤零零的红点。
    */
   const menuBadges = computed<Record<string, { count: number; dot: boolean; level: 'danger' | 'primary' }>>(() => {
     const map: Record<string, { count: number; dot: boolean; level: 'danger' | 'primary' }> = {}
@@ -268,12 +356,17 @@ export const useBadgesStore = defineStore('badges', () => {
     if (logsFailedUnread > 0) {
       map['/logs'] = { count: logsFailedUnread, dot: false, level: 'danger' }
     }
-    if (c.subs_failed > 0) {
-      map['/subscriptions'] = { count: c.subs_failed, dot: false, level: 'danger' }
+    // 订阅与依赖这两支同样是【未读的新失败】，不是【当前失败总数】——理由见 depsFailedAcked。
+    const subsFailedUnread = Math.max(0, c.subs_failed - subsFailedAcked.value)
+    if (subsFailedUnread > 0) {
+      map['/subscriptions'] = { count: subsFailedUnread, dot: false, level: 'danger' }
     }
     // 依赖页两种状态择一显示：失败优先于「安装中」，因为失败需要用户介入。
-    if (c.deps_failed > 0) {
-      map['/deps'] = { count: c.deps_failed, dot: false, level: 'danger' }
+    // 注意判空用的是「未读数」而不是失败总数：全部已读时要落到下面的「安装中」分支，
+    // 否则用户看过失败后，正在安装的进度提示会被一条永远显示不出来的失败分支吃掉。
+    const depsFailedUnread = Math.max(0, c.deps_failed - depsFailedAcked.value)
+    if (depsFailedUnread > 0) {
+      map['/deps'] = { count: depsFailedUnread, dot: false, level: 'danger' }
     } else if (c.deps_installing > 0) {
       map['/deps'] = { count: c.deps_installing, dot: true, level: 'primary' }
     }
@@ -294,5 +387,7 @@ export const useBadgesStore = defineStore('badges', () => {
     stop,
     noteUpdateAvailable,
     ackLogsFailed,
+    ackDepsFailed,
+    ackSubsFailed,
   }
 })

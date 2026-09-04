@@ -184,7 +184,43 @@ func (h *DepsHandler) List(c *gin.Context) {
 		data[i] = d.ToDict()
 	}
 
-	response.Success(c, gin.H{"data": data, "total": len(data)})
+	// failed_by_type 是跨类型的失败数汇总，专门给依赖页三个类型页签上的「失败 N」用。
+	//
+	// 【为什么要额外下发，而不是让前端数 data】
+	// 上面的 data 只含当前请求的那个类型（Python 还只含当前版本），前端数出来的失败数
+	// 天然只是「当前标签页」的。而侧栏「依赖管理」角标（server/handler/system_badges.go 的
+	// deps_failed）是不分类型、不分版本的全表 status='failed' 计数，两个数字对不上，
+	// 用户得挨个切三个标签页才能凑出角标那个数。
+	//
+	// 【为什么 Python 不跟着 python_version 过滤】
+	// 同理：只有让 nodejs + python + linux 三个数之和恰好等于全表失败数，页签上的数字
+	// 才能和侧栏角标对上。所以这里刻意不复用上面的版本过滤，Python 跨所有版本一起统计。
+	//
+	// 查询用一条 GROUP BY type 完成，不为每个类型各查一次。
+	failedByType := map[string]int64{
+		model.DepTypeNodeJS: 0,
+		model.DepTypePython: 0,
+		model.DepTypeLinux:  0,
+	}
+	type depFailedCountRow struct {
+		Type  string
+		Total int64
+	}
+	var failedRows []depFailedCountRow
+	database.DB.Model(&model.Dependency{}).
+		Select("type, COUNT(*) AS total").
+		Where("status = ?", model.DepStatusFailed).
+		Group("type").
+		Scan(&failedRows)
+	for _, row := range failedRows {
+		// 只回填三个已知类型，历史脏数据里若有别的 type，忽略即可，
+		// 免得凭空多出一个前端不认识的键。
+		if _, ok := failedByType[row.Type]; ok {
+			failedByType[row.Type] = row.Total
+		}
+	}
+
+	response.Success(c, gin.H{"data": data, "total": len(data), "failed_by_type": failedByType})
 }
 
 func (h *DepsHandler) Create(c *gin.Context) {

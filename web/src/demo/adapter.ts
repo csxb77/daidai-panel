@@ -1931,12 +1931,24 @@ route('DELETE', '/security/2fa', () => ({ message: '已关闭两步验证' }))
 route('GET', '/deps', (ctx) => {
   const type = (ctx.params['type'] ?? '').trim()
   const pythonVersion = (ctx.params['python_version'] ?? '').trim()
-  const rows = db().deps.filter((dep) => {
+  const all = db().deps
+  const rows = all.filter((dep) => {
     if (type && dep.type !== type) return false
     if (dep.type === 'python' && pythonVersion && dep.python_version !== pythonVersion) return false
     return true
   })
-  return { data: rows, total: rows.length }
+  // failed_by_type 与上面的筛选无关，永远是【全量】统计，python 一档跨所有版本：
+  // 三者之和必须等于侧栏角标的 deps_failed（buildSystemBadges 同样是全量数 failed），
+  // 依赖页的类型页签才能和角标对得上。同样只算不写死，跟着 Demo 数据走。
+  const failedByType: Record<'nodejs' | 'python' | 'linux', number> = { nodejs: 0, python: 0, linux: 0 }
+  for (const dep of all) {
+    if (dep.status !== 'failed') continue
+    const depType = dep.type
+    if (depType === 'nodejs' || depType === 'python' || depType === 'linux') {
+      failedByType[depType] += 1
+    }
+  }
+  return { data: rows, total: rows.length, failed_by_type: failedByType }
 })
 
 route('GET', '/deps/python-runtimes', () => ({

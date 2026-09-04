@@ -126,6 +126,11 @@
     </el-card>
 
     <div class="deps-tabs">
+      <!-- 类型页签上各挂一个自己的失败数。三者之和 == 侧栏「依赖管理」角标，
+           用户看到角标 9 时能直接看出是哪一类、各几个，不用挨个切标签去凑。
+           与右边那排状态角标（level="info" + show-zero 的中性计数）刻意不同：
+           这三个是「需要用户处理」的告警，所以用 danger，且为 0 时整个消失，
+           免得三个红 0 常驻抢注意力。 -->
       <div class="status-tabs">
         <button
           :class="['status-tab', { active: activeTab === 'nodejs' }]"
@@ -136,6 +141,11 @@
           "
         >
           Node.js
+          <DdBadge
+            :value="failedByType.nodejs"
+            level="danger"
+            title="Node.js 下安装失败的依赖数"
+          />
         </button>
         <button
           :class="['status-tab', { active: activeTab === 'python' }]"
@@ -146,6 +156,11 @@
           "
         >
           Python3
+          <DdBadge
+            :value="failedByType.python"
+            level="danger"
+            title="Python 下安装失败的依赖数（含所有 Python 版本）"
+          />
         </button>
         <button
           :class="['status-tab', { active: activeTab === 'linux' }]"
@@ -156,6 +171,11 @@
           "
         >
           Linux
+          <DdBadge
+            :value="failedByType.linux"
+            level="danger"
+            title="Linux 下安装失败的依赖数"
+          />
         </button>
       </div>
       <!-- 状态筛选是【纯前端】的：点这三个按钮只改 statusFilter + 复位页码，不重新请求
@@ -835,6 +855,7 @@ import {
 } from "vue";
 import {
   depsApi,
+  type DepsFailedByType,
   type MirrorsResponse,
   type PythonRuntimeInfo,
 } from "@/api/deps";
@@ -864,8 +885,11 @@ import {
 } from "@/utils/sse";
 import { usePageActivity } from "@/composables/usePageActivity";
 import { useResponsive } from "@/composables/useResponsive";
+import { useBadgesStore } from "@/stores/badges";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
 import { formatDateTime } from "@/utils/datetime";
+
+const badgesStore = useBadgesStore();
 
 // ---------- Android 面具版脚本运行时 ----------
 const androidStatus = ref<AndroidRuntimeStatus | null>(null);
@@ -986,6 +1010,16 @@ const pythonRuntimeInstallSummary = computed(() => {
   return labels.length > 0 ? labels.join(" / ") : "Python 3.12";
 });
 const depsList = ref<any[]>([]);
+/**
+ * Node.js / Python3 / Linux 三个类型页签上各自的失败数，由 GET /deps 一并带回。
+ *
+ * 【为什么不在前端自己数】
+ * depsList 只有【当前选中类型】（python 还只有当前版本）的依赖，数出来的失败数
+ * 永远只是三分之一，与侧栏那个跨类型汇总的角标对不上——这正是用户看到「侧栏 9、
+ * 页面失败 2」的原因。服务端那份是全量统计，且本页本来就在轮询这个接口，
+ * 计数天然新鲜、零额外请求。
+ */
+const failedByType = ref<DepsFailedByType>({ nodejs: 0, python: 0, linux: 0 });
 const loading = ref(false);
 const showCreateDialog = ref(false);
 const showLogDialog = ref(false);
@@ -1312,6 +1346,9 @@ async function loadData() {
       activeTab.value === "python" ? pythonVersion.value : undefined,
     );
     depsList.value = res.data || [];
+    // 三个类型页签上的失败数由服务端一并带回（跨类型全量，python 跨所有版本）。
+    // 老版本服务端没有这个字段，读不到就退回全 0，别把 undefined 渲染出去。
+    failedByType.value = res.failed_by_type || { nodejs: 0, python: 0, linux: 0 };
     selectedIds.value = selectedIds.value.filter((id) =>
       depsList.value.some((dep) => dep.id === id),
     );
@@ -1321,6 +1358,8 @@ async function loadData() {
     if (!refreshTimer) {
       depsList.value = [];
     }
+    // failedByType 刻意不清零：网络抖一下就把「有 3 个失败」的提示抹掉，
+    // 比不显示更糟——失败数保留上一次的值，只在请求成功时整体替换。
     syncPendingRefresh();
   } finally {
     loading.value = false;
@@ -1789,6 +1828,8 @@ function getLetterColor(name: string): string {
 onMounted(async () => {
   mounted = true;
   createType.value = activeTab.value;
+  // 进页即把侧栏的「依赖管理」失败角标标记为已读——用户已经站在这一页上了，再红着没有意义
+  badgesStore.ackDepsFailed();
   await loadPythonRuntimes();
   createPythonVersion.value = pythonVersion.value || pythonDefaultVersion.value;
   loadData();
@@ -1796,6 +1837,11 @@ onMounted(async () => {
 });
 
 onActivated(() => {
+  // 角标清零刻意放在下面那道 mounted 闸【外面】、且无条件执行：
+  // 那道闸是给 loadData 防重复请求用的（onMounted 刚拉过一次），
+  // 而 MainLayout 的 keep-alive 是 :max="14"，第二次以后进本页只触发 onActivated、
+  // 不再触发 onMounted，写进 if 里就只有首次访问才会清零。
+  badgesStore.ackDepsFailed();
   if (!mounted) {
     void loadData();
   }
