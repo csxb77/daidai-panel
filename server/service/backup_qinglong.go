@@ -837,6 +837,20 @@ func loadQingLongSubscriptions(db *sql.DB) ([]model.Subscription, error) {
 			schedule = ""
 		}
 
+		// 青龙订阅行上这两列非 0 表示「这条订阅自己要建/删任务」，翻译成 enabled（强制开启）。
+		// 为 0 时留 inherit（跟随本面板的全局默认），**不能**翻成 disabled ——
+		// 青龙侧的 0 是「按青龙自己的全局配置来」，硬翻成强制关会把导入进来的订阅全部锁死，
+		// 而且用户在面板里不改一遍就永远建不出任务。
+		//
+		// 只写三态、不写旧布尔列：mode 已经带够信息了，而旧布尔列一旦被写成 true，
+		// 用户之后把这条订阅改成「跟随全局设置」，下次重启就会被启动回填提回 enabled
+		//（回填的幂等性依赖「源列恒 0」，见 model.ResolveSubscriptionTaskSyncModeInput）。
+		// 第一个参数传空串是有意的：青龙侧压根没有三态这个概念，只有一个布尔可说话。
+		autoAddTaskMode := model.ResolveSubscriptionTaskSyncModeInput("",
+			sqliteRowInt(row, "autoAddCron") != 0 || sqliteRowBool(row, "auto_add_cron"))
+		autoDelTaskMode := model.ResolveSubscriptionTaskSyncModeInput("",
+			sqliteRowInt(row, "autoDelCron") != 0 || sqliteRowBool(row, "auto_del_cron"))
+
 		result = append(result, model.Subscription{
 			ID:          uint(sqliteRowInt(row, "id")),
 			Name:        strings.TrimSpace(firstNonEmptySQLiteString(row, "name")),
@@ -847,8 +861,9 @@ func loadQingLongSubscriptions(db *sql.DB) ([]model.Subscription, error) {
 			Whitelist:   strings.TrimSpace(firstNonEmptySQLiteString(row, "whitelist")),
 			Blacklist:   strings.TrimSpace(firstNonEmptySQLiteString(row, "blacklist")),
 			DependOn:    strings.TrimSpace(firstNonEmptySQLiteString(row, "dependences", "depend_on")),
-			AutoAddTask: sqliteRowInt(row, "autoAddCron") != 0 || sqliteRowBool(row, "auto_add_cron"),
-			AutoDelTask: sqliteRowInt(row, "autoDelCron") != 0 || sqliteRowBool(row, "auto_del_cron"),
+			// 刻意不写 AutoAddTask / AutoDelTask：旧布尔列恒为 false（只读输出），见上面的注释。
+			AutoAddTaskMode: autoAddTaskMode,
+			AutoDelTaskMode: autoDelTaskMode,
 			Enabled:     !(sqliteRowBool(row, "is_disabled") || sqliteRowBool(row, "isDisabled")),
 			Status:      0,
 			Alias:       strings.TrimSpace(firstNonEmptySQLiteString(row, "alias")),

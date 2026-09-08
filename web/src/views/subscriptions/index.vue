@@ -53,16 +53,22 @@ const qlCommand = ref("");
 
 const settingsLoading = ref(false);
 const settingsSaving = ref(false);
-// 全局「覆盖拉取（默认）」的**只读展示值**，只供订阅编辑弹窗里那句「（当前：X）」使用。
-// 刻意不复用 settingsForm.subscription_force_overwrite：那个字段同时是「订阅设置」弹窗里
-// el-switch 的 v-model，而该弹窗的「取消」只做 showSettingsDialog = false、不重置表单。
+// 三个全局默认值的**只读展示值**，只供订阅编辑弹窗里那几句「（当前：X）」使用：
+//   覆盖拉取     subscription_force_overwrite
+//   自动建任务   auto_add_cron
+//   自动删任务   auto_del_cron
+// 刻意不复用 settingsForm.*：那些字段同时是「订阅设置」弹窗里 el-switch 的 v-model，
+// 而该弹窗的「取消」只做 showSettingsDialog = false、不重置表单。
 // 于是「拨动开关 → 取消 → 打开订阅编辑弹窗」会把用户已经撤销的值当成服务端现状展示出来，
 // 用户据此选了 inherit，下次拉取的实际行为和提示相反（提示保留本地、实际 reset --hard）。
 // 所以这里只在真正拿到/写入服务端值的时刻更新：页面加载、打开设置弹窗回包、设置保存成功、
 // 打开订阅编辑弹窗时的静默刷新。settingsForm 从此只负责设置弹窗自己的编辑态。
 const globalOverwriteDefault = ref(true);
-// 上面那个值到底读到没有。没读到时订阅表单不显示「当前：X」，见 loadGlobalOverwriteDefault。
-const globalOverwriteLoaded = ref(false);
+const globalAutoAddDefault = ref(true);
+const globalAutoDelDefault = ref(true);
+// 上面那一组值到底读到没有。三个值来自同一次 /configs 回包、在同样的三个时刻一起更新，
+// 所以共用一个标志位即可。没读到时订阅表单不显示「（当前：X）」，见 loadGlobalDefaults。
+const globalDefaultsLoaded = ref(false);
 const settingsForm = ref({
   github_mirror: "",
   auto_add_cron: true,
@@ -96,8 +102,21 @@ const editForm = ref({
   depend_on: "",
   pre_script: "",
   hook_script: "",
-  auto_add_task: false,
-  auto_del_task: false,
+  // ⚠️ 刻意不放旧布尔字段 auto_add_task / auto_del_task：后端已废弃、只做只读输出，
+  // 表单里带着它们的唯一后果是「原样回传」——用户把订阅改成「跟随全局设置」并保存时，
+  // 顺带把 auto_add_task=true 也写回了库，下次重启被启动回填提回「强制开启」，
+  // 用户的选择静默消失。真正生效的是下面的 auto_add_task_mode / auto_del_task_mode。
+  //
+  // 同步任务三态：inherit=跟随全局设置 / enabled=强制开启 / disabled=强制关闭。
+  // 与 overwrite_mode 一样要多处同步，但落点比它多两处，一共六处：
+  //   这里的初值、openCreate、openEdit 回填、handleSave 提交、表单控件、
+  //   以及只读展示的全局默认值（globalAutoAddDefault / globalAutoDelDefault）。
+  // 注意它和 overwrite_mode / full_checkout 有一点关键差别：那两个只对 git 仓库生效，
+  // 而同步任务对单文件订阅一样跑，所以既不加 v-if，handleSave 里也不能跟着复位。
+  // 类型写成联合而不是 string，与下面 auth_type 的既有写法一致：
+  // 打错一个档位（比如 "enable"）能在编译期就被 SubscriptionPayload 挡住，不用等到线上存不住。
+  auto_add_task_mode: "inherit" as "inherit" | "enabled" | "disabled",
+  auto_del_task_mode: "inherit" as "inherit" | "enabled" | "disabled",
   save_dir: "",
   sub_path: "",
   auth_type: "" as "" | "ssh" | "token",
@@ -231,23 +250,27 @@ async function loadSSHKeys() {
   }
 }
 
-// 订阅表单里「跟随全局设置」那一项要当场标出全局开关现在是什么值，所以进页面就先读一次；
+// 订阅表单里「跟随全局设置」那几项要当场标出全局开关现在是什么值，所以进页面就先读一次；
 // 打开「订阅设置」弹窗（handleOpenSettings）、保存设置（handleSaveSettings）、
 // 打开订阅编辑弹窗（openEdit）时都会再刷新一遍。
 //
 // /configs 是 admin-only 接口，所以这里先按角色 gate：operator 直接返回、根本不发这个必然 403 的请求。
-// 派生结论是「（当前：X）」这句话对 operator 永远不存在（globalOverwriteLoaded 保持 false）——
+// 派生结论是「（当前：X）」这句话对 operator 永远不存在（globalDefaultsLoaded 保持 false）——
 // 这是有意为之：拿不到服务端真值时宁可不写，也别把前端写死的默认值当成实际值展示误导用户。
-async function loadGlobalOverwriteDefault() {
+async function loadGlobalDefaults() {
   if (!isAdmin.value) return;
   try {
     const res = await configApi.list();
+    const cfgs = res.data || {};
     globalOverwriteDefault.value = readCfgBool(
-      res.data || {},
+      cfgs,
       "subscription_force_overwrite",
       true,
     );
-    globalOverwriteLoaded.value = true;
+    // 这两个默认值同样是 true（见后端配置注册表），与订阅三态的 inherit 档配套展示
+    globalAutoAddDefault.value = readCfgBool(cfgs, "auto_add_cron", true);
+    globalAutoDelDefault.value = readCfgBool(cfgs, "auto_del_cron", true);
+    globalDefaultsLoaded.value = true;
   } catch {
     /* ignore：失败就沿用上一次读到的值，不弹错 */
   }
@@ -258,7 +281,7 @@ onMounted(() => {
   badgesStore.ackSubsFailed();
   loadData();
   loadSSHKeys();
-  loadGlobalOverwriteDefault();
+  loadGlobalDefaults();
 });
 
 onActivated(() => {
@@ -305,8 +328,9 @@ function openCreate() {
     depend_on: "",
     pre_script: "",
     hook_script: "",
-    auto_add_task: false,
-    auto_del_task: false,
+    // 新建订阅默认跟随全局设置，与 editForm 的初值保持一致
+    auto_add_task_mode: "inherit",
+    auto_del_task_mode: "inherit",
     save_dir: "",
     sub_path: "",
     auth_type: "",
@@ -380,9 +404,12 @@ async function handleOpenSettings() {
     );
     // 这一刻读到的是服务端最新值，同步给只读展示 ref；此后用户在这个弹窗里怎么拨开关、
     // 拨完是点保存还是点取消，都不会再影响订阅编辑弹窗里的「（当前：X）」。
+    // 三个默认值要一起同步：只同步覆盖拉取的话，另外两句「（当前：X）」会停在旧值上。
     globalOverwriteDefault.value =
       settingsForm.value.subscription_force_overwrite;
-    globalOverwriteLoaded.value = true;
+    globalAutoAddDefault.value = settingsForm.value.auto_add_cron;
+    globalAutoDelDefault.value = settingsForm.value.auto_del_cron;
+    globalDefaultsLoaded.value = true;
     settingsForm.value.default_cron_rule = readCfgStr(
       cfgs,
       "default_cron_rule",
@@ -421,7 +448,9 @@ async function handleSaveSettings() {
     // 保存成功 ⇒ 编辑态的值已经落到服务端，只读展示值同步跟上（失败时不动，展示的仍是旧的服务端值）。
     globalOverwriteDefault.value =
       settingsForm.value.subscription_force_overwrite;
-    globalOverwriteLoaded.value = true;
+    globalAutoAddDefault.value = settingsForm.value.auto_add_cron;
+    globalAutoDelDefault.value = settingsForm.value.auto_del_cron;
+    globalDefaultsLoaded.value = true;
     const mirror = mirrorRaw || DEFAULT_GITHUB_MIRROR;
     githubMirror.value = normalizeMirror(mirror);
     localStorage.setItem(GITHUB_MIRROR_STORAGE_KEY, githubMirror.value);
@@ -497,7 +526,10 @@ function parseQLCommand() {
     // 里没有「完整检出」的对位概念，硬猜一个值只会让识别结果和用户粘贴的命令不符。
     // 它保持 openCreate 给的 false（稀疏检出），需要整仓的用户自己去开那个开关。
     if (hookScript) editForm.value.hook_script = hookScript;
-    editForm.value.auto_add_task = true;
+    // ql repo 的语义就是「拉下来并建任务」，所以这里强制开启而不是留给全局设置：
+    // 用户全局关掉了自动建任务时，粘贴 ql 命令建出来的订阅仍应按命令本意建任务。
+    // 只动「添加」，不动「删除」——ql repo 没有删任务的对位概念，保持 inherit。
+    editForm.value.auto_add_task_mode = "enabled";
     ElMessage.success("已识别 ql repo 命令");
     qlCommand.value = "";
     return;
@@ -512,7 +544,8 @@ function parseQLCommand() {
     editForm.value.name = fileName.replace(/\.[^/.]+$/, "");
     editForm.value.save_dir = deriveSubscriptionSaveDir(url) || "downloads";
     if (hookScript) editForm.value.hook_script = hookScript;
-    editForm.value.auto_add_task = true;
+    // 同 ql repo：单文件订阅一样会建任务，这里同样强制开启「自动建任务」
+    editForm.value.auto_add_task_mode = "enabled";
     ElMessage.success("已识别 ql raw 命令");
     qlCommand.value = "";
     return;
@@ -560,8 +593,13 @@ function openEdit(row: any) {
     depend_on: row.depend_on || "",
     pre_script: row.pre_script || "",
     hook_script: row.hook_script || "",
-    auto_add_task: row.auto_add_task,
-    auto_del_task: row.auto_del_task,
+    // 老库或老接口没有这两个字段时回落 inherit（跟随全局），与后端归一口径一致。
+    // 刻意不回填、也不提交旧布尔字段 row.auto_add_task / row.auto_del_task：
+    // 它们已废弃、后端不再读，抄进表单只会被原样回传写回库，
+    // 让用户选的「跟随全局设置」在下次重启被启动回填提回「强制开启」。
+    // 按它们推导三态同样不行——会把「跟随全局」的存量订阅静默钉死成强制档。
+    auto_add_task_mode: row.auto_add_task_mode || "inherit",
+    auto_del_task_mode: row.auto_del_task_mode || "inherit",
     save_dir: row.save_dir || "",
     sub_path: row.sub_path || "",
     auth_type: row.auth_type || "",
@@ -580,7 +618,7 @@ function openEdit(row: any) {
   // 「（当前：X）」展示的是全局开关：别的管理员在别处改过之后，本页那个值一旦读到就不会自己回落，
   // 会一直陈旧到用户手动打开一次「订阅设置」。这里顺手静默刷新一次
   //（非管理员在函数内部直接 return；失败就沿用旧值、不弹错），代价只有一次低频请求。
-  void loadGlobalOverwriteDefault();
+  void loadGlobalDefaults();
 }
 
 async function handleSave() {
@@ -627,6 +665,11 @@ async function handleSave() {
       // 表单里也不显示这个开关，所以先在 git 模式打开、再改成单文件时要一并复位，
       // 免得库里留下一个永远不会生效、改回 git 仓库时却会突然生效的值。
       data.full_checkout = false;
+      // ⚠️ auto_add_task_mode / auto_del_task_mode 绝不能跟着复位：
+      // overwrite_mode 与 full_checkout 之所以要复位，是因为它们只在 git clone / sparse-checkout
+      // 这一步生效、单文件订阅根本走不到；而「同步定时任务」对单文件订阅一样跑，
+      // 表单里也照样显示这两组单选。跟着复位的表现是「用户明明在界面上选了强制关闭，
+      // 保存后却被悄悄改回跟随全局」——设了但存不住，而且没有任何提示。
     } else if (data.auth_type === "ssh") {
       data.auth_username = "";
       data.auth_token = "";
@@ -1227,6 +1270,27 @@ function viewLogDetail(log: any) {
                 >
                   保留本地
                 </el-tag>
+                <!--
+                  同步任务三态只标 disabled 这一档：全局默认是「开」，enabled 与绝大多数订阅的
+                  实际行为一致，标出来全是噪音；「这条订阅不建/不删任务」才是意料之外、
+                  值得在列表里一眼看到的状态。inherit 同理不标（写法照上面的 overwrite_mode）。
+                  桌面表格刻意不加这两个标签：名称列 min-width 只有 120，
+                  再挂标签会把订阅名挤到第二行，见下面表格里那段宽度测算。
+                -->
+                <el-tag
+                  v-if="row.auto_add_task_mode === 'disabled'"
+                  size="small"
+                  type="info"
+                >
+                  不建任务
+                </el-tag>
+                <el-tag
+                  v-if="row.auto_del_task_mode === 'disabled'"
+                  size="small"
+                  type="info"
+                >
+                  不删任务
+                </el-tag>
               </div>
             </div>
             <div class="dd-mobile-card__subtitle">{{ row.url }}</div>
@@ -1734,7 +1798,7 @@ function viewLogDetail(log: any) {
               编辑态，而那个弹窗的「取消」不重置表单，读它会把用户已经撤销的值当成服务端现状展示。
             -->
             <el-radio value="inherit"
-              >跟随全局设置<template v-if="globalOverwriteLoaded"
+              >跟随全局设置<template v-if="globalDefaultsLoaded"
                 >（当前：{{
                   globalOverwriteDefault ? "强制覆盖" : "保留本地修改"
                 }}）</template
@@ -1752,6 +1816,59 @@ function viewLogDetail(log: any) {
             "
           >
             只作用于脚本文件：强制覆盖会在拉取前丢弃本地改动，保留本地会先暂存再恢复。<strong>不影响任务配置</strong>——手动改过名称/定时的任务会自动锁定，拉取不会覆盖。首次拉取（本地还没有仓库时）不适用，一律按远端内容检出。
+          </div>
+        </el-form-item>
+        <!--
+          同步定时任务的两组订阅级三态（#119）。挨着「覆盖拉取」放，因为它们是同一类
+          「这条订阅要不要跟随全局设置」的开关，用单选也是同一个理由：开关只有两态，
+          表达不了「跟随全局」这个默认档。
+
+          ⚠️ 刻意**不加** v-if="editForm.type === 'git-repo'"：上面的完整检出与覆盖拉取
+          只在 clone / sparse-checkout 这一步生效，单文件订阅走不到；而拉取后同步定时任务
+          这一步对单文件订阅一样跑。加了 v-if 的表现是「单文件订阅界面上看不到开关」，
+          用户完全没有办法为它单独关掉自动建任务。handleSave 里也同理不能跟着复位。
+        -->
+        <el-form-item label="自动建任务" class="form-item--full">
+          <el-radio-group v-model="editForm.auto_add_task_mode">
+            <!-- 「（当前：X）」同样只读 globalAutoAddDefault，理由见上面覆盖拉取那段注释 -->
+            <el-radio value="inherit"
+              >跟随全局设置<template v-if="globalDefaultsLoaded"
+                >（当前：{{ globalAutoAddDefault ? "开" : "关" }}）</template
+              ></el-radio
+            >
+            <el-radio value="enabled">强制开启</el-radio>
+            <el-radio value="disabled">强制关闭</el-radio>
+          </el-radio-group>
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            拉取后是否按脚本内容自动创建定时任务。选「跟随全局设置」时用订阅设置里的<strong>自动添加定时任务</strong>；只想让这一条订阅单独例外时才选强制开启/关闭。<strong>只管新建</strong>——已经建好的任务不会因为改成强制关闭而被删掉。
+          </div>
+        </el-form-item>
+        <el-form-item label="自动删任务" class="form-item--full">
+          <el-radio-group v-model="editForm.auto_del_task_mode">
+            <el-radio value="inherit"
+              >跟随全局设置<template v-if="globalDefaultsLoaded"
+                >（当前：{{ globalAutoDelDefault ? "开" : "关" }}）</template
+              ></el-radio
+            >
+            <el-radio value="enabled">强制开启</el-radio>
+            <el-radio value="disabled">强制关闭</el-radio>
+          </el-radio-group>
+          <div
+            style="
+              color: var(--el-text-color-secondary);
+              font-size: 12px;
+              margin-top: 4px;
+              line-height: 1.4;
+            "
+          >
+            订阅源里的脚本被删除后，是否自动删除面板上对应的定时任务。选「跟随全局设置」时用订阅设置里的<strong>自动删除失效任务</strong>；<strong>怕误删自己手动建的任务就选强制关闭</strong>，失效任务改为手动清理。
           </div>
         </el-form-item>
         <el-form-item label="拉取前指令" class="form-item--full">
@@ -1944,7 +2061,9 @@ function viewLogDetail(log: any) {
             active-text="开"
             inactive-text="关"
           />
-          <div class="settings-hint">拉取后根据脚本内容自动同步定时任务</div>
+          <div class="settings-hint">
+            拉取后根据脚本内容自动同步定时任务。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑弹窗里选「强制开启 / 强制关闭」
+          </div>
         </el-form-item>
         <el-form-item label="自动删除失效任务">
           <el-switch
@@ -1954,7 +2073,7 @@ function viewLogDetail(log: any) {
             inactive-text="关"
           />
           <div class="settings-hint">
-            订阅源删除脚本后，自动删除对应定时任务
+            订阅源删除脚本后，自动删除对应定时任务。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑弹窗里选「强制开启 / 强制关闭」
           </div>
         </el-form-item>
         <el-form-item label="覆盖拉取（默认）">

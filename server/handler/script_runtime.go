@@ -13,6 +13,20 @@ import (
 	"daidai-panel/service"
 )
 
+const (
+	// maxRunLogLines 是单次运行在内存里保留的日志行数上限。
+	// scanner.Buffer 只限制单行长度，不限制总量：实测 `yes` 跑 2 秒就能灌进 2500 万行、
+	// 占用 1.3GB 堆内存，而命令行的默认超时是 30 分钟——容器会先被 OOM Killer 干掉，
+	// 整个面板（含所有定时任务）一起没。
+	maxRunLogLines = 200000
+	// runLogTrimBatch 是超限时一次性丢弃的行数（约上限的 1/4）。
+	// 成块丢而不是逐行淘汰：逐行淘汰意味着每来一行都要重排一次切片、每一轮轮询里
+	// 头部锚点都在动，前端只能整份重灌；成块丢让「触顶后的截断」几万行才发生一次。
+	// 代价是每次截断会一口气少掉 5 万行历史输出，所以必须把丢弃计数如实告诉前端
+	// （见 snapshotWithOffset），否则它按数组长度猜下标就会静默跳过整整一块。
+	runLogTrimBatch = maxRunLogLines / 4
+)
+
 var scriptInterpreterMap = map[string][]string{
 	".py":  {"python", "-u"},
 	".js":  {"node"},
@@ -70,8 +84,40 @@ func (run *debugRun) setProcess(process *os.Process) {
 
 func (run *debugRun) appendLog(line string) {
 	run.mu.Lock()
+	defer run.mu.Unlock()
+
 	run.Logs = append(run.Logs, line)
-	run.mu.Unlock()
+	run.trimLogsLocked()
+}
+
+// trimLogsLocked 在日志超过上限时，把最前面的一整块丢掉，并在头部补一行省略提示。
+// 调用方必须已持有 run.mu。
+//
+// 不变式：Logs[i] 的全局行号恒等于 run.discardedLogs + i。
+// 每次截断丢掉 drop 个槽位、又补回 1 个提示槽位，所以丢弃计数只加 drop-1，
+// 这样 logLen() 返回的全局序号在截断前后完全连续。
+func (run *debugRun) trimLogsLocked() {
+	if len(run.Logs) <= maxRunLogLines {
+		return
+	}
+
+	drop := runLogTrimBatch
+	if drop >= len(run.Logs) {
+		// 兜底：上限被调得极小时也不能把新写进来的那行一起丢掉。
+		drop = len(run.Logs) - 1
+	}
+	if drop <= 0 {
+		return
+	}
+
+	run.discardedLogs += drop - 1
+	discarded := run.discardedLogs
+	kept := run.Logs[drop:]
+	trimmed := make([]string, 0, len(kept)+1)
+	// discarded+1 才是「实际被省略的输出行数」：头部那行提示自己也占一个槽位。
+	trimmed = append(trimmed, fmt.Sprintf("[前 %d 行输出已省略：单次运行最多保留 %d 行日志]", discarded+1, maxRunLogLines))
+	trimmed = append(trimmed, kept...)
+	run.Logs = trimmed
 }
 
 func (run *debugRun) logOutput() string {
@@ -80,22 +126,45 @@ func (run *debugRun) logOutput() string {
 	return strings.Join(run.Logs, "\n")
 }
 
+// logOutputSince 返回全局行号 offset 及其之后的日志。
+// offset 是 logLen() 给出的全局序号，不是切片下标——头部被成块丢弃后两者会错开。
 func (run *debugRun) logOutputSince(offset int) string {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if offset >= len(run.Logs) {
+
+	start := offset - run.discardedLogs
+	if start < 0 {
+		// 要找的位置已经被丢弃了，只能从现存最早一行开始。
+		start = 0
+	}
+	if start >= len(run.Logs) {
 		return ""
 	}
-	return strings.Join(run.Logs[offset:], "\n")
+	return strings.Join(run.Logs[start:], "\n")
 }
 
+// logLen 返回只增不减的全局行号水位，供调用方当作 logOutputSince 的锚点。
 func (run *debugRun) logLen() int {
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	return len(run.Logs)
+	return run.discardedLogs + len(run.Logs)
 }
 
 func (run *debugRun) snapshot() ([]string, bool, *int, string) {
+	logs, _, done, exitCode, status := run.snapshotWithOffset()
+	return logs, done, exitCode, status
+}
+
+// snapshotWithOffset 在 snapshot() 的基础上多返回一个「logs[0] 的全局行号」，
+// 也就是已经被成块丢弃的行数（见 trimLogsLocked 的不变式）。
+//
+// 锚点必须和日志快照在同一把锁里取：分两次调用的话，两次之间恰好发生一次截断，
+// 拿到的锚点就和 logs 对不上，按它算出来的下标会指到别的全局行上。
+//
+// 只有命令行的轮询接口需要这个锚点（前端按全局行号增量追加，光看数组长度会在
+// 「本轮既截断、又新增更多行」时静默跳过中间几万行）；脚本调试页走的是全量替换，
+// 所以 snapshot() 保持原签名不动，避免动它那几个调用点。
+func (run *debugRun) snapshotWithOffset() ([]string, int, bool, *int, string) {
 	run.mu.Lock()
 	defer run.mu.Unlock()
 
@@ -108,7 +177,7 @@ func (run *debugRun) snapshot() ([]string, bool, *int, string) {
 		exitCode = &value
 	}
 
-	return logs, run.Done, exitCode, run.Status
+	return logs, run.discardedLogs, run.Done, exitCode, run.Status
 }
 
 func (run *debugRun) stop() {
@@ -127,19 +196,31 @@ func (run *debugRun) stop() {
 	run.Logs = append(run.Logs, "[调试运行已停止]")
 }
 
-func (run *debugRun) killIfRunning() {
+// killIfRunning 杀掉仍在运行的进程组，返回是否真的下过这一刀。
+// 返回值是给超时结算用的：只要 kill 发出去了，就不许再拿子进程的退出码把超时标记抹掉。
+func (run *debugRun) killIfRunning() bool {
 	run.mu.Lock()
 	defer run.mu.Unlock()
 
 	if run.Process != nil && !run.Done {
 		service.KillProcessGroup(run.Process)
+		return true
 	}
+	return false
 }
 
 func (run *debugRun) isStopped() bool {
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	return run.Status == "stopped"
+}
+
+// isDone 只读一个布尔。注册表淘汰只关心「跑完没有」，
+// 用 snapshot() 会顺手复制整份日志切片，纯属浪费。
+func (run *debugRun) isDone() bool {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.Done
 }
 
 func (run *debugRun) finish(exitCode int, waitErr error, elapsed float64) {
@@ -244,6 +325,18 @@ func collectRunLogs(reader io.Reader, run *debugRun) chan struct{} {
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			run.appendLog(scanner.Text())
+		}
+		// 单行超过 1MB（`base64 -w0 某个db`、`cat 压成一行的 min.js`、`jq -c .` 都很日常）时，
+		// Scan 会直接返回 false 退出循环。此时若不把 reader 读空，exec 内部那个往 io.Pipe
+		// 写侧灌数据的 io.Copy 会永久阻塞，cmd.Wait() 卡死在 awaitGoroutines ——
+		// 阻塞点在父进程里，杀子进程、杀整个进程组都救不回来。
+		// 不能改用 CloseWithError：这里拿到的是 io.Reader，没有那个方法；
+		// 而且实测它会污染 cmd.Wait() 的返回值，把本来成功的命令记成 failed。
+		// 排空不会反过来卡住：drain 一直读，exec 的 copy goroutine 得以结束，
+		// Wait 返回后 waitTrackedCommand 才 pipeWriter.Close()，drain 随即拿到 EOF。
+		if err := scanner.Err(); err != nil {
+			run.appendLog("[输出行过长（超过 1MB），该行及其后续输出已被丢弃]")
+			_, _ = io.Copy(io.Discard, reader)
 		}
 		close(done)
 	}()

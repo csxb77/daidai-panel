@@ -321,11 +321,19 @@ func EnsureColumns() {
 		// 这里刻意新增一列而不是把 force_overwrite 改成 nullable —— 存量行的 force_overwrite 全是 1，
 		// 复用它会让所有老订阅被解读成「强制覆盖」，把全局关掉的用户升级后静默切回覆盖模式。
 		{"overwrite_mode", "VARCHAR(16) NOT NULL DEFAULT 'inherit'"},
+		// 自动添加定时任务 / 自动删除失效任务的三态开关（inherit / enabled / disabled）。
+		// 存量行补列后一律落 inherit = 跟随全局 auto_add_cron / auto_del_cron，
+		// 而全局默认是 true，与升级前那套 `订阅列 OR 全局` 在全局开启时逐字节一致。
+		// 全局被关掉、且订阅旧布尔列是 1 的那批行不能只靠 inherit 兜住，
+		// 由下面的 migrateLegacySubscriptionTaskSyncFlags 一次性回填成 enabled。
+		{"auto_add_task_mode", "VARCHAR(16) NOT NULL DEFAULT 'inherit'"},
+		{"auto_del_task_mode", "VARCHAR(16) NOT NULL DEFAULT 'inherit'"},
 		// 完整检出开关。NOT NULL DEFAULT 0：老库 ALTER TABLE 补列时存量行一律落成 0，
 		// 也就是「继续走 sparse-checkout」——升级后拉取行为与升级前完全一致，
 		// 不需要任何数据回填。带 NOT NULL 是为了不让 NULL 漏进来（同表 overwrite_mode 的写法）。
 		{"full_checkout", "BOOLEAN NOT NULL DEFAULT 0"},
 	})
+	migrateLegacySubscriptionTaskSyncFlags()
 
 	ensureTableColumns("notify_channels", []columnDef{
 		{"today_send_count", "INTEGER DEFAULT 0"},
@@ -388,6 +396,56 @@ func migrateLegacyTaskPIDColumn() {
 	}
 	if err := DB.Exec("UPDATE tasks SET pid = p_id WHERE pid IS NULL AND p_id IS NOT NULL").Error; err != nil {
 		log.Printf("warn: failed to migrate legacy tasks.p_id values to tasks.pid: %v", err)
+	}
+}
+
+// migrateLegacySubscriptionTaskSyncFlags 把旧布尔列 auto_add_task / auto_del_task 一次性翻译成
+// 新的三态列 auto_add_task_mode / auto_del_task_mode。
+//
+// 为什么必须回填、光补 inherit 不够：旧语义是 OR（订阅这一列开 **或** 全局开就算开），
+// 所以 auto_add_task=1 的订阅今天是恒为「开」的，跟全局开关无关。而「识别 ql 命令」那条创建路径
+// 会把它写成 1，存量里占比不低。只补列落 inherit 的话，这批订阅会从「恒开」变成「跟随全局」——
+// 把全局关掉的用户升级后会突然发现这些订阅不再建任务/不再删任务了。回填成 enabled 才能保证
+// 升级前后行为逐字节一致。全局开着的用户两种写法结果相同，不受影响。
+//
+// 两条 UPDATE 必须成对：先把 mode 提成 enabled，紧接着把源列清 0。
+// 少了清 0 这条，整段迁移就不幂等 —— 用户之后手动把 mode 改回 inherit，下次启动又会被源列的 1
+// 重新提成 enabled，改不动还查不出原因（database-guidelines 反复强调的那个坑）。
+// 清 0 之后源列只剩「只读兼容输出」这一个用途，不再是任何判定的输入，所以清掉是安全的。
+//
+// 附带效果：老客户端 / APP 升级后仍只会发布尔字段，它们写进来的 1 会在下次启动时被同样翻译成
+// enabled —— 与那些客户端心里的「开就是开，不看全局」也是一致的。
+func migrateLegacySubscriptionTaskSyncFlags() {
+	existing := getExistingColumns("subscriptions")
+	pairs := []struct {
+		legacyColumn string
+		modeColumn   string
+	}{
+		{"auto_add_task", "auto_add_task_mode"},
+		{"auto_del_task", "auto_del_task_mode"},
+	}
+	for _, pair := range pairs {
+		if !existing[pair.legacyColumn] || !existing[pair.modeColumn] {
+			continue
+		}
+		// mode 认定的范围比代码侧宽一点点：NULL 与空串在 NormalizeSubscriptionTaskSyncMode 里
+		// 本来就等价于 inherit，这里一并覆盖，免得某些非常规写入路径留下的行漏掉回填。
+		promote := fmt.Sprintf(
+			"UPDATE subscriptions SET %s = 'enabled' WHERE %s = 1 AND (%s IS NULL OR %s = '' OR %s = 'inherit')",
+			pair.modeColumn, pair.legacyColumn, pair.modeColumn, pair.modeColumn, pair.modeColumn)
+		result := DB.Exec(promote)
+		if result.Error != nil {
+			log.Printf("warn: failed to migrate legacy subscriptions.%s into %s: %v", pair.legacyColumn, pair.modeColumn, result.Error)
+			continue
+		}
+		if result.RowsAffected > 0 {
+			log.Printf("migrated %d subscriptions from legacy %s to %s='enabled'", result.RowsAffected, pair.legacyColumn, pair.modeColumn)
+		}
+		// 清 0 必须紧跟提升执行：这一条才是整段迁移幂等性的来源，提升失败时（上面 continue）
+		// 也绝不能单独跑它，否则会把「本该提成 enabled」的意图直接抹掉。
+		if err := DB.Exec(fmt.Sprintf("UPDATE subscriptions SET %s = 0 WHERE %s = 1", pair.legacyColumn, pair.legacyColumn)).Error; err != nil {
+			log.Printf("warn: failed to clear legacy subscriptions.%s after migration: %v", pair.legacyColumn, err)
+		}
 	}
 }
 

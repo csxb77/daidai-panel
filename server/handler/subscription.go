@@ -185,6 +185,12 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		HookScript     string `json:"hook_script"`
 		AutoAddTask    bool   `json:"auto_add_task"`
 		AutoDelTask    bool   `json:"auto_del_task"`
+		// 自动添加定时任务 / 自动删除失效任务的三态开关，前端只发这两个；
+		// 上面那两个布尔字段继续接收只为老客户端不报错。它们不会被原样落库 ——
+		// 只发布尔而没发三态时，由 model.ResolveSubscriptionTaskSyncModeInput 当场翻译成 mode，
+		// 源列恒写 false（同 force_overwrite 与 overwrite_mode 的并存做法）。
+		AutoAddTaskMode string `json:"auto_add_task_mode"`
+		AutoDelTaskMode string `json:"auto_del_task_mode"`
 		SaveDir        string `json:"save_dir"`
 		SubPath        string `json:"sub_path"`
 		SSHKeyID       *uint  `json:"ssh_key_id"`
@@ -250,8 +256,12 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		DependOn:       req.DependOn,
 		PreScript:      req.PreScript,
 		HookScript:     req.HookScript,
-		AutoAddTask:    req.AutoAddTask,
-		AutoDelTask:    req.AutoDelTask,
+		// 刻意不写 AutoAddTask / AutoDelTask：旧布尔列在这里恒落 false（Go 零值 + 列默认值都是 false）。
+		// 老客户端只发布尔 true、不发三态时，语义「开就是开、不看全局」由下面的 Resolve 翻译成
+		// mode='enabled'，信息一点不丢；而源列一旦能被写成 1，启动回填就会在下次重启把用户
+		// 显式选的 inherit 静默提回 enabled（回填的幂等性全靠「源列恒 0」）。
+		AutoAddTaskMode: model.ResolveSubscriptionTaskSyncModeInput(req.AutoAddTaskMode, req.AutoAddTask),
+		AutoDelTaskMode: model.ResolveSubscriptionTaskSyncModeInput(req.AutoDelTaskMode, req.AutoDelTask),
 		Enabled:        true,
 		SaveDir:        req.SaveDir,
 		SubPath:        req.SubPath,
@@ -296,9 +306,14 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	allowed := map[string]bool{
 		"name": true, "type": true, "url": true, "branch": true,
 		"schedule": true, "whitelist": true, "blacklist": true,
-		"depend_on": true, "pre_script": true, "hook_script": true, "auto_add_task": true, "auto_del_task": true,
+		"depend_on": true, "pre_script": true, "hook_script": true,
 		"save_dir": true, "sub_path": true, "ssh_key_id": true, "auth_type": true, "auth_username": true, "auth_token": true, "alias": true, "force_overwrite": true,
 		"overwrite_mode": true,
+		// 自动添加定时任务 / 自动删除失效任务的三态开关。
+		// 旧布尔键 auto_add_task / auto_del_task 刻意**不在**白名单里：map 更新会真写那一列，
+		// 而只要库里出现 legacy=1，启动回填就会把用户显式选的 inherit 提回 enabled
+		//（老客户端本来也只读这两个字段，ToDict 继续下发就够它们不炸了）。
+		"auto_add_task_mode": true, "auto_del_task_mode": true,
 		// 完整检出开关。Update 走 map 更新，false 也会被写库（map 更新不会跳过零值），
 		// 所以用户在表单里关掉它能正常落库。
 		"full_checkout": true,
@@ -323,6 +338,17 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 	if value, exists := updates["overwrite_mode"]; exists {
 		text, _ := value.(string)
 		updates["overwrite_mode"] = model.NormalizeSubscriptionOverwriteMode(text)
+	}
+
+	// 自动添加定时任务 / 自动删除失效任务的三态开关同理：非字符串或脏值一律归 inherit
+	// （跟随全局默认），方向安全——最坏结果只是回到「和升级前一样」的行为。
+	if value, exists := updates["auto_add_task_mode"]; exists {
+		text, _ := value.(string)
+		updates["auto_add_task_mode"] = model.NormalizeSubscriptionTaskSyncMode(text)
+	}
+	if value, exists := updates["auto_del_task_mode"]; exists {
+		text, _ := value.(string)
+		updates["auto_del_task_mode"] = model.NormalizeSubscriptionTaskSyncMode(text)
 	}
 
 	// 完整检出开关同理：JSON 里可能是 null / 数字 / 字符串，直接 map 更新会把脏值塞进

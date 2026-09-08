@@ -7,6 +7,8 @@ export interface SettingsConfigForm {
   random_delay: string
   random_delay_extensions: string
   auto_install_deps: boolean
+  // 系统命令行里单条命令的超时分钟数（服务端注册项 console_timeout_minutes，默认 30，区间 1-720）
+  console_timeout_minutes: number
   auto_add_cron: boolean
   auto_del_cron: boolean
   default_cron_rule: string

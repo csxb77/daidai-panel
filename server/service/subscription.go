@@ -132,7 +132,8 @@ func PullSubscriptionWithContext(ctx context.Context, sub *model.Subscription, o
 //
 // 三态优先级：订阅显式选了 force / preserve 就以订阅为准，inherit（含空串、脏值）才回落全局开关。
 // 刻意不写成 `sub.X || isConfigEnabled(...)` 那种 OR —— OR 表达不了「全局开着、但这个订阅强制关」，
-// 而这正是本功能的核心诉求（同文件里 auto_add_cron / auto_del_cron 的 OR 语义本次不动）。
+// 而这正是本功能的核心诉求。v3.2.6 起「自动添加定时任务 / 自动删除失效任务」也从 OR 换成了同一形状，
+// 见下面的 resolveSubscriptionAutoAddTask / resolveSubscriptionAutoDelTask。
 func resolveSubscriptionForceOverwrite(sub *model.Subscription) bool {
 	if sub != nil {
 		switch model.NormalizeSubscriptionOverwriteMode(sub.OverwriteMode) {
@@ -144,6 +145,51 @@ func resolveSubscriptionForceOverwrite(sub *model.Subscription) bool {
 	}
 	// inherit（含空串、脏值、sub 为 nil）才回落全局开关，顺带避免另外两档白读一次配置
 	return isConfigEnabled("subscription_force_overwrite", true)
+}
+
+// resolveSubscriptionAutoAddTask / resolveSubscriptionAutoDelTask 解析这次同步到底建不建任务、删不删任务。
+// 与上面的覆盖拉取解析器同形：纯解析，sub 对象一个字段都不写回
+// （sub 稍后还会被 database.DB.Model(sub).Updates(...) 用到，就地改写既掩盖个体值也埋回写隐患）。
+//
+// v3.2.6 之前这两项是 `sub.AutoAddTask || isConfigEnabled("auto_add_cron", true)` 的 OR：
+// 全局默认 true，订阅那一列几乎恒等于空转；更要命的是 OR 永远表达不出
+// 「全局开着、但这一条订阅别建任务」——那正是用户提的需求。现在换成三态解析：
+// 订阅显式选了 enabled / disabled 就以订阅为准，inherit（含空串、脏值、sub 为 nil）才回落全局默认。
+func resolveSubscriptionAutoAddTask(sub *model.Subscription) bool {
+	if sub != nil {
+		switch model.NormalizeSubscriptionTaskSyncMode(sub.AutoAddTaskMode) {
+		case model.SubTaskSyncEnabled:
+			return true
+		case model.SubTaskSyncDisabled:
+			return false
+		}
+	}
+	return isConfigEnabled("auto_add_cron", true)
+}
+
+func resolveSubscriptionAutoDelTask(sub *model.Subscription) bool {
+	if sub != nil {
+		switch model.NormalizeSubscriptionTaskSyncMode(sub.AutoDelTaskMode) {
+		case model.SubTaskSyncEnabled:
+			return true
+		case model.SubTaskSyncDisabled:
+			return false
+		}
+	}
+	return isConfigEnabled("auto_del_cron", true)
+}
+
+// subscriptionTaskSyncStrategyLabel 把三态开关翻译成日志里的人话，
+// 让「我明明在订阅里关了怎么还在建任务」这类问题一眼能自查（同拉取日志里的「策略：X」）。
+func subscriptionTaskSyncStrategyLabel(mode string) string {
+	switch model.NormalizeSubscriptionTaskSyncMode(mode) {
+	case model.SubTaskSyncEnabled:
+		return "强制开启"
+	case model.SubTaskSyncDisabled:
+		return "强制关闭"
+	default:
+		return "跟随全局设置"
+	}
 }
 
 func runCmdWithCallback(ctx context.Context, cmd *exec.Cmd, emit PullCallback) (string, error) {
@@ -1092,9 +1138,28 @@ func checkBlacklist(sub *model.Subscription, filePath string) bool {
 
 func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 	options := getSubscriptionTaskSyncOptions(sub)
+	addStrategy := subscriptionTaskSyncStrategyLabel(sub.AutoAddTaskMode)
+	delStrategy := subscriptionTaskSyncStrategyLabel(sub.AutoDelTaskMode)
 	if !options.autoAdd && !options.autoDelete {
-		emit("[跳过自动同步任务] 订阅与系统设置中均未启用 auto_add_cron / auto_del_cron")
+		// 旧文案写的是「订阅与系统设置中均未启用 auto_add_cron / auto_del_cron」，
+		// 那是 OR 语义下唯一可能的原因；三态之后「全局开着、订阅自己强制关」也会走到这里，
+		// 所以必须把两项各自的策略来源打出来，否则用户会去翻全局设置而永远找不到原因。
+		emit(fmt.Sprintf("[跳过自动同步任务] 自动添加定时任务=关闭（策略：%s），自动删除失效任务=关闭（策略：%s）",
+			addStrategy, delStrategy))
 		return
+	}
+
+	// 两项各打一条策略来源：订阅单独设过就是「强制开启 / 强制关闭」，没设过是「跟随全局设置」。
+	// 只关掉其中一项时不会走上面那条跳过日志，不打这两行的话用户看不出「为什么一个都没建」。
+	if options.autoAdd {
+		emit(fmt.Sprintf("[自动添加定时任务] 已启用（策略：%s）", addStrategy))
+	} else {
+		emit(fmt.Sprintf("[自动添加定时任务] 未启用（策略：%s），本次不会新建任务", addStrategy))
+	}
+	if options.autoDelete {
+		emit(fmt.Sprintf("[自动删除失效任务] 已启用（策略：%s）", delStrategy))
+	} else {
+		emit(fmt.Sprintf("[自动删除失效任务] 未启用（策略：%s），本次不会删除任务", delStrategy))
 	}
 
 	saveDir := subscriptionSaveDir(sub)
@@ -1313,14 +1378,16 @@ func getSubscriptionTaskSyncOptions(sub *model.Subscription) subscriptionTaskSyn
 	// 注意：兜底目前**无法关闭**。原注释声称「把 default_cron_rule 设成非法值即可关闭」是错的——
 	// model.normalizeDefaultCronRule 对非法值直接报错拒写，这条逃生口从来就不存在。
 	// 上面那句 cron.Parse 校验只用来兜住直接改库/导入配置绕过注册表写入的脏值。
-	// 想让没有 cron 头的脚本不建任务，请关掉「自动添加定时任务」（auto_add_cron / 订阅的 AutoAddTask）。
+	// 想让没有 cron 头的脚本不建任务，请关掉「自动添加定时任务」
+	//（全局默认 auto_add_cron，或把这条订阅的 auto_add_task_mode 设成 disabled）。
 	if defaultCron == "" {
 		defaultCron = FallbackSubscriptionCron
 	}
 
 	return subscriptionTaskSyncOptions{
-		autoAdd:     sub.AutoAddTask || isConfigEnabled("auto_add_cron", true),
-		autoDelete:  sub.AutoDelTask || isConfigEnabled("auto_del_cron", true),
+		// 三态解析，不再是 `sub.AutoAddTask || 全局`：见 resolveSubscriptionAutoAddTask 的注释。
+		autoAdd:     resolveSubscriptionAutoAddTask(sub),
+		autoDelete:  resolveSubscriptionAutoDelTask(sub),
 		defaultCron: defaultCron,
 		allowedExts: getSubscriptionAllowedExtensions(model.GetRegisteredConfig("repo_file_extensions")),
 	}
@@ -1419,7 +1486,8 @@ func shouldManageSubscriptionFile(sub *model.Subscription, filePath string, allo
 // 打开完整检出后整仓文件都落盘了，这条间接约束随之消失：
 // 一个填了 `sub_path=qinglong/DefaultTasks`、白名单留空、开了自动建任务的订阅，
 // 会把仓库里每一个 .sh/.js/.py（含 tools/、examples/、ci/ 下的）都建成定时任务并真的按 cron 跑起来，
-// 而 auto_del_task 不会帮用户收回去。用户的感受是「只开了一个检出开关，任务列表凭空多出几十条」。
+// 而「自动删除失效任务」（auto_del_task_mode / auto_del_cron）不会帮用户收回去——
+// 那一项只删「订阅源里已经消失的脚本」对应的任务。用户的感受是「只开了一个检出开关，任务列表凭空多出几十条」。
 //
 // 这个开关的语义是「多落一些文件到磁盘上给脚本自己读」，不是「多建一堆任务」，所以这里补回来。
 //

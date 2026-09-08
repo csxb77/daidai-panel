@@ -922,17 +922,68 @@ func buildDependencyFailureHint(logText string) string {
 		strings.Contains(lower, "failed to fetch"):
 		return "[检测到镜像源不可达或网络中断（域名能解析但连不上/下载失败），" +
 			"请检查 Linux 镜像源配置、代理设置和网络连通性，必要时更换镜像源后重试]"
+	// 顺序契约：这条必须夹在「镜像源」与「Alpine glibc 不兼容」之间。
+	//   - 排在锁冲突 / DNS / 镜像源之后：那三类是更靠前的次生故障，先解决它们才对；
+	//   - 排在 isAlpineGlibcIncompatible 之前：后者的关键词（failed to build installable wheels、
+	//     manylinux）太宽，日志里一出现就会盖掉「编译器 / CMake 根本不存在」这个更具体的真因。
+	//     两条结论的第一步动作并不相同（换镜像拿预编译包 vs 装工具链现场编），所以两边的文案
+	//     都必须把这两条出路并列写出来，而不是各给一半（issue #120）。
+	case isMissingBuildToolchain(lower):
+		return buildMissingToolchainHint(detectDependencyToolchainEnv())
 	case isAlpineGlibcIncompatible(lower):
-		return "[当前容器使用 Alpine 镜像（musl libc），该依赖需要 glibc 环境，无法在 Alpine 上安装。请切换到 Debian 版镜像（如 linzixuanzz/daidai-panel:debian）后重试]"
+		return buildAlpineGlibcHint(detectDependencyToolchainEnv())
 	default:
 		return ""
 	}
+}
+
+// buildAlpineGlibcHint 是「musl 上没有预编译包」这条归因的结论文案。
+//
+// 主出路是换 Debian 版镜像：PyPI 上的科学计算包普遍只发 manylinux wheel（只认 glibc）、
+// 不发 musllinux wheel，换过去 pip 直接下预编译包，根本不用编译 ——
+// issue #120 的 opencv-python 就属于这一类（有 manylinux_2_17 的 x86_64/aarch64 wheel，没有任何 musllinux wheel）。
+// 但必须同时写上退路：万一该包连 manylinux wheel 都没有，换完镜像照样会掉进源码编译，
+// 那时该做的是装编译工具链，而不是继续换镜像。
+//
+// 这条退路要指到哪儿，必须跟着面板的运行身份走，理由与 buildMissingToolchainHint 完全一样：
+// 降权部署（PUID/PGID）下用户照着「去 Linux 页签装」点下去，会先建出 3 条依赖记录、
+// 再被 EnsureLinuxPackageManagerPrivilege 全部拒掉，白白多出 3 条 failed 和侧栏角标。
+// 所以这里从 const 改成按环境组装的函数，非 root 时改指提权出路。
+func buildAlpineGlibcHint(env dependencyToolchainEnv) string {
+	install := "请到「依赖管理 → Linux」页签装好编译器与 cmake" +
+		"（Alpine 装 build-base、linux-headers、cmake，Debian 装 build-essential、cmake）后再重装"
+	if env.PrivilegeHint != "" {
+		install = "面板内的「依赖管理 → Linux」页签在当前的非 root 运行身份下装不了系统包，" +
+			"只能按下面的提权出路装 build-base、linux-headers、cmake" +
+			"（换到 Debian 版镜像后则是 build-essential、cmake）后再重装"
+	}
+
+	hint := "[当前容器使用 Alpine 镜像（musl libc），该依赖在 musl 上没有可用的预编译包" +
+		"（PyPI 上常见的 manylinux wheel 只认 glibc）。请切换到 Debian 版镜像（如 linzixuanzz/daidai-panel:debian）后重试，" +
+		"多数这类包换过去就能直接装上、不用编译；若换镜像后仍然报编译失败，说明该包连 manylinux wheel 都没有，只能现场编译 —— " +
+		install
+	if env.PrivilegeHint != "" {
+		// 与 buildMissingToolchainHint 同款收尾：把作用域写清楚，
+		// 否则 PrivilegeHint 末句「Node.js / Python 依赖不受此限制」贴在一条刚失败的
+		// Python 依赖日志末尾，会被读成自相矛盾。
+		hint += "。装系统包这一步受面板运行身份限制：" + env.PrivilegeHint
+	}
+	return hint + "]"
 }
 
 func isAlpineGlibcIncompatible(lowerLog string) bool {
 	if detectLinuxDistribution() != "alpine" {
 		return false
 	}
+	return matchesAlpineGlibcHints(lowerLog)
+}
+
+// matchesAlpineGlibcHints 只做关键词判定、不读环境。
+//
+// 拆出来有两个原因：一是让 issue #120 那份原样日志能在非 Alpine 的开发机 / CI 上被断言
+// 「仍然落在 glibc 这条车道里」；二是钉住 failed to build installable wheels ——
+// 它是 #120 那份日志唯一的命中项，从这里删掉等于让用户拿到一条空提示。
+func matchesAlpineGlibcHints(lowerLog string) bool {
 	glibcHints := []string{
 		"no matching distribution",
 		"resolutionimpossible",
@@ -946,6 +997,172 @@ func isAlpineGlibcIncompatible(lowerLog string) bool {
 		}
 	}
 	return false
+}
+
+// isMissingBuildToolchain 判断日志是不是「机器上根本没有 C/C++ 编译器 / CMake」。
+//
+// 典型场景：pip 装 opencv-python、lxml、numpy 这类没有对应平台 wheel 的包时会回退到
+// 源码编译，而面板镜像的精简档刻意不装编译器（Dockerfile 里还有构建期断言守着），
+// 完整档虽有 build-base / build-essential 但不含 cmake，于是编译在第一步就断了。
+//
+// 关键词只收「工具本身不存在」这一类明确信号，不收 "failed building wheel" 之类
+// 只说明「编译失败了」的宽泛结论 —— 那种日志的真实原因可能是缺头文件、缺系统库、
+// 版本不兼容等等，硬归到这里就是新的误诊。只写 Failed building wheel 的日志由后面的
+// matchesAlpineGlibcHints 接住（在 musl 上它多半确实是「没有预编译包」），两条结论的
+// 文案都并列给了「换镜像」和「装工具链」，所以落到哪一条都不会把用户引进死胡同。
+func isMissingBuildToolchain(lowerLog string) bool {
+	hints := []string{
+		// CMake 在、编译器不在：opencv-python 这类把 cmake 写进 build-system.requires 的包，
+		// pip 构建隔离会先从 PyPI 装一个 cmake wheel（musllinux 的也有），于是现场变成
+		// 「cmake 有、gcc/g++ 没有」，此时 CMake 会点名吐出下面这几句，pip 那一层只剩
+		// Failed building wheel 这种看不出真因的结论（issue #120 的最可能形态）。
+		//
+		// 反过来，"An error occurred while configuring with CMake." 这句绝不能收：
+		// 它不是 CMake 自己吐的，而是 scikit-build 的 cmaker.configure() 包装 ——
+		// cmake 子进程返回非 0 就抛。也就是说它出现时 cmake 明明已经跑起来了，
+		// 与「cmake / 编译器不存在」互斥；缺 zlib 之类系统开发包的失败照样会带上它
+		// （上面还明明白白印着 The CXX compiler identification is GNU 12.2.0），
+		// 收进来就是把工具链齐全的现场误判成缺工具链、把真因盖掉。
+		// 真缺工具链时 CMake 必定另外打印下面这几条点名信号，不靠这句也照样命中。
+		"no cmake_cxx_compiler could be found",
+		"no cmake_c_compiler could be found",
+		"cmake_cxx_compiler not set",
+		"cmake_c_compiler not set",
+		"the cxx compiler identification is unknown",
+		"the c compiler identification is unknown",
+		// 编译器缺失：sh / bash / exec.Command 三种报法都覆盖
+		"gcc: not found",
+		"g++: not found",
+		"cc: not found",
+		"make: not found",
+		"gcc: command not found",
+		"g++: command not found",
+		"make: command not found",
+		`exec: "gcc"`,
+		`exec: "g++"`,
+		`exec: "cc"`,
+		"command 'gcc' failed",
+		"command 'cc' failed",
+		"command 'g++' failed",
+		"unable to execute 'cc1plus'",
+		"unable to execute 'gcc'",
+		// CMake / Ninja 缺失：setuptools、scikit-build、cmake 包装器各有各的措辞
+		"cmake: not found",
+		"cmake: command not found",
+		"cmake must be installed",
+		"no cmake found",
+		"cmake is required",
+		"could not find cmake",
+		"problem with the cmake installation",
+		"ninja is required",
+		"error: [errno 2] no such file or directory: 'cmake'",
+		// 缺开发头文件，本质同样是「编译环境没准备好」
+		"fatal error: python.h",
+		// Windows 二进制部署下的等价故障
+		"visual c++ 14.0 or greater is required",
+	}
+	for _, hint := range hints {
+		if strings.Contains(lowerLog, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+// dependencyToolchainEnv 是「缺编译工具链」这条归因分支需要的全部环境事实。
+//
+// 之所以抽成参数而不是在文案函数里现读环境：isAlpineGlibcIncompatible 直接读
+// /etc/os-release，在 Windows 开发机上恒为 false，那条分支的文案单测根本覆盖不到。
+// 这里改成「外层读环境、内层纯函数」，buildMissingToolchainHint 就能被直接调用测试。
+type dependencyToolchainEnv struct {
+	// Distribution 取 /etc/os-release 的 ID（alpine / debian / ubuntu ...），探测不到为空串
+	Distribution string
+	// PackageManager 取包管理器名（apk / apt / dnf / yum / microdnf / zypper），探测不到为空串
+	PackageManager string
+	// PrivilegeHint 非空即表示当前是非 root：内容就是用户真去点「安装」时会撞上的那段拦截说明
+	PrivilegeHint string
+}
+
+// detectDependencyToolchainEnv 负责读环境，文案拼装交给纯函数 buildMissingToolchainHint。
+func detectDependencyToolchainEnv() dependencyToolchainEnv {
+	env := dependencyToolchainEnv{Distribution: detectLinuxDistribution()}
+	if manager, err := detectLinuxPackageManager(); err == nil {
+		env.PackageManager = manager.Name
+	}
+	// 非 root 时不能只叫用户「去 Linux 页签装」——他一点安装就会被
+	// EnsureLinuxPackageManagerPrivilege 拦下，提示就自相矛盾了。
+	// 这里直接复用它那段（已经按 Docker / Magisk / 裸机分岔好的）出路说明，避免两处维护同一套文案。
+	if err := service.EnsureLinuxPackageManagerPrivilege(); err != nil {
+		env.PrivilegeHint = err.Error()
+	}
+	return env
+}
+
+// buildMissingToolchainHint 是这条分支的纯函数内核：只依赖入参，不碰环境、不碰 DB。
+func buildMissingToolchainHint(env dependencyToolchainEnv) string {
+	// 包管理器比 /etc/os-release 更能代表「实际能用哪条命令装」，所以优先按它分岔；
+	// 只有探测不到包管理器时才退回发行版 ID。
+	family := strings.ToLower(strings.TrimSpace(env.PackageManager))
+	if family == "" {
+		switch strings.ToLower(strings.TrimSpace(env.Distribution)) {
+		case "alpine":
+			family = "apk"
+		case "debian", "ubuntu":
+			family = "apt"
+		}
+	}
+
+	// packages 只回答「要装哪些包」，「去哪儿装」由下面按 PrivilegeHint 决定。
+	// 两件事必须拆开：非 root 时面板内的「依赖管理 → Linux」页签根本装不了
+	// （BuildLinuxPackageCommand 第一行就被 EnsureLinuxPackageManagerPrivilege 拒掉），
+	// 再指路过去只会凭空多出几条 failed 依赖记录、把侧栏角标顶上去。
+	packages := ""
+	// musl 上优先换镜像：多数科学计算包（opencv-python、grpcio…）在 PyPI 上只发
+	// manylinux wheel、不发 musllinux wheel，换到 Debian 版镜像 pip 直接下预编译包，
+	// 根本不用编译；留在 Alpine 硬编反而是最慢、最容易撞超时的一条路。
+	preferDebianImage := false
+	switch family {
+	case "apk":
+		packages = "build-base、linux-headers、cmake"
+		preferDebianImage = true
+	case "apt":
+		packages = "build-essential、cmake"
+	case "dnf", "yum", "microdnf", "zypper":
+		packages = "gcc、gcc-c++、make、cmake"
+	}
+
+	var body string
+	if packages == "" {
+		// 探测不到包管理器（Windows、裸机等），只能给通用结论，不编造包名。
+		body = "当前环境探测不到 Linux 包管理器，需要先自行装好 C/C++ 编译工具链" +
+			"（Linux 为 gcc/g++/make，Windows 为 Visual Studio 生成工具）与 CMake，再重装本依赖"
+	} else {
+		install := "请到「依赖管理 → Linux」页签安装 " + packages
+		if env.PrivilegeHint != "" {
+			install = "面板内的「依赖管理 → Linux」页签在当前的非 root 运行身份下装不了系统包，" +
+				"只能按下面的提权出路装 " + packages
+		}
+		compile := install + "，装完再重装本依赖；现场编译很慢，" +
+			"记得先到「系统设置 - 依赖安装超时(分钟)」把阈值调大，默认 20 分钟往往不够"
+		if preferDebianImage {
+			// 两条出路是并列关系，不是二选一：先给成本最低的换镜像，再给兜底的现场编译。
+			body = "出路一：换到 Debian 版镜像（如 linzixuanzz/daidai-panel:debian）后重装 —— " +
+				"多数科学计算包在 musl 上没有预编译包、在 glibc 上却有 manylinux wheel，换过去往往直接装上、不用编译。" +
+				"出路二：若该包连 manylinux wheel 都没有，就只能现场编译：" + compile
+		} else {
+			body = compile
+		}
+	}
+
+	hint := "[检测到缺少 C/C++ 编译工具链或 CMake：当前平台找不到可直接使用的预编译包，" +
+		"回退到源码编译时发现编译器或 CMake 不存在。" + body
+	if env.PrivilegeHint != "" {
+		// 作用域必须写清楚：这条限制只卡「装 Linux 系统包」这一步。
+		// 否则 PrivilegeHint 末句「Node.js / Python 依赖不受此限制」贴在一条刚失败的
+		// Python 依赖日志末尾，会被读成自相矛盾。
+		hint += "。装系统包这一步受面板运行身份限制：" + env.PrivilegeHint
+	}
+	return hint + "]"
 }
 
 func ensureTmpDir() {

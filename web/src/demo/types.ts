@@ -135,8 +135,18 @@ export interface DemoSubscription {
   depend_on: string
   pre_script: string
   hook_script: string
+  // auto_add_task / auto_del_task 是 v3.2.5 之前的旧布尔字段，保留只做兼容，
+  // 真正参与判定的是下面两个三态字段。
   auto_add_task: boolean
   auto_del_task: boolean
+  // 订阅级「自动添加定时任务」三态：inherit=跟随全局 auto_add_cron / enabled=强制开启 / disabled=强制关闭。
+  // 写成可选是为了对齐「缺省即 inherit」的后端口径；演示站自己已经不会产出缺省态了 ——
+  // fixture 三条订阅都显式给了值，adapter.ts 的 POST / PUT /subscriptions 也会按
+  // enabled / disabled 白名单归一后写进来（空值、脏值一律落 inherit）。
+  // 留着 `?` 只是让页面读到 undefined 时仍按 inherit 处理，不用另外兜底。
+  auto_add_task_mode?: string
+  // 订阅级「自动删除失效任务」三态，取值同上，inherit 时回落到全局 auto_del_cron。
+  auto_del_task_mode?: string
   enabled: boolean
   status: number
   last_pull_at: string | null

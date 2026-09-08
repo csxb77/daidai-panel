@@ -39,6 +39,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useResponsive } from '@/composables/useResponsive'
 import { formatDateTime } from '@/utils/datetime'
 import RandomCronDialog from './RandomCronDialog.vue'
+import CronVisualDialog from './CronVisualDialog.vue'
 
 type CronRuleState = {
   id: number
@@ -126,6 +127,10 @@ const showAllTemplates = ref(false)
 const activeTemplateRuleIndex = ref(0)
 const showRandomDialog = ref(false)
 const activeRandomRuleIndex = ref(0)
+const showVisualDialog = ref(false)
+const activeVisualRuleIndex = ref(0)
+/** 传给可视化弹窗的初值。只在打开那一刻取一次快照，弹窗内部自己反解 */
+const visualExpression = ref('')
 const favoriteNameInput = ref('')
 
 /** 拿不到用户名时用空串——它与任何存档里的名字都对不上，等价于「没有收藏」 */
@@ -341,6 +346,33 @@ function applyRandomExpressions(expressions: string[]) {
   }
 }
 
+function openVisualDialog(index: number) {
+  activeVisualRuleIndex.value = index
+  // 现场取当前表达式，不在 CronRuleState 上挂可视化状态：
+  // 规则行的唯一事实来源始终是那串表达式，用户手改过再打开也必须看到手改后的状态
+  visualExpression.value = rules.value[index]?.expression || ''
+  showVisualDialog.value = true
+}
+
+/**
+ * 应用可视化编辑的结果。
+ *
+ * 三步与 selectTemplate 完全一致，缺一不可：写回表达式 -> emitRules() 上报父组件 ->
+ * 立刻解析拿后端的人话描述和下次执行时间。漏 emitRules 会「改了但没上报」，
+ * 漏 parseRule 会「描述停在改之前」。
+ * 这里必须从 rules.value 按下标取回代理对象（本文件另两处已踩过这个坑）：
+ * 裸对象上的 `rule.parseResult = ...` 绕过 set 陷阱，值写进去了但不触发重渲染。
+ */
+function applyVisualExpression(expression: string) {
+  const rule = rules.value[activeVisualRuleIndex.value]
+  if (!rule) {
+    return
+  }
+  rule.expression = expression
+  emitRules()
+  void parseRule(rule)
+}
+
 function isFavorited(expression: string) {
   return favorites.value.some(item => item.expression === expression)
 }
@@ -496,6 +528,7 @@ const groupedTemplates = computed(() => {
           </div>
           <el-button text size="small" @click="openTemplateDialog(index)">常用规则</el-button>
           <el-button text size="small" @click="openRandomDialog(index)">随机时间</el-button>
+          <el-button text size="small" @click="openVisualDialog(index)">可视化编辑</el-button>
         </div>
       </div>
     </div>
@@ -592,6 +625,12 @@ const groupedTemplates = computed(() => {
     </el-dialog>
 
     <RandomCronDialog v-model:visible="showRandomDialog" @apply="applyRandomExpressions" />
+
+    <CronVisualDialog
+      v-model:visible="showVisualDialog"
+      :expression="visualExpression"
+      @apply="applyVisualExpression"
+    />
   </div>
 </template>
 

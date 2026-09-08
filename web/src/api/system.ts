@@ -159,6 +159,64 @@ export const configScriptApi = {
 }
 
 // ============================================================================
+// 网页版系统命令行
+//
+// 一组 admin-only 接口（应用令牌进不来），形态与脚本调试的
+// POST /scripts/run-code + GET /scripts/run/:id/logs 那一套完全一致：
+// 提交一次拿 run_id，然后轮询取输出，中途可停止、结束后可清除。
+//
+// 它【不是】交互式 PTY：每次 run 都是一个独立的一次性 shell 进程，
+// cd / export 出来的状态不会带到下一条命令，要连起来只能写成
+// `cd /x && ls` 这种单条复合命令。这条约束必须在 UI 上说清楚，
+// 否则用户会按终端的直觉一条条敲然后发现「目录没切过去」。
+// ============================================================================
+
+export interface SystemConsoleMeta {
+  /** false 表示当前环境跑不了命令行（例如 Windows 裸机没有 bash），输入区要整体禁用 */
+  available: boolean
+  /** available=false 时的原因，原样展示给用户，不要自己编文案 */
+  unavailable_reason?: string
+  /** 实际使用的 shell（服务端当前固定是 bash） */
+  shell?: string
+  /** 命令的工作目录（面板脚本目录） */
+  work_dir?: string
+  /** 面板进程是不是 root。决定 apk add / apt-get install 能不能装得上 */
+  is_root?: boolean
+  /** 探测到的系统包管理器：apk / apt / dnf / yum / microdnf / zypper，探测不到是空串 */
+  package_manager?: string
+  distribution?: string
+  /** 单条命令的超时分钟数，由系统配置 console_timeout_minutes 决定 */
+  timeout_minutes?: number
+}
+
+/** 一次命令执行的输出快照。与脚本调试的轮询接口同形，外面还包一层 data */
+export interface SystemConsoleRunLogs {
+  logs: string[]
+  /**
+   * logs[0] 的全局行号，也就是服务端已经成块丢弃的行数（单次运行最多留 20 万行，
+   * 触顶后一次丢掉最前面的 1/4）。
+   *
+   * 增量追加渲染必须按它算下标：只看 logs.length 的话，「本轮既截断、又新增了更多行」
+   * 时长度反而变大，切片下标在整体左移过的新数组里指向的是完全不同的全局行。
+   * 可选是为了兜住老服务端不下发的情况，读不到按 0 处理即可（没截断过时它本来就是 0）。
+   */
+  discarded?: number
+  done: boolean
+  exit_code?: number
+  status?: string
+}
+
+export const systemConsoleApi = {
+  meta: () => request.get('/system/console/meta') as Promise<SystemConsoleMeta>,
+  run: (command: string) =>
+    request.post('/system/console/run', { command }) as Promise<{ message?: string; run_id: string }>,
+  logs: (runId: string) =>
+    request.get(`/system/console/run/${runId}/logs`) as Promise<{ data: SystemConsoleRunLogs }>,
+  stop: (runId: string) => request.put(`/system/console/run/${runId}/stop`) as Promise<{ message: string }>,
+  clear: (runId: string) => request.delete(`/system/console/run/${runId}`) as Promise<{ message: string }>,
+}
+
+// ============================================================================
 // 系统配置 schema
 //
 // 下面这几个类型与服务端 server/handler/config.go 的 buildConfigResponseItem

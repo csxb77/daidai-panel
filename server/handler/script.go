@@ -39,7 +39,11 @@ type debugRun struct {
 	Done     bool
 	ExitCode *int
 	Status   string
-	mu       sync.Mutex
+	// discardedLogs 是日志超过上限后被成块丢弃的行数。
+	// Logs 被截断后切片下标就不再等于「第几行输出」，logOutputSince / logLen 靠它
+	// 把 offset 解释成只增不减的全局序号（见 script_runtime.go 的 trimLogsLocked）。
+	discardedLogs int
+	mu            sync.Mutex
 }
 
 type ScriptHandler struct {

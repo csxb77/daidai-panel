@@ -41,6 +41,11 @@ defineProps<{
       <span class="form-hint">单次任务在数据库中保留的日志字节数，默认 102400000</span>
     </div>
     <div class="form-field">
+      <label>系统命令行超时(分钟)</label>
+      <el-input v-model.number="form.console_timeout_minutes" />
+      <span class="form-hint">依赖管理页「系统命令行」里单条命令的最长执行时间，取值 1-720</span>
+    </div>
+    <div class="form-field">
       <label>随机延迟最大秒数</label>
       <el-input v-model="form.random_delay" placeholder="如 300 表示 1~300 秒随机延迟" />
       <span class="form-hint">留空或 0 表示不延迟</span>

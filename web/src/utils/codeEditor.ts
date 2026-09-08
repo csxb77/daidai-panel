@@ -210,6 +210,8 @@ const DARK_SYNTAX = {
   number: '#b5cea8',
   typeName: '#4ec9b0',
   functionName: '#dcdcaa',
+  // variableName 保留只为记录 VS Code 的原值，**两个引擎都不再引用它**（issue #119，见
+  // buildHighlightStyle / defineMonacoTheme 里那两段注释）。别看它没人用就顺手接回去。
   variableName: '#9cdcfe',
   constant: '#4fc1ff',
   operator: '#d4d4d4',
@@ -241,8 +243,11 @@ const LIGHT_SYNTAX = {
 function buildHighlightStyle(dark: boolean) {
   const color = dark ? DARK_SYNTAX : LIGHT_SYNTAX
 
-  // 同一个词命中多条规则时，lezer 按「标签更具体者胜」决定，与书写顺序无关，
-  // 所以 function(variableName) 不会被下面那条裸 variableName 盖掉。
+  // 同一个词命中多条规则时，lezer 按「标签更具体者胜」决定，与书写顺序无关。
+  // 下面 tags.function(tags.variableName) / tags.constant(tags.variableName) 是**标签构造器**
+  // （给 variableName 套一层修饰后得到的更具体标签），不是在读调色板里的 variableName 字段 ——
+  // 裸的 variableName 规则本身已经按 issue #119 删掉了（见下面那条 ⚠️），但这两条得留着：
+  // 它们只命中函数名与常量，不会把正文染色。
   return HighlightStyle.define([
     // ⚠️ 注释刻意**不加** fontStyle: 'italic'（issue #116-6）：等宽字体的斜体多半是合成出来的
     // （字体家族里没有真正的 italic 字形，浏览器直接把正体切一刀），笔画会发虚、行内还会串位。
@@ -255,7 +260,11 @@ function buildHighlightStyle(dark: boolean) {
     { tag: [tags.number, tags.integer, tags.float], color: color.number },
     { tag: [tags.typeName, tags.className, tags.namespace], color: color.typeName },
     { tag: [tags.function(tags.variableName), tags.function(tags.propertyName), tags.macroName], color: color.functionName },
-    { tag: [tags.variableName, tags.propertyName, tags.labelName], color: color.variableName },
+    // ⚠️ 裸的 variableName / propertyName / labelName 刻意**不给**颜色（issue #119）：
+    // 它们覆盖的是「代码正文里绝大多数的词」，给它上色等于把正文整片染成 #001080 深蓝。
+    // 不给规则时它们继承 buildCodeEditorTheme() 里 `&` 的 color（--dd-editor-fg-color，
+    // 浅色 #111827 / 深色 #e5e7eb），与 v3.1.1 的观感一致，也跟着用户自定义的编辑器前景色走。
+    // Monaco 侧 defineMonacoTheme() 里同样不给 identifier 规则，两个引擎必须一起改。
     { tag: [tags.constant(tags.variableName), tags.standard(tags.variableName)], color: color.constant },
     { tag: [tags.operator, tags.punctuation, tags.separator, tags.bracket, tags.derefOperator], color: color.operator },
     { tag: [tags.tagName, tags.angleBracket], color: color.tagName },
@@ -669,7 +678,12 @@ export function defineMonacoTheme(monaco: MonacoThemeHost): MonacoThemeDescripto
       { token: 'number', foreground: hex(color.number) },
       { token: 'type', foreground: hex(color.typeName) },
       { token: 'type.identifier', foreground: hex(color.typeName) },
-      { token: 'identifier', foreground: hex(color.variableName) },
+      // ⚠️ identifier 刻意**不给**规则（issue #119）：Monarch 里 JS/TS/Python 的 tokenizer 都是
+      // `"@default": "identifier"`，也就是所有非关键字的词——变量、函数名、属性、模块名——全吐 identifier。
+      // 给它上色等于把代码正文整片染成深蓝 #001080（v3.2.2 起就是这样）。不给规则时它落到
+      // defaultForeground，也就是下面 colors 里的 editor.foreground（浅色 #111827 / 深色 #e5e7eb），
+      // 与 v3.1.1（那时 rules 是空数组）逐字一致。CodeMirror 侧 buildHighlightStyle() 同样不给，
+      // 两个引擎必须一起改，否则切一下引擎正文就变色。
       { token: 'constant', foreground: hex(color.constant) },
       { token: 'operator', foreground: hex(color.operator) },
       { token: 'delimiter', foreground: hex(color.operator) },

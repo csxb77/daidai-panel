@@ -654,6 +654,80 @@ route('POST', '/system/backup/upload', () => blocked())
 // 备份文件是编出来的剧本，没有真实内容可下；给个空文件比给个 200 更诚实
 route('GET', '/system/backup/download', () => blocked())
 
+// ---- 网页版系统命令行（admin-only 的 /system/console 组） -------------------
+/**
+ * 演示站是【纯静态托管】，没有任何能执行命令的容器，所以这组接口给的是一次诚实的降级，
+ * 而不是编一段假输出冒充终端。
+ *
+ * 关门的位置刻意选在 meta：SystemConsoleDialog 的 canRun 是
+ * `consoleAvailable && !metaLoading`，available=false 会让输入框、常用命令按钮、
+ * 运行按钮整排禁用，并把 unavailable_reason **原样**渲染成一条红色 el-alert
+ * （模板里 `:title="meta.unavailable_reason || '当前环境不支持系统命令行'"`）。
+ * 也就是说这句文案就是访客看到的唯一解释，要写成人话，别写成错误码。
+ *
+ * 其余字段给的是「这台演示面板如果真能跑命令，环境长什么样」的合理占位，
+ * 与 GET /system/info 里报的 deployment_type=docker 对齐：官方镜像是 Alpine（apk），
+ * 工作目录就是镜像里的脚本目录 DATA_DIR/scripts（docker/entrypoint.sh 的 DATA_DIR
+ * 默认 /app/Dumb-Panel）。
+ *
+ * ⚠️ 这些占位值访客其实【一个都看不到】：SystemConsoleDialog 表头的 root 徽标 / 包管理器 /
+ *    超时三个 tag 整组挂在 `v-if="consoleAvailable"` 上，available=false 时只剩一个「不可用」；
+ *    带 work_dir / shell / distribution 的那条蓝色说明块也被 unavailable_reason 的红色 alert
+ *    整块顶掉了。留着它们只是让这条 mock 与后端的字段形状保持完整 —— 少给字段等于让后来
+ *    照它读契约的人漏掉一半。也正因为渲染不到，它们与同一个演示站 /deps/mirrors 报的
+ *    apt / debian 对不上并无用户可见影响（那边才是依赖页真正在用的值）。
+ *
+ * is_root 给 false：演示站不该在任何地方暗示自己有 root。
+ */
+route('GET', '/system/console/meta', () => ({
+  available: false,
+  unavailable_reason: '演示环境不提供系统命令行（这里没有可执行命令的容器）',
+  shell: 'bash',
+  work_dir: '/app/Dumb-Panel/scripts',
+  is_root: false,
+  package_manager: 'apk',
+  distribution: 'alpine',
+  // 与配置项 console_timeout_minutes 的注册默认值一致
+  timeout_minutes: 30,
+}))
+
+/**
+ * 提交命令：与 POST /deps 同样走 blocked()（403 + warning toast）。
+ *
+ * 正常路径走不到这里 —— meta 已经把运行按钮禁掉了。铺上是为了兜住「弹窗开着的时候
+ * 页面被热更新 / 老标签页」这类边角，让它撞一堵明确的墙而不是拿到 200 之后开始轮询。
+ *
+ * ⚠️ 这一条与文件顶部 blocked() 的注释说的那个坑【不同】：handleRun 的 catch 会自己
+ *    `ElMessage.error(err.response.data.error)`，所以这里会连着 adapter 的 notifyBlocked
+ *    一起弹两条。不改成静默 200 是因为 403 才是真正要的效果（挡住轮询），
+ *    多一条提示远好过让访客以为命令真的在跑。
+ */
+route('POST', '/system/console/run', () => blocked())
+
+/**
+ * 轮询 / 停止 / 清除。同样是正常路径走不到（拿不到 run_id 就不会有人来问它们），
+ * 铺上只为「万一走到了也不能炸」：不铺就会掉进 createFallbackBody 的 { data: [], total: 0 }，
+ * 而 pollLogs 读的是 `payload.logs`，数组上没有这个键 ⇒ appendLogs(undefined || []) 拿到空数组、
+ * `payload.done` 恒 undefined ⇒ 500ms 一次的定时器【永远停不下来】。
+ *
+ * logs 的信封与后端一致（外面包一层 data，与脚本调试的轮询接口同形）。
+ * discarded 是 logs[0] 的全局行号（服务端成块丢弃的行数），演示站只有一行输出、
+ * 永远不会触发截断，所以恒为 0；照给是为了让这条 mock 与后端的字段形状保持完整。
+ * ⚠️ exit_code / status 刻意都不给：给 `0` / `'success'` 等于宣称一条从来没执行过的命令成功了
+ *    （表头会亮出绿色「退出码 0」），给 'failed' 又会凭空弹一条红色「命令执行失败」。
+ *    两个字段在前端都是可选的（`payload.exit_code ?? null`、`status === 'failed'` 才报错），
+ *    不给就是「这次运行没有结论」，正好是事实。
+ */
+route('GET', '/system/console/run/:runId/logs', () => ({
+  data: {
+    logs: ['演示环境不提供系统命令行（这里没有可执行命令的容器），没有任何命令被执行。'],
+    discarded: 0,
+    done: true,
+  },
+}))
+route('PUT', '/system/console/run/:runId/stop', () => ({ message: '已停止' }))
+route('DELETE', '/system/console/run/:runId', () => ({ message: '已清除' }))
+
 // ===========================================================================
 // 系统配置（/configs）
 // ===========================================================================
@@ -861,8 +935,18 @@ route('DELETE', '/tasks/views/:id', (ctx) => {
   return { message: '视图已删除' }
 })
 
-// cron 模板与解析：模板照抄 server/pkg/cron/cron.go 的 GetTemplates()（六段含秒），
-// 解析结果的字段名照抄 handler/task_cron.go 的 CronParse。
+/**
+ * 🔴 出厂 cron 预设的【手抄副本】—— 逐条照抄 server/pkg/cron/cron.go 的 GetTemplates()
+ *    （六段含秒；字段、顺序、分类、name、expression、description 都要逐字一致）。
+ *
+ * 服务端这份没有注册表、也没有生成器（不像 notification-types / configs 那两个 fixture
+ * 能一条命令重跑，见文件顶部说明），所以它是【零护栏】的：后端加预设、改文案，
+ * 这边不同步就会静默漂移，构建和类型检查一个都发现不了。
+ * 历史上已经漂过一次：后端 21 条时这里只有 19 条，秒级那两条从来没跟上过。
+ *
+ * ⚠️ 改 server/pkg/cron/cron.go 的 GetTemplates() 时，必须同步改这里，并数一遍条数是否相等。
+ *    当前：24 条。
+ */
 const CRON_TEMPLATES = [
   { name: '每分钟', expression: '0 * * * * *', description: '每分钟执行一次', category: '高频' },
   { name: '每5分钟', expression: '0 */5 * * * *', description: '每5分钟执行一次', category: '高频' },
@@ -877,16 +961,35 @@ const CRON_TEMPLATES = [
   { name: '每天9点', expression: '0 0 9 * * *', description: '每天上午9点执行', category: '每天' },
   { name: '每天12点', expression: '0 0 12 * * *', description: '每天中午12点执行', category: '每天' },
   { name: '每天18点', expression: '0 0 18 * * *', description: '每天下午6点执行', category: '每天' },
+  // 「时段 + 每N分钟」这三条预设（本条 + 下面工作日分类里的两条）的 description 必须写清区间是闭区间：
+  // 用户很容易把「9-22 点」理解成 22:00 收尾，实际 22 点这一小时照常执行，最后一次是 22:50。
+  // 不写明白的话，会被当成面板自作主张多跑了 5 次。（原文与后端逐字一致，别在这里改写。）
+  { name: '每天9-22点每10分钟', expression: '0 */10 9-22 * * *', description: '每天9点到22点之间每10分钟执行一次；9-22 是闭区间，22点这一小时照常执行，最后一次是 22:50 而不是 22:00', category: '每天' },
   { name: '工作日9点', expression: '0 0 9 * * 1-5', description: '工作日上午9点执行', category: '工作日' },
   { name: '工作日18点', expression: '0 0 18 * * 1-5', description: '工作日下午6点执行', category: '工作日' },
+  { name: '工作日9-22点每10分钟', expression: '0 */10 9-22 * * 1-5', description: '工作日9点到22点之间每10分钟执行一次；9-22 是闭区间，22点这一小时照常执行，最后一次是 22:50 而不是 22:00', category: '工作日' },
+  { name: '工作日9-18点每30分钟', expression: '0 */30 9-18 * * 1-5', description: '工作日9点到18点之间每30分钟执行一次；9-18 是闭区间，18点这一小时照常执行，最后一次是 18:30 而不是 18:00', category: '工作日' },
   { name: '周末10点', expression: '0 0 10 * * 0,6', description: '周末上午10点执行', category: '周末' },
   { name: '每周一0点', expression: '0 0 0 * * 1', description: '每周一凌晨0点执行', category: '每周' },
   { name: '每月1日0点', expression: '0 0 0 1 * *', description: '每月1日凌晨0点执行', category: '每月' },
   { name: '每月15日0点', expression: '0 0 0 15 * *', description: '每月15日凌晨0点执行', category: '每月' },
+  { name: '每10秒', expression: '*/10 * * * * *', description: '每10秒执行一次', category: '秒级' },
+  { name: '每30秒', expression: '*/30 * * * * *', description: '每30秒执行一次', category: '秒级' },
 ]
 
 route('GET', '/tasks/cron/templates', () => CRON_TEMPLATES)
 
+/**
+ * cron 解析。字段名照抄 handler/task_cron.go 的 CronParse。
+ *
+ * ⚠️ description 恒返回同一句固定文案，这是【刻意的，不是 bug】：
+ *    后端那句人话描述来自 server/pkg/cron/cron.go 的 describe()，是一整套按段拼句子的描述器
+ *    （星期前缀、小时区间、逗号小时列表、秒位后缀、各种早退与兜底……）。
+ *    在演示站里手抄第二份，就等于给自己再造一个会静默漂移的副本 —— 上面 CRON_TEMPLATES
+ *    的教训已经够了。演示站真正要展示的是「规则合法 + 下次执行时间」，那两项是真算的
+ *    （nextRunTimes 走的是本地实现），描述本身给一句诚实的占位即可。
+ *    要复刻的话得整体移植 describe()，那属于另一件事，不要顺手在这里补半套。
+ */
 route('POST', '/tasks/cron/parse', (ctx) => {
   const expression = String(bodyObject(ctx)['expression'] ?? '').trim()
   const times = nextRunTimes(expression, Date.now(), 5)
@@ -1707,6 +1810,19 @@ route('GET', '/subscriptions', (ctx) => {
   return paginate([...rows].sort((left, right) => right.created_at.localeCompare(left.created_at)), ctx.params)
 })
 
+/**
+ * 订阅上的三态枚举归一，与后端 NormalizeSubscriptionOverwriteMode /
+ * NormalizeSubscriptionTaskSyncMode 同口径：先 trim + 转小写再比白名单，
+ * 白名单之外（含空值、undefined、脏值）一律落到 inherit。
+ *
+ * 现有唯一调用方是编辑弹窗里的 el-radio，只会发精确小写字面量，所以 trim/小写这两步
+ * 眼下走不到；对齐它纯粹是为了别在演示站与后端之间留一条「同名不同义」的口径差。
+ */
+function normalizeSubMode(value: unknown, allowed: string[]): string {
+  const text = String(value ?? '').trim().toLowerCase()
+  return allowed.includes(text) ? text : 'inherit'
+}
+
 route('POST', '/subscriptions', (ctx) => {
   const body = bodyObject(ctx)
   const now = nowIso()
@@ -1722,8 +1838,14 @@ route('POST', '/subscriptions', (ctx) => {
     depend_on: String(body['depend_on'] ?? ''),
     pre_script: String(body['pre_script'] ?? ''),
     hook_script: String(body['hook_script'] ?? ''),
+    // 旧布尔字段：只为老客户端不报错而继续收下，【不参与任何判定】
+    //（与后端 handler/subscription.go 的做法一致，同 force_overwrite 与 overwrite_mode 的并存）
     auto_add_task: Boolean(body['auto_add_task']),
     auto_del_task: Boolean(body['auto_del_task']),
+    // 与后端 NormalizeSubscriptionTaskSyncMode 同口径：只认 enabled / disabled，
+    // 不传、传空、传脏值一律 inherit（跟随全局 auto_add_cron / auto_del_cron 默认值）
+    auto_add_task_mode: normalizeSubMode(body['auto_add_task_mode'], ['enabled', 'disabled']),
+    auto_del_task_mode: normalizeSubMode(body['auto_del_task_mode'], ['enabled', 'disabled']),
     enabled: body['enabled'] === undefined ? true : Boolean(body['enabled']),
     status: 0,
     last_pull_at: null,
@@ -1736,9 +1858,7 @@ route('POST', '/subscriptions', (ctx) => {
     alias: String(body['alias'] ?? ''),
     force_overwrite: body['force_overwrite'] === undefined ? true : Boolean(body['force_overwrite']),
     // 与后端 NormalizeSubscriptionOverwriteMode 同口径：只认 force / preserve，其余一律 inherit（跟随全局）
-    overwrite_mode: ['force', 'preserve'].includes(String(body['overwrite_mode'] ?? ''))
-      ? String(body['overwrite_mode'])
-      : 'inherit',
+    overwrite_mode: normalizeSubMode(body['overwrite_mode'], ['force', 'preserve']),
     // 完整检出：缺省即 false（稀疏检出），与后端布尔列的默认值一致。
     // 演示站不真的 clone 仓库，这里只做「存得住、编辑弹窗能回填」的透传。
     full_checkout: Boolean(body['full_checkout']),
@@ -1815,18 +1935,21 @@ route('PUT', '/subscriptions/:id', (ctx) => {
   const body = bodyObject(ctx)
   const writable = [
     'name', 'type', 'url', 'branch', 'schedule', 'whitelist', 'blacklist', 'depend_on',
+    // auto_add_task / auto_del_task 是旧布尔键，留着可写只为老客户端不报错，不参与判定；
+    // 真正生效的是后面那两个三态键
     'pre_script', 'hook_script', 'auto_add_task', 'auto_del_task', 'enabled', 'sub_path',
     'save_dir', 'ssh_key_id', 'auth_type', 'auth_username', 'alias', 'force_overwrite',
-    'overwrite_mode', 'full_checkout',
+    'overwrite_mode', 'auto_add_task_mode', 'auto_del_task_mode', 'full_checkout',
   ]
   for (const key of writable) {
     if (body[key] === undefined) continue
     ;(sub as unknown as Record<string, unknown>)[key] = body[key]
   }
   // 与后端一致：脏值 / 非字符串一律归到 inherit，别让演示站存下真站不可能出现的取值
-  if (!['force', 'preserve'].includes(String(sub.overwrite_mode ?? ''))) {
-    sub.overwrite_mode = 'inherit'
-  }
+  sub.overwrite_mode = normalizeSubMode(sub.overwrite_mode, ['force', 'preserve'])
+  // 两个任务同步三态开关同理（NormalizeSubscriptionTaskSyncMode）：只认 enabled / disabled
+  sub.auto_add_task_mode = normalizeSubMode(sub.auto_add_task_mode, ['enabled', 'disabled'])
+  sub.auto_del_task_mode = normalizeSubMode(sub.auto_del_task_mode, ['enabled', 'disabled'])
   sub.updated_at = nowIso()
   return { message: '更新成功', data: sub }
 })

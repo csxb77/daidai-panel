@@ -45,7 +45,7 @@
 - **执行日志** — SSE 实时日志流，历史日志查看与自动清理
 - **环境变量** — 分组管理、拖拽排序、批量导入导出（兼容青龙格式）
 - **订阅管理** — 自动从 Git 仓库拉取脚本，支持定期同步
-- **依赖管理** — 可视化安装/卸载 Python (pip) 和 Node.js (npm) 依赖
+- **依赖管理** — 可视化安装/卸载 Python (pip)、Node.js (npm) 依赖，以及 **Linux 系统包**（自动识别 `apk` / `apt` / `dnf` / `yum` / `microdnf` / `zypper`）；页面工具条里还有管理员专用的网页版「系统命令行」
 - **通知推送** — Bark、Telegram、Server酱、企业微信、钉钉、飞书等 22 种渠道
 - **开放 API** — App Key / App Secret 认证，支持第三方系统对接
 - **系统安全** — 双因素认证 (2FA)、IP 白名单、登录日志、多设备会话管理
@@ -274,7 +274,7 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 </details>
 
 <details>
-<summary><b>展开：该选哪个镜像标签 —— 要跑 Go 任务 / 装需要现场编译的依赖 / 换 Debian 运行时 / 指定 Python 3.10、3.11 / 查 CPU 架构支持 / 本地源码构建</b></summary>
+<summary><b>展开：该选哪个镜像标签 —— 要跑 Go 任务 / 装需要现场编译的依赖 / pip 报 Failed building wheel 怎么办 / 换 Debian 运行时 / 指定 Python 3.10、3.11 / 查 CPU 架构支持 / 本地源码构建</b></summary>
 
 ### 支持的 CPU 架构
 
@@ -293,10 +293,29 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 
 | 工具档位 | 默认包含 | 额外工具或限制 |
 |----------|----------|----------------|
-| 精简版 | 目标 Python 与 pip/venv、Node.js/npm、`apk` 或 `apt`、Git/SSH、bash、curl、Nginx 和基础运行库 | 不含 Go、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config |
-| 完整版 | 精简版的全部内容 | 额外包含 Go/gofmt、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config |
+| 精简版 | 目标 Python 与 pip/venv、Node.js/npm、`apk` 或 `apt`、Git/SSH、bash、curl、Nginx 和基础运行库 | 不含 Go、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件、pkg-config，**也不含 CMake** |
+| 完整版 | 精简版的全部内容 | 额外包含 Go/gofmt、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config；**同样不含 CMake** |
 
 自 `v3.0.0` 起，**Go 任务必须使用 `latest-full` 或 `debian-full`。** 安装需要现场编译原生扩展的 pip/npm 依赖时，也建议使用完整版。普通 Python、JavaScript、TypeScript 和 Shell 任务优先使用体积更小的精简版。
+
+> ⚠️ **「换工具档位」和「换基础系统」是两件事，别混在一起。**<br>
+> **换档位（精简版 → `latest-full` / `debian-full`）解决不了「缺 CMake」。** 完整版补的是 Alpine 的 `build-base` + `linux-headers` + `pkgconf`、Debian 的 `build-essential` + `linux-libc-dev` + `pkg-config` —— 有 gcc / g++ / make，但**两个档位都没有 CMake**。只要那个包真的要现场编译、且构建后端调 CMake，换成完整版之后日志照样停在 `CMake must be installed to build ...`。<br>
+> **换基础系统（Alpine → Debian）反而常常直接绕开编译。** PyPI 上的科学计算包普遍只发认 glibc 的 `manylinux` wheel、不发认 musl 的 `musllinux` wheel（`opencv-python` 就是典型：有 `manylinux_2_17` 的 x86_64 / aarch64 wheel，一个 musllinux wheel 都没有）。这类包在 Alpine 上只能源码编译，换到 `debian` / `debian-full` 后 pip 直接下预编译 wheel，几秒装完、根本用不到 gcc 和 CMake。<br>
+> **两条路都不通，才是真的要现场编译。** 到面板「依赖管理 → Linux」页签补装系统包：**Alpine 装 `build-base`、`linux-headers`、`cmake`；Debian 装 `build-essential`、`cmake`**（RHEL / openSUSE 系是 `gcc`、`gcc-c++`、`make`、`cmake`）。该页签的「安装编译工具链」按钮会按当前探测到的包管理器把这几个包名预填好，不用自己记。
+
+#### pip 装某个包时报 `Failed building wheel` / `gcc: not found` / `CMake must be installed`
+
+这类报错的含义都一样：**这个包在当前平台没有可直接使用的预编译 wheel，pip 回退到下载源码现场编译，而镜像里缺编译工具。** 出路有两条，按下面的顺序试：
+
+1. **在 Alpine 镜像上先试换 Debian 版镜像。** 多数科学计算包只发 `manylinux` wheel，换到 `debian` / `debian-full` 后 pip 直接下预编译包，不用编译也就不用装工具链，通常是最省事的一条路。
+2. **换完镜像仍然报编译失败，说明这个包连 `manylinux` wheel 都没有，只能现场编译。** 到「依赖管理 → Linux」页签点「安装编译工具链」，装完再重装那个 pip 包。已经在 Debian 上的直接从这一步开始。
+3. **别指望换工具档位。** 完整版只多了 gcc/g++/make，`cmake` 两个档位都没有（见上一条提示）。只有「缺 gcc / make」这一类才是完整版能覆盖的，而那同样可以在 Linux 页签装工具链解决，不必重建容器。
+4. **面板会替你判一次，但判得到什么取决于日志写了什么。** 日志里出现 `gcc: not found`、`command 'gcc' failed`、`CMake must be installed`、`No CMAKE_CXX_COMPILER could be found` 这类**明确点名了工具的缺失信号**时，面板会把「缺 C/C++ 编译工具链或 CMake」这个结论、连同上面两条出路一起写进依赖的失败原因里。但 pip 很多时候只吐一句 `Failed building wheel` / `Failed to build installable wheels`、完全不提是哪个工具没有 —— 这种日志面板只能判到「musl 上没有预编译包」，给出的结论是先换 Debian 版镜像（对 `opencv-python` 这类包这恰好就是对的）；若换完仍失败，回到第 2 条装工具链。
+5. **设了 `PUID` / `PGID` 的容器装不了系统包。** 包管理器要写 `/usr` 和自己的锁，必须 root；面板会明确说明而不是甩 `Permission denied`，并且不会再叫你去点那个点不动的按钮。此时在宿主机执行 `docker exec -u 0 <容器名> apk add build-base linux-headers cmake`（Debian 版镜像是 `apt-get install -y build-essential cmake`）。
+6. **编译很慢，注意别撞超时。** 依赖安装默认 20 分钟超时，ARM 设备上现场编译 opencv 远不止这个时间。到「系统设置」里把「依赖安装超时(分钟)」调大即可，**上限 720 分钟（12 小时）**。
+7. **想自己看真实报错**，可以用依赖管理页工具条菜单里的「系统命令行」（仅管理员可用）直接在容器里跑命令，不必先 `docker exec` 进容器。
+
+#### 正式浮动标签与固定版本标签
 
 自 `v3.0.0` 起提供下面 10 个正式浮动标签，其中包含 `debian-full`。在 Watchtower 或 Compose 部署中，浮动标签会持续收到新版，固定版本标签用于锁定环境。
 
@@ -480,6 +499,8 @@ daidai-panel-windows-amd64/
 |-------|--------|
 | 先看看界面长什么样，不想为此先装一遍 | [在线演示](#在线演示)，或直接打开 <https://linzixuanzz.github.io/daidai-panel/> |
 | 跑 Go 任务、装需要现场编译的依赖、换 Debian 运行时、指定 Python 3.10 / 3.11 | [快速部署](#快速部署) → 「该选哪个镜像标签」 |
+| pip 装包报 `Failed building wheel` / `gcc: not found` / `CMake must be installed` | [快速部署](#快速部署) → 「该选哪个镜像标签」→ 「pip 装某个包时报…」 |
+| 想在面板里装 Linux 系统包（`apk` / `apt` / `dnf` / `yum` / `microdnf` / `zypper`），或直接敲命令 | 面板「依赖管理」页 →「Linux」页签 / 工具条菜单「系统命令行」 |
 | 不用 Docker，在 Windows 上直接跑 | [快速部署](#快速部署) → 「Windows 单机版」 |
 | 在已 Root 的安卓手机上跑 | [快速部署](#快速部署) → 「Android Magisk 模块」，完整文档见 [`Magisk/README.md`](./Magisk/README.md) |
 | 改端口、配 Nginx / 宝塔 / Caddy 反代、SSE 日志流断掉 | [端口与反向代理](#端口与反向代理) |

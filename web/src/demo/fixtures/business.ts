@@ -624,6 +624,10 @@ function buildSubscriptions(now: number): DemoSubscription[] {
     // 完整检出默认关闭：三条种子订阅都保持稀疏检出，与真实面板的默认值一致
     // （演示站开着它没有任何可见差异，反而会让编辑弹窗里的开关默认亮起，误导用户以为这是默认档）
     full_checkout: false,
+    // 同步任务三态默认跟随全局；下面第 1 条设成「强制关闭删除」用来展示列表标签，
+    // 第 3 条两项都强制开启，第 2 条不覆盖、留作 inherit 那一档的展示行。
+    auto_add_task_mode: 'inherit',
+    auto_del_task_mode: 'inherit',
   }
 
   return [
@@ -639,6 +643,9 @@ function buildSubscriptions(now: number): DemoSubscription[] {
       blacklist: 'tests/',
       auto_add_task: true,
       auto_del_task: false,
+      // 旧布尔值的等价三态：建任务强制开、删任务强制关（移动端卡片会挂「不删任务」标签）
+      auto_add_task_mode: 'enabled',
+      auto_del_task_mode: 'disabled',
       enabled: true,
       last_pull_at: iso(now - 9 * HOUR_MS),
       save_dir: 'subscriptions/ops-scripts',
@@ -656,6 +663,8 @@ function buildSubscriptions(now: number): DemoSubscription[] {
       schedule: '0 5 * * 1',
       auto_add_task: false,
       auto_del_task: false,
+      // 刻意不覆盖 auto_add_task_mode / auto_del_task_mode：沿用 base 的 inherit，
+      // 让演示站三条订阅正好凑齐 inherit / enabled / disabled 三档形态。
       enabled: false,
       last_pull_at: iso(now - 6 * DAY_MS),
       save_dir: 'subscriptions/monitor-kit',
@@ -675,6 +684,10 @@ function buildSubscriptions(now: number): DemoSubscription[] {
       schedule: '30 6 * * *',
       auto_add_task: true,
       auto_del_task: true,
+      // 旧布尔值的等价三态：两项都强制开启。单文件订阅同样跑同步任务，
+      // 所以这两个字段对 single-file 一样有意义（不像 overwrite_mode / full_checkout 只对 git 生效）。
+      auto_add_task_mode: 'enabled',
+      auto_del_task_mode: 'enabled',
       enabled: true,
       last_pull_at: iso(now - 31 * HOUR_MS),
       save_dir: 'report',

@@ -125,6 +125,9 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	// 下限刻意不给到 1 分钟：填 1 会让几乎所有安装都秒失败，看起来像面板坏了。
 	// 上限 720 分钟（12 小时）足够覆盖 ARM 设备上现场编译 opencv 这类极端情况。
 	newIntConfig("dependency_install_timeout_minutes", "依赖安装超时(分钟)", "20", "单个依赖安装/卸载的最长执行时间。安装 opencv 等需要现场编译的大包时可调大", "tasks", 5, 720),
+	// 系统命令行的单条命令超时。与依赖安装分开是因为语义不同：这里跑的是用户临时敲的命令，
+	// 挂死时没人会盯着，必须有个上限；下限给到 1 分钟（敲错命令时不用等）。
+	newIntConfig("console_timeout_minutes", "系统命令行超时(分钟)", "30", "系统命令行里单条命令的最长执行时间，超时会终止整个进程组", "tasks", 1, 720),
 	newBoolConfig("auto_update_enabled", "静默更新", "false", "静默更新开关（每 24 小时自动检查并在有新版本时尝试更新）", "network"),
 	newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "上次自动检查更新时间", "network"),
 	newIntConfig("random_delay", "随机延迟最大秒数", "0", "任务执行前随机延迟最大秒数", "tasks", 0, 86400),
@@ -146,8 +149,10 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newIntConfig("cpu_warn", "CPU 阈值 (%)", "80", "CPU 告警阈值（%）", "alerts", 1, 100),
 	newIntConfig("memory_warn", "内存阈值 (%)", "80", "内存告警阈值（%）", "alerts", 1, 100),
 	newIntConfig("disk_warn", "磁盘阈值 (%)", "90", "磁盘告警阈值（%）", "alerts", 1, 100),
-	newBoolConfig("auto_add_cron", "自动添加定时任务", "true", "自动添加定时任务", "subscription"),
-	newBoolConfig("auto_del_cron", "自动删除失效任务", "true", "自动删除失效任务", "subscription"),
+	// 这两项自 v3.2.6 起是「默认值」而不是「总开关」：订阅可以用 auto_add_task_mode /
+	// auto_del_task_mode 单独强制开或强制关，只有留在 inherit 的订阅才回落到这里。
+	newBoolConfig("auto_add_cron", "自动添加定时任务（默认）", "true", "订阅拉取后自动为新脚本创建定时任务（未单独设置的订阅使用此默认值）", "subscription"),
+	newBoolConfig("auto_del_cron", "自动删除失效任务（默认）", "true", "订阅里脚本消失后自动删除对应定时任务（未单独设置的订阅使用此默认值）", "subscription"),
 	// 这项只管 git 工作区里已跟踪文件的覆盖方式（reset --hard）：已跟踪文件会被重置成远端状态、
 	// 远端已删除的也会跟着删掉，但不会删除未跟踪的本地新增文件（日志里「本地新增的文件已保留」说的就是这个）。
 	// 唯一会跑 git clean -fd（连未跟踪文件一起清）的是「目录已存在但不是 git 仓库、原地 init 接管」那条分支，

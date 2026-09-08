@@ -1335,6 +1335,17 @@ func restoreSubscriptions(tx *gorm.DB, subscriptions []BackupSubscription, sshKe
 		oldID := item.ID
 		item.ID = 0
 		item.Status = 0
+		// 老备份（v3.2.6 之前）里没有三态列，只有 auto_add_task / auto_del_task=1，
+		// 语义是「开就是开、不看全局」。在落库前就地翻译成 enabled 并把源列清成 false，
+		// 与 handler.Create / 青龙导入用的是同一个口径：
+		//   - 还原完当场就有正确语义，不必等下次重启的启动回填；
+		//   - 也不会给回填留下新的 legacy=1 行 —— 否则用户把这条订阅改回「跟随全局设置」，
+		//     下次重启又会被提回「强制开启」。
+		// ⚠️ Resolve 只在备份没带三态信息时才看旧布尔：新备份里的 mode 是准的，不能被 legacy 顶掉。
+		item.AutoAddTaskMode = model.ResolveSubscriptionTaskSyncModeInput(item.AutoAddTaskMode, item.AutoAddTask)
+		item.AutoDelTaskMode = model.ResolveSubscriptionTaskSyncModeInput(item.AutoDelTaskMode, item.AutoDelTask)
+		item.AutoAddTask = false
+		item.AutoDelTask = false
 		if item.SSHKeyID != nil {
 			mapped := sshKeyIDMap[*item.SSHKeyID]
 			if mapped == 0 {

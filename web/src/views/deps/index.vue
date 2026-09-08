@@ -363,6 +363,45 @@
       </div>
     </el-alert>
 
+    <!-- Linux 页签的说明。以前这里什么都没有，页签上只写着「Linux」两个字，
+         用户根本看不出「这里装的就是 apk / apt 系统包」——issue #120 的用户
+         在 Alpine 下装不上 opencv-python，问的是「能不能加个装系统依赖的功能」，
+         而这个功能一直都在。包管理器/发行版/镜像源可配性全来自 GET /deps/mirrors，
+         挂载时就拉好了（见 loadMirrorMeta），不用等用户打开镜像源弹窗。 -->
+    <el-alert
+      v-if="activeTab === 'linux'"
+      class="linux-runtime-hint"
+      type="info"
+      :closable="false"
+      show-icon
+    >
+      <template #title>Linux 系统包说明</template>
+      <div class="linux-runtime-hint__body">
+        这里安装的是<b>操作系统软件包</b>（走
+        {{ linuxMirrorManagerText }} 包管理器），不是 Python / Node.js
+        包。pip 安装时报缺 gcc、缺头文件、需要现场编译的依赖，要先在这里补上。
+      </div>
+      <div class="linux-runtime-hint__body">
+        当前检测：包管理器 <b>{{ linuxMirrorManagerText }}</b>
+        <span v-if="linuxMirrorDistributionText">
+          · 发行版 <b>{{ linuxMirrorDistributionText }}</b></span
+        >
+        · 镜像源{{ linuxMirrorSupported ? "可配置" : "不可配置" }}。
+        <span v-if="linuxMirrorMessage">{{ linuxMirrorMessage }}</span>
+      </div>
+      <div class="linux-runtime-hint__actions">
+        <el-button
+          type="primary"
+          size="small"
+          :disabled="linuxToolchainPackages.length === 0"
+          @click="openLinuxToolchainInstall"
+        >
+          安装编译工具链
+        </el-button>
+        <span class="linux-runtime-hint__tip">{{ linuxToolchainTip }}</span>
+      </div>
+    </el-alert>
+
     <div v-if="isMobile" class="dd-mobile-list">
       <div
         v-for="(row, index) in paginatedDepsList"
@@ -490,11 +529,12 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="version" label="版本" width="120">
-          <template #default="{ row }">
-            <span class="version-text">{{ row.version || "-" }}</span>
-          </template>
-        </el-table-column>
+        <!-- 这里原本有一列「版本」，读 row.version，已整列删除。
+             原因：Dependency 模型（server/model/dependency.go）根本没有 version 字段，
+             ToDict() 也不输出它，所以 Node.js / Python / Linux 三种类型下这一列
+             恒定渲染「-」，是一列纯噪音。
+             真要展示版本，得先让后端在安装成功后把实际装到的版本回写进模型
+             （pip show / npm ls / apk info 的输出解析），那是另一件事，不在本次范围。 -->
         <el-table-column
           v-if="activeTab === 'python'"
           prop="python_version"
@@ -596,12 +636,22 @@
             show-icon
           />
         </el-form-item>
+        <!-- 系统包必须 root 才装得上。非 root 部署下不提前说，用户只能靠
+             「先提交、再失败、再点详情、再读日志」才知道本来就装不了。 -->
+        <el-form-item v-if="createType === 'linux'" label="说明">
+          <el-alert
+            :title="linuxCreateHint"
+            type="warning"
+            :closable="false"
+            show-icon
+          />
+        </el-form-item>
         <el-form-item label="名称">
           <el-input
             v-model="createNames"
             type="textarea"
             :rows="5"
-            placeholder="每行一个依赖名称，支持换行/空格/逗号分隔"
+            :placeholder="createNamePlaceholder"
           />
         </el-form-item>
         <el-form-item label="自动拆分">
@@ -841,6 +891,14 @@
         >
       </template>
     </el-dialog>
+
+    <!-- 系统命令行。入口放在依赖页是因为 issue #120 的用户正是在「装不上依赖」
+         这个场景下提的需求；接口是 admin-only，所以整块按角色 gate 掉。 -->
+    <SystemConsoleDialog
+      v-if="isAdmin"
+      v-model:visible="showConsoleDialog"
+      :is-mobile="isMobile"
+    />
   </div>
 </template>
 
@@ -870,6 +928,7 @@ import {
   Cpu,
   Delete,
   Download,
+  Monitor,
   Plus,
   Refresh,
   RefreshRight,
@@ -879,17 +938,25 @@ import {
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
 import DdBadge from "@/components/ui/DdBadge.vue";
+import SystemConsoleDialog from "./components/SystemConsoleDialog.vue";
 import {
   openAuthorizedEventStream,
   type EventStreamConnection,
 } from "@/utils/sse";
 import { usePageActivity } from "@/composables/usePageActivity";
 import { useResponsive } from "@/composables/useResponsive";
+import { useAuthStore } from "@/stores/auth";
 import { useBadgesStore } from "@/stores/badges";
+import { canAdminister } from "@/utils/roles";
 import { ansiToHtml, normalizeAnsi } from "@/utils/ansi";
 import { formatDateTime } from "@/utils/datetime";
 
 const badgesStore = useBadgesStore();
+const authStore = useAuthStore();
+// 系统命令行那组接口是 JWTAuth + RequireAdmin 的管理员接口，非管理员点进去必然 403，
+// 所以入口按角色隐藏（与订阅页里同一套判断）。
+const isAdmin = computed(() => canAdminister(authStore.user?.role));
+const showConsoleDialog = ref(false);
 
 // ---------- Android 面具版脚本运行时 ----------
 const androidStatus = ref<AndroidRuntimeStatus | null>(null);
@@ -1073,6 +1140,13 @@ const toolbarActionItems = computed<SplitButtonItem[]>(() => [
     disabled: exporting.value,
   },
   { key: "mirror", label: "镜像源设置", icon: Setting },
+  // 系统命令行只对管理员显示：接口本身是 admin-only，给 operator 显示出来只会点出 403
+  {
+    key: "console",
+    label: "系统命令行",
+    icon: Monitor,
+    visible: isAdmin.value,
+  },
   {
     key: "batch-reinstall",
     label: "批量重装",
@@ -1086,6 +1160,7 @@ function onToolbarAction(key: string) {
   if (key === "refresh") loadData();
   else if (key === "export") handleExport();
   else if (key === "mirror") openMirrorDialog();
+  else if (key === "console") showConsoleDialog.value = true;
   else if (key === "batch-reinstall") handleBatchReinstall();
 }
 
@@ -1337,6 +1412,70 @@ const linuxMirrorOptions = computed(() => {
 
   return [];
 });
+
+/**
+ * Linux 页签「安装编译工具链」要预填的包名。
+ *
+ * 名字按包管理器分：Alpine 的 build-base 在 Debian 系叫 build-essential，
+ * RPM 系两边都不是。探测不到包管理器时返回空数组 —— 此时给任何包名都是错的，
+ * 按钮会被禁用（见 linuxToolchainTip 说明原因）。
+ * 走的是现成的 POST /deps，不新增接口，装出来的记录和手动新增的完全一样。
+ */
+const linuxToolchainPackages = computed<string[]>(() => {
+  switch (mirrorMeta.value.linux_package_manager) {
+    case "apk":
+      return ["build-base", "linux-headers", "cmake"];
+    case "apt":
+      return ["build-essential", "cmake"];
+    case "dnf":
+    case "yum":
+    case "microdnf":
+    case "zypper":
+      return ["gcc", "gcc-c++", "make", "cmake"];
+    default:
+      return [];
+  }
+});
+
+const linuxToolchainTip = computed(() => {
+  if (linuxToolchainPackages.value.length === 0) {
+    return "未识别到系统包管理器，无法确定对应的工具链包名";
+  }
+  return `将预填：${linuxToolchainPackages.value.join(" ")}`;
+});
+
+/** 新建弹窗里 Linux 分支的前置提示：权限 + 当前包管理器 */
+const linuxCreateHint = computed(() => {
+  const manager = mirrorMeta.value.linux_package_manager;
+  const managerText = manager
+    ? `当前检测到的包管理器：${manager}`
+    : "当前未识别到系统包管理器，提交后大概率直接失败";
+  return `安装的是系统软件包，需要面板进程有 root 权限；非 root 部署会安装失败。${managerText}。`;
+});
+
+/** 名称输入框的占位文案。Linux 下给真实包名示例，通用文案对系统包没有任何提示作用 */
+const createNamePlaceholder = computed(() => {
+  if (createType.value !== "linux") {
+    return "每行一个依赖名称，支持换行/空格/逗号分隔";
+  }
+  const manager = mirrorMeta.value.linux_package_manager;
+  if (manager === "apk") {
+    return "每行一个系统包名，例如：build-base linux-headers cmake";
+  }
+  if (manager === "apt") {
+    return "每行一个系统包名，例如：build-essential cmake";
+  }
+  return "每行一个系统包名，例如：gcc make cmake";
+});
+
+function openLinuxToolchainInstall() {
+  if (linuxToolchainPackages.value.length === 0) return;
+  createType.value = "linux";
+  createNames.value = linuxToolchainPackages.value.join("\n");
+  // 预填的是多行包名，自动拆分必须开着，否则会被当成一个超长的包名提交
+  autoSplit.value = true;
+  showCreateDialog.value = true;
+}
 
 async function loadData() {
   loading.value = true;
@@ -1757,20 +1896,35 @@ watch(showLogDialog, (val) => {
   }
 });
 
+/**
+ * 拉一次 GET /deps/mirrors 并写进 mirrorMeta，返回是否成功。
+ *
+ * 这份响应里除了三个镜像地址，还带着 linux_package_manager / linux_distribution /
+ * linux_mirror_supported / linux_mirror_message —— 也就是「面板到底认出了 apk 还是 apt」。
+ * 以前它只在打开镜像源弹窗时才拉，于是 Linux 页签和新建弹窗一个字都显示不出来。
+ * 抽成函数后挂载时也调一次；镜像源弹窗仍然自己再拉一次拿最新值并回填表单，行为不变。
+ */
+async function loadMirrorMeta(): Promise<boolean> {
+  try {
+    mirrorMeta.value = await depsApi.getMirrors();
+    return true;
+  } catch {
+    // 失败时保留上一次的值（初始值是全空 + 未识别），页面说明会退化成「未识别」，不弹错
+    return false;
+  }
+}
+
 async function openMirrorDialog() {
   showMirrorDialog.value = true;
   mirrorLoading.value = true;
-  try {
-    const res = await depsApi.getMirrors();
-    mirrorMeta.value = res;
-    mirrorForm.value.pip_mirror = res.pip_mirror || "";
-    mirrorForm.value.npm_mirror = res.npm_mirror || "";
-    mirrorForm.value.linux_mirror = res.linux_mirror || "";
-  } catch {
+  if (await loadMirrorMeta()) {
+    mirrorForm.value.pip_mirror = mirrorMeta.value.pip_mirror || "";
+    mirrorForm.value.npm_mirror = mirrorMeta.value.npm_mirror || "";
+    mirrorForm.value.linux_mirror = mirrorMeta.value.linux_mirror || "";
+  } else {
     ElMessage.error("获取镜像源配置失败");
-  } finally {
-    mirrorLoading.value = false;
   }
+  mirrorLoading.value = false;
 }
 
 async function handleSaveMirrors() {
@@ -1834,6 +1988,9 @@ onMounted(async () => {
   createPythonVersion.value = pythonVersion.value || pythonDefaultVersion.value;
   loadData();
   loadAndroidStatus();
+  // Linux 页签的说明、新建弹窗的提示与 placeholder 都要靠这份元数据，
+  // 不能再等到用户打开镜像源弹窗才拉。失败也不弹错，页面自己退化成「未识别」。
+  void loadMirrorMeta();
 });
 
 onActivated(() => {
@@ -1949,6 +2106,30 @@ onBeforeUnmount(() => {
   margin-top: 8px;
 }
 
+// Linux 页签说明块。位置与观感完全对齐上面的 Python 说明块，
+// 只多一行「安装编译工具链」的操作区。
+.linux-runtime-hint {
+  margin-bottom: 14px;
+}
+
+.linux-runtime-hint__body {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.linux-runtime-hint__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.linux-runtime-hint__tip {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 // ---------- Table Card ----------
 // 表格卡：无阴影，仅用 1px 边框与页面底色区分；本页是滚动页（dd-scroll-page），不做 fixed 高度链处理。
 .table-card {
@@ -2051,11 +2232,7 @@ onBeforeUnmount(() => {
   font-weight: 500;
   color: var(--el-text-color-primary);
 }
-.version-text {
-  font-family: var(--dd-font-mono);
-  font-size: 13px;
-  color: var(--el-text-color-secondary);
-}
+// .version-text 随「版本」列一起删除（模型里没有 version 字段，见模板处注释）
 .time-text {
   font-family: var(--dd-font-mono);
   font-size: 12px;

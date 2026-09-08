@@ -25,6 +25,7 @@ func Setup(engine *gin.Engine) {
 	userHandler := handler.NewUserHandler()
 	securityHandler := handler.NewSecurityHandler()
 	systemHandler := handler.NewSystemHandler()
+	consoleHandler := handler.NewConsoleHandler()
 	openAPIHandler := handler.NewOpenAPIHandler()
 	depsHandler := handler.NewDepsHandler()
 	configHandler := handler.NewConfigHandler()
@@ -64,6 +65,9 @@ func Setup(engine *gin.Engine) {
 
 	systemHandler.RegisterRoutes(v1)
 	systemHandler.RegisterRoutes(legacy)
+
+	consoleHandler.RegisterRoutes(v1)
+	consoleHandler.RegisterRoutes(legacy)
 
 	openAPIHandler.RegisterRoutes(v1)
 	openAPIHandler.RegisterRoutes(legacy)
