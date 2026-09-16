@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { CopyDocument, Download, Refresh, Search, Tickets } from '@element-plus/icons-vue'
 import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
+import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
 import type { PanelLogLevel } from '../usePanelLogViewer'
 
 const props = defineProps<{
@@ -44,15 +45,23 @@ const lineOptions = [100, 200, 500, 1000]
 const renderedHtml = computed(() => ansiToHtml(normalizeAnsi(props.logs.join('\n'))))
 
 const logViewRef = ref<HTMLElement>()
+// 面板日志卡的自动跟随。这里只做到「不在底部就不拽回」：内容每 3s 整体替换，
+// 跟随中贴到最新，用户上翻超过阈值后就不再被拽回底部（可以停在中间阅读）。
+const panelFollow = useLogAutoFollow(logViewRef)
+
+onMounted(() => {
+  // 面板日志默认自动刷新，进卡即视为「运行中」并跟随最新
+  panelFollow.begin(true)
+})
 
 watch(() => props.logs, () => {
-  nextTick(() => {
-    const el = logViewRef.value
-    if (el) {
-      el.scrollTop = el.scrollHeight
-    }
-  })
+  panelFollow.onContentChange()
 }, { flush: 'post' })
+
+// 切换关键词 / 级别 / 行数相当于换了一份内容，回到底部看最新
+watch(() => [props.keyword, props.level, props.lines], () => {
+  panelFollow.begin(true)
+})
 </script>
 
 <template>

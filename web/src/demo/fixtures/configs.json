@@ -490,6 +490,32 @@
       "value": "1",
       "value_type": "int"
     },
+    "mcp_allow_mutations": {
+      "default_value": "false",
+      "description": "开启后，AI 可以运行、停止、启用或禁用任务，增删改环境变量，保存与运行脚本，拉取订阅；关闭时只提供查询类工具。注意：应用拥有 scripts 权限就等于可以执行任意代码",
+      "group": "mcp",
+      "group_label": "MCP 服务",
+      "label": "允许写入与执行工具",
+      "order": 52,
+      "registered": true,
+      "secret": false,
+      "updated_at": null,
+      "value": "false",
+      "value_type": "bool"
+    },
+    "mcp_enabled": {
+      "default_value": "false",
+      "description": "开启后，AI 客户端可以通过 POST /api/v1/mcp（HTTP）或容器内的 ddp mcp（stdio）连接面板，用开放 API 应用凭据（app_key / app_secret）或登录令牌鉴权；能访问哪些模块由应用的权限范围决定",
+      "group": "mcp",
+      "group_label": "MCP 服务",
+      "label": "启用 MCP 服务",
+      "order": 51,
+      "registered": true,
+      "secret": false,
+      "updated_at": null,
+      "value": "false",
+      "value_type": "bool"
+    },
     "memory_warn": {
       "default_value": "80",
       "description": "内存告警阈值（%）",

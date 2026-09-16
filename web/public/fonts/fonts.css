@@ -26,10 +26,9 @@
  * 二进制文件不手工放置，由 `node scripts/fetch-fonts.mjs` 一次性抓取后提交进版本库。
  * 构建期不联网（CI 只跑 npm ci + vite build），所以 woff2 必须在库里。
  *
- * ⚠️ 目录名 "fonts" 与 server/main.go 的静态目录白名单耦合。
- *    内嵌二进制部署（无 nginx）只挂载白名单里的子目录，其余路径会掉进 SPA 的
- *    NoRoute，回一份 200 + text/html 的 index.html —— 浏览器按 MIME 拒绝当样式表，
- *    字体静默失效且不报 404。挪目录时两边必须一起改。
+ * ⚠️ 目录名 "fonts" 与 server/static_frontend.go 的静态目录白名单 staticFrontendDirs 耦合。
+ *    内嵌二进制部署（无 nginx）只托管白名单里的子目录；目录挪了而白名单没改，
+ *    本文件和字体文件都会回 404，字体失效。挪目录时两边必须一起改。
  *    Docker 部署走 docker/nginx.conf 的 try_files，不受这条约束。
  */
 

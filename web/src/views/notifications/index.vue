@@ -673,7 +673,7 @@ function getChannelConfigSummary(row: any): string[] {
             :data="pagedChannels"
             v-loading="channelLoading"
             style="width: 100%"
-            :header-cell-style="{ background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '13px' }"
+            :header-cell-style="{ background: 'var(--el-fill-color-light)', color: 'var(--el-text-color-regular)', fontWeight: 600, fontSize: '13px' }"
           >
             <el-table-column prop="name" label="名称" min-width="180">
               <template #default="{ row }">

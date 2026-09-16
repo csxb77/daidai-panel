@@ -7,6 +7,8 @@ import { useBadgesStore } from '@/stores/badges'
 import DdBadge from '@/components/ui/DdBadge.vue'
 import { systemApi } from '@/api/system'
 import { loadPanelSettings as loadCachedPanelSettings } from '@/utils/panelSettings'
+import { reloadIfWebVersionStale } from '@/utils/chunkReload'
+import { warmMonacoOnEngineSwitch } from '@/utils/monacoWarmup'
 import { useResponsive } from '@/composables/useResponsive'
 import { preloadPanelRoutes, preloadRouteByPath } from '@/router'
 import {
@@ -123,6 +125,10 @@ function badgeOf(path: string) {
   return badgesStore.menuBadges[path]
 }
 
+// 切到 Monaco 引擎时立即预热（#133，utils/monacoWarmup.ts）。挂在布局上而不是某个编辑器页：
+// 引擎可能在任一编辑器页的齿轮菜单里切，布局是它们登录后一直在的共同祖先。
+let stopEngineSwitchWarmup: (() => void) | null = null
+
 onMounted(() => {
   loadPanelSettings()
   loadVersion()
@@ -130,6 +136,7 @@ onMounted(() => {
     authStore.fetchUser()
   }
   scheduleMenuPreload()
+  stopEngineSwitchWarmup = warmMonacoOnEngineSwitch()
   // 只在布局挂上之后才开始轮询：登录页不该去打受保护的接口
   badgesStore.start()
 })
@@ -138,6 +145,8 @@ onBeforeUnmount(() => {
   // 退出登录会卸载整个布局。不停表的话定时器会继续打 /system/badges，
   // 每次都 401，把用户刚跳到的登录页反复推一遍。
   badgesStore.stop()
+  stopEngineSwitchWarmup?.()
+  stopEngineSwitchWarmup = null
 })
 
 watch(isMobile, (mobile) => {
@@ -192,7 +201,16 @@ async function loadPanelSettings() {
 async function loadVersion() {
   try {
     const res = await systemApi.version() as any
-    if (res.data?.version) panelVersion.value = res.data.version
+    const serverVersion = res.data?.version
+    if (serverVersion) panelVersion.value = serverVersion
+    // 版本自检（#126，契约 C10）：上面的徽标取的是后端版本，浏览器跑着缓存里的旧前端壳时它照样显示新版本号，
+    // 用户看不出来。这里拿后端版本和本前端包构建时写死的 __DD_WEB_VERSION__ 比，后端版本比前端新时自动刷新一次
+    // （相等或后端更旧都不刷；有未保存内容时改为提示）。限次，比较前两边都去掉前缀 v，细节见 utils/chunkReload.ts。
+    // 守卫必须是编译期常量：开发环境没有「旧壳」这回事，版本号改到一半时还会误刷；演示站的 /system/version
+    // 返回部署时注入的 VITE_DEMO_VERSION，跟 package.json 无关，不关掉就会一进来就刷。
+    if (import.meta.env.PROD && import.meta.env.VITE_DEMO !== '1') {
+      reloadIfWebVersionStale(serverVersion)
+    }
   } catch {}
 }
 
@@ -519,9 +537,11 @@ async function loadVersion() {
   flex-direction: column;
   background: var(--el-bg-color);
   border-right: 1px solid var(--el-border-color-light);
-  transition: width 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  // 宽度过渡吃令牌（原来写死 0.25s，绕过了减少动效的降级）。
+  // 去掉了原来的 will-change: width：width 不是合成器能加速的属性，
+  // will-change 对它没有任何收益，只会让浏览器常驻一层额外的合成层。
+  transition: width var(--dd-motion-normal) var(--dd-ease-standard);
   overflow: hidden;
-  will-change: width;
   z-index: 10;
 
   &.is-collapsed {
@@ -554,7 +574,7 @@ async function loadVersion() {
   border-radius: var(--dd-radius-control);
   background: var(--el-bg-color);
   border: 1px solid color-mix(in srgb, var(--el-color-primary) 10%, var(--el-border-color-lighter));
-  transition: border-color 0.3s;
+  transition: border-color var(--dd-motion-fast) var(--dd-ease-standard);
   width: 100%;
   min-height: 42px;
 
@@ -772,7 +792,7 @@ async function loadVersion() {
   padding: 5px 6px;
   border-radius: var(--dd-radius-control);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   // hover 只换底色
   &:hover {
@@ -829,7 +849,7 @@ async function loadVersion() {
   padding: 8px 10px;
   border-radius: var(--dd-radius-control);
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   // hover 只换底色：去掉上浮阴影与顶部白色高光扫过（::after 装饰层已整体移除）
   &:hover {
@@ -950,7 +970,12 @@ async function loadVersion() {
   justify-content: center;
   cursor: pointer;
   color: var(--el-text-color-regular);
-  transition: all 0.2s;
+  // 只过渡 hover 真正会变的三个属性并吃令牌：原来的 all 0.2s 连尺寸变化也一起过渡，
+  // 写死的时长还绕过了「减少动效」的降级（顶栏另外两处同理）。
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
   flex-shrink: 0;
 
   &:hover {
@@ -1008,7 +1033,9 @@ async function loadVersion() {
   background: var(--el-fill-color-light);
   border: 1px solid transparent;
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
 
   &:hover {
     background: var(--el-fill-color);
@@ -1088,7 +1115,7 @@ async function loadVersion() {
   padding: 5px 10px;
   border-radius: var(--dd-radius-control);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background-color var(--dd-motion-fast) var(--dd-ease-standard);
   outline: none;
 
   // hover 只换底色：去掉上浮阴影与顶部白色高光扫过（::after 装饰层已整体移除）
@@ -1187,12 +1214,22 @@ async function loadVersion() {
 }
 
 // ==================== Page transition ====================
-// 切页只保留透明度 + 极轻缩放，避免 blur、复杂位移和长动画抢主线程。
-// 这里不再使用 out-in：旧页面绝对定位短暂淡出，新页面立即进入，避免先卸载旧页后等待新页导致白屏。
+// 切页：新页面淡入并从下方 8px 升起，旧页面纯淡出（#132，v3.2.8）。
+// 原来是 180ms + scale 0.992 + decelerate：那条曲线前段极陡，肉眼可见的变化只有头 50~70ms，
+// 0.992 的缩放在 1200px 宽的内容区上两边各只动约 5px，再叠上 80ms 的离场，观感接近瞬切。
+//   - 进场吃 --dd-motion-page-enter（280ms）+ emphasized。用位移不用缩放：缩放会让子元素在进场期间的
+//     getBoundingClientRect 失真，表格列宽、浮层定位这类按尺寸算的逻辑会算错。
+//   - 离场吃 --dd-motion-page-leave（120ms），纯淡出，被 z-index:1 的新页压在下面，不抢注意力。
+//   - 刻意不直接改 --dd-motion-page：它被十几个页面的 dd-*-rise-in 共用。
+// 仍然不用 out-in：旧页面绝对定位短暂淡出，新页面立即进入，避免先卸载旧页后等待新页导致白屏。
+// 仍然不用 filter: blur（整页 blur 是切页卡顿的主因）。
 .page-shell-enter-active {
   position: relative;
   z-index: 1;
-  animation: dd-page-shell-enter 180ms var(--dd-ease-decelerate) both;
+  // 进场不写 both（同 global.scss 里弹窗那条约束）：动画收尾后 transform 自然清空，
+  // 页面根上残留的 transform 会成为页内 position:fixed 元素的包含块，没 teleport 的弹窗会跟着错位。
+  // 这里没有 delay，起点帧用不着 backwards 填充；终点帧与元素的自然状态一致，去掉 forwards 也不会闪。
+  animation: dd-page-shell-enter var(--dd-motion-page-enter) var(--dd-ease-emphasized);
   will-change: opacity, transform;
 }
 
@@ -1202,18 +1239,19 @@ async function loadVersion() {
   z-index: 0;
   width: 100%;
   pointer-events: none;
-  animation: dd-page-shell-leave 80ms var(--dd-ease-standard) both;
+  // 离场必须留着 both：终点是 opacity 0，去掉 forwards 的话，Vue 摘掉节点前会闪回完全不透明一帧。
+  animation: dd-page-shell-leave var(--dd-motion-page-leave) var(--dd-ease-standard) both;
   will-change: opacity;
 }
 
 @keyframes dd-page-shell-enter {
   from {
     opacity: 0;
-    transform: scale3d(0.992, 0.992, 1);
+    transform: translate3d(0, 8px, 0);
   }
   to {
     opacity: 1;
-    transform: scale3d(1, 1, 1);
+    transform: none;
   }
 }
 

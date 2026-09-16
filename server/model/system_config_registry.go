@@ -66,6 +66,13 @@ const (
 	DefaultPanelTimezone   = "Asia/Shanghai"
 )
 
+// 内置 MCP 服务（issue #128）的两个开关。HTTP 模式（handler/mcp.go）与 stdio 模式（ddp mcp）
+// 都按这两个键读，收成常量，避免两边各写一份字面量。
+const (
+	MCPEnabledConfigKey        = "mcp_enabled"
+	MCPAllowMutationsConfigKey = "mcp_allow_mutations"
+)
+
 const (
 	// DefaultRepoFileExtensions 是订阅扫描任务候选时认的脚本后缀。
 	// LegacyRepoFileExtensions 是 v3.0.5 及之前的默认值，它漏了 mjs。
@@ -99,6 +106,7 @@ var systemConfigGroupLabels = map[string]string{
 	"backup":       "定时备份",
 	"alerts":       "告警通知",
 	"subscription": "订阅拉取",
+	"mcp":          "MCP 服务",
 }
 
 // finalizeSystemConfigSpecs 补齐无法在单条声明里写死的元信息：注册顺序和分组中文名。
@@ -282,6 +290,23 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 			{Value: "open", Label: "宽松放行"},
 			{Value: "strict", Label: "严格拦截"},
 		},
+	),
+	// 内置 MCP 服务（issue #128），两项都默认关闭；只开 mcp_enabled 时 AI 只能用查询类工具。
+	// 这两项对网页、APP 与所有 MCP 客户端都生效，所以说明里不能写「仅网页端生效」。
+	// 服务端每次 HTTP 请求（ddp mcp 则是每次工具调用）都现读数据库，不需要进 reloadRuntimeConfigKeys。
+	newBoolConfig(
+		MCPEnabledConfigKey,
+		"启用 MCP 服务",
+		"false",
+		"开启后，AI 客户端可以通过 POST /api/v1/mcp（HTTP）或容器内的 ddp mcp（stdio）连接面板，用开放 API 应用凭据（app_key / app_secret）或登录令牌鉴权；能访问哪些模块由应用的权限范围决定",
+		"mcp",
+	),
+	newBoolConfig(
+		MCPAllowMutationsConfigKey,
+		"允许写入与执行工具",
+		"false",
+		"开启后，AI 可以运行、停止、启用或禁用任务，增删改环境变量，保存与运行脚本，拉取订阅；关闭时只提供查询类工具。注意：应用拥有 scripts 权限就等于可以执行任意代码",
+		"mcp",
 	),
 })
 

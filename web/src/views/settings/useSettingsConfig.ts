@@ -87,13 +87,25 @@ async function compressLogBackgroundImage(file: File) {
   throw new Error('compressed image too large')
 }
 
+/**
+ * 「MCP 服务」卡片（components/McpConfigCard.vue）的两个开关，
+ * 对应服务端注册项 mcp_enabled / mcp_allow_mutations，默认都关。
+ * 并进 configForm 之后，这两个键按差集规则自动从兜底区（ExtraConfigCard）消失。
+ */
+export interface McpConfigFields {
+  mcp_enabled: boolean
+  mcp_allow_mutations: boolean
+}
+
+export type SettingsConfigFormState = SettingsConfigForm & McpConfigFields
+
 export function useSettingsConfig() {
   // 此开关原为功能上线门控，当前已全量启用（保留常量以兼容消费方）
   const captchaFeatureImplemented = true
   const configsLoading = ref(false)
   const configsSaving = ref(false)
 
-  const configForm = ref<SettingsConfigForm>({
+  const configForm = ref<SettingsConfigFormState>({
     max_concurrent_tasks: 5,
     log_retention_days: 7,
     max_log_content_size: 102400000,
@@ -135,7 +147,9 @@ export function useSettingsConfig() {
     backup_schedule_password: '',
     backup_schedule_selection: 'configs,tasks,subscriptions,env_vars,logs,scripts,dependencies,task_views',
     max_web_sessions: 1,
-    max_app_sessions: 1
+    max_app_sessions: 1,
+    mcp_enabled: false,
+    mcp_allow_mutations: false
   })
 
   // 服务端下发的原始 schema + 当前值。两个用途：
@@ -232,7 +246,9 @@ export function useSettingsConfig() {
         backup_schedule_password: readConfigString(cfgs, 'backup_schedule_password', ''),
         backup_schedule_selection: readConfigString(cfgs, 'backup_schedule_selection', 'configs,tasks,subscriptions,env_vars,logs,scripts,dependencies,task_views'),
         max_web_sessions: readConfigNumber(cfgs, 'max_web_sessions', 1),
-        max_app_sessions: readConfigNumber(cfgs, 'max_app_sessions', 1)
+        max_app_sessions: readConfigNumber(cfgs, 'max_app_sessions', 1),
+        mcp_enabled: readConfigBool(cfgs, 'mcp_enabled', false),
+        mcp_allow_mutations: readConfigBool(cfgs, 'mcp_allow_mutations', false)
       }
 
       // 兜底区草稿整体重建，以服务端当前值为准（丢弃上一次未保存的编辑）。
@@ -386,6 +402,10 @@ export function useSettingsConfig() {
     void saveConfigKeys(['max_web_sessions', 'max_app_sessions'])
   }
 
+  function handleSaveMcpConfig() {
+    void saveConfigKeys(['mcp_enabled', 'mcp_allow_mutations'])
+  }
+
   function handleSaveBackupSchedule(selectionCSV?: string) {
     const normalizedSelection = selectionCSV?.trim() || configForm.value.backup_schedule_selection
     configForm.value.backup_schedule_selection = normalizedSelection
@@ -438,6 +458,7 @@ export function useSettingsConfig() {
     handleSaveProxy,
     handleSaveCaptcha,
     handleSaveSessionConfig,
+    handleSaveMcpConfig,
     handleSaveBackupSchedule
   }
 }

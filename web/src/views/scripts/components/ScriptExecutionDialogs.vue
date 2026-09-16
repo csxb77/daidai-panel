@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { Edit, RefreshRight, Select, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ansiToHtml, normalizeAnsi } from '@/utils/ansi'
+import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
 import {
   EDITOR_PREFERENCES_CHANGE_EVENT,
   readEditorPreferences,
@@ -79,6 +80,68 @@ onBeforeUnmount(() => {
 const debugLogsHtml = computed(() => ansiToHtml(normalizeAnsi(props.debugLogs.join('\n'))))
 const runnerLogsHtml = computed(() => ansiToHtml(normalizeAnsi(props.runnerLogs.join('\n'))))
 
+// 调试日志 / 运行输出的自动跟随（原来这两处完全不自动滚动，现补上「运行中跟随、上翻暂停」）。
+// 日志由父组件按 500ms 轮询整体替换数组传下来，引用必变，watch 一定触发。
+// 两个 ref 挂在 .panel-content.debug-log-content（overflow:auto 的那一层）上，不能挂在里面的 <pre>：
+// <pre> 只是随内容撑高的 flex 子项、自己不滚动，对它读写 scrollTop、监听 scroll 全是空操作。
+const debugLogRef = ref<HTMLElement>()
+const runnerLogRef = ref<HTMLElement>()
+const debugFollow = useLogAutoFollow(debugLogRef)
+const runnerFollow = useLogAutoFollow(runnerLogRef)
+
+// 调试运行点「停止」：useScriptExecution 的 stopDebugRun 先同步置 debugRunning=false，
+// await 停止请求之后才补取最后几行 logs 赋回来。下降沿若照常 end()，这批补取的输出到达时
+// 跟随已冻结、onContentChange 成了空操作，跟随中的用户看不到结尾。
+// 所以用户主动停止期间，下降沿只贴底、不冻结；等 onDebugStop 整个结束（补取已赋值）再「先贴底、再冻结」，
+// 与系统命令行 handleStop 里「先 appendLogs 再 end()」同一口径（见下面的 handleDebugStop）。
+// 代码运行器的停止不补取日志，没有这个问题，仍由下降沿直接冻结。
+let debugStopPending = false
+
+// 运行结束那一拍，父组件的轮询通常【同时】换上最后一批输出（useScriptExecution 里先赋 logs 再置 running=false）。
+// 这两个 watcher 是 pre，会先于下面 flush:'post' 的日志 watcher 执行，直接 end() 的话那批输出就不再贴底。
+// 所以下降沿先按跟随态排一次贴底（在 nextTick 里执行，届时 DOM 已换上新输出），再冻结。
+watch(
+  () => props.debugRunning,
+  (running) => {
+    if (running) {
+      debugFollow.begin(true)
+    } else {
+      debugFollow.onContentChange()
+      // 用户主动停止时先不冻结，由 handleDebugStop 在补取完最后几行之后再冻结（理由见 debugStopPending）
+      if (!debugStopPending) debugFollow.end()
+    }
+  },
+)
+watch(
+  () => props.runnerRunning,
+  (running) => {
+    if (running) {
+      runnerFollow.begin(true)
+    } else {
+      runnerFollow.onContentChange()
+      runnerFollow.end()
+    }
+  },
+)
+// flush:'post' 保证 DOM 已按新数组 patch 完再贴底，否则会停在这一帧之前的高度上
+watch(() => props.debugLogs, () => debugFollow.onContentChange(), { flush: 'post' })
+watch(() => props.runnerLogs, () => runnerFollow.onContentChange(), { flush: 'post' })
+
+async function handleDebugStop() {
+  debugStopPending = true
+  try {
+    await props.onDebugStop()
+  } finally {
+    debugStopPending = false
+    // 补取的最后几行此刻已赋值：跟随中先排一次贴底（nextTick 里执行，届时 DOM 已换上），再冻结。
+    // 停止请求还在飞时用户可能已经点了「重新运行」：新一轮已经 begin(true)，不能把它冻结掉。
+    if (!props.debugRunning) {
+      debugFollow.onContentChange()
+      debugFollow.end()
+    }
+  }
+}
+
 function markDebugCodeChanged() {
   debugCodeChanged.value = true
 }
@@ -128,7 +191,7 @@ function markDebugCodeChanged() {
             {{ runnerExitCode === 0 ? '成功' : '失败' }}
           </el-tag>
         </div>
-        <div class="panel-content debug-log-content dd-log-surface">
+        <div ref="runnerLogRef" class="panel-content debug-log-content dd-log-surface">
           <div v-if="runnerError" class="debug-error">
             <el-alert type="error" :title="runnerError === 'failed' ? `退出码: ${runnerExitCode}` : runnerError" :closable="false" show-icon />
           </div>
@@ -187,7 +250,7 @@ function markDebugCodeChanged() {
           <el-tag v-if="debugRunning" type="warning" size="small" effect="plain">运行中</el-tag>
           <el-tag v-else-if="debugLogs.length > 0" type="success" size="small" effect="plain">已完成</el-tag>
         </div>
-        <div class="panel-content debug-log-content dd-log-surface">
+        <div ref="debugLogRef" class="panel-content debug-log-content dd-log-surface">
           <div v-if="debugError" class="debug-error">
             <el-alert type="error" :title="`退出码: ${debugExitCode}`" :closable="false" show-icon />
           </div>
@@ -203,7 +266,7 @@ function markDebugCodeChanged() {
       <el-button :disabled="!debugCodeChanged || debugRunning || debugSaving" @click="onDebugSave">
         <el-icon><Select /></el-icon>{{ debugSaving ? '保存中' : '保存' }}
       </el-button>
-      <el-button v-if="debugRunning" type="danger" @click="onDebugStop">
+      <el-button v-if="debugRunning" type="danger" @click="handleDebugStop">
         <el-icon><VideoPause /></el-icon>停止
       </el-button>
       <el-button v-if="!debugRunning && (debugLogs.length > 0 || debugError)" type="primary" @click="onDebugStart">

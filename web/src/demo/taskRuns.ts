@@ -1,6 +1,6 @@
-import { appendTaskRunLog, db, nowIso } from './db'
+import { appendTaskRunLog, db, isTaskActiveStatus, nowIso, settleTaskRunStatus } from './db'
 import type { DemoTask, DemoTaskLog } from './types'
-import { LOG_STATUS_SUCCESS, TASK_STATUS_ENABLED, TASK_STATUS_RUNNING } from './types'
+import { LOG_STATUS_SUCCESS, RUN_STATUS_SUCCESS, TASK_STATUS_DISABLED, TASK_STATUS_RUNNING } from './types'
 
 /**
  * 「手动点了运行」这件事在演示环境里的生命周期。
@@ -19,10 +19,16 @@ import { LOG_STATUS_SUCCESS, TASK_STATUS_ENABLED, TASK_STATUS_RUNNING } from './
  *     —— 那会让仪表盘的「运行中的任务」越点越多，且再也降不回去。
  */
 
+/**
+ * 注册表只记「这次运行的日志 + 兜底定时器」。
+ *
+ * 「跑完回到禁用还是启用」不在这里记：那就是任务的开关位，放在任务自己的 pending_disable 上（types.ts），
+ * toTaskDict 算 enabled、运行中点启用 / 禁用、停止、跑完收尾都读写这一个字段（issue #133）。
+ * 以前这里存一份运行前的 status（previousStatus），有三处对不上：运行中点「启用」「禁用」改不到它；
+ * fixture 里那两个运行中任务根本没有注册表条目；db.ts 要读它得反过来 import 本文件（本文件已经 import 了 db.ts）。
+ */
 interface DemoTaskRun {
   log: DemoTaskLog
-  /** 运行前的任务状态：手动运行一个「已禁用」的任务，跑完要回到已禁用而不是已启用 */
-  previousStatus: number
   timer: ReturnType<typeof setTimeout>
 }
 
@@ -41,7 +47,14 @@ export function startDemoTaskRun(task: DemoTask): DemoTaskLog {
   // 同一个任务连点两次「运行」：先把上一次收尾掉，避免留下两条运行中的日志。
   finishDemoTaskRun(task.id)
 
-  const previousStatus = task.status === TASK_STATUS_RUNNING ? TASK_STATUS_ENABLED : task.status
+  // 复刻服务端 SchedulerV2.RunNow（issue #133）：禁用中的任务被手动运行，入队前先打「待禁用」标记。
+  // 运行期间开关位据此仍是关（菜单给出「启用」），跑完 / 被停止据此落回禁用；运行中点「启用」撤掉它就落回启用。
+  // 只在「不在跑」时重算：上面的收尾没找到运行中的日志时任务可能还停在运行中，那时保留已有标记（服务端「已有标记不重打」）。
+  // 按 status 重算而不是只在禁用时置 true：顺手清掉万一残留在启用任务上的旧标记，免得这次跑完被错当成禁用。
+  if (!isTaskActiveStatus(task.status)) {
+    task.pending_disable = task.status === TASK_STATUS_DISABLED
+  }
+
   // duration 传 0 ⇒ started_at 就是此刻，且 duration / ended_at 都是 null（运行中的语义）
   const log = appendTaskRunLog(task, 'running', 0)
 
@@ -51,7 +64,6 @@ export function startDemoTaskRun(task: DemoTask): DemoTaskLog {
 
   runs.set(task.id, {
     log,
-    previousStatus,
     timer: setTimeout(() => {
       finishDemoTaskRun(task.id)
     }, AUTO_FINISH_MS),
@@ -104,11 +116,11 @@ export function finishDemoTaskRun(taskId: number, transcript?: string): void {
   if (transcript) log.content = transcript
 
   if (task) {
-    if (task.status === TASK_STATUS_RUNNING) {
-      task.status = run?.previousStatus ?? TASK_STATUS_ENABLED
-    }
+    // 按开关位落回（issue #133）：有待禁用标记 → 禁用，没有 → 启用；标记随这次结算一并清掉。
+    // 口径见 db.ts 的 settleTaskRunStatus（与停止共用；服务端这两条路径用的也是同一个 ResolveTaskInactiveStatus）。
+    settleTaskRunStatus(task)
     task.pid = null
-    task.last_run_status = LOG_STATUS_SUCCESS
+    task.last_run_status = RUN_STATUS_SUCCESS
     task.last_running_time = duration
     task.updated_at = nowIso()
   }
@@ -117,7 +129,7 @@ export function finishDemoTaskRun(taskId: number, transcript?: string): void {
 /**
  * 「停止」按钮走的路径：只撤掉兜底定时器。
  *
- * 日志与任务状态由 adapter 的 `PUT /tasks/:id/stop` 自己改成「已终止」，
+ * 日志与任务状态由 adapter 的停止（`PUT /tasks/:id/stop` 与批量停止，见 stopDemoTask）自己改成「已终止」，
  * 这里如果不撤定时器，9 秒后它会把那条已经终止的记录又翻成成功。
  */
 export function cancelDemoTaskRun(taskId: number): void {

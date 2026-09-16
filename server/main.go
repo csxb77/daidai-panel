@@ -262,59 +262,35 @@ func verifyInstalledDeps() {
 // web directory is configured (e.g. the Magisk module bundles `web/` next to
 // the binary and has no nginx). Docker deployments leave WebDir empty and
 // keep using nginx.
-func setupStaticFrontend(engine *gin.Engine, webDir string) {
+//
+// 二进制 / Windows / Magisk 三种内嵌部署都走这里。路由、缓存头、缺失资源 404、/assets 的 gzip
+// 都在 static_frontend.go（Docker 的对应规则在 docker/nginx.conf）。
+// 返回值只给测试用；没有挂载前端时返回 nil。
+func setupStaticFrontend(engine *gin.Engine, webDir string) *staticFrontend {
 	if strings.TrimSpace(webDir) == "" {
 		webDir = autoDetectWebDir()
 		if webDir == "" {
-			return
+			return nil
 		}
 	}
 
 	absDir, err := filepath.Abs(webDir)
 	if err != nil {
 		log.Printf("web_dir 解析失败: %v", err)
-		return
+		return nil
 	}
 
 	indexPath := filepath.Join(absDir, "index.html")
 	if _, err := os.Stat(indexPath); err != nil {
 		log.Printf("web_dir=%s 缺少 index.html，跳过前端托管", absDir)
-		return
+		return nil
 	}
 
-	engine.StaticFile("/", indexPath)
-	// 面板图标。注意这是单文件白名单，与下面的子目录白名单同理：
-	// 不在这里注册的话会掉进 NoRoute 的 SPA fallback，被当成深链回一份 index.html
-	// （200 + text/html），浏览器拿不到图片但也不报 404 —— 静默失效。
-	// 换文件名（如 .svg -> .webp）时必须同步改这一行和 web/index.html 的 <link rel="icon">。
-	engine.StaticFile("/favicon-512.webp", filepath.Join(absDir, "favicon-512.webp"))
-
-	// 注意这是白名单：不在这个列表里的子目录会掉进下面的 NoRoute，
-	// 被当成 SPA 深链回一份 index.html —— 也就是 200 + text/html，
-	// 而不是 404。对 <link rel="stylesheet"> / woff2 来说这是**静默失效**，
-	// 比 404 更难查。新增前端静态目录时必须同步加到这里。
-	//
-	// "fonts" 是自托管 Web 字体（web/public/fonts/），Docker 部署走 nginx 的
-	// try_files 不受影响，但内嵌二进制部署（无 nginx）依赖这一条。
-	for _, sub := range []string{"assets", "fonts", "sponsor-portal"} {
-		subDir := filepath.Join(absDir, sub)
-		if info, err := os.Stat(subDir); err == nil && info.IsDir() {
-			engine.Static("/"+sub, subDir)
-		}
-	}
-
-	// SPA fallback: 非 API 的路径在后端没有命中时一律回 index.html，
-	// 交给前端 vue-router 处理。
-	engine.NoRoute(func(c *gin.Context) {
-		p := c.Request.URL.Path
-		if strings.HasPrefix(p, "/api/") {
-			c.JSON(404, gin.H{"error": "route not found"})
-			return
-		}
-		c.File(indexPath)
-	})
+	sf := newStaticFrontend(absDir)
+	sf.register(engine)
 
 	log.Printf("前端静态目录已挂载: %s", absDir)
+	return sf
 }
 
 func autoDetectWebDir() string {

@@ -8,14 +8,13 @@ import type {
 import {
   LOG_STATUS_ABORTED,
   LOG_STATUS_FAILED,
-  LOG_STATUS_RUNNING,
   LOG_STATUS_SUCCESS,
   TASK_STATUS_DISABLED,
   TASK_STATUS_ENABLED,
   TASK_STATUS_QUEUED,
   TASK_STATUS_RUNNING,
 } from './types'
-import { createSeedState, logStatusOfKind } from './fixtures/business'
+import { createSeedState, logStatusOfKind, runStatusOfLogStatus } from './fixtures/business'
 import { normalizeScriptPath, splitCommandTokens } from '@/utils/taskCommandScript'
 
 /**
@@ -260,6 +259,64 @@ function splitCronExpressions(raw: string): string[] {
     .filter((line) => line.length > 0)
 }
 
+/** 分组标签的前缀，与服务端 task_query.go 的 taskGroupLabelPrefix 同一个（App 的分组管理写的就是它） */
+const TASK_GROUP_LABEL_PREFIX = '分组:'
+
+/**
+ * 取任务的分组名，复刻 server/handler/task_groups.go 的 taskGroupNameFromLabels（issue #130）：
+ * trim 后第一个以 `分组:` 开头、且名字非空的标签；名字为空的跳过接着找，多个分组标签只认第一个。返回空串表示没有分组。
+ *
+ * 展示标签（buildDisplayLabels 放在第 0 位的那个）、filters / sort_rules 的 group 字段、GET /tasks/groups
+ * 都走这一个函数，与服务端一样只有一份口径：漂了就会出现「顶栏标签写着 X，点进去筛出来的却不是 X 名下那批任务」。
+ */
+export function taskGroupNameFromLabels(labels: string[]): string {
+  for (const raw of labels) {
+    const label = raw.trim()
+    if (!label.startsWith(TASK_GROUP_LABEL_PREFIX)) continue
+    const name = label.slice(TASK_GROUP_LABEL_PREFIX.length).trim()
+    if (name) return name
+  }
+  return ''
+}
+
+/**
+ * 按 Go strings.Compare 的口径比较两个字符串：UTF-8 字节序，也就是按 Unicode 码点比。
+ * JS 的 < / > 比的是 UTF-16 码元，只在「补充平面字符 vs U+E000–U+FFFF」时与它不同；
+ * localeCompare 更是另一套排序规则（会把 a 排到 B 前面），这两种都不能拿来对齐服务端。
+ */
+function compareByteOrder(left: string, right: string): number {
+  let index = 0
+  while (index < left.length && index < right.length) {
+    const leftCode = left.codePointAt(index) ?? 0
+    const rightCode = right.codePointAt(index) ?? 0
+    if (leftCode !== rightCode) return leftCode < rightCode ? -1 : 1
+    // 两边码点相同 ⇒ 占的码元数也相同，下标可以一起走
+    index += leftCode > 0xffff ? 2 : 1
+  }
+  // 公共前缀相同：短的在前
+  if (left.length === right.length) return 0
+  return left.length < right.length ? -1 : 1
+}
+
+/**
+ * GET /tasks/groups 的返回体（契约 C2），复刻 server/handler/task_groups.go 的 ListGroups：
+ * 裸数组 [{ name, count }]，按 name 字节序升序；一个分组都没有时是 []。
+ *
+ * 去重区分大小写（Prod 与 prod 各算一个），而 filters 的 group equals 不区分大小写 ——
+ * 两边都是服务端的既有口径，演示站照抄，不在这里统一。
+ */
+export function buildTaskGroups(): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>()
+  for (const task of db().tasks) {
+    const name = taskGroupNameFromLabels(task.labels)
+    if (!name) continue
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((left, right) => compareByteOrder(left.name, right.name))
+}
+
 /**
  * 把原始标签翻译成展示标签，复刻 server/handler/task_query.go 的 buildPreparedTaskLabels：
  *   - `分组:xxx` 提到最前面；
@@ -281,7 +338,8 @@ function buildDisplayLabels(labels: string[]): { display: string[]; subscription
   // 分组名不参与这两个集合（它在 return 里单独前插），与订阅名重名时同样各留一条。
   const seenCustom = new Set<string>()
   const seenSubscription = new Set<string>()
-  let groupName = ''
+  // 分组名的取法统一在 taskGroupNameFromLabels，这里只负责把它放到第 0 位；下面逐条遍历时跳过所有分组标签
+  const groupName = taskGroupNameFromLabels(labels)
 
   const push = (label: string) => {
     const value = label.trim()
@@ -292,11 +350,8 @@ function buildDisplayLabels(labels: string[]): { display: string[]; subscription
 
   for (const raw of labels) {
     const label = raw.trim()
-    if (label.startsWith('分组:')) {
-      const group = label.slice('分组:'.length).trim()
-      if (group && !groupName) groupName = group
-      continue
-    }
+    // 分组标签（包括名字为空的 `分组:`）一律不进自定义标签，分组名在 return 里单独前插（与服务端一致）
+    if (label.startsWith(TASK_GROUP_LABEL_PREFIX)) continue
     if (!label.startsWith('subscription:')) {
       push(label)
       continue
@@ -327,7 +382,12 @@ export function toTaskDict(task: DemoTask): Record<string, unknown> {
     display_labels: preparedLabels.display,
     // 与后端 prepareTaskListItems 一致：订阅名再单独下发一份，前端靠它把订阅标签和自定义标签分开
     subscription_labels: preparedLabels.subscription,
+    // 启用开关位（契约 C1，issue #133），与运行态无关；口径见 resolveTaskEnabledSwitch
+    enabled: resolveTaskEnabledSwitch(task),
   }
+  // pending_disable 是演示站的内部状态（对应服务端只在内存里的待禁用标记），服务端不下发，这里也不能漏出去：
+  // 页面只该看到由它算出来的 enabled。
+  delete item['pending_disable']
 
   if (task.notification_channel_id) {
     const channel = current.channels.find((item2) => item2.id === task.notification_channel_id)
@@ -344,6 +404,37 @@ export function toTaskDict(task: DemoTask): Record<string, unknown> {
   }
 
   return item
+}
+
+/**
+ * 任务的启用开关位（契约 C1 的 enabled，issue #133），复刻 service.ResolveTaskEnabledSwitch：
+ * status 一个字段同时装着「开关 0 / 1」和「运行态 0.5 / 2」，禁用中的任务被手动运行时同样会走到 0.5 / 2，
+ * 光看 status 分不出开关是开是关，所以排队中 / 运行中改看待禁用标记（pending_disable）。
+ *
+ * 服务端在标记之外还有一层 `!HasJob` 兜底：标记只活在进程内存里，面板重启或 `ddp task run` 在另一个进程里打的都看不见。
+ * 演示站没有调度器，标记也不会丢 —— 让开关变成「关」的两条路径（手动运行禁用任务、运行中点禁用）都会打标记，
+ * 所以不需要那层兜底。
+ */
+export function resolveTaskEnabledSwitch(task: DemoTask): boolean {
+  if (task.status === TASK_STATUS_DISABLED) return false
+  if (isTaskActiveStatus(task.status)) return !task.pending_disable
+  // 启用(1)，以及万一出现的其它取值：与前端的回退口径（status !== 0 即开）一致
+  return true
+}
+
+/**
+ * 一次执行结束（跑完 / 被停止）时任务落成什么状态，复刻 service.ResolveTaskInactiveStatus（issue #133）：
+ * 禁用 → 禁用；排队中 / 运行中看待禁用标记：有标记落回禁用、没有落回启用；其余一律启用。
+ * 这一步就是结算，所以顺手清掉标记（服务端由结算路径清：runTask 的 defer、OnTaskFailed）。
+ *
+ * 调用方：taskRuns.ts 的 finishDemoTaskRun（跑完）、adapter 的 stopDemoTask（单个与批量停止）。
+ * 原来两处各写一份：跑完按注册表里记的运行前状态还原，停止则一律写成启用 —— 禁用任务被手动运行后一停就变成了启用。
+ */
+export function settleTaskRunStatus(task: DemoTask): void {
+  if (task.status !== TASK_STATUS_DISABLED) {
+    task.status = isTaskActiveStatus(task.status) && task.pending_disable ? TASK_STATUS_DISABLED : TASK_STATUS_ENABLED
+  }
+  task.pending_disable = false
 }
 
 /**
@@ -376,7 +467,7 @@ function compareTasksByDefault(left: DemoTask, right: DemoTask): number {
   //    一旦把运行中拆成独立的桶，拖拽落点会随任务自己起跑/跑完而漂移。排序要分区、拖拽不要分区。
   // 🔴 出于同样的理由，reorderTask 枚举整桶时也【不能】复用本函数（它会把运行中位置写进 list_order），
   //    那里另有一个 compareTasksForReorder，口径对齐服务端 task_sort.go。
-  // 🔴 也【不能】加进 sortTasksByTimeField 的规则层：那里对应服务端的 sortPreparedTaskListItems，
+  // 🔴 也【不能】加进 sortPreparedTasks 的规则层：那里对应服务端的 sortPreparedTaskListItems，
   //    服务端没在那儿加这一层 —— 用户显式点了「名称 A→Z」，运行中不该越过他的规则插到前面。
   //    规则全部打平回落到本函数时它才生效，与服务端一致。
   const leftRunning = left.status === TASK_STATUS_RUNNING
@@ -395,87 +486,300 @@ export function sortTasks(rows: DemoTask[]): DemoTask[] {
   return [...rows].sort(compareTasksByDefault)
 }
 
+/** filters 的一项，字段照抄 server/handler/task_query.go 的 taskListFilter */
+interface TaskListFilter {
+  field: string
+  operator: string
+  value: string
+}
+
+/** sort_rules 的一项，照抄 taskListSortRule；direction 在解析时已归一成 asc / desc */
+interface TaskListSortRule {
+  field: string
+  direction: 'asc' | 'desc'
+}
+
 /**
- * 「最后运行 / 下次运行」两列的排序，复刻服务端 sortPreparedTaskListItems 的内存排序分支。
+ * 把 filters / sort_rules 的 JSON 串解成「每项只含指定字符串字段」的行，容错口径照抄服务端
+ * `json.Unmarshal` 进 `[]struct{ ... string }`、`err != nil` 就 `return nil` 的效果：
+ *   - 空串、不是合法 JSON、顶层不是数组 → 返回 null（整批作废，等同于没传）；
+ *   - 数组里的 null、缺字段、字段为 null → 在 Go 里都只是零值 ""，不算错，交给调用方按「字段为空」丢掉那一条；
+ *   - 元素不是对象，或字段是数字 / 布尔 / 对象 → Go 报 UnmarshalTypeError，服务端整批丢弃，这里同样返回 null。
+ * 只做到这一层：Go 解 JSON 时键名不区分大小写（"Field" 也认），演示站不模拟。
+ */
+function parseTaskListJsonRows(raw: string, keys: readonly string[]): Array<Record<string, string>> | null {
+  const text = raw.trim()
+  if (!text) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!Array.isArray(parsed)) return null
+
+  const rows: Array<Record<string, string>> = []
+  for (const entry of parsed as unknown[]) {
+    if (entry !== null && (typeof entry !== 'object' || Array.isArray(entry))) return null
+    const source = (entry ?? {}) as Record<string, unknown>
+    const row: Record<string, string> = {}
+    for (const key of keys) {
+      const value = source[key]
+      if (typeof value === 'string') row[key] = value
+      else if (value === undefined || value === null) row[key] = ''
+      else return null
+    }
+    rows.push(row)
+  }
+  return rows
+}
+
+/** 复刻 parseTaskListFilters：三项都去首尾空白，任何一项为空就丢掉这一条 */
+function parseTaskListFilters(raw: string): TaskListFilter[] {
+  const rows = parseTaskListJsonRows(raw, ['field', 'operator', 'value'])
+  if (!rows) return []
+  const filters: TaskListFilter[] = []
+  for (const row of rows) {
+    const field = (row['field'] ?? '').trim()
+    const operator = (row['operator'] ?? '').trim()
+    const value = (row['value'] ?? '').trim()
+    if (!field || !operator || !value) continue
+    filters.push({ field, operator, value })
+  }
+  return filters
+}
+
+/** 复刻 parseTaskListSortRules：field 为空的丢掉；direction 只认 desc（不区分大小写），其余一律按 asc */
+function parseTaskListSortRules(raw: string): TaskListSortRule[] {
+  const rows = parseTaskListJsonRows(raw, ['field', 'direction'])
+  if (!rows) return []
+  const rules: TaskListSortRule[] = []
+  for (const row of rows) {
+    const field = (row['field'] ?? '').trim()
+    if (!field) continue
+    const direction = (row['direction'] ?? '').trim().toLowerCase() === 'desc' ? 'desc' : 'asc'
+    rules.push({ field, direction })
+  }
+  return rules
+}
+
+/**
+ * 带筛选 / 排序规则时每条任务的预处理结果，对应服务端的 preparedTaskListItem：
+ * 展示标签、订阅名、分组名各算一次，筛选与排序都读这一份，免得各算各的漂成两套口径。
+ */
+interface PreparedTask {
+  task: DemoTask
+  displayLabels: string[]
+  subscriptionLabels: string[]
+  /** 分组名（taskGroupNameFromLabels），空串表示没有分组 */
+  groupName: string
+}
+
+function prepareTask(task: DemoTask): PreparedTask {
+  const labels = buildDisplayLabels(task.labels)
+  return {
+    task,
+    displayLabels: labels.display,
+    subscriptionLabels: labels.subscription,
+    groupName: taskGroupNameFromLabels(task.labels),
+  }
+}
+
+/** 复刻 taskStatusFilterText：状态列显示的那套文案 */
+function taskStatusFilterText(status: number): string {
+  if (status === TASK_STATUS_DISABLED) return '禁用中'
+  if (status === TASK_STATUS_QUEUED) return '排队中'
+  if (status === TASK_STATUS_RUNNING) return '运行中'
+  return '空闲中'
+}
+
+/** 复刻 taskStatusFilterAlias：「已启用 / 已禁用」这套别名，视图里写哪一种都能筛中 */
+function taskStatusFilterAlias(status: number): string {
+  if (status === TASK_STATUS_DISABLED) return '已禁用'
+  if (status === TASK_STATUS_QUEUED) return '排队中'
+  if (status === TASK_STATUS_RUNNING) return '运行中'
+  return '已启用'
+}
+
+/**
+ * 某个筛选字段在这条任务上的取值，复刻 preparedTaskFilterValues。
+ * 返回空数组表示「没有值」：equals / contains 为假，not_equals / not_contains 为真；不认识的字段同样返回空数组。
+ */
+function preparedTaskFilterValues(item: PreparedTask, field: string): string[] {
+  const task = item.task
+  switch (field) {
+    case 'command':
+      return [String(task.command).trim()]
+    case 'name':
+      return [String(task.name).trim()]
+    case 'cron_expression': {
+      // 多行 cron：整串与逐行各算一个值，按其中任意一行 equals 也能筛中
+      const raw = String(task.cron_expression).trim()
+      return raw ? [raw, ...splitCronExpressions(raw)] : []
+    }
+    case 'status':
+      // 数值、状态文案、别名三种写法都认（Go 的 FormatFloat(v, 'f', -1) 与 JS 的 String() 对 0 / 0.5 / 1 / 2 输出一致）
+      return [String(task.status), taskStatusFilterText(task.status), taskStatusFilterAlias(task.status)]
+    case 'labels':
+      // 展示标签：含分组名（第 0 位）与订阅名，所以「标签 等于 X」会连同名的分组一起筛中 —— 服务端就是这样，
+      // 只想按分组筛要用下面的 group
+      return item.displayLabels
+    case 'subscription':
+      return item.subscriptionLabels
+    case 'group':
+      // 只认分组名本身（issue #130，契约 C3），不看展示标签：那里分组名和同名的自定义标签、订阅名混在一起
+      return item.groupName ? [item.groupName] : []
+    default:
+      return []
+  }
+}
+
+/** 复刻 matchTaskFilterValues：两边都去空白、转小写再比；目标值为空一律放行，不认识的运算符也一律放行 */
+function matchTaskFilterValues(values: string[], operator: string, target: string): boolean {
+  const needle = target.trim().toLowerCase()
+  if (!needle) return true
+  const normalized = values.map((value) => value.trim().toLowerCase()).filter((value) => value !== '')
+  switch (operator) {
+    case 'contains':
+      return normalized.some((value) => value.includes(needle))
+    case 'not_contains':
+      return !normalized.some((value) => value.includes(needle))
+    case 'equals':
+      return normalized.includes(needle)
+    case 'not_equals':
+      return !normalized.includes(needle)
+    default:
+      return true
+  }
+}
+
+/** 数值比较，-1 / 0 / 1；NaN 按相等处理，免得比较器吐出 NaN 让排序结果不可预期 */
+function compareNumbers(left: number, right: number): number {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+
+function normalizeSortText(value: string): string {
+  return String(value).trim().toLowerCase()
+}
+
+/** 按时间排序的两个字段：值可能为空，空值有专门的排法（见 sortPreparedTasks） */
+type TaskTimeSortField = 'last_run_at' | 'next_run_at'
+
+function isTimeSortField(field: string): field is TaskTimeSortField {
+  return field === 'last_run_at' || field === 'next_run_at'
+}
+
+/** 取 last_run_at / next_run_at 的毫秒值，null 表示没有值 */
+type PreparedTaskTimeOf = (item: PreparedTask, field: TaskTimeSortField) => number | null
+
+/** 复刻 comparePreparedTaskByRule：-1 / 0 / 1，方向由调用方翻转；不认识的字段返回 0（静默回落默认序，不报错） */
+function comparePreparedTaskByRule(
+  left: PreparedTask,
+  right: PreparedTask,
+  field: string,
+  timeOf: PreparedTaskTimeOf,
+): number {
+  if (isTimeSortField(field)) {
+    // 一边有值一边没有的情况调用方已经判掉了（恒排本区最后、不随方向翻转），走到这里两边都为空就按相等处理
+    const leftTime = timeOf(left, field)
+    const rightTime = timeOf(right, field)
+    if (leftTime === null || rightTime === null) return 0
+    return compareNumbers(leftTime, rightTime)
+  }
+  switch (field) {
+    case 'name':
+      return compareByteOrder(normalizeSortText(left.task.name), normalizeSortText(right.task.name))
+    case 'command':
+      return compareByteOrder(normalizeSortText(left.task.command), normalizeSortText(right.task.command))
+    case 'cron_expression':
+      return compareByteOrder(normalizeSortText(left.task.cron_expression), normalizeSortText(right.task.cron_expression))
+    case 'status':
+      return compareNumbers(left.task.status, right.task.status)
+    case 'labels':
+      return compareByteOrder(left.displayLabels.join(',').toLowerCase(), right.displayLabels.join(',').toLowerCase())
+    case 'subscription':
+      return compareByteOrder(left.subscriptionLabels.join(',').toLowerCase(), right.subscriptionLabels.join(',').toLowerCase())
+    case 'group':
+      // 与 labels / subscription 同一套比较口径：不区分大小写，没有分组的按空串参与比较（issue #130）
+      return compareByteOrder(left.groupName.toLowerCase(), right.groupName.toLowerCase())
+    case 'created_at':
+      return compareNumbers(Date.parse(left.task.created_at), Date.parse(right.task.created_at))
+    default:
+      return 0
+  }
+}
+
+/**
+ * 带 filters / sort_rules 时的排序，复刻 server/handler/task_query.go 的 sortPreparedTaskListItems。
  *
- * next_run_at 不是库里的列、是按 cron 现算的快照，所以只能在内存里排；这里直接复用 estimateNextRun，
- * 生效条件（非禁用 + cron 类型 + 表达式非空）与 toTaskDict 保持一致，
- * 否则会出现「列表里显示有下次运行、排序却把它当成空值沉底」。
- *
- * 🔴 分区语义：置顶与状态分组【压在排序规则之上】，规则只在同一分区内生效。
+ * 🔴 分区压在规则之上：先置顶、再状态分组（空闲 / 排队 / 运行 → 禁用 → 其他），规则只决定同一个区内部怎么排。
  *    少了这两层的表现是「点一下最后运行倒序，置顶任务被冲散、禁用任务混进启用任务中间」——
  *    而不带排序规则时它们规规矩矩地待在各自的区里，同一个列表两副面孔。
+ *    唯一的例外：首要排序字段就是 status 时跳过状态分组（只看第一条规则），否则「按状态升序」读出来是
+ *    0.5 → 1 → 2 → 0，数值上并不递增。置顶分区永不豁免。
+ * 🔴 空值语义：last_run_at / next_run_at 没有值的任务（从未运行、禁用、非定时任务）在各自分区内恒排最后，
+ *    不随 asc / desc 翻转 —— 这段判定必须写在方向翻转【之前】，写在后面的话降序时一堆「-」会全冒到最前面。
+ * 🔴 规则全部打平才回落 compareTasksByDefault（服务端同样直接调 defaultTaskListLess），
+ *    所以「运行中提到本区最前」只在这时生效：用户显式点了「名称 A→Z」，运行中不该越过他的规则插到前面。
  *
- * 🔴 空值语义：从未运行 / 没有下次运行的任务【在各自分区内恒排最后，不随 asc/desc 翻转】。
- *    这段判定必须写在方向翻转【之前】——写在后面的话降序时一堆 `-` 会全冒到最前面。
+ * next_run_at 不是库里的列、是按 cron 现算的快照，生效条件（非禁用 + 定时任务 + 表达式非空）与 toTaskDict 一致，
+ * 否则会出现「列表里显示有下次运行、排序却把它当成空值沉底」。它要遍历时间窗口，每条任务只算一次，不在比较器里反复算。
  */
-function sortTasksByTimeField(
-  rows: DemoTask[],
-  field: 'last_run_at' | 'next_run_at',
-  direction: 'asc' | 'desc',
-): DemoTask[] {
+function sortPreparedTasks(items: PreparedTask[], rules: TaskListSortRule[]): PreparedTask[] {
+  const skipStatusGrouping = rules[0]?.field === 'status'
   const now = Date.now()
-  // 先把值算出来存下：estimateNextRun 要遍历时间窗口，放进比较器里每次比较都算一遍会明显卡顿
-  const values = new Map<number, number | null>()
-  for (const task of rows) {
+  const timeCache = new Map<string, number | null>()
+  const timeOf: PreparedTaskTimeOf = (item, field) => {
+    const key = `${field}:${item.task.id}`
+    const cached = timeCache.get(key)
+    if (cached !== undefined) return cached
+    const task = item.task
+    let value: number | null = null
     if (field === 'last_run_at') {
-      values.set(task.id, task.last_run_at ? new Date(task.last_run_at).getTime() : null)
-      continue
+      value = task.last_run_at ? Date.parse(task.last_run_at) : null
+    } else if (task.status !== TASK_STATUS_DISABLED && task.task_type === 'cron' && task.cron_expression) {
+      const next = estimateNextRun(task.cron_expression, now)
+      value = next ? Date.parse(next) : null
     }
-    if (task.status === TASK_STATUS_DISABLED || task.task_type !== 'cron' || !task.cron_expression) {
-      values.set(task.id, null)
-      continue
-    }
-    const next = estimateNextRun(task.cron_expression, now)
-    values.set(task.id, next ? new Date(next).getTime() : null)
+    timeCache.set(key, value)
+    return value
   }
 
-  return [...rows].sort((left, right) => {
-    // 两层分区先走，与服务端 sortPreparedTaskListItems 的口径一致：
-    // 置顶是用户主动设置的展示优先级，状态分组决定「能跑的在上、禁用的在下」，
-    // 这两件事都不该被一次列排序推翻，所以它们压在下面的时间比较之上。
-    if (left.is_pinned !== right.is_pinned) return left.is_pinned ? -1 : 1
-    const groupDiff = taskSortGroup(left.status) - taskSortGroup(right.status)
-    if (groupDiff !== 0) return groupDiff
+  // Array.prototype.sort 是稳定排序（ES2019 起），与服务端的 sort.SliceStable 对应
+  return [...items].sort((left, right) => {
+    if (left.task.is_pinned !== right.task.is_pinned) return left.task.is_pinned ? -1 : 1
+    if (!skipStatusGrouping) {
+      const groupDiff = taskSortGroup(left.task.status) - taskSortGroup(right.task.status)
+      if (groupDiff !== 0) return groupDiff
+    }
 
-    const leftValue = values.get(left.id) ?? null
-    const rightValue = values.get(right.id) ?? null
-    // 两边都没有值 / 值完全相同 ⇒ 这条规则给不出顺序，回落默认排序（拖拽顺序 > 手工顺序 > 创建时间），
-    // 与服务端「comparePreparedTaskByRule 返回 0 就走 defaultTaskListLess」逐字一致。
-    if (leftValue === null && rightValue === null) return compareTasksByDefault(left, right)
-    if (leftValue === null) return 1
-    if (rightValue === null) return -1
-    if (leftValue !== rightValue) return direction === 'desc' ? rightValue - leftValue : leftValue - rightValue
-    return compareTasksByDefault(left, right)
+    for (const rule of rules) {
+      const field = rule.field
+      if (isTimeSortField(field)) {
+        const leftMissing = timeOf(left, field) === null
+        const rightMissing = timeOf(right, field) === null
+        if (leftMissing !== rightMissing) return leftMissing ? 1 : -1
+      }
+      const comparison = comparePreparedTaskByRule(left, right, field, timeOf)
+      if (comparison === 0) continue
+      return rule.direction === 'desc' ? -comparison : comparison
+    }
+
+    return compareTasksByDefault(left.task, right.task)
   })
 }
 
 /**
- * 解析 sort_rules 里的第一条规则。
- *
- * Demo 只认「最后运行 / 下次运行」这两个字段（任务页的列排序与工具栏排序下拉），
- * 其余字段（视图那套 name / command / labels…）仍回落默认排序 —— 与服务端「未知 field 静默回落」的口径一致，
- * 不报错、不空列表。
+ * 任务列表的筛选与排序，复刻 server/handler/task_query.go 的 List：
+ *   1. keyword / status / label 三个查询参数先筛（服务端这一步在 SQL 里）；
+ *   2. 既没有 filters 也没有 sort_rules → 默认排序（服务端走 SQL 的 applyDefaultTaskListOrdering，口径同 compareTasksByDefault）；
+ *   3. 否则逐条预处理 → filters 逐条 AND → 按 sort_rules 排（见 sortPreparedTasks）。
+ * filters 认服务端支持的全部字段（command / name / cron_expression / status / labels / subscription / group）
+ * 与四个运算符（equals / not_equals / contains / not_contains）；sort_rules 在此之外还认 created_at / last_run_at / next_run_at。
+ * 不认识的字段：筛选按「没有值」处理，排序静默回落默认序 —— 与服务端一致，不报错、不空列表。
  */
-function parseTaskSortRule(raw: string): { field: 'last_run_at' | 'next_run_at'; direction: 'asc' | 'desc' } | null {
-  const text = raw.trim()
-  if (!text) return null
-  try {
-    const rules = JSON.parse(text)
-    if (!Array.isArray(rules) || rules.length === 0) return null
-    const first = rules[0] ?? {}
-    const field = String(first.field ?? '')
-    if (field === 'last_run_at' || field === 'next_run_at') {
-      // 与服务端一致：direction 只认 desc，其它一律按 asc
-      return { field, direction: String(first.direction ?? '') === 'desc' ? 'desc' : 'asc' }
-    }
-    return null
-  } catch {
-    return null
-  }
-}
-
-/** 复刻服务端的 keyword / status / label 过滤（filters 那套高级筛选不在 Demo 范围内） */
 export function filterTasks(params: Record<string, string>): DemoTask[] {
   let rows = db().tasks
 
@@ -497,10 +801,17 @@ export function filterTasks(params: Record<string, string>): DemoTask[] {
     rows = rows.filter((task) => task.labels.some((item) => includesIgnoreCase(item, label)))
   }
 
-  const rule = parseTaskSortRule(params['sort_rules'] ?? '')
-  if (rule) return sortTasksByTimeField(rows, rule.field, rule.direction)
+  const filters = parseTaskListFilters(params['filters'] ?? '')
+  const sortRules = parseTaskListSortRules(params['sort_rules'] ?? '')
+  if (filters.length === 0 && sortRules.length === 0) return sortTasks(rows)
 
-  return sortTasks(rows)
+  let prepared = rows.map(prepareTask)
+  if (filters.length > 0) {
+    prepared = prepared.filter((item) => filters.every(
+      (filter) => matchTaskFilterValues(preparedTaskFilterValues(item, filter.field), filter.operator, filter.value),
+    ))
+  }
+  return sortPreparedTasks(prepared, sortRules).map((item) => item.task)
 }
 
 /**
@@ -770,7 +1081,8 @@ export function appendTaskRunLog(task: DemoTask, kind: DemoTaskLog['kind'], dura
 
   current.logs.unshift(log)
   task.last_run_at = log.started_at
-  task.last_run_status = status === LOG_STATUS_RUNNING ? null : status
+  // 任务上的「上次结果」用 RUN_STATUS_*，不是日志状态（已终止两边不同值），换算见 runStatusOfLogStatus
+  task.last_run_status = runStatusOfLogStatus(status)
   task.last_running_time = log.duration
   task.updated_at = nowIso()
   return log
@@ -1009,20 +1321,48 @@ export function filterEnvs(params: Record<string, string>): DemoEnvVar[] {
   return sortEnvs(rows)
 }
 
+/**
+ * 某个置顶桶的「下一个 position」：桶内最大 position + 1000，空桶给 1000。
+ * 复刻 server/handler/env.go 的 nextEnvPosition（按 position DESC 取第一条再加步长）。
+ * 🔴 不能从 0 起取最大值：position 现在能在编辑弹窗里手填（契约 C5），桶里全是负数时
+ *    「从 0 起取最大值」会得出 1000，与服务端的「最大的那个负数 + 1000」对不上。
+ */
 export function nextEnvPosition(sortOrder: number): number {
   const siblings = db().envs.filter((env) => env.sort_order === sortOrder)
-  const max = siblings.reduce((acc, env) => (env.position > acc ? env.position : acc), 0)
-  return max + ENV_POSITION_STEP
+  if (siblings.length === 0) return ENV_POSITION_STEP
+  return siblings.reduce((max, env) => Math.max(max, env.position), Number.NEGATIVE_INFINITY) + ENV_POSITION_STEP
 }
 
 /**
- * 拖拽排序：把 sourceId 插到 targetId 之前；targetId 为空表示移到末尾。
- * 复刻 server/handler/env.go 的 reorderEnvWithinSortBucket。
+ * 把变量追加到某个置顶桶（0 = 普通区，1 = 置顶区）的末尾，复刻 server/handler/env.go 的 appendEnvToSortBucket。
+ * 置顶（move-top）与取消置顶（cancel-top）都走这里。
+ *
+ * 必须先按移动前的数据算好落点、再改桶：反过来的话变量自己会被算进目标桶，
+ * 取消置顶时拿到的是它在置顶区的旧 position，而服务端算的是普通区原有的最大值。
+ */
+export function appendEnvToSortBucket(env: DemoEnvVar, sortOrder: number) {
+  const position = nextEnvPosition(sortOrder)
+  env.sort_order = sortOrder
+  env.position = position
+  env.updated_at = nowIso()
+}
+
+/**
+ * 拖拽排序：把 sourceId 插到 targetId 之前（insertAfter 时插到之后）；targetId 为空表示移到本桶末尾。
+ * 复刻 server/handler/env.go 的 reorderEnvWithinSortBucket（契约 C4）。
+ *
+ * insertAfter 对应 PUT /envs/sort 的 position:"after"：前端落在可见列表最后一行时发「插到上一行之后」，
+ * 不再靠「target 为空 = 整桶末尾」—— 分页 / 筛选下那样会越过没显示的项被甩到整桶最后，
+ * 置顶项也永远拖不到置顶区末尾（issue #131）。targetId 为空时 insertAfter 不起作用，与服务端一致。
  *
  * ⚠️ 这里必须【真的改顺序】。只回一句 `{message:'排序更新成功'}` 而不动数据，
  *    页面重新加载列表后会把行弹回原位，看起来像拖拽功能坏了。
  */
-export function reorderEnv(sourceId: number, targetId?: number): { ok: true } | { ok: false; error: string } {
+export function reorderEnv(
+  sourceId: number,
+  targetId?: number,
+  insertAfter = false,
+): { ok: true } | { ok: false; error: string } {
   const current = db()
   const source = current.envs.find((env) => env.id === sourceId)
   if (!source) return { ok: false, error: '源环境变量不存在' }
@@ -1043,7 +1383,7 @@ export function reorderEnv(sourceId: number, targetId?: number): { ok: true } | 
   if (targetId !== undefined) {
     const found = rest.findIndex((env) => env.id === targetId)
     if (found === -1) return { ok: false, error: '目标环境变量不存在' }
-    insertIndex = found
+    insertIndex = insertAfter ? found + 1 : found
   }
 
   const ordered = [...rest.slice(0, insertIndex), source, ...rest.slice(insertIndex)]
@@ -1313,8 +1653,12 @@ const DEMO_DANGEROUS_PATH_FRAGMENTS = ['..', '~', '$', '`', ';', '|', '&', '>', 
 const NOTE_UNRESOLVED = '没能从命令里识别出脚本文件（命令格式可能有误），只删除任务。'
 const NOTE_TASK_NOT_FOUND = '任务不存在（可能已被删除）。'
 
-/** 运行中与排队中都算「还在跑」（server/model/task.go）：排队请求带的是任务副本，删掉任务行之后照样会执行 */
-function isTaskActiveStatus(status: number): boolean {
+/**
+ * 运行中与排队中都算「还在跑」（server/model/task.go）。
+ * 删任务预览靠它判「删了照样会执行」（排队请求带的是任务副本，删掉任务行之后照样会执行）；
+ * 开关位与结算（resolveTaskEnabledSwitch / settleTaskRunStatus、taskRuns.ts、adapter 的启用）也靠它判「瞬时态」。
+ */
+export function isTaskActiveStatus(status: number): boolean {
   return status === TASK_STATUS_RUNNING || status === TASK_STATUS_QUEUED
 }
 

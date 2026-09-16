@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch, onMounted } from 'vue'
 import { taskViewApi, type TaskView, type TaskViewFilter, type TaskViewSortRule } from '@/api/taskView'
+import { taskApi, type TaskGroupSummary } from '@/api/task'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, Close, Edit, Setting } from '@element-plus/icons-vue'
+import { Plus, Delete, Close, Edit, Setting, Folder } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
+import { usePageActivity } from '@/composables/usePageActivity'
 import ViewManagementDialog from './ViewManagementDialog.vue'
 
 const emit = defineEmits<{
@@ -12,11 +14,15 @@ const emit = defineEmits<{
 
 const { dialogFullscreen } = useResponsive()
 const views = ref<TaskView[]>([])
-// null 有两层含义：一是「不带任何视图筛选」，二是「全部」标签处于高亮。
-// 「全部」被隐藏后第二层含义失效 —— 此时仍可能短暂停在 null（比如刚删掉当前选中的视图），
+// 当前高亮项由两个互斥的 ref 共同表达：选中视图时 activeViewId 是它的 id、activeGroupName 为 null；
+// 选中分组标签时反过来。两者都为 null 有两层含义：一是「不带任何筛选」，二是「全部」标签处于高亮。
+// 「全部」被隐藏后第二层含义失效 —— 此时仍可能短暂停在两者皆 null（比如刚删掉当前选中的视图），
 // 标签栏不会有任何高亮项，但 emit 出去的 filters 同样是空数组、列表不带筛选，两者是一致的。
 // 随后的 applyViewFallback() 会把它落到第一个可见视图。
 const activeViewId = ref<number | null>(null)
+// 分组标签（issue #130）没有库里的行、只能按名字认，所以单独一个 ref，
+// 而不是往 number 型的 activeViewId 里硬塞字符串（那样每个比较点都要多一层类型判断）。
+const activeGroupName = ref<string | null>(null)
 const showDialog = ref(false)
 // 提交在途锁：弹窗要等请求成功才关，期间不锁按钮连点就会建出多个同名视图。
 // 写法与同目录 ViewManagementDialog 的 saving 保持一致。
@@ -30,35 +36,48 @@ const visibleViews = computed(() => views.value.filter(view => !view.hidden))
 // 「全部」是模板里硬编码的内置筛选项，库里没有对应行，后端的 hidden 字段够不到它，
 // 它的显隐只能落到本地存储。默认 '0'（显示），老用户升级后第一眼观感不变。
 const VIEW_ALL_HIDDEN_STORAGE_KEY = 'dd:tasks:view_all_hidden'
+// 分组标签（issue #130）同理：它们来自任务 labels 里的 `分组:` 标签，不在 task_views 表里。
+// 照「全部」的先例只做一个整体开关（不逐个分组隐藏），默认 '0'（显示）。
+const VIEW_GROUPS_HIDDEN_STORAGE_KEY = 'dd:tasks:view_groups_hidden'
 
-function readStoredViewAllHidden() {
+function readStoredHiddenFlag(key: string) {
   if (typeof window === 'undefined') {
     return false
   }
   try {
-    return window.localStorage.getItem(VIEW_ALL_HIDDEN_STORAGE_KEY) === '1'
+    return window.localStorage.getItem(key) === '1'
   } catch {
     // 隐私模式下读 localStorage 会直接抛错，必须吞掉：否则整个 setup 挂掉、标签栏整块白
     return false
   }
 }
 
-function persistViewAllHidden(hidden: boolean) {
+function persistHiddenFlag(key: string, hidden: boolean) {
   if (typeof window === 'undefined') {
     return
   }
   try {
-    window.localStorage.setItem(VIEW_ALL_HIDDEN_STORAGE_KEY, hidden ? '1' : '0')
+    window.localStorage.setItem(key, hidden ? '1' : '0')
   } catch {
     // 存储不可用只影响「下次进页还记不记得」，不该阻断当前这次交互
   }
 }
 
-const allTabHidden = ref(readStoredViewAllHidden())
+const allTabHidden = ref(readStoredHiddenFlag(VIEW_ALL_HIDDEN_STORAGE_KEY))
+const groupTabsHidden = ref(readStoredHiddenFlag(VIEW_GROUPS_HIDDEN_STORAGE_KEY))
 
 // 保底规则：一个可见视图都没有时，忽略隐藏设置强制把「全部」放回来。
 // 否则标签栏只剩右侧两个图标按钮，用户既没有可点的筛选项、也退不回不带筛选的状态。
+// 刻意不把分组标签算进「可见项」：分组标签同样是筛选，只剩它们时照样退不回「不带筛选」。
 const showAllTab = computed(() => !allTabHidden.value || visibleViews.value.length === 0)
+
+// 分组标签（issue #130）：App 里建的分组就是任务 labels 里的 `分组:<名>` 标签，
+// 两端数据本来就是同一份，但网页顶栏原来只渲染 task_views，看不到它们。
+// 清单来自 GET /tasks/groups（契约 C2，按名称升序）；点一下按 filters 的 group 字段精确筛选（契约 C3），
+// 不会像「labels 等于 X」那样误中同名的自定义标签或订阅名。
+const groups = ref<TaskGroupSummary[]>([])
+const showGroupTabs = computed(() => !groupTabsHidden.value && groups.value.length > 0)
+const allTabActive = computed(() => activeViewId.value === null && activeGroupName.value === null)
 
 const filterFields = [
   { value: 'command', label: '命令' },
@@ -66,8 +85,17 @@ const filterFields = [
   { value: 'cron_expression', label: '定时规则' },
   { value: 'status', label: '状态' },
   { value: 'labels', label: '标签' },
+  // 分组（issue #130，契约 C3）：只比任务的 `分组:` 标签，不会误中同名的自定义标签 / 订阅名。
+  // App 会把视图的 filters 原样透传给 GET /tasks，所以这里建的「按分组」视图两端都能用。
+  // ⚠️ 老后端不认这个字段，带它的视图在老后端上会筛成空列表。
+  { value: 'group', label: '分组' },
   { value: 'subscription', label: '订阅' }
 ]
+
+// 排序可选字段与筛选字段是同一份，含「分组」：服务端 task_query.go 的 comparePreparedTaskByRule
+// 已有 case "group"（与 labels / subscription 同一套口径：不区分大小写，没有分组的按空串参与比较）。
+// ⚠️ 老后端不认这个排序字段，会走 default 分支静默回落默认序（不报错），选了等于没排。
+const sortFields = filterFields
 
 const statusOptions = [
   { label: '已启用 / 空闲中', value: '1' },
@@ -103,14 +131,68 @@ async function loadViews() {
   applyViewFallback()
 }
 
-// 视图列表或「全部」显隐变化后校正当前高亮项，三处硬回退点（首次加载 / 管理弹窗保存 / 删除视图）
-// 都汇到这里，避免各写一份规则跑偏：
+// 服务端契约是裸数组；老后端 404 会走 catch，演示站没注册这个端点时会兜底回 { data: [] } 这种对象，
+// 这里一律收成「没有分组」。逐项再过一遍：名字必须是非空字符串，重名只留第一条
+// （模板拿名字拼 :key，重复会让 Vue 报 Duplicate keys）。
+function normalizeTaskGroups(raw: unknown): TaskGroupSummary[] {
+  if (!Array.isArray(raw)) return []
+  const seen = new Set<string>()
+  const result: TaskGroupSummary[] = []
+  for (const item of raw) {
+    const name = typeof item?.name === 'string' ? item.name.trim() : ''
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    const count = Number(item?.count)
+    result.push({ name, count: Number.isFinite(count) ? count : 0 })
+  }
+  return result
+}
+
+// 在途去重：挂载、每次切换筛选、页面重新可见这几路可能撞在一起，同一时刻只发一个请求，
+// 后来者直接复用在途那一次（它刚发出去，结果足够新）。
+// 顺带挡住一条回环：本函数末尾的 applyViewFallback 可能 selectView → emitViewChange → 再调本函数，
+// 那一刻在途标记还没清，拿到的是同一个 promise，不会再发第二个请求。
+let groupsLoading: Promise<void> | null = null
+
+function loadGroups(): Promise<void> {
+  if (!groupsLoading) {
+    groupsLoading = (async () => {
+      try {
+        groups.value = normalizeTaskGroups(await taskApi.groups())
+      } catch {
+        // 老后端没有这个接口（404）、应用令牌缺 tasks 权限（403）、网络抖动：一律静默，不弹错。
+        // 从没成功过 → groups 仍是空数组，顶栏不出现分组标签；
+        // 成功过 → 保留上一次的清单：一次抖动不该把用户正在用的分组标签闪没、把筛选回落掉。
+        return
+      }
+      // 只在「当前停在某个分组上」时校正（applyViewFallback 的第 4 条），视图相关的回落只归 loadViews 管。
+      // 不能在这里跑整套规则：删掉当前视图时 doDeleteView 先 selectView(null)（顺带发出本请求）再 await loadViews()，
+      // 本请求若先回来，views 里还留着被删的那条 ——「全部」被隐藏、被删的又恰好排在第一个可见时，
+      // 整套规则会把它重新选回来、按它的筛选再拉一次列表，等 loadViews 回来才又改选。
+      if (activeGroupName.value !== null) {
+        applyViewFallback()
+      }
+    })().finally(() => {
+      groupsLoading = null
+    })
+  }
+  return groupsLoading
+}
+
+// 视图列表、分组清单或各类显隐变化后校正当前高亮项，几处硬回退点
+// （首次加载 / 管理弹窗保存 / 删除视图 / 分组清单刷新）都汇到这里，避免各写一份规则跑偏：
 //   1. 当前选中的视图被删除或被隐藏了 —— 不能继续停在一个看不见的标签上；
-//   2. 「全部」被隐藏而 activeViewId 还停在 null —— null 是「全部」的高亮语义，
-//      必须落到第一个可见视图，否则标签栏一个高亮都没有；
-//   3. 一个可见视图都没有时 showAllTab 会强制把「全部」放回来，此时停在 null 反而是对的。
+//   2. 「全部」被隐藏而当前停在「全部」语义上（两个 ref 皆 null）—— 必须落到第一个可见视图，
+//      否则标签栏一个高亮都没有；
+//   3. 一个可见视图都没有时 showAllTab 会强制把「全部」放回来，此时停在「全部」反而是对的；
+//   4. 当前选中的分组在 App 里被改名 / 解散了（清单里没了），或分组标签被整体隐藏了 —— 同第 1 条。
 function applyViewFallback() {
-  if (activeViewId.value !== null) {
+  if (activeGroupName.value !== null) {
+    const name = activeGroupName.value
+    if (showGroupTabs.value && groups.value.some(group => group.name === name)) {
+      return
+    }
+  } else if (activeViewId.value !== null) {
     const current = views.value.find(v => v.id === activeViewId.value)
     if (current && !current.hidden) {
       return
@@ -126,17 +208,30 @@ function openManagementDialog() {
   showManagementDialog.value = true
 }
 
-async function handleManagementSaved(allHidden: boolean) {
-  // 「全部」不进 taskViewApi.reorder 的提交列表，弹窗只把结果回传上来，由这里写本地存储
+async function handleManagementSaved(allHidden: boolean, groupsHidden: boolean) {
+  // 「全部」与分组标签都不进 taskViewApi.reorder 的提交列表，弹窗只把结果回传上来，由这里写本地存储。
+  // 分组标签被隐藏时若正选中某个分组，下面 loadViews 末尾的 applyViewFallback 会把它回落掉。
   allTabHidden.value = allHidden
-  persistViewAllHidden(allHidden)
+  persistHiddenFlag(VIEW_ALL_HIDDEN_STORAGE_KEY, allHidden)
+  groupTabsHidden.value = groupsHidden
+  persistHiddenFlag(VIEW_GROUPS_HIDDEN_STORAGE_KEY, groupsHidden)
   await loadViews()
+}
+
+// 所有 view-change 都从这里发，发完顺手刷新一次分组清单。
+// 分组来自任务 labels：任务的增删改、导入、订阅拉取、App 端改分组都会让它变，而这些都发生在
+// index.vue 或别的端上 —— 按约定不为这件事去改 index.vue（高冲突文件），改由本组件在
+// 「挂载 / 每次切换筛选 / 页面重新可见」三个时机自己拉（另外两处调用见文件末尾）。
+function emitViewChange(filters: TaskViewFilter[], sortRules: TaskViewSortRule[]) {
+  emit('view-change', filters, sortRules)
+  void loadGroups()
 }
 
 function selectView(viewId: number | null) {
   activeViewId.value = viewId
+  activeGroupName.value = null
   if (!viewId) {
-    emit('view-change', [], [])
+    emitViewChange([], [])
     return
   }
   const view = views.value.find(v => v.id === viewId)
@@ -144,11 +239,19 @@ function selectView(viewId: number | null) {
     try {
       const filters = JSON.parse(view.filters || '[]')
       const sortRules = JSON.parse(view.sort_rules || '[]')
-      emit('view-change', filters, sortRules)
+      emitViewChange(filters, sortRules)
     } catch {
-      emit('view-change', [], [])
+      emitViewChange([], [])
     }
   }
+}
+
+// 分组标签 = 一条临时的「group 等于 X」视图（契约 C3）。不带排序规则，所以列表的拖拽排序照常可用
+// （index.vue 的 dragSortDisabledReason 只看 sort_rules），handleViewChange / buildTaskListParams 一行不用改。
+function selectGroup(name: string) {
+  activeViewId.value = null
+  activeGroupName.value = name
+  emitViewChange([{ field: 'group', operator: 'equals', value: name }], [])
 }
 
 function openCreateDialog() {
@@ -227,7 +330,7 @@ async function handleSave() {
       ElMessage.success('视图更新成功')
       // If editing the active view, re-apply its filters
       if (activeViewId.value === editingViewId.value) {
-        emit('view-change', validFilters, editForm.value.sortRules)
+        emitViewChange(validFilters, editForm.value.sortRules)
       }
     } else {
       await taskViewApi.create(payload)
@@ -266,20 +369,31 @@ async function doDeleteView(viewId: number) {
   } catch {}
 }
 
-onMounted(loadViews)
+onMounted(() => {
+  void loadViews()
+  void loadGroups()
+})
 
-defineExpose({ loadViews })
+// 分组清单的第三个刷新时机：页面重新可见 —— 切回这个浏览器标签页，
+// 或从别的菜单页切回任务页（MainLayout 是 keep-alive，二次进页只触发 activated、不会重新挂载）。
+// isPageActive 两种情况都覆盖；挂载那一刻它本来就是 true，watch 不会多发一次。
+const { isPageActive } = usePageActivity()
+watch(isPageActive, (active) => {
+  if (active) void loadGroups()
+})
+
+defineExpose({ loadViews, loadGroups })
 </script>
 
 <template>
   <div class="view-manager">
-    <!-- 槽内只放筛选项（全部 + 各视图），动作按钮（新建 / 视图管理）放槽外：
+    <!-- 槽内只放筛选项（全部 + 各视图 + 分组标签），动作按钮（新建 / 视图管理）放槽外：
          「选哪一个」与「做什么」语义分开，顺带消掉了原来「全部」24px、视图 32px 的高度不一致 -->
     <div class="view-tabs">
       <div class="view-seg">
         <button
           v-if="showAllTab"
-          :class="['view-tab', { active: activeViewId === null }]"
+          :class="['view-tab', { active: allTabActive }]"
           @click="selectView(null)"
         >
           全部
@@ -292,6 +406,24 @@ defineExpose({ loadViews })
         >
           {{ view.name }}
         </button>
+        <!-- 分组标签（issue #130）排在自定义视图之后、放在同一个灰底槽里：三类标签同一时刻只能选一个，
+             同槽正好表达「单选」（另起一个槽会被读成可以和视图叠加的第二个维度）。
+             与自己建的视图靠「竖线分隔 + 文件夹图标」区分。竖线画在第一个分组标签自己的伪元素上
+             （view-tab--group-first），不再是槽里单独的一个子项：槽会换行，单独的竖线可能孤零零落在上一行末尾。
+             前面恒有东西可分隔：没有可见视图时 showAllTab 会强制显示「全部」。 -->
+        <template v-if="showGroupTabs">
+          <button
+            v-for="(group, index) in groups"
+            :key="`group:${group.name}`"
+            type="button"
+            :class="['view-tab', 'view-tab--group', { 'view-tab--group-first': index === 0, active: activeGroupName === group.name }]"
+            :title="`分组：${group.name}（${group.count} 个任务）`"
+            @click="selectGroup(group.name)"
+          >
+            <el-icon class="view-tab__icon"><Folder /></el-icon>
+            <span class="view-tab__label">{{ group.name }}</span>
+          </button>
+        </template>
       </div>
       <div class="view-tabs__actions">
         <el-tooltip content="新建视图" placement="top">
@@ -299,7 +431,9 @@ defineExpose({ loadViews })
             <el-icon><Plus /></el-icon>
           </el-button>
         </el-tooltip>
-        <el-tooltip v-if="views.length > 0" content="视图管理" placement="top">
+        <!-- 有分组时也要给入口：分组标签的显隐开关在管理弹窗里，
+             一个自定义视图都没有的用户（很多人只用 App 建分组）也得能关掉它、关掉后也得能再打开 -->
+        <el-tooltip v-if="views.length > 0 || groups.length > 0" content="视图管理" placement="top">
           <el-button @click="openManagementDialog">
             <el-icon><Setting /></el-icon>
           </el-button>
@@ -311,6 +445,8 @@ defineExpose({ loadViews })
       v-model="showManagementDialog"
       :views="views"
       :all-hidden="allTabHidden"
+      :groups-hidden="groupTabsHidden"
+      :group-count="groups.length"
       @saved="handleManagementSaved"
       @edit="openEditDialog"
       @delete="doDeleteView"
@@ -357,7 +493,7 @@ defineExpose({ loadViews })
           <div class="filter-list">
             <div v-for="(rule, index) in editForm.sortRules" :key="index" class="filter-row">
               <el-select v-model="rule.field" style="width: 120px" size="small">
-                <el-option v-for="f in filterFields" :key="f.value" :label="f.label" :value="f.value" />
+                <el-option v-for="f in sortFields" :key="f.value" :label="f.label" :value="f.value" />
               </el-select>
               <el-select v-model="rule.direction" style="width: 100px" size="small">
                 <el-option v-for="d in sortDirections" :key="d.value" :label="d.label" :value="d.value" />
@@ -443,6 +579,52 @@ defineExpose({ loadViews })
     border-color: var(--el-border-color-lighter);
     font-weight: 600;
   }
+}
+
+// 自定义视图与分组标签之间的竖向分隔线（issue #130）。
+// 画在第一个分组标签自己的 ::before 上，不再是槽里一个独立的 flex 子项：槽是 flex-wrap 的，
+// 视图、分组都多而窗口又窄时，独立的竖线会单独留在上一行末尾，成了一根孤零零的线；
+// 挂在标签自身上，换行时它始终紧贴第一个分组标签左侧、跟着一起走。
+// 间距照原来的独立元素复刻：gap 2 + 外边距 4 + 线 1 + 外边距 4 + gap 2 = 13px ——
+// 这里用左外边距 11px（加上槽的 gap 2 正好 13px）让出位置，线落在正中、两侧各留 6px。
+// 只是一条 1px 的线，不是表面，不涉及圆角；高 16px 约为项高 33px 的一半，居中不顶槽边。
+.view-tab--group-first {
+  position: relative;
+  margin-left: 11px;
+
+  &::before {
+    content: '';
+    position: absolute;
+    // 绝对定位以内边距盒为参照，它比边框盒往里缩了 1px（.view-tab 的透明描边占位）：
+    // -8px 让线的左缘落在边框盒左缘外 7px，线右侧与标签之间正好 6px
+    left: -8px;
+    top: calc(50% - 8px);
+    width: 1px;
+    height: 16px;
+    background: var(--el-border-color);
+    pointer-events: none;
+  }
+}
+
+// 分组标签：前置文件夹图标 + 名称。尺寸、配色、选中态全部沿用 .view-tab，与上一排分段控件逐项对齐；
+// inline-flex + center 下图标（13px）比文字行矮，项高不变，仍是 33px。
+.view-tab--group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  // 分组名是 App 里的自由输入，可能很长；单行省略，全名与任务数挂在按钮的 title 上
+  max-width: 16em;
+}
+
+.view-tab__icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.view-tab__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 // 动作按钮在槽外，高度对齐灰底槽（3 + 33 + 3 = 39px），

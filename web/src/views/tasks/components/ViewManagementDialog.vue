@@ -17,11 +17,16 @@ const props = defineProps<{
   // 「全部」的当前显隐状态。它是标签栏里硬编码的内置项、库里没有对应行，
   // 所以只能由父组件从 localStorage 读来传进来，再由本弹窗把结果原样回传。
   allHidden: boolean
+  // 分组标签（issue #130）的整体显隐，与「全部」同一套来回：分组来自任务 labels 里的 `分组:` 标签，
+  // 同样没有 task_views 行、没有 hidden 字段可写，只能落本地存储。
+  groupsHidden: boolean
+  // 当前有几个分组，只用来写说明文字
+  groupCount: number
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  saved: [allHidden: boolean]
+  saved: [allHidden: boolean, groupsHidden: boolean]
   edit: [view: TaskView]
   delete: [viewId: number]
 }>()
@@ -31,6 +36,8 @@ const saving = ref(false)
 const managed = ref<ManagedView[]>([])
 // 「全部」显隐的本地工作副本，和各视图的 _hidden 一样，点保存前不落地
 const allTabHidden = ref(props.allHidden)
+// 分组标签显隐的本地工作副本，规则同上
+const groupTabsHidden = ref(props.groupsHidden)
 const listContainer = ref<HTMLElement | null>(null)
 let sortableInstance: any = null
 let sortableLoader: Promise<any> | null = null
@@ -104,8 +111,8 @@ async function handleDelete(view: ManagedView) {
 async function handleSave() {
   saving.value = true
   try {
-    // 「全部」不参与 sort_order 重编号、也不进 reorder 的提交列表 —— 库里根本没有它这一行，
-    // 它的显隐由父组件写本地存储。所以一个自定义视图都没有时也仍然要走到下面的 emit。
+    // 「全部」与「分组标签」都不参与 sort_order 重编号、也不进 reorder 的提交列表 —— 库里根本没有这两行，
+    // 它们的显隐由父组件写本地存储。所以一个自定义视图都没有时也仍然要走到下面的 emit。
     if (managed.value.length > 0) {
       // Dense re-numbering keeps sort_order contiguous and mirrors the
       // visible list order.
@@ -117,7 +124,7 @@ async function handleSave() {
       await taskViewApi.reorder(payload)
     }
     ElMessage.success('视图设置已保存')
-    emit('saved', allTabHidden.value)
+    emit('saved', allTabHidden.value, groupTabsHidden.value)
     emit('update:modelValue', false)
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || err?.message || '保存失败')
@@ -137,6 +144,7 @@ watch(
       managed.value = cloneToManaged(props.views)
       // 每次打开都从父组件当前值重新取，避免上次取消掉的改动残留在工作副本里
       allTabHidden.value = props.allHidden
+      groupTabsHidden.value = props.groupsHidden
       await nextTick()
       await initSortable()
     } else {
@@ -167,7 +175,7 @@ watch(
     @update:model-value="handleClose"
   >
     <div class="view-manager-hint">
-      拖动左侧把手调整顺序，右侧开关控制是否在标签栏展示；「全部」是内置项，只能改显隐。
+      拖动左侧把手调整顺序，右侧开关控制是否在标签栏展示；「全部」与「分组标签」是内置项，只能改显隐。
       <!-- 计数刻意只报自定义视图的口径，并在文案里写明，避免与下方列表行数对不上 -->
       <span class="view-manager-counts">自定义视图 {{ managed.length }} 个 · 显示 {{ visibleCount }} · 隐藏 {{ hiddenCount }}</span>
     </div>
@@ -199,6 +207,37 @@ watch(
             :active-icon="View"
             :inactive-icon="Hide"
             @update:model-value="allTabHidden = !allTabHidden"
+          />
+        </el-tooltip>
+      </div>
+    </div>
+
+    <!-- 「分组标签」同样是内置项（issue #130）：来自任务 labels 里的 `分组:` 标签（App 里建的分组），
+         库里没有对应的视图行，顺序固定按名称、也不能单独编辑删除，所以只给一个整体显示开关。
+         同样放在 listContainer 之外，理由同上。 -->
+    <div
+      class="view-manager-row is-builtin"
+      :class="{ 'is-hidden': groupTabsHidden }"
+    >
+      <span class="view-drag-handle is-locked" title="内置项，不参与排序">
+        <el-icon><Lock /></el-icon>
+      </span>
+      <span class="view-row-name">
+        分组标签
+        <span class="view-row-note">
+          {{ groupCount > 0
+            ? `当前 ${groupCount} 个分组，排在自定义视图之后，按名称排列`
+            : '暂无分组；任务设置了分组（App 里建的分组也算）后会自动出现' }}
+        </span>
+      </span>
+      <div class="view-row-actions">
+        <el-tooltip :content="groupTabsHidden ? '在标签栏隐藏' : '在标签栏显示'" placement="top">
+          <el-switch
+            :model-value="!groupTabsHidden"
+            inline-prompt
+            :active-icon="View"
+            :inactive-icon="Hide"
+            @update:model-value="groupTabsHidden = !groupTabsHidden"
           />
         </el-tooltip>
       </div>
@@ -245,7 +284,7 @@ watch(
 
     <template #footer>
       <el-button @click="handleClose(false)">取消</el-button>
-      <!-- 不再按 managed.length 禁用：一个自定义视图都没有时，「全部」的显隐开关仍然要能保存 -->
+      <!-- 不再按 managed.length 禁用：一个自定义视图都没有时，「全部」与「分组标签」的显隐开关仍然要能保存 -->
       <el-button
         type="primary"
         :loading="saving"
@@ -315,6 +354,11 @@ watch(
   &.is-builtin:hover {
     background: var(--el-bg-color);
     border-color: var(--el-border-color-lighter);
+  }
+
+  // 两个内置项（「全部」「分组标签」）上下相邻，间距与下方视图列表的行间距同为 6px
+  &.is-builtin + &.is-builtin {
+    margin-top: 6px;
   }
 }
 

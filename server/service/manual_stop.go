@@ -48,7 +48,8 @@ func consumeManualStop(taskID uint) bool {
 // 存时刻而不是 struct{}{}，是为了防「任务 id 被复用」：标记只活在内存里，
 // 而 SQLite 的自增 id 在删掉最大那行之后是会被下一条记录重新用上的。
 // 万一某个任务被标记后连着被删掉，光看 id 的话，新建的同 id 任务会平白继承一个禁用意图。
-// 加上「标记时刻必须晚于任务的创建时刻」这条判据，复用出来的新任务就一定不会命中。
+// 加上「标记时刻不早于任务的创建时刻」这条判据，复用出来的新任务就一定不会命中：
+// 顺序一定是「先打标记 → 再删任务 → 再建新任务」，新任务的创建时刻只会更晚。
 var pendingDisableMarks sync.Map
 
 // MarkPendingDisable 标记某任务「本次执行结束后落成禁用」。重复标记安全（幂等）。
@@ -81,8 +82,14 @@ func hasPendingDisable(task *model.Task) bool {
 	if !ok {
 		return false
 	}
-	// 标记比任务本身还早，说明这个 id 是复用来的，标记属于上一个任务，不能算数。
-	return !task.CreatedAt.IsZero() && markedAt.After(task.CreatedAt)
+	// 标记严格早于任务的创建时刻，说明这个 id 是复用来的，标记属于上一个任务，不能算数。
+	//
+	// 判据刻意是「不早于」而不是「晚于」：time.Now() 的墙钟粒度在 Windows 上是百微秒级，
+	// 「建任务 → 打标记」之间不足一个 tick 时，两个时刻会完全相等。要求严格晚于的话，
+	// 相等这一档会被判成 id 复用，用户的禁用意图被静默丢掉（本机实测偶发 3/100）。
+	// 相等算命中并不会削弱防复用：id 复用的新任务是「先有标记、再删任务、再新建」才出现的，
+	// 它的创建时刻必然晚于那笔标记，只有整套删建都挤进同一个 tick 才可能误继承。
+	return !task.CreatedAt.IsZero() && !markedAt.Before(task.CreatedAt)
 }
 
 // HasPendingDisable 是 hasPendingDisable 的导出包装，供 handler 跨包调用。

@@ -90,9 +90,29 @@ export interface TaskBatchDeleteScriptOptions {
   confirm_script_paths?: string[]
 }
 
+/**
+ * 任务分组清单里的一项（issue #130）。分组 = 任务 labels 里的 `分组:<名>` 标签（App 建的分组就是它），
+ * 服务端按「trim 后取第一个 `分组:`」的口径去重计数。
+ */
+export interface TaskGroupSummary {
+  name: string
+  /** 带这个分组的任务数 */
+  count: number
+}
+
 export const taskApi = {
+  // 列表项，以及启用 / 禁用、新建 / 编辑 / 复制接口响应里的 data，从 v3.2.8 起多一个 enabled: boolean（启用开关位，与运行态无关，issue #133）。
+  // 老后端不下发，页面用 taskLabels.ts 的 isTaskSwitchOn 读它，缺失时回退 status !== 0。
+  // filters 从 v3.2.8 起认 group 字段（issue #130），只比任务的 `分组:` 标签。
   list(params?: { keyword?: string; status?: number | string; label?: string; page?: number; page_size?: number; filters?: string; sort_rules?: string; all?: 0 | 1 }) {
     return request.get('/tasks', { params }) as Promise<{ data: any[]; total: number; page: number; page_size: number }>
+  },
+
+  // 全部任务分组（issue #130）：裸数组 [{ name, count }]，按 name 升序。
+  // 老后端没有这个接口会 404；演示站没注册时会兜底回 { data: [] } 这种对象而不是数组 ——
+  // 调用方必须把「请求失败」和「返回的不是数组」都当成「没有分组」静默处理，不能弹错。
+  groups() {
+    return request.get('/tasks/groups') as Promise<TaskGroupSummary[]>
   },
 
   // push_scope 见 @/api/notification 的 NotifyPushScope：

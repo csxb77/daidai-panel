@@ -216,6 +216,12 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "无效的订阅定时规则")
 		return
 	}
+	// 白名单 / 黑名单 / 依赖规则里含正则触发字符的片段按正则解析（#129），编译不过就在保存时拦下，
+	// 文案点名字段、第几段和 RE2 的报错。拉取时另有兜底（逐条跳过并告警），管的是升级前的存量和青龙备份导入。
+	if err := service.ValidateSubscriptionFilterFields(req.Whitelist, req.Blacklist, req.DependOn); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
 	authType, sshKeyID, authToken, err := normalizeSubscriptionAuthInput(req.AuthType, req.SSHKeyID, req.AuthToken)
 	if err != nil {
 		response.BadRequest(c, err.Error())
@@ -288,6 +294,37 @@ func (h *SubscriptionHandler) Create(c *gin.Context) {
 	response.Created(c, gin.H{"message": "创建成功", "data": sub.ToDict()})
 }
 
+// validateChangedSubscriptionFilterFields 只校验这次真的改了的过滤字段（值与库里逐字不同才校验）。
+// 库里的存量值（升级前保存的、青龙备份导入的）可能本来就不是合法正则，而 App 每次保存都会把
+// whitelist / blacklist / depend_on 原样回传；全量校验会让用户连改个名字都被 400 挡住。
+// 这类存量值由拉取时的兜底处理：编译不过的片段逐条跳过并告警。
+// 非字符串的值（null、数字）不在这里拦，维持 map 更新原有的写库行为。
+func validateChangedSubscriptionFilterFields(updates map[string]interface{}, sub *model.Subscription) error {
+	current := map[string]string{
+		service.SubscriptionFilterFieldWhitelist: sub.Whitelist,
+		service.SubscriptionFilterFieldBlacklist: sub.Blacklist,
+		service.SubscriptionFilterFieldDependOn:  sub.DependOn,
+	}
+	for _, key := range []string{
+		service.SubscriptionFilterFieldWhitelist,
+		service.SubscriptionFilterFieldBlacklist,
+		service.SubscriptionFilterFieldDependOn,
+	} {
+		value, exists := updates[key]
+		if !exists {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || text == current[key] {
+			continue
+		}
+		if err := service.ValidateSubscriptionFilterField(key, text); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (h *SubscriptionHandler) Update(c *gin.Context) {
 	subID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 
@@ -330,6 +367,11 @@ func (h *SubscriptionHandler) Update(c *gin.Context) {
 			response.BadRequest(c, "无效的订阅定时规则")
 			return
 		}
+	}
+
+	if err := validateChangedSubscriptionFilterFields(updates, &sub); err != nil {
+		response.BadRequest(c, err.Error())
+		return
 	}
 
 	// 覆盖拉取策略写库前先归一。Update 收的是 map[string]interface{}，

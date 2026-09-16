@@ -87,6 +87,12 @@ func Setup(engine *gin.Engine) {
 	androidRuntimeHandler.RegisterRoutes(v1)
 	androidRuntimeHandler.RegisterRoutes(legacy)
 
+	// 内置 MCP 服务（issue #128）。它的工具调用会在进程内回放到上面这些 /api/v1 接口，
+	// 所以要把 engine 本身交给它；回放发生在请求期，届时所有路由（含静态前端）都已注册完。
+	mcpHandler := handler.NewMCPHandler(engine)
+	mcpHandler.RegisterRoutes(v1)
+	mcpHandler.RegisterRoutes(legacy)
+
 	engine.GET("/robots.txt", func(c *gin.Context) {
 		c.Data(200, "text/plain; charset=utf-8", []byte("User-agent: *\nDisallow: /\n"))
 	})

@@ -24,7 +24,7 @@
 
 呆呆面板 (Daidai Panel) 是一款轻量级定时任务管理平台，采用 Go (Gin) + Vue3 (Element Plus) + SQLite 架构，专注于脚本托管与自动化任务调度。支持 Python、Node.js（含 `.js` / `.mjs`）、Shell、TypeScript、Go 等多语言脚本的定时执行与可视化管理，内置 22 种消息推送渠道、订阅管理、环境变量、依赖管理、Open API 等功能。Docker 一键部署，开箱即用。
 
-> 最新稳定版：`v3.2.7` · [更新日志](./docs/release-notes/v3.2.7.md)<br>
+> 最新稳定版：`v3.2.8` · [更新日志](./docs/release-notes/v3.2.8.md)<br>
 > 本次重点：运行中的任务排到前面（但点运行不会当场跳、刷新后才重排）；环境变量能按变量名精确筛选并显示同名条数；上传已有定时任务的脚本不再重复询问；「发现新版本」弹窗终于渲染 markdown<br>
 > APP 客户端：[linzixuanzz/Dumb-Panel-APP](https://github.com/linzixuanzz/Dumb-Panel-APP)
 
@@ -42,12 +42,13 @@
 
 - **定时任务** — Cron 表达式调度，支持重试、超时、定时停止、任务依赖、前后置钩子
 - **脚本管理** — 在线代码编辑器，支持 Python、Node.js（含 `.mjs`）、Shell、TypeScript、Go，拖拽移动文件
-- **执行日志** — SSE 实时日志流，历史日志查看与自动清理
-- **环境变量** — 分组管理、拖拽排序、批量导入导出（兼容青龙格式）
+- **执行日志** — SSE 实时日志流（自动跟随最新输出，往上翻即暂停），历史日志查看与自动清理
+- **环境变量** — 分组管理、拖拽排序、敏感值默认遮蔽、批量导入导出（兼容青龙格式）
 - **订阅管理** — 自动从 Git 仓库拉取脚本，支持定期同步
 - **依赖管理** — 可视化安装/卸载 Python (pip)、Node.js (npm) 依赖，以及 **Linux 系统包**（自动识别 `apk` / `apt` / `dnf` / `yum` / `microdnf` / `zypper`）；页面工具条里还有管理员专用的网页版「系统命令行」
 - **通知推送** — Bark、Telegram、Server酱、企业微信、钉钉、飞书等 22 种渠道
 - **开放 API** — App Key / App Secret 认证，支持第三方系统对接
+- **MCP 服务** — 内置 MCP，Claude、Cursor 等 AI 客户端连上后可以直接查任务、看日志、巡检失败任务；管理员放开写入后还能运行任务、改变量（默认关闭，[使用说明](./docs/mcp.md)）
 - **系统安全** — 双因素认证 (2FA)、IP 白名单、登录日志、多设备会话管理
 - **数据备份** — 一键备份与恢复，支持每天/每周/每月定时备份
 - **系统监控** — 实时 CPU / 内存 / 磁盘监控，任务执行趋势统计
@@ -73,14 +74,14 @@
 - 支持 `.mjs` 脚本调试与任务执行
 
 ### 执行日志
-- SSE 实时日志流
+- SSE 实时日志流，自动跟随最新输出（往上翻即暂停，滚回底部恢复）
 - 执行状态追踪（成功/失败/超时/手动终止）
 - 执行耗时统计
 - 日志自动清理策略
 
 ### 环境变量
 - 安全存储敏感配置
-- 变量值脱敏显示
+- 名称像凭据的变量（含 TOKEN、COOKIE、PASSWORD 等）默认遮蔽显示，可切换为全部遮蔽或全部明文
 - 分组管理与拖拽排序
 - 批量导入导出（兼容青龙格式）
 - 任务执行时自动注入
@@ -89,10 +90,12 @@
 - Git 仓库自动拉取
 - 定期同步（Cron 调度）
 - SSH Key / Token 认证
-- 白名单/黑名单/依赖规则过滤（对应青龙 `ql repo` 的第 2/3/4 个参数，`,` 与 `|` 均可作分隔符，匹配方式是「子串包含」而非正则）
-  - 白名单不仅筛选任务，还会参与实际检出范围：只有命中白名单的文件会落盘并建成定时任务。
+- 白名单/黑名单/依赖规则过滤（对应青龙 `ql repo` 的第 2/3/4 个参数，`,` 与 `|` 均可作分隔符）
+  - 匹配方式：普通片段按「子串包含」匹配（不是 glob）；含 `^ $ ( ) [ ] { } ? \` 或 `.*` `.+` 的片段按正则匹配仓库内的相对路径（不锚定，路径分隔写 `/`），例如 `^jd[^_]` 只命中仓库根目录下的 `jdCookie.js` 这类文件。想按字面匹配这些字符时用 `\` 转义；正则写错会在保存时直接提示。
+  - 白名单不仅筛选任务，还会参与实际检出范围：只有命中白名单的文件会落盘并建成定时任务；填了「指定子目录」时按子目录检出，白名单只决定建不建任务。
+  - 用了正则时会改为检出完整仓库（git 的检出规则表达不了正则；多占些磁盘，建任务的范围不变）：依赖规则里有正则片段就会，填了「指定子目录」也一样，但仍只给子目录里的脚本建任务；白名单里的正则片段只在没填「指定子目录」时才会。
   - 依赖规则同样参与检出：命中的文件会被拉取到脚本目录供主脚本调用，但**不会**建成定时任务，主脚本 require 的辅助库填这里即可，不必再塞进白名单。
-  - 黑名单对两者都生效；白名单留空时视为全部命中，依赖规则不改变任何行为。
+  - 黑名单对两者都生效（其中的正则片段只让命中的文件不建任务，不减少落盘）；白名单留空时视为全部命中；如果「指定子目录」也没填，本来就检出完整仓库，依赖规则不起作用。
 
 ### 消息推送
 - 22 种主流推送渠道
@@ -321,16 +324,16 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 
 | 正式浮动标签 | 固定版本标签示例 | 基础系统 | Python | 工具档位 | 支持平台 |
 |--------------|------------------|----------|--------|----------|----------|
-| `latest` | `3.2.7` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-full` | `3.2.7-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
-| `latest-3.10` | `3.2.7-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
-| `latest-3.11` | `3.2.7-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
-| `latest-all` | `3.2.7-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `3.2.7-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `3.2.7-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `3.2.7-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `3.2.7-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `3.2.7-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `latest` | `3.2.8` | Alpine | 3.12 | 精简 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-full` | `3.2.8-full` | Alpine | 3.12 | 完整 | amd64 / arm64 / 386 / arm/v7 |
+| `latest-3.10` | `3.2.8-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
+| `latest-3.11` | `3.2.8-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
+| `latest-all` | `3.2.8-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
+| `debian` | `3.2.8-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-full` | `3.2.8-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
+| `debian-3.10` | `3.2.8-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-3.11` | `3.2.8-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian-all` | `3.2.8-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
 
 后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
@@ -354,7 +357,7 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 | `debian3.11` | `debian-3.11` |
 | `debianall` | `debian-all` |
 
-Debian 的旧固定版本格式也保留兼容别名：`3.2.7-debian3.10`、`3.2.7-debian3.11`、`3.2.7-debianall` 分别对应新的 `3.2.7-debian-3.10`、`3.2.7-debian-3.11`、`3.2.7-debian-all`。新部署请直接使用新名称。
+Debian 的旧固定版本格式也保留兼容别名：`3.2.8-debian3.10`、`3.2.8-debian3.11`、`3.2.8-debianall` 分别对应新的 `3.2.8-debian-3.10`、`3.2.8-debian-3.11`、`3.2.8-debian-all`。新部署请直接使用新名称。
 
 #### 切换标签与本地构建
 
@@ -507,10 +510,11 @@ daidai-panel-windows-amd64/
 | 升级到新版本 | [更新](#更新) |
 | 忘了密码 / 用户名，或 IP 白名单把自己锁在门外 | [容器命令 `ddp`](#容器命令-ddp) |
 | 在定时任务脚本里回头调面板：发通知、写回环境变量、触发别的任务 | [脚本内调用面板能力](./docs/script-api.md) |
+| 让 Claude、Cursor 等 AI 客户端连上面板查任务、看日志 | [内置 MCP 服务](./docs/mcp.md) |
 | 定时任务到点不执行、日志抽屉说「还没有日志记录」，或想跑 Playwright | [定时任务不执行 / 没有日志](./docs/task-not-running.md) |
 | 备份、迁移、想知道数据存在哪 | [数据目录](#数据目录) |
 | 查 Docker 环境变量、`config.yaml` 怎么配 | [配置参考](#配置参考) |
-| 看这一版改了什么 | [v3.2.7 更新日志](./docs/release-notes/v3.2.7.md) |
+| 看这一版改了什么 | [v3.2.8 更新日志](./docs/release-notes/v3.2.8.md) |
 
 ## 端口与反向代理
 
@@ -656,7 +660,7 @@ server {
 
 - **Docker 精简版**：自 `v3.0.0` 起，统一由 Watchtower 拉取并重建容器。仓库自带的两份基础 Compose 已配置内部 HTTP API，所以页面手动更新和面板的 `auto_update` 都能触发 Watchtower；Watchtower API 没有向宿主机开放端口。
   ⚠️ 这条链路要求 **Watchtower `v1.20.0` 或更新的版本**，版本偏低时点更新会失败并报 `connection refused`。Watchtower 不会自我更新，需要手动 `docker compose pull watchtower && docker compose up -d watchtower`，详见「快速部署」里的版本提示。
-- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.2.7-full`、`3.2.7-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
+- **Docker 完整版**：同样推荐使用 Watchtower。早期直接把 `/var/run/docker.sock` 挂给面板、由面板调用 Docker CLI 更新的部署仍可保留原有 Socket 挂载，但这条兼容更新链只支持完整版标签。使用 `3.2.8-full`、`3.2.8-debian-full` 这类固定完整版标签触发一键更新时，面板会切换到同系列浮动标签 `latest-full` 或 `debian-full`；精简版不包含 Docker CLI。
 - **二进制部署**：自动匹配 `daidai-windows-amd64.zip` 或 `daidai-linux-*.tar.gz`，后台下载、解压、替换程序和 `web/` 前端文件，更新过程会跳过 `config.yaml` 与数据目录，避免覆盖服务器本地配置。
 - **Magisk 模块版**（自 `v3.0.3`）：下载对应架构的 `daidai-linux-*.tar.gz`，只替换容器内的 `daidai-server`、`ddp` 和前端目录，同时写回模块目录并同步 `module.prop` 版本号，保证重启后不回滚。容器 rootfs、apt/apk 系统包、Python venv 与已装依赖、`config.yaml`、`ports.conf` 一概不动，**不需要重启手机**。
   ⚠️ 在线升级**替换不了模块脚本**（`service.sh` / `customize.sh` / `action.sh`），升完之后是「新面板 + 旧模块外壳」，管理器里的版本号会跟着变成新版。所以由模块脚本实现的新能力需要重刷一次 ZIP 才有 —— 例如 `v3.0.4` 的「停止面板服务」，在线升级上来的用户在面板里会看到该按钮被禁用并提示当前外壳版本。只有当新面板**根本无法**在旧外壳上运行时，面板才会在检查更新阶段直接拒绝升级并要求重刷 ZIP。

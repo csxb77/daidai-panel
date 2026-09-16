@@ -281,8 +281,26 @@ function syncEditorTheme() {
   });
 }
 
+/**
+ * 行尾规范成 LF，规则与 CodeMirror 6 自己切行的规则一致（@codemirror/state 的 DefaultSplit 是 /\r\n?|\n/）。
+ *
+ * 本组件没配 EditorState.lineSeparator，所以 CRLF / 单 CR 的内容一灌进来就被按行切开，
+ * doc.toString() 再一律用 \n 拼回 —— 从编辑器里读出来的永远是 LF。
+ * 凡是拿「编辑器当前文本」和 props.modelValue 判等、再据此决定要不要 emit 的地方，
+ * 都得先把 modelValue 过一遍这里，否则一打开 CRLF 文件就会被当成「用户改过」。
+ * ⚠️ 别改成配 lineSeparator: "\r\n" 让 CM 原样保留 CRLF：那会连带改变编辑后保存出去的行尾
+ * （现在是整份存成 LF），不是这里要动的东西。
+ */
+function normalizeLineBreaks(value: string) {
+  return value.replace(/\r\n?/g, "\n");
+}
+
 function replaceDoc(value: string) {
   if (!view) return;
+  // 这里刻意原样判等、不走 normalizeLineBreaks：外部值是 CRLF 时（切到 CRLF 文件、放弃改动回到 CRLF 原文）
+  // 这条永远不相等，一定走下面的整篇替换，不会有哪次外部变化被判等挡掉；
+  // 就算规范后恰好和当前文档一样，也只是多替换一次、显示不变。
+  // 这次替换也不会回写给父组件：updateListener 是规范后判等的，相等就不 emit。
   if (view.state.doc.toString() === value) return;
   // 外部整体换文档（脚本页切文件、拉到内容后首次灌入、setValue）时，
   // 「自动」档必须按新内容重新检测一次缩进宽度 —— 这是 issue #116-1 的关键一环：
@@ -361,7 +379,10 @@ onMounted(() => {
           const value = update.state.doc.toString();
           // 和外部 modelValue 相同，说明这次变更是下面那个 watch 同步进来的，
           // 再 emit 一次就和父组件转成回环了。
-          if (value === props.modelValue) return;
+          // modelValue 必须先规范行尾再比（见 normalizeLineBreaks）：CRLF 文件灌进来后 value 是 LF，
+          // 原样比永远不等，会把 LF 回写给父组件 —— 脚本页的「未保存」圆点、离开确认、
+          // 挡掉升级后的自动刷新就全误报了。用户真改了内容时规范后仍不等，照常 emit。
+          if (value === normalizeLineBreaks(props.modelValue)) return;
           // 每次输入即时 emit，不能等失焦：
           // 「未保存」角标、保存按钮 disabled、调试弹窗的 markDebugCodeChanged 全靠它。
           emit("update:modelValue", value);

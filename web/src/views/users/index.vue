@@ -337,7 +337,7 @@ function getRoleName(role: string) {
     </div>
 
     <div v-else class="table-card">
-      <el-table :data="pagedUsers" v-loading="loading" style="width: 100%" :header-cell-style="{ background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '13px' }">
+      <el-table :data="pagedUsers" v-loading="loading" style="width: 100%" :header-cell-style="{ background: 'var(--el-fill-color-light)', color: 'var(--el-text-color-regular)', fontWeight: 600, fontSize: '13px' }">
         <el-table-column prop="id" label="ID" width="60" />
         <el-table-column prop="username" label="用户名" min-width="150">
           <template #default="{ row }">

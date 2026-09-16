@@ -58,6 +58,12 @@ export interface ToastOptions {
   grouping?: boolean
   /** 带操作的轻提示：在文字右侧挂一个可点击的次要动作 */
   action?: ToastAction
+  /**
+   * 提示关闭时回调。自动到期、用户点关闭按钮、点了操作按钮后自动关，三种情况都会触发。
+   * 用于「提示还在不在」会影响后续行为的场景（比如按提示的停留时长做去重的调用方，
+   * 提示被提前关掉后要把去重窗口撤掉）。
+   */
+  onClose?: () => void
 }
 
 type ToastType = 'success' | 'info' | 'warning' | 'error'
@@ -79,6 +85,7 @@ function show(type: ToastType, message: string, options?: ToastOptions): Message
       // 不自动关闭时必须给关闭按钮，否则提示会永久占住页面顶部
       showClose: duration === 0,
       grouping: options?.grouping ?? false,
+      onClose: options?.onClose,
     })
   }
 
@@ -112,6 +119,7 @@ function show(type: ToastType, message: string, options?: ToastOptions): Message
     // 带 VNode 的提示不能合并：EP 的 grouping 按内容判重，VNode 每次都是新对象，
     // 开着它只会让判重逻辑空转，还可能把不同的动作按钮错误地折叠到一起。
     grouping: false,
+    onClose: options.onClose,
   })
 
   return handler

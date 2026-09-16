@@ -22,6 +22,16 @@ export const TASK_STATUS_QUEUED = 0.5
 export const TASK_STATUS_ENABLED = 1
 export const TASK_STATUS_RUNNING = 2
 
+/**
+ * server/model/task.go:21-23 —— 任务「上次结果」（last_run_status）用的是这一套，不是下面执行日志的 LOG_STATUS_*。
+ * 两套只有「成功 / 失败」恰好同值：已终止在任务上是 2、在日志上是 3（2 在日志上是「运行中」）。
+ * 页面按 2 渲染「已终止」（views/tasks/index.vue 的 getRunStatusText、TaskDetail.vue），
+ * 把日志状态直接抄过来的话，被终止的任务会显示成「失败」。换算见 fixtures/business.ts 的 runStatusOfLogStatus。
+ */
+export const RUN_STATUS_SUCCESS = 0
+export const RUN_STATUS_FAILED = 1
+export const RUN_STATUS_ABORTED = 2
+
 /** server/model/task_log.go:7-12 */
 export const LOG_STATUS_SUCCESS = 0
 export const LOG_STATUS_FAILED = 1
@@ -36,9 +46,19 @@ export interface DemoTask {
   cron_expression: string
   task_type: string
   status: number
+  /**
+   * 待禁用标记（issue #133）。演示站自己的一层，服务端没有这一列：
+   * 对应服务端只活在内存里的「待禁用」标记（service.MarkPendingDisable），只在排队中 / 运行中才作数。
+   *   - 打标记：手动运行一个禁用中的任务（RunNow）、运行中点「禁用」；
+   *   - 清标记：点「启用」、这次执行结算（跑完 / 被停止）。
+   * status 在排队中 / 运行中说明不了开关是开是关，只能看它。
+   * toTaskDict 不下发它，下发的是由它算出来的 enabled（开关位，见 db.ts 的 resolveTaskEnabledSwitch）。
+   */
+  pending_disable: boolean
   /** 存的是数组；服务端库里是逗号串，但 ToDict() 下发的就是数组 */
   labels: string[]
   last_run_at: string | null
+  /** 取值是 RUN_STATUS_*（0 成功 / 1 失败 / 2 已终止），不是执行日志的 LOG_STATUS_*；没有结果时为 null */
   last_run_status: number | null
   timeout: number
   success_exit_codes: string

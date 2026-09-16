@@ -77,6 +77,8 @@ func run(args []string) int {
 		err = runDisable2FA(rt, args[1:])
 	case "ip-whitelist", "ip-white", "whitelist":
 		err = runIPWhitelist(rt, args[1:])
+	case "mcp":
+		err = runMCP(rt, args[1:])
 	default:
 		err = fmt.Errorf("未知命令: %s", args[0])
 	}

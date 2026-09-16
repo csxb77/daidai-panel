@@ -133,6 +133,22 @@ export function classifyDisplayTaskLabels(
   return entries
 }
 
+/**
+ * 任务的「启用开关」是否打开 —— 与运行态无关（issue #133）。
+ *
+ * ⚠️ 这不是标签逻辑。放在这里只是因为它要被列表页（index.vue）和详情弹窗（TaskDetail.vue）共用，
+ * 而 tasks 目录下这两处已经共同引用的 helper 模块只有本文件；两边各抄一份迟早会改漏一边。
+ *
+ * 为什么不能再按 `status === 0` 判：status 一个字段同时承载「开关」和「运行态」。
+ * 禁用任务被手动运行时，排队中 / 运行中的 status 是 0.5 / 2，与启用任务一模一样，
+ * 于是运行期间下拉第一项显示成「禁用」（实际仍是禁用），点下去还会走「运行结束后禁用」的分支。
+ * 服务端 v3.2.8 起在列表项与任务详情里下发 enabled（契约 C1）专门表达开关位；
+ * 老后端 / 未同步的演示站不下发时退回原来的 status !== 0，行为与改动前逐字一致。
+ */
+export function isTaskSwitchOn(task: any): boolean {
+  return typeof task?.enabled === 'boolean' ? task.enabled : task?.status !== 0
+}
+
 export function splitTaskLabels(labels: string[] = []) {
   const editableLabels: string[] = []
   const internalLabels: string[] = []

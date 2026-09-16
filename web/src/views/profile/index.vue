@@ -13,8 +13,14 @@ import {
   InfoFilled,
   Camera,
   Delete,
+  MagicStick,
 } from "@element-plus/icons-vue";
 import { authApi } from "@/api/auth";
+import {
+  applyMotionPreference,
+  readMotionPreference,
+  type MotionPreference,
+} from "@/utils/panelAppearance";
 import { securityApi } from "@/api/security";
 import {
   sponsorApi,
@@ -403,6 +409,40 @@ async function handleDisable2FA() {
   }
 }
 
+// ===== 界面动效（本机偏好，存 localStorage；三档的具体含义见 utils/panelAppearance.ts）=====
+const motionOptions: Array<{ value: MotionPreference; label: string }> = [
+  { value: "system", label: "跟随系统" },
+  { value: "always", label: "始终开启" },
+  { value: "reduce", label: "减少动效" },
+];
+const motionPreference = ref<MotionPreference>(readMotionPreference());
+// 系统当前是否开着「减少动态效果」：只用来在说明里提示用户「为什么跟随系统时看不到动画」，
+// 真正的降级完全由 global.scss 里的媒体查询决定，这里读不读都不影响效果。
+const systemReducedMotion = ref(false);
+let reducedMotionQuery: MediaQueryList | null = null;
+
+function setMotionPreference(value: MotionPreference) {
+  // applyMotionPreference 会写 localStorage 并立即改 <html> 上的 class，全站即时生效、无需刷新
+  motionPreference.value = applyMotionPreference(value);
+}
+
+function syncSystemReducedMotion() {
+  systemReducedMotion.value = Boolean(reducedMotionQuery?.matches);
+}
+
+onMounted(() => {
+  // 老 WebView 可能没有 matchMedia：拿不到就当系统没开，只影响那一行提示文字
+  reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
+  syncSystemReducedMotion();
+  // 页面开着时用户也可能去改系统设置，跟着刷新提示
+  reducedMotionQuery?.addEventListener("change", syncSystemReducedMotion);
+});
+
+onUnmounted(() => {
+  reducedMotionQuery?.removeEventListener("change", syncSystemReducedMotion);
+  reducedMotionQuery = null;
+});
+
 onMounted(async () => {
   if (!authStore.user) {
     try {
@@ -639,6 +679,41 @@ onUnmounted(() => {
                 }}</span>
               </div>
             </div>
+          </section>
+
+          <!-- 界面动效：纯本机偏好，不进服务端配置（理由见 utils/panelAppearance.ts）。
+               分段控件用全局的 .dd-seg-group / .dd-seg-btn，与全站「多选一」的控件同一套观感。 -->
+          <section class="profile-card">
+            <header class="profile-card-header">
+              <span class="card-title">
+                <el-icon :size="15"><MagicStick /></el-icon>
+                <span>界面动效</span>
+              </span>
+              <span class="motion-pref-scope">仅对当前浏览器生效</span>
+            </header>
+            <div class="dd-seg-group" role="radiogroup" aria-label="界面动效">
+              <button
+                v-for="option in motionOptions"
+                :key="option.value"
+                type="button"
+                role="radio"
+                class="dd-seg-btn"
+                :class="{ 'is-active': motionPreference === option.value }"
+                :aria-checked="motionPreference === option.value"
+                @click="setMotionPreference(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <p class="motion-pref-desc">
+              系统开了「减少动态效果」时浏览器默认不播动画，选「始终开启」可覆盖；
+              选「减少动效」则无论系统怎么设，动画都压到几乎不可见。
+            </p>
+            <p class="motion-pref-desc motion-pref-desc--muted">
+              当前系统：{{
+                systemReducedMotion ? "已开启减少动态效果" : "未开启减少动态效果"
+              }}
+            </p>
           </section>
 
           <section class="profile-card">
@@ -1323,6 +1398,30 @@ onUnmounted(() => {
   font-size: 15px;
   font-weight: 700;
   color: var(--el-text-color-primary);
+}
+
+/* 界面动效卡片：标题右侧的作用范围说明 + 分段控件下方的说明文字 */
+.motion-pref-scope {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+/* 320px 宽时三个分段项刚好放得下（约 256px / 可用约 260px），留一手换行兜底，不许撑破卡片 */
+.profile-card .dd-seg-group {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.motion-pref-desc {
+  margin: 12px 0 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+}
+
+.motion-pref-desc--muted {
+  margin-top: 4px;
+  color: var(--el-text-color-secondary);
 }
 
 /* Info grid */

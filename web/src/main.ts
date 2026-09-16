@@ -64,7 +64,9 @@ import {
 import App from "./App.vue";
 import LoadingMotion from "./components/LoadingMotion.vue";
 import router from "./router";
+import { isChunkLoadError, reloadOnce } from "./utils/chunkReload";
 import {
+  applyMotionPreference,
   applyPanelShapeStyle,
   fetchAndApplyPanelAppearance,
 } from "./utils/panelAppearance";
@@ -101,6 +103,24 @@ if (!daidaiWindow.__DAIDAI_SAFE_FOCUS_PATCHED__) {
     rawHTMLElementFocus.call(this, options);
   };
 }
+
+// 升级后旧页面拿不到新版文件时自动刷新一次（issue #126，细节见 utils/chunkReload.ts）。
+// Vite 的预加载助手在任何动态 import 失败时都会先派发这个事件（切页、Monaco、懒加载的弹窗都算），
+// 它是 chunk 失效最早、也最全的信号。模块自身求值时抛的普通异常也会走到这里，由 isChunkLoadError 挡在外面：
+// 那是代码 bug，刷新解决不了。
+//
+// ⚠️ preventDefault 只能在真的安排了刷新时才调：它会让那次 import 静默 resolve 成 undefined 而不是 reject。
+//    被限次拦下（60 秒内刚刷过）、页面上有未保存的内容（这时 reloadOnce 改为提示用户保存后手动刷新）时，
+//    reloadOnce 都返回 false。这时还吞掉的话，调用方就拿不到错误 —— 编辑器停在「加载中」出不来，
+//    切页报的是一句不相干的「组件解析失败」—— 比原样抛出去更难懂。
+//    reloadOnce 把真正的跳转推迟到下一个宏任务，所以先 reloadOnce 再 preventDefault 与反过来写效果相同。
+// 挂在模块顶层：bootstrap() 里第一个动态 import（演示站的 mock 层）之前就必须就位。
+window.addEventListener("vite:preloadError", (event) => {
+  if (!isChunkLoadError(event.payload)) return;
+  if (reloadOnce("preload")) {
+    event.preventDefault();
+  }
+});
 
 const globalIcons = {
   ArrowLeft,
@@ -179,6 +199,10 @@ async function bootstrap() {
   // ⚠️ 必须放在下面 demo 的 await import() 之前：演示版构建里那一 await 会让出主线程，
   //    浏览器很可能已经把首帧画出去了，放在它后面就等于没做。
   applyPanelShapeStyle();
+  // 界面动效偏好（跟随系统 / 始终开启 / 减少动效，个人设置页可切）同理：<html> 上的
+  // dd-motion-force / dd-motion-off 必须在首帧之前挂好，挂晚了首屏动画会先按系统设置跑一遍。
+  // 同样必须早于下面 demo 的 await。
+  applyMotionPreference();
 
   // 这段刻意写成「编译期常量守卫 + 动态 import()」：
   // VITE_DEMO 在发布版构建里被 define 成 ''（见 vite.config.ts），条件恒假，

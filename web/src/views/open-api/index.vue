@@ -196,8 +196,8 @@
         v-loading="loading"
         style="width: 100%"
         :header-cell-style="{
-          background: '#f8fafc',
-          color: '#64748b',
+          background: 'var(--el-fill-color-light)',
+          color: 'var(--el-text-color-regular)',
           fontWeight: 600,
           fontSize: '13px',
         }"

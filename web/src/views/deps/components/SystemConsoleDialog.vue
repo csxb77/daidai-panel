@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, nextTick, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Monitor, RefreshRight, Tickets, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import {
@@ -8,6 +8,7 @@ import {
   type SystemConsoleRunLogs,
 } from '@/api/system'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE } from '@/utils/ansi'
+import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
 
 /**
  * 网页版系统命令行。
@@ -67,6 +68,8 @@ const outputRevision = ref(0)
  */
 let renderedGlobalEnd = 0
 const outputRef = ref<HTMLElement>()
+// 命令输出的自动跟随：运行中上翻即暂停，滚回底部恢复
+const outputFollow = useLogAutoFollow(outputRef)
 
 // 渲染窗口封顶：默认只渲染最后 5000 行，避免 `find /` 这类命令把 DOM 撑爆
 const RENDER_WINDOW_CHUNKS = 50
@@ -175,11 +178,8 @@ function appendLogs(logs: string[], discarded = 0) {
   renderedGlobalEnd = discarded + logs.length
   outputRevision.value++
 
-  void nextTick(() => {
-    if (outputRef.value) {
-      outputRef.value.scrollTop = outputRef.value.scrollHeight
-    }
-  })
+  // 跟随中贴到最新，暂停时什么都不做（由 useLogAutoFollow 判定）
+  outputFollow.onContentChange()
 }
 
 function expandOutputWindow() {
@@ -209,6 +209,8 @@ function finishRun(payload: SystemConsoleRunLogs) {
   running.value = false
   activeRunId.value = ''
   clearPollTimer()
+  // 运行结束：冻结跟随态（此前那一次 appendLogs 已按跟随态贴过底）
+  outputFollow.end()
   exitCode.value = payload.exit_code ?? null
   if (payload.status) runStatus.value = payload.status
   if (payload.status === 'failed' && !errorText.value) {
@@ -279,6 +281,8 @@ async function handleRun() {
     }
     activeRunId.value = runId
     pendingCleanupRunId = runId
+    // 命令开始运行：开启自动跟随
+    outputFollow.begin(true)
     pollLogs()
   } catch (err: any) {
     running.value = false
@@ -313,6 +317,9 @@ async function handleStop() {
     if (payload.status) runStatus.value = payload.status
   } catch {
     // 取不到就算了，用户已经看到停止前的输出，标签保持上面落的「已停止」
+  } finally {
+    // 停止后冻结跟随态（上面补取的那一次 appendLogs 已按跟随态贴过底）
+    outputFollow.end()
   }
 }
 
@@ -326,6 +333,8 @@ function teardown() {
   clearPollTimer()
   activeRunId.value = ''
   running.value = false
+  // 关闭弹窗 / 卸载：冻结跟随态
+  outputFollow.end()
   // DELETE 会把还在跑的进程一并杀掉（服务端 Clear 里带 killIfRunning），
   // 所以这里不用再单独发一次 stop——两个请求并发过去，后到的那个只会拿到 404。
   cleanupPendingRun()

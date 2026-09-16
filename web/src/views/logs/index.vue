@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { openAuthorizedEventStream, type EventStreamConnection } from '@/utils/sse'
 import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
+import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
 import { formatDuration } from '@/utils/duration'
@@ -47,6 +48,8 @@ const { isPageActive } = usePageActivity()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let logEventSource: EventStreamConnection | null = null
 const logContentRef = ref<HTMLElement>()
+// 执行日志详情弹窗的自动跟随：运行中日志上翻即暂停，滚回底部恢复；已结束记录停在顶部不跟随
+const detailFollow = useLogAutoFollow(logContentRef)
 let sseBuffer: string[] = []
 let sseFlushRaf = 0
 
@@ -169,8 +172,9 @@ function expandDetailWindow() {
   void nextTick(() => {
     const el = logContentRef.value
     if (!el) return
-    // 补齐的内容是往上长的，按高度差补偿滚动位置，避免视口整个跳走
-    el.scrollTop = previousTop + (el.scrollHeight - previousHeight)
+    // 补齐的内容是往上长的，按高度差补偿滚动位置，避免视口整个跳走。
+    // 走 setScrollTop 带程序标记，避免这次写入被自动跟随误读成用户上翻。
+    detailFollow.setScrollTop(previousTop + (el.scrollHeight - previousHeight))
   })
 }
 
@@ -301,6 +305,8 @@ async function viewDetail(log: any) {
   closeLogSSE()
 
   if (log.status === 2) {
+    // 运行中：开启自动跟随，首帧贴底，用户上翻即暂停
+    detailFollow.begin(true)
     const url = `/api/v1/logs/${log.task_id}/stream`
     sseBuffer = []
     logEventSource = openAuthorizedEventStream(url, {
@@ -308,33 +314,29 @@ async function viewDetail(log: any) {
         sseBuffer.push(data)
         if (!sseFlushRaf) {
           sseFlushRaf = requestAnimationFrame(() => {
-            for (const chunk of sseBuffer) {
-              detailBuffer.append(chunk)
-            }
-            sseBuffer = []
             sseFlushRaf = 0
-            // 整批只触发一次重渲染
-            detailRevision.value++
-            // 等 DOM 真正更新完再滚底，否则会停在这一帧之前的高度上
-            void nextTick(() => {
-              if (logContentRef.value) {
-                logContentRef.value.scrollTop = logContentRef.value.scrollHeight
-              }
-            })
+            flushDetailSseBuffer()
           })
         }
       },
       onEvent(event) {
         if (event.event === 'done') {
+          // 先把还挂在 rAF 里的最后一批冲进去（按跟随态贴底），再冻结跟随态，此后不再自动滚
+          flushDetailSseBuffer()
+          detailFollow.end()
           closeLogSSE()
           loadLogs()
         }
       },
       onError() {
+        flushDetailSseBuffer()
+        detailFollow.end()
         closeLogSSE()
       }
     })
   } else {
+    // 已结束记录：一次性加载、停在顶部，不跟随（与现状一致）
+    detailFollow.end()
     try {
       const res = await logApi.detail(log.id)
       detailLog.value = res
@@ -345,6 +347,25 @@ async function viewDetail(log: any) {
       ElMessage.error(extractError(err, '获取日志详情失败'))
     }
   }
+}
+
+// 把还挂在 rAF 里、没来得及 flush 的实时日志立刻冲进去。结束（done / onError）时必须先调它再 end()：
+// 最后几行常与 done 同一帧到达，留给 rAF 的话那次 onContentChange 会落在 end() 之后被忽略，
+// 跟随中的用户就看不到结尾那几行（旧实现在 rAF 里无条件贴底，没有这个问题）。
+function flushDetailSseBuffer() {
+  if (sseFlushRaf) {
+    cancelAnimationFrame(sseFlushRaf)
+    sseFlushRaf = 0
+  }
+  if (sseBuffer.length === 0) return
+  for (const chunk of sseBuffer) {
+    detailBuffer.append(chunk)
+  }
+  sseBuffer = []
+  // 整批只触发一次重渲染
+  detailRevision.value++
+  // 跟随中贴到最新，暂停时什么都不做（由 useLogAutoFollow 判定）
+  detailFollow.onContentChange()
 }
 
 function closeLogSSE() {
@@ -842,7 +863,7 @@ onBeforeUnmount(() => {
         v-loading="loading"
         :data="logs"
         style="width: 100%"
-        :header-cell-style="{ background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '13px' }"
+        :header-cell-style="{ background: 'var(--el-fill-color-light)', color: 'var(--el-text-color-regular)', fontWeight: 600, fontSize: '13px' }"
         :row-style="{ cursor: 'pointer' }"
         @selection-change="handleSelectionChange"
         @row-click="viewDetail"
@@ -1579,7 +1600,23 @@ onBeforeUnmount(() => {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
+// 页面自带的「减少动效」规则统一走这个包装（C8 动效偏好，本文件下方的呼吸点那段也用它）：
+// - 跟随系统：媒体查询里带 :root:not(.dd-motion-force)，个人设置选「始终开启」时不生效；
+// - 个人设置选「减少动效」：html.dd-motion-off 下不看系统同样生效。
+// 与 global.scss 末尾「减少动效」段同一口径；前缀包在 :where() 里，特异性与改动前的裸选择器相同，层叠结果不变。
+@mixin dd-page-reduced-motion {
+  @media (prefers-reduced-motion: reduce) {
+    :where(:root:not(.dd-motion-force)) {
+      @content;
+    }
+  }
+
+  :where(html.dd-motion-off) {
+    @content;
+  }
+}
+
+@include dd-page-reduced-motion {
   .detail-hero-close {
     transition: none;
   }
@@ -1699,7 +1736,8 @@ onBeforeUnmount(() => {
   100% { transform: scale(1.4); opacity: 0; }
 }
 
-@media (prefers-reduced-motion: reduce) {
+// 走上面 dd-page-reduced-motion 的包装（C8 动效偏好）
+@include dd-page-reduced-motion {
   .status-indicator-pulse,
   .detail-status-item--live::before { animation: none; }
 }

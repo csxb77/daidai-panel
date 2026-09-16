@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, shallowRef, onMounted, onBeforeUnmount, watch } from "vue";
 import {
   defineMonacoTheme,
   detectIndentWidth,
   resolveMonacoLanguage,
 } from "@/utils/codeEditor";
 import { PANEL_APPEARANCE_CHANGE_EVENT } from "@/utils/panelAppearance";
+import { MonacoLoadErrorOverlay } from "@/utils/monacoWarmup";
 // ⚠️ 只能是 `import type`：MonacoApi 是纯类型，type 关键字保证这一行被 TS 完全擦掉、
 // 不产生任何运行时导入。漏掉它就等于给本文件加了一条对 monacoEngine 的静态 import，
 // monaco chunk 会被 Rollup 提升成入口的静态依赖 —— 构建全绿、页面能用，纯静默劣化。
@@ -98,8 +99,19 @@ let monacoApi: MonacoApi | null = null;
 let contentSubscription: { dispose(): void } | null = null;
 // model.onDidChangeOptions 的订阅句柄，即下面那个「缩进宽度自愈守卫」。类型同上。
 let modelOptionsSubscription: { dispose(): void } | null = null;
-// 组件是否已卸载。onMounted 是 async 的，见下面 create 前那道守卫。
+// 组件是否已卸载。mountEditor 是 async 的，见它 create 前那道守卫。
 let destroyed = false;
+// monacoEngine 那一发 import 正在路上。连点「重试」时挡住第二发：两次 await 回来会各 create 一个实例，
+// 先建的那个没人 dispose。
+let loadingEngine = false;
+
+/**
+ * monacoEngine 动态 import 的失败原因；非 null 时在编辑区上盖一层失败态（#126）。
+ * 原来这里没有 try/catch：chunk 一失败（升级后的旧页面、网络抖动、升级进行到一半）编辑区就永远空白，
+ * 没有提示也没有出路。现在给「重试」与「改用 CodeMirror」两个出口，与分发层的失败态是同一个组件。
+ * 用 shallowRef：Error 对象不需要做成深层响应式。
+ */
+const loadError = shallowRef<unknown>(null);
 
 /**
  * 本实例**期望**的缩进宽度，也就是自愈守卫判断「model 被别人改坏了」的唯一基准。
@@ -240,13 +252,43 @@ function replaceValue(value: string) {
   }
 }
 
-onMounted(async () => {
+onMounted(() => {
   // 监听器在 await 之前就挂上，卸载时统一摘掉；即使 Monaco 最终没加载成也不会漏挂/漏摘。
   window.addEventListener(PANEL_APPEARANCE_CHANGE_EVENT, syncEditorTheme);
-  if (!editorRef.value) return;
+  void mountEditor();
+});
+
+/** 失败态里的「重试」：重新走一遍动态 import 与 create。 */
+function retryMountEditor() {
+  void mountEditor();
+}
+
+/** 取 Monaco 并建出编辑器实例。挂载时调一次；monacoEngine 加载失败后由失败态的「重试」再调。 */
+async function mountEditor() {
+  // 已经建好了，或上一发 import 还在路上（连点「重试」）：都不再来一次
+  if (!editorRef.value || editor || loadingEngine) return;
+  loadingEngine = true;
+  loadError.value = null;
 
   // 全仓唯一的 Monaco 取用姿势：动态 import。不切到 Monaco 的用户一个字节都不下载。
-  const { monaco } = await import("@/utils/monacoEngine");
+  // 经分发层 CodeEditor.vue 挂进来时，它的 loader 已经把 monacoEngine 一起拉好了，这一发当场 resolve；
+  // 这里的 try/catch 是兜底，接住仍然失败的边角情况（比如不经分发层直接挂本组件），盖一层失败态。
+  let monaco: MonacoApi;
+  try {
+    const engineModule = await import("@/utils/monacoEngine");
+    // 取成员也必须在 try 里：chunk 失败而 main.ts 已经安排了自动刷新时，Vite 的预加载助手被 preventDefault，
+    // 这一发 import 不 reject 而是 resolve 成 undefined，读成员抛的 TypeError 同样要落进失败态。
+    monaco = engineModule.monaco;
+  } catch (error) {
+    loadingEngine = false;
+    // 已卸载就不必显示了（切文件、关弹窗、引擎切回 CodeMirror 都会走到这里）
+    if (!destroyed) {
+      loadError.value = error;
+      console.warn("Monaco 编辑器加载失败", error);
+    }
+    return;
+  }
+  loadingEngine = false;
 
   // ⚠️ await 期间组件完全可能已经被卸载了（脚本页切文件、调试弹窗被关、引擎又切回 CodeMirror），
   // 那时 onBeforeUnmount 早就跑完了。少了这道守卫就会往一个已经从文档里摘掉的 DOM 节点上
@@ -328,7 +370,7 @@ onMounted(async () => {
     // 「未保存」角标、保存按钮 disabled、调试弹窗的 markDebugCodeChanged 全靠它。
     emit("update:modelValue", value);
   });
-});
+}
 
 watch(
   () => props.modelValue,
@@ -459,6 +501,12 @@ function resolveMinHeight(value: string | number | undefined) {
     :style="{ '--code-editor-min-height': resolveMinHeight(props.minHeight) }"
   >
     <div ref="editorRef" class="code-editor-container"></div>
+    <!-- monacoEngine 没加载成时盖一层失败态（重试 / 改用 CodeMirror），与分发层的失败态是同一个组件 -->
+    <MonacoLoadErrorOverlay
+      v-if="loadError !== null"
+      :error="loadError"
+      :retry="retryMountEditor"
+    />
   </div>
 </template>
 

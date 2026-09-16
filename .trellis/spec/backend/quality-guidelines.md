@@ -3037,3 +3037,249 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
     err = os.Remove(realPath)
 }
 ```
+
+---
+
+## 场景：执行器的「执行窗口」与 per-run 停止（v3.2.8 重写）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/task_executor.go` 的 `OnTaskExecuting` / `RunTask` / `runTask` / `StopTask` / `StopAllRunningTasks` / 重试循环 / 结算块，或任何「停止一个任务」的新入口时必须看本节。
+- 原因：进程表只覆盖**已经起来的进程**，而一次执行里有三段没有进程可杀：准备阶段（建日志、装环境、前置钩子）、两次重试之间的等待、以及进程刚被杀掉、循环正要起下一轮。停止请求落在这三段里，旧实现要么无效、要么只杀掉一轮就被重试续上，用户看到的是「点了停止没反应」或「停了又自己跑起来」。
+
+### 2. Signatures
+
+- 执行窗口：`func (e *TaskExecutor) beginExecuting(taskID uint) *executingRun` / `func (e *TaskExecutor) endExecuting(run *executingRun)`（幂等）
+- 准备阶段窗口：`preparedRuns map[uint]*executingRun` + `func (e *TaskExecutor) closePreparedRun(taskID uint)`
+- 每次执行的停止意图：`executingRun.stop runStopKind`（`runStopNone` / `runStopManual` / `runStopHalt`）+ `executingRun.stopCh`
+- 停止入口：`func (e *TaskExecutor) StopTask(taskID uint) bool` / `func (e *TaskExecutor) StopAllRunningTasks()`
+- 重试等待：`func (e *TaskExecutor) waitRetryInterval(run *executingRun, d time.Duration) bool`
+- 进程登记释放：`func (e *TaskExecutor) releaseRunProcesses(run *executingRun)`
+
+### 3. Contracts
+
+- **停止必须同时做两件事**：杀掉已登记的进程 **+** 给「此刻在窗口里的每一次执行」置停止意图。只杀进程会被重试循环续上：被杀那一轮算失败 → 起新进程，`MaxRetries>0` 的任务点一次停止只停一轮。
+- 重试循环的**每一轮起点**都要检查本次执行的停止意图并跳出；重试等待必须是 `select { case <-run.stopCh: ... case <-timer.C: }`，不能用 `time.Sleep`（`RetryInterval` 可配成几分钟，用户会以为按钮坏了）。
+- **停止意图记在 `executingRun` 上，不能按 taskID 记一笔**。`AllowMultipleInstances=true` 时，按 taskID 记会让「停止之后才启动」的实例一进循环就跳出，一个进程都不起。
+- **手动停止的结算按 run 判定**：`run.stop == runStopManual` 的执行各自结算为 Aborted；任务级的 `manualStopMarks`（外部入口按 PID 兜底停止时打的）只有在「本任务此刻没有别的执行在窗口里」时才允许认领，否则一次没被停的执行会抢走这笔标记、被误判成已终止并吞掉成功通知。
+- **窗口全开全关成对**：准备阶段开的窗口记在 `preparedRuns`，建日志失败 / `OnTaskFailed` / `RunTask` 缺日志兜底都必须 `closePreparedRun`；`runTask` 接手后用 `defer e.endExecuting(run)` 收口（含 panic 路径）。漏关的表现是空闲任务被永远当成「正在执行」：`StopTask` 恒返回 true，停止请求还会挂到下一次运行。
+- **关机用 `runStopHalt`，不是手动停止**：`StopAllRunningTasks` 除杀进程外还要拦住窗口里的执行继续启动新进程，但**结算口径不变**（仍按失败，再由 `MarkActiveTasksInterrupted` 统一标成中断）。写成手动停止会把「面板重启」谎报成「用户终止」。
+- **结算只摘自己登记的 pid**，禁止 `delete(e.runningProcesses, taskID)`：多实例下先结算的那次会把另一次仍在跑的进程一起抹掉，之后停不掉它，`HasRunningProcess` 也会误报「没有进程在跑」——「删除任务时一并删除脚本」正是靠它兜底，会把还在跑的任务的脚本删掉。
+- **杀进程不要持锁**：锁内只收集 victim 列表与落定标记，出锁后再 `KillProcessGroup`（Unix 下是 syscall，持锁会把进程登记、`HasRunningProcess` 这些短临界区堵住）。
+- 面板自己打进任务日志的停止提示行（`[任务已被手动停止，…`、`[面板正在关闭，…`）必须登记进 `panelMetaLinePrefixes`，否则成功通知的日志摘录会被这些行顶掉用户真正想看的脚本输出。
+
+### 4. Validation & Error Matrix
+
+- 停止落在准备阶段（无进程）→ 置 `runStopManual`，循环起点跳出，日志写「终止刚启动的进程」类提示，结算 Aborted。
+- 停止落在重试等待 → `stopCh` 立刻唤醒，不等满 `RetryInterval`，不再起下一轮。
+- 停止命中已登记进程 + `MaxRetries>0` → 杀进程**并且**置停止意图，重试循环不得续跑。
+- `AllowMultipleInstances=true`，停止后才启动的实例 → 不受上一次停止影响，正常执行。
+- 关机 → 窗口内执行不再起新进程，`last_run_status` 仍是失败/中断，不是 Aborted。
+- 任务此刻没有任何执行在窗口里 + 外部入口打了任务级标记 → 下一次执行开窗时先 `consumeManualStop` 清掉残留，不得串到这一次。
+
+### 5. Good/Base/Bad Cases
+
+- Good：点运行后 0.3 秒点停止（进程还没登记）→ 状态直接回到禁用/启用，日志写明被手动停止，之后不再冒 pid。
+- Base：运行中点停止 → 杀进程、结算 Aborted、不重试。
+- Bad：`StopTask` 第一分支只 `KillProcessGroup` 就 `return true` —— 重试循环马上起新进程，用户点一次停止只停掉一轮。
+- Bad：把停止请求按 taskID 记一笔并等「该任务所有执行都结束」才清 —— 多实例下误伤后启动的实例。
+
+### 6. Tests Required
+
+见 `server/service/manual_stop_executing_window*_test.go`：
+
+- 停止已登记进程 → 重试循环必须结束（不得起新进程）。
+- 停止落在重试等待 → 结算耗时远小于 `RetryInterval`。
+- 多实例：停止不得泄漏到「停止之后才开始」的执行。
+- 多实例：一次停止同时命中两个实例时两个都判 Aborted；没被停过的执行不得认领任务级标记。
+- 关机：窗口内执行被拦住，且 `last_run_status` 仍是失败。
+- 准备阶段失败 / `runTask` 内 panic → 窗口必须关闭（之后 `StopTask` 不得恒 true）。
+- 结算只释放自己的进程登记（另一实例仍可被停止）。
+- 停止提示行必须在 `panelMetaLinePrefixes` 里。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "Stop|Executing|Manual|Executor|RunTask" -count=1
+go test ./...
+```
+
+> **突变验证**：把重试循环起点的停止检查删掉，「停止已登记进程后不得起新进程」必须变红；把 `releaseRunProcesses` 换回整条 `delete`，多实例那条必须变红。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：只杀进程就返回，重试循环照常起下一轮。
+if procs, ok := e.runningProcesses[taskID]; ok {
+    KillProcessGroup(procs)
+    return true
+}
+```
+
+```go
+// 错误：不可打断的重试等待，停止落在这里要白等满整个间隔。
+time.Sleep(time.Duration(task.RetryInterval) * time.Second)
+```
+
+#### Correct
+
+```go
+// 正确：杀进程 + 给此刻窗口里的每一次执行置停止意图（出锁后再 kill）。
+victims := e.markStopForTask(taskID, runStopManual) // 锁内
+for _, p := range victims {                          // 锁外
+    KillProcessGroup(p)
+}
+```
+
+```go
+// 正确：重试等待可被停止唤醒。
+select {
+case <-run.stopCh:
+    return false
+case <-timer.C:
+    return true
+}
+```
+
+---
+
+## 场景：内置 MCP 服务（issue #128）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/mcp*.go`、`server/mcptools/`、`server/cmd/ddp/mcp.go`、`middleware/cors.go` 的 MCP 分支，或增删 MCP 工具时必须看本节。
+- 原因：MCP 把面板的能力暴露给 AI 客户端。它与 Open API 共用凭据与权限范围，任何「工具比接口多给了一点」的偏差都是越权。
+
+### 2. Signatures
+
+- HTTP：`POST /api/v1/mcp`（兼容 `POST /api/mcp`），Streamable HTTP，Stateless + JSONResponse
+- stdio：`ddp mcp`（`RemoteDispatcher`，把工具调用转成对本机面板的 HTTP 请求）
+- 构建入口：`func BuildServer(dispatcher Dispatcher, allowMutations bool) *mcp.Server`
+- 配置键：`mcp_enabled`、`mcp_allow_mutations`（分组 `mcp` / 「MCP 服务」）
+
+### 3. Contracts
+
+- **两级开关**：`mcp_enabled=false` → 403；`mcp_allow_mutations=false` → 只注册 11 个只读工具，写类工具**不存在**（不是注册了再拒绝，避免 AI 反复试）。
+- 鉴权走 Open API 应用凭据（Basic `app_key:app_secret`）或登录 Bearer；**权限范围仍由应用的 scope 决定**，工具不得绕过接口层自己查库。
+- 工具调用在进程内走 `engine.ServeHTTP` 派发到既有 handler，**不复制业务逻辑**：接口改了行为，工具自动跟上。
+- `list_envs` 必须与 Web 同口径遮蔽敏感值（`server/handler/envsecret.go` ↔ `web/src/utils/envSecret.ts`），否则「网页上打码、AI 一问就明文」。
+- 每次请求现读配置（不进 `reloadRuntimeConfigKeys`），关掉开关立即生效。
+- 跨域：MCP 端点必须校验 Origin，外站 Origin 一律 403。
+
+### 4. Validation & Error Matrix
+
+- `mcp_enabled=false` → 403，不暴露工具列表。
+- 凭据错误 / 缺失 → 401。
+- 外站 Origin → 403。
+- 写开关关闭时调用写工具 → unknown tool（工具根本没注册）。
+- 应用缺少对应 scope → 工具返回错误，与直接调接口一致。
+
+### 5. Tests Required
+
+- 开关矩阵：关/只读/读写三档下的工具数（11 / 21）与写工具可见性。
+- 鉴权：Basic、Bearer、错误 secret、无凭据、外站 Origin。
+- `list_envs` 遮蔽与 Web 实现逐字对齐（同一组样例）。
+- `ddp mcp` stdio：initialize → tools/list → 一次真实工具调用。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./mcptools ./handler -run "MCP|Mcp" -count=1
+go test ./...
+```
+
+---
+
+## 场景：订阅过滤的正则片段与子目录范围（issue #129）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/subscription_patterns.go`、`subscription.go` 的 sparse 规则构建 / 任务候选扫描，或改动白名单、黑名单、依赖规则、`sub_path`、`full_checkout` 时必须看本节。
+
+### 2. Contracts
+
+- **按片段判定是否正则**：片段含 `^ $ ( ) [ ] { } ? \` 或 `.*` `.+` 时按 RE2 正则匹配**仓库内相对路径**（不锚定，路径分隔一律 `/`）；否则保持历史的「子串包含」语义。顶层 `,` / `|` 分隔多个片段。
+- 保存时校验：非法正则直接 400（只在值有变化时校验，避免老数据被卡住）。
+- **正则表达不了 git 的检出规则**：白名单/依赖含正则片段时退化为整仓检出（tier-1），但**建任务的范围不变**。
+- **`sub_path` 是硬边界**：填了子目录时，依赖规则的普通片段虽然会被并进 sparse（这些文件要落盘），但**不得因此把子目录外的文件纳入建任务范围**——否则依赖文件会被建成定时任务。判定统一走 `subscriptionSubPathCovers`。
+- 兜底计数同步收口：白名单兜底（「一个都没命中就别全删」）的计数只数子目录范围内的文件，否则会出现「白名单只命中子目录外的依赖文件 → 兜底不触发 + 护栏挡掉 → 一个任务都不建」。
+
+### 3. Tests Required
+
+- 真实 git 仓库用例：`sub_path` + 依赖普通片段 → 只给子目录里的脚本建任务，依赖文件落盘但不建任务。
+- 正则片段的三种写法（`scripts`、`scripts/`、`scripts/*`）结论一致。
+- pin/golden 用例锁住「一组配置 → managed / candidates / patterns」的整体结论，改动时必须解释每一处差异。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "Subscription|Sparse|Depend|Pattern|SubPath|Pin" -count=1
+go test ./...
+```
+
+> **突变验证**：把子目录护栏那一行改成恒 false，子目录用例必须变红。
+
+---
+
+## 场景：内嵌前端的静态服务与缓存（issue #126）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/static_frontend.go`、`server/main.go` 的静态挂载、`docker/nginx.conf` 的缓存段时必须看本节。
+- 原因：面板升级会整目录替换 `web/`，旧 `index.html` 引用的 hash 文件名全部消失。浏览器手里还是旧壳时，任何动态 import 都会失败，而且**没有报错**：切页没反应、编辑器空白。
+
+### 2. Contracts
+
+- `index.html` 与 SPA 深链：`Cache-Control: no-cache`（必须回源校验）。
+- 带 hash 的资源（`assets/*`）：`immutable` 长缓存。
+- **缺失的 hash 资源必须回 404**，绝不能掉进 SPA fallback 回 200 + HTML：前端据此判定「旧壳」，回 200 会让它把 HTML 当 JS 解析。
+- 错误响应不得带长缓存。
+- gzip 结果在内存里缓存，按文件内容失效。
+- `docker/nginx.conf` 必须与上面这套口径一致（Docker 部署不走 Go 的静态层）。
+
+### 3. Tests Required
+
+- `/` 与深链：`no-cache`。
+- hash 资源：`immutable` + gzip + 304。
+- 缺失资源：404 且不是 HTML。
+- `/api/**` 未匹配：404 JSON（不得回 HTML）。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./ -run "StaticFrontend" -count=1
+go test ./...
+```
+
+---
+
+## 场景：「运行中被禁用」标记的时钟判据
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/manual_stop.go` 的 `pendingDisableMarks` / `MarkPendingDisable` / `hasPendingDisable`，或任何用「两个墙钟时刻比先后」来判定状态归属的逻辑时必须看本节。
+
+### 2. Contracts
+
+- 标记存的是打标时刻，用途只有一个：防 SQLite 自增 id 复用（任务被标记后删掉，新建的同 id 任务不能继承这笔禁用意图）。
+- 判据必须是 `!markedAt.Before(task.CreatedAt)`（不早于），**不能是 `After`（严格晚于）**：Windows 上 `time.Now()` 的粒度约 515µs，「建任务 → 立刻标记」经常落在同一个 tick 里，两个时刻相等时严格比较会把用户真实的禁用意图当成 id 复用丢弃。
+- 放宽后被认可的标记集合是原来的**严格超集**，任何调用方都不会因此少认一笔标记（`ResolveTaskInactiveStatus`、任务列表的 `HasPendingDisable`、`ResolveTaskEnabledSwitch`、`RunNow`、AddJob 护栏都只会更符合用户刚点的那一下）。
+- 残余误继承窗口：「打标 → 删任务 → 新建任务复用同一 id」必须整套挤进同一个 tick（中间还夹两次 SQLite 写），实际不可达。已实测 `CreatedAt` 在 GORM + `glebarez/sqlite` 下往返**纳秒无损**，不存在「存储精度截断把窗口放大」这一说。
+- 已知未解：墙钟在「建任务」与「打标」之间被往回调时，标记会被判成 id 复用而丢弃。只有改存单调序号或在打标时连 `CreatedAt` 一起存才能免疫，本版没做。
+
+### 3. Tests Required
+
+- 创建时刻与打标时刻**完全相等** → `hasPendingDisable` 为真，`ResolveTaskInactiveStatus` 结算为禁用（还要覆盖「剥掉单调钟」的相等，模拟从库里读出来的任务）。
+- 创建时刻晚于打标 1ns → 仍判 id 复用，结算回启用；`CreatedAt` 为零值 → 不命中。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "PendingDisable|Disabled|Scheduler|Enabled" -count=1
+go test ./service -run "^TestSchedulerV2AddJobSkipsTasksPendingDisable$" -count=100
+```
+
+> **突变验证**：把判据还原成 `markedAt.After(...)`，「相等时必须认这笔标记」那条必须变红，而防复用那条仍绿。
+> 这条偶发在修复前是 3~7/100，单跑 `-count=25` 复现不出来 —— 概率性用例必须跑够轮数才能下结论。

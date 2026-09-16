@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { defineMonacoTheme, resolveMonacoLanguage } from "@/utils/codeEditor";
 import { PANEL_APPEARANCE_CHANGE_EVENT } from "@/utils/panelAppearance";
+import { MonacoLoadErrorOverlay } from "@/utils/monacoWarmup";
 // ⚠️ 只能是 `import type`：它会被 TS 完全擦掉、不产生运行时导入。
 // 漏掉 type 关键字就等于给本文件加了一条对 monacoEngine 的静态 import，
 // monaco chunk 当场被提升进首屏——构建全绿、页面能用，纯静默劣化。
@@ -57,6 +58,13 @@ const containerRef = ref<HTMLElement>();
  */
 const wrapperBackground = ref("");
 
+/**
+ * monacoEngine 动态 import 的失败原因；非 null 时在对比区上盖一层失败态（#126），
+ * 给「重试」与「改用 CodeMirror」两个出口，与分发层的失败态是同一个组件。
+ * 原来这里没有 try/catch，chunk 一失败对比区就永远空白。
+ */
+const loadError = shallowRef<unknown>(null);
+
 let monacoApi: MonacoApi | null = null;
 let diffEditor: MonacoDiffEditorInstance | null = null;
 let originalModel: MonacoTextModel | null = null;
@@ -109,7 +117,21 @@ async function buildEditor() {
   destroyEditor();
   const token = buildToken;
 
-  const { monaco } = await import("@/utils/monacoEngine");
+  loadError.value = null;
+  // 与 MonacoEditor.vue 同一套兜底：经分发层挂进来时 monacoEngine 已被它的 loader 拉好，这一发当场 resolve；
+  // 仍然失败时盖一层失败态，而不是让对比区永远空白。取成员也放在 try 里，理由见 MonacoEditor.vue 的 mountEditor。
+  let monaco: MonacoApi;
+  try {
+    const engineModule = await import("@/utils/monacoEngine");
+    monaco = engineModule.monaco;
+  } catch (error) {
+    // 只有仍是最新一轮构建时才显示：已卸载、或 props 又变了触发了新一轮时，这一轮的结果没人要了
+    if (token === buildToken) {
+      loadError.value = error;
+      console.warn("Monaco 对比编辑器加载失败", error);
+    }
+    return;
+  }
   // 卸载守卫：上面 await 期间可能已经卸载或又发起了新一轮构建
   const container = containerRef.value;
   if (token !== buildToken || !container) return;
@@ -151,6 +173,11 @@ async function buildEditor() {
   diffEditor.setModel({ original: originalModel, modified: modifiedModel });
 }
 
+/** 失败态里的「重试」：整体重建一遍（buildEditor 会重新 import，并用轮次令牌挡住并发的那一轮）。 */
+function retryBuild() {
+  void buildEditor();
+}
+
 onMounted(() => {
   // 明暗切换与「自定义编辑器底色」都走这个事件（见 stores/theme.ts 与 utils/panelAppearance.ts）。
   // 这里只换主题、不重建实例：Monaco 支持在线换主题，没必要像 CodeMirror 侧那样整体重建。
@@ -186,6 +213,12 @@ onBeforeUnmount(() => {
     :style="wrapperBackground ? { background: wrapperBackground } : undefined"
   >
     <div ref="containerRef" class="code-diff-container"></div>
+    <!-- monacoEngine 没加载成时盖一层失败态（重试 / 改用 CodeMirror），与分发层的失败态是同一个组件 -->
+    <MonacoLoadErrorOverlay
+      v-if="loadError !== null"
+      :error="loadError"
+      :retry="retryBuild"
+    />
   </div>
 </template>
 

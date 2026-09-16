@@ -4,7 +4,9 @@ import {
   defineAsyncComponent,
   onBeforeUnmount,
   onMounted,
+  provide,
   ref,
+  shallowRef,
 } from "vue";
 import CodeMirrorEditor from "./CodeMirrorEditor.vue";
 import {
@@ -13,6 +15,16 @@ import {
   resolveEditorEngine,
   type ResolvedEditorEngine,
 } from "@/utils/editorEngine";
+import {
+  MONACO_LOADING_DELAY_MS,
+  MONACO_LOAD_RETRY_KEY,
+  MonacoEditorLoadError,
+  MonacoEditorLoading,
+} from "@/utils/monacoWarmup";
+// Monaco 失败态里的「重试 / 改用 CodeMirror」是渲染函数里的 ElButton，不经过 unplugin-vue-components，样式要自己引。
+// 引在这里而不是 monacoWarmup.ts：那个文件在首屏 chunk 里，会把整份按钮样式搬进首屏 CSS（见那边的注释）；
+// 本文件在懒加载 chunk 里，调用页本来就用着 el-button，这一句不会多下载任何东西。
+import "element-plus/theme-chalk/el-button.css";
 
 /**
  * 代码编辑器（引擎分发层）。
@@ -59,9 +71,42 @@ import {
 // Monaco 用异步组件引入，这是「不切过去的用户一个字节都不下载」的落点：
 // 静态 import 会让 Rollup 把 MB 级的 monaco chunk 提升成入口的静态依赖，
 // 构建全绿、页面能用，纯静默劣化。CodeMirror 是默认引擎、绝大多数会话都要用，静态引入即可。
-// 刻意不给 loadingComponent：Monaco chunk 是同源本地资源，解析通常在一帧内完成，
-// 塞个骨架屏反而会闪一下。
-const MonacoEditor = defineAsyncComponent(() => import("./MonacoEditor.vue"));
+//
+// v3.2.8（#133 / #126）起带加载态与失败态，推翻了原来「刻意不给 loadingComponent」的取舍：
+//   - 原来的理由是「同源本地资源，一帧内解析完」。实际上二进制 / Magisk 部署由 Go 直出、此前既没有
+//     缓存头也没有压缩，第一次进编辑页要现下现解析约 4 MB，最长白屏 4 秒。
+//   - 加载占位延迟 MONACO_LOADING_DELAY_MS（200ms）才露出来：有缓存时照旧直接出编辑器，不闪一下。
+//   - 原来 chunk 一失败（升级后的旧页面、网络抖动）编辑区就永远空白，没有提示也没有出路；
+//     现在失败态给「重试」与「改用 CodeMirror」。页面级「自动刷新一次」在 main.ts 的 vite:preloadError 里，
+//     这里的失败态是它被限次拦下（60 秒内刚刷过）之后的兜底。
+//   - 占位组件拿到的是与编辑器同一批 props 与 class / style（Vue 异步组件就是这么转的），
+//     尺寸按同一套 minHeight / fillHeight 规则算，编辑器挂上来时不跳（见 utils/monacoWarmup.ts）。
+//
+// loader 把 MonacoEditor.vue 与 monacoEngine 两个 chunk 一起拉：MonacoEditor.vue 本身只有几 KB，
+// 真正的大头（Monaco 本体）是它挂载后才 await import 的 monacoEngine。只等前者的话，加载占位一闪就换成
+// 一块空白编辑区，剩下的几秒照样白屏，而且两个 chunk 是先后串行下载的。一起拉之后占位覆盖整个等待，
+// MonacoEditor 挂上去时 monacoEngine 已在模块表里，它那一发 import 当场 resolve。
+// 两个都仍是动态 import，「不切过去的人一个字节都不下载」不变。
+//
+// 「重试」换一个全新的异步组件定义：包装层进了 error 态就一直停在那里，换定义等于让 Vue 卸掉旧包装层、
+// 挂一个带自己加载状态的新包装层，loader 必然重跑一遍。重试函数经 provide 交给 errorComponent
+// （Vue 创建它时只给一个 error prop，够不着这里的函数）。
+function createMonacoEditorComponent() {
+  return defineAsyncComponent({
+    loader: () =>
+      Promise.all([
+        import("./MonacoEditor.vue"),
+        import("@/utils/monacoEngine"),
+      ]).then(([editorModule]) => editorModule),
+    loadingComponent: MonacoEditorLoading,
+    delay: MONACO_LOADING_DELAY_MS,
+    errorComponent: MonacoEditorLoadError,
+  });
+}
+const MonacoEditor = shallowRef(createMonacoEditorComponent());
+provide(MONACO_LOAD_RETRY_KEY, () => {
+  MonacoEditor.value = createMonacoEditorComponent();
+});
 
 // ⚠️ props 必须与两份实现**逐字相同**，并且下面模板里要一个个显式传下去。
 const props = withDefaults(
@@ -139,12 +184,16 @@ const emit = defineEmits<{
   "engine-resolved": [engine: ResolvedEditorEngine];
 }>();
 
-/** 两个引擎实现共同暴露的方法集，与它们各自 defineExpose 的四个键逐字对应。 */
+/**
+ * 两个引擎实现共同暴露的方法集，与它们各自 defineExpose 的四个键逐字对应。
+ * 成员写成可选：Monaco 还在加载时，Vue 会把模板 ref 一并转给 loadingComponent（runtime-core 的
+ * createInnerComp 连 ref 带 props 一起转），这时 engineRef 指着的是加载占位，身上没有这四个方法。
+ */
 interface EditorEngineExposed {
-  focus: () => void;
-  getValue: () => string;
-  setValue: (value: string) => void;
-  format: () => void;
+  focus?: () => void;
+  getValue?: () => string;
+  setValue?: (value: string) => void;
+  format?: () => void;
 }
 
 const engineRef = ref<EditorEngineExposed | null>(null);
@@ -190,8 +239,9 @@ onBeforeUnmount(() => {
 
 // 引擎变了 → 组件类型变了 → Vue 会卸载旧实例、挂载新实例（不用额外给 key）。
 // 撤销历史与滚动位置会丢，这是换引擎不可避免的代价，也符合用户「我要换一个编辑器」的预期。
+// MonacoEditor 是 shallowRef（「重试」会换成新的异步组件定义），这里取 .value，computed 才跟得上换定义
 const engineComponent = computed(() =>
-  engine.value === "monaco" ? MonacoEditor : CodeMirrorEditor,
+  engine.value === "monaco" ? MonacoEditor.value : CodeMirrorEditor,
 );
 
 // 显式转发而不是让 v-model 事件走 $attrs：上面声明了 emits，事件就不在 $attrs 里了。
@@ -202,14 +252,15 @@ function onInnerUpdate(value: string) {
 }
 
 defineExpose({
-  focus: () => engineRef.value?.focus(),
+  focus: () => engineRef.value?.focus?.(),
   // ⚠️ 必须用 props.modelValue 兜底，不能写成 `?? ""`：
-  // Monaco 是异步组件，chunk 还没 resolve 时 engineRef 是 null，返回空串会让调用方
+  // Monaco 是异步组件，chunk 还没 resolve 时 engineRef 要么是 null（占位露出来之前、失败态），
+  // 要么指着加载占位（见 EditorEngineExposed 的注释），两种情况都拿不到编辑器。返回空串会让调用方
   // 以为「文档是空的」并据此覆盖掉真实内容。回落到 modelValue 才是当下真正的文档。
-  getValue: () => engineRef.value?.getValue() ?? props.modelValue,
-  setValue: (value: string) => engineRef.value?.setValue(value),
+  getValue: () => engineRef.value?.getValue?.() ?? props.modelValue,
+  setValue: (value: string) => engineRef.value?.setValue?.(value),
   // 全仓没有调用点，两份实现里也都是空的；这里只做转发，保持对外契约不变。
-  format: () => engineRef.value?.format(),
+  format: () => engineRef.value?.format?.(),
 });
 </script>
 

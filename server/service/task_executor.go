@@ -37,8 +37,64 @@ type TaskExecutor struct {
 	scriptsDir       string
 	logDir           string
 	runningProcesses map[uint]map[int]*os.Process
-	processLock      sync.Mutex
-	runWG            sync.WaitGroup
+	// executingRuns 登记每个任务此刻处于「执行窗口」里的每一次执行（taskID -> 执行集合）。
+	// 窗口在 OnTaskExecuting 把状态写成运行中之前打开、在 runTask 结算时关闭，覆盖「已写运行中、进程还没登记」、
+	// 前置钩子、重试等待、依赖自动安装、后置钩子这一整段。原来 StopTask 只看 runningProcesses，
+	// 落在进程登记之前的停止会返回 false、什么都不做，进程照常跑完被记成成功。
+	// 停止请求记在每一次执行自己身上（executingRun.stop），只作用于停止那一刻正在执行的那几次：
+	// 多实例下停止之后才开始的执行不受影响，同一批被停的执行各自结算成已终止。
+	executingRuns map[uint]map[*executingRun]struct{}
+	// preparedRuns 记录 OnTaskExecuting 已经打开、还没被 runTask 接手的执行窗口。
+	// runTask 接手时沿用它（停止请求可能已经记在上面）；准备后没能进入 runTask（OnTaskFailed、缺日志兜底）时据它关窗。
+	preparedRuns map[*ExecutionRequest]*executingRun
+	processLock  sync.Mutex
+	runWG        sync.WaitGroup
+}
+
+// runStopKind 是一次执行收到的停止请求种类，只升不降。
+type runStopKind int
+
+const (
+	runStopNone runStopKind = iota
+	// runStopHalt：面板关闭 / 重启时的整体中断（StopAllRunningTasks）。只拦「继续启动新进程」，
+	// 结算口径不变：照旧按失败结算，再由关机流程统一标成中断，不记成手动停止。
+	runStopHalt
+	// runStopManual：手动 / 批量 / 定时停止（StopTask）。拦新进程，且本次执行结算成已终止。
+	runStopManual
+)
+
+// executingRun 是一次执行在执行窗口里的登记。stop、processes、closed 受 processLock 保护；
+// stopCh 创建后不再替换（因此可以不持锁读），第一次收到停止请求时关闭，重试等待靠它提前醒来。
+type executingRun struct {
+	taskID    uint
+	stop      runStopKind
+	stopCh    chan struct{}
+	processes map[int]*os.Process
+	closed    bool
+}
+
+// requestStopLocked 给这次执行记下停止请求：种类只升不降（关机之后又点手动停止会升级成手动，
+// 反过来不会把手动停止降级成关机），第一次收到请求时关闭 stopCh 叫醒正在等重试间隔的那一轮。
+// 调用方必须持有 processLock。
+func (r *executingRun) requestStopLocked(kind runStopKind) {
+	if r == nil || kind <= r.stop {
+		return
+	}
+	r.stop = kind
+	select {
+	case <-r.stopCh:
+		// 升级种类时 stopCh 已经关过，不能再关一次。
+	default:
+		close(r.stopCh)
+	}
+}
+
+// stopNotice 是执行器因停止打进任务日志的提示行，前缀已登记到 panelMetaLinePrefixes。
+func stopNotice(kind runStopKind, action string) string {
+	if kind == runStopHalt {
+		return "[面板正在关闭，" + action + "]\n"
+	}
+	return "[任务已被手动停止，" + action + "]\n"
 }
 
 func NewTaskExecutor() *TaskExecutor {
@@ -46,6 +102,8 @@ func NewTaskExecutor() *TaskExecutor {
 		scriptsDir:       config.C.Data.ScriptsDir,
 		logDir:           config.C.Data.LogDir,
 		runningProcesses: make(map[uint]map[int]*os.Process),
+		executingRuns:    make(map[uint]map[*executingRun]struct{}),
+		preparedRuns:     make(map[*ExecutionRequest]*executingRun),
 	}
 }
 
@@ -103,6 +161,11 @@ func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 
 	// 随机延迟已经在 ResolveExecutionDelay + 调度器重新入队阶段完成，这里不再 sleep，避免双重延迟。
 
+	// 状态马上要写成运行中，用户从这一刻起就能点停止：先把执行窗口打开，
+	// 停止落在「已写运行中、进程还没登记」这段里时才认得出这次执行。窗口由 runTask 结算时关闭；
+	// 准备阶段失败（下面建日志失败、或调用方随后的 OnTaskFailed）则由 closePreparedRun 关掉。
+	e.openPreparedRun(req)
+
 	now := time.Now()
 	database.DB.Model(task).Updates(map[string]interface{}{
 		"status":      model.TaskStatusRunning,
@@ -114,6 +177,8 @@ func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error {
 	if !plan.SuppressLiveOutput {
 		tinyLog, err = GetTinyLogManager().Create(logID)
 		if err != nil {
+			// 准备失败，这次执行不会再有 runTask 来结算：窗口必须在这里关掉。
+			e.closePreparedRun(req)
 			return fmt.Errorf("failed to create log: %w", err)
 		}
 		req.LogID = logID
@@ -154,7 +219,9 @@ func (e *TaskExecutor) RunTask(req *ExecutionRequest) {
 
 	if taskLog == nil {
 		// 正常链路里 OnTaskExecuting 成功后一定有 taskLog，这里只是兜底。
-		// 兜底也必须把已经建好的实时日志收口，否则 TinyLog 会永远留在管理器里泄漏。
+		// 兜底也必须把已经建好的实时日志收口，否则 TinyLog 会永远留在管理器里泄漏；
+		// 准备阶段开的执行窗口同理，不关的话这个任务会永远显示成「正在执行」。
+		e.closePreparedRun(req)
 		if tinyLog != nil {
 			tinyLog.Close()
 			GetTinyLogManager().Remove(tinyLog.LogID)
@@ -176,6 +243,10 @@ func (e *TaskExecutor) OnTaskCompleted(req *ExecutionRequest, result *ExecutionR
 
 func (e *TaskExecutor) OnTaskFailed(req *ExecutionRequest, err error) {
 	log.Printf("task %d failed: %v", req.TaskID, err)
+
+	// 准备阶段打开过执行窗口（OnTaskExecuting 成功后失败、或调度阶段 panic）时必须关掉，
+	// 这次执行已经在这里结算完了，不会再有 runTask 接手。
+	e.closePreparedRun(req)
 
 	task := req.Task
 	if task == nil {
@@ -200,8 +271,15 @@ func (e *TaskExecutor) OnTaskFailed(req *ExecutionRequest, err error) {
 	}
 
 	runStatus := model.RunFailed
+	inactiveStatus := ResolveTaskInactiveStatus(task)
+	if inactiveStatus == model.TaskStatusDisabled {
+		// 与 runTask 结算块同一口径：禁用意图到这里已经落地，标记用完即清。
+		// 禁用中的任务被手动运行时 RunNow 会打这笔标记（issue #133），准备阶段就失败
+		// （依赖任务上次未成功、脚本不存在……）同样是这次运行的最终结算，不清的话标记会一直挂在任务上。
+		ClearPendingDisable(task.ID)
+	}
 	database.DB.Model(task).Updates(map[string]interface{}{
-		"status":            ResolveTaskInactiveStatus(task),
+		"status":            inactiveStatus,
 		"last_run_at":       now,
 		"last_run_status":   runStatus,
 		"last_running_time": 0.0,
@@ -227,19 +305,245 @@ func KillProcessByPid(pid int) {
 }
 
 func (e *TaskExecutor) StopTask(taskID uint) bool {
+	if e == nil {
+		return false
+	}
+
+	e.processLock.Lock()
+	runs := e.executingRuns[taskID]
+	processes := e.runningProcesses[taskID]
+	if len(runs) == 0 && len(processes) == 0 {
+		e.processLock.Unlock()
+		return false
+	}
+
+	// 先打"手动停止"标记再 kill，保证完成块结算时标记已可见。
+	markManualStop(taskID)
+	// 停止请求记在此刻正在执行的每一次执行上：onStart 一登记就杀掉刚起的进程、重试循环每一轮跳出、
+	// 重试等待立刻醒来，本次执行结算成已终止。原来这里只看 runningProcesses：
+	// 落在「已进入执行、进程还没登记」窗口里的停止直接返回 false、什么都不做，
+	// 进程随后照常启动跑完、被记成成功 —— 修复的正是这段竞态。
+	// 记在每一次执行自己身上而不是按任务 id 挂一笔，多实例下才不会误伤停止之后才开始的执行。
+	victims := make([]*os.Process, 0, len(processes))
+	for _, process := range processes {
+		victims = append(victims, process)
+	}
+	for run := range runs {
+		run.requestStopLocked(runStopManual)
+		run.processes = make(map[int]*os.Process)
+	}
+	delete(e.runningProcesses, taskID)
+	e.processLock.Unlock()
+
+	// 杀进程放在锁外：KillProcessGroup 要走系统调用，拿着 processLock 杀会把 onStart 的进程登记、
+	// HasRunningProcess 这些短临界区一起堵住。标记与请求都已经在锁内落定，这里只剩收尾。
+	for _, process := range victims {
+		KillProcessGroup(process)
+	}
+	return true
+}
+
+// newExecutingRunLocked 建一次执行窗口登记并挂到任务名下，同时回报「本任务此前没有别的执行在窗口里」。
+// 调用方必须持有 processLock。
+func (e *TaskExecutor) newExecutingRunLocked(taskID uint) (*executingRun, bool) {
+	run := &executingRun{
+		taskID:    taskID,
+		stopCh:    make(chan struct{}),
+		processes: make(map[int]*os.Process),
+	}
+	if e.executingRuns == nil {
+		e.executingRuns = make(map[uint]map[*executingRun]struct{})
+	}
+	first := len(e.executingRuns[taskID]) == 0
+	if e.executingRuns[taskID] == nil {
+		e.executingRuns[taskID] = make(map[*executingRun]struct{})
+	}
+	e.executingRuns[taskID][run] = struct{}{}
+	return run, first
+}
+
+// beginExecuting 打开一次执行窗口：从这里起，即便进程还没登记，StopTask 也能认出这次执行。
+func (e *TaskExecutor) beginExecuting(taskID uint) *executingRun {
+	if e == nil {
+		return nil
+	}
+	e.processLock.Lock()
+	run, first := e.newExecutingRunLocked(taskID)
+	e.processLock.Unlock()
+
+	if first {
+		// 本任务此刻没有别的执行在窗口里，那么还留着的手动停止标记只可能是上一次运行残留的
+		// （例如网页停止一个由 `ddp task run` 在别的进程里跑起来的任务：执行器里没有这次执行，
+		// handler 按库里的 PID 兜底时照样会 MarkManualStop）。不清掉的话，它会把这次刚开始的
+		// 执行错判成已终止、还顺手吞掉成功通知。已经有执行在窗口里时不能清：那笔标记可能正是给它的。
+		consumeManualStop(taskID)
+	}
+	return run
+}
+
+// endExecuting 关掉一次执行窗口，幂等（结算 defer 与 runTask 的兜底 defer 都会调）。
+// 本任务最后一次执行窗口关掉时，把可能在结算之后才落下的残留手动停止标记读即清，避免串到下一次运行。
+func (e *TaskExecutor) endExecuting(run *executingRun) {
+	if e == nil || run == nil {
+		return
+	}
+
+	taskID := run.taskID
+	e.processLock.Lock()
+	if run.closed {
+		e.processLock.Unlock()
+		return
+	}
+	run.closed = true
+	if runs, ok := e.executingRuns[taskID]; ok {
+		delete(runs, run)
+		if len(runs) == 0 {
+			delete(e.executingRuns, taskID)
+		}
+	}
+	// 兜底摘干净这次执行登记过的进程：正常路径下结算块已经摘过，panic 等异常路径靠这里。
+	for pid := range run.processes {
+		e.removeProcessLocked(taskID, pid)
+	}
+	run.processes = make(map[int]*os.Process)
+	drained := len(e.executingRuns[taskID]) == 0
+	e.processLock.Unlock()
+
+	if drained {
+		// 正常路径下标记早已被 applyManualStopOverride 消费，这里命不中，纯属兜底。
+		consumeManualStop(taskID)
+	}
+}
+
+// openPreparedRun 在准备阶段（OnTaskExecuting 把状态写成运行中之前）打开执行窗口，
+// 并记到 preparedRuns 上等 runTask 接手。用户从状态变成运行中那一刻起就能点停止，
+// 而进程还要经过建日志、环境准备、前置钩子好几步才登记，这段同样必须认得出「正在执行」。
+func (e *TaskExecutor) openPreparedRun(req *ExecutionRequest) *executingRun {
+	if e == nil || req == nil {
+		return nil
+	}
+	run := e.beginExecuting(req.TaskID)
+	e.processLock.Lock()
+	if e.preparedRuns == nil {
+		e.preparedRuns = make(map[*ExecutionRequest]*executingRun)
+	}
+	e.preparedRuns[req] = run
+	e.processLock.Unlock()
+	return run
+}
+
+// takePreparedRun 取走准备阶段打开的执行窗口（读即删），交给 runTask 接手。
+// 取不到说明这次执行没走准备阶段（测试直接调 runTask、或兜底路径），由调用方自己开窗。
+func (e *TaskExecutor) takePreparedRun(req *ExecutionRequest) *executingRun {
+	if e == nil || req == nil {
+		return nil
+	}
 	e.processLock.Lock()
 	defer e.processLock.Unlock()
 
-	if processes, ok := e.runningProcesses[taskID]; ok {
-		// 先打"手动停止"标记再 kill，保证完成块结算时标记已可见。
-		markManualStop(taskID)
-		for _, process := range processes {
-			KillProcessGroup(process)
-		}
-		delete(e.runningProcesses, taskID)
+	run, ok := e.preparedRuns[req]
+	if !ok {
+		return nil
+	}
+	delete(e.preparedRuns, req)
+	return run
+}
+
+// closePreparedRun 关掉准备阶段打开、却没能进入 runTask 的执行窗口（OnTaskFailed、缺日志兜底）。
+// 不关的话窗口只增不减：之后对这个空闲任务点停止会被当成「正在执行」返回 true，
+// 停止请求还会挂到下一次运行上。没有窗口时是空操作。
+func (e *TaskExecutor) closePreparedRun(req *ExecutionRequest) {
+	e.endExecuting(e.takePreparedRun(req))
+}
+
+// runStopKind 只读地回答「这次执行此刻收到的停止请求是哪一种」，供重试循环守卫使用。
+func (e *TaskExecutor) runStopKind(run *executingRun) runStopKind {
+	if e == nil || run == nil {
+		return runStopNone
+	}
+	e.processLock.Lock()
+	defer e.processLock.Unlock()
+	return run.stop
+}
+
+// canClaimTaskManualStopMark 判断这次结算能不能认领那笔按任务 id 的手动停止标记。
+//
+// 标记是任务级的、只有一笔，而外部停止路径（handler 的 PID 兜底、定时停止、旧调度器）只知道任务 id、
+// 不知道该算到哪一次执行头上。多实例下「谁先结算谁读即清」会把一次停止记到另一个根本没被停的执行头上：
+// 那次执行被判成已终止，成功通知也被吞掉。所以只有本任务此刻没有别的执行还在窗口里时才认领 ——
+// 那种情况下标记只可能是给自己的。
+func (e *TaskExecutor) canClaimTaskManualStopMark(run *executingRun) bool {
+	if e == nil || run == nil {
+		// 没有执行窗口信息（理论上不会发生），维持原来的口径。
 		return true
 	}
-	return false
+	e.processLock.Lock()
+	defer e.processLock.Unlock()
+	return len(e.executingRuns[run.taskID]) <= 1
+}
+
+// removeProcessLocked 从任务进程表里摘掉一个 pid，空了就把整条删掉。调用方必须持有 processLock。
+func (e *TaskExecutor) removeProcessLocked(taskID uint, pid int) {
+	procs, ok := e.runningProcesses[taskID]
+	if !ok {
+		return
+	}
+	delete(procs, pid)
+	if len(procs) == 0 {
+		delete(e.runningProcesses, taskID)
+	}
+}
+
+// releaseRunProcesses 结算时把这次执行登记过的进程摘掉。
+// 只摘自己这一次的 pid：多实例下同一任务还有别的执行在跑，整条 delete 会把别人的进程一起抹掉，
+// 之后对那个任务点停止就找不到进程可杀了。
+func (e *TaskExecutor) releaseRunProcesses(run *executingRun) {
+	if e == nil || run == nil {
+		return
+	}
+	e.processLock.Lock()
+	defer e.processLock.Unlock()
+
+	for pid := range run.processes {
+		e.removeProcessLocked(run.taskID, pid)
+	}
+	run.processes = make(map[int]*os.Process)
+}
+
+// killRunningProcess 把某个已登记进程从进程表里摘掉并连进程组一起杀掉。
+// 供 onStart 在「登记时发现已有停止请求」的竞态窗口里立即收尾。
+func (e *TaskExecutor) killRunningProcess(run *executingRun, taskID uint, process *os.Process) {
+	if process == nil {
+		return
+	}
+	e.processLock.Lock()
+	e.removeProcessLocked(taskID, process.Pid)
+	if run != nil {
+		delete(run.processes, process.Pid)
+	}
+	e.processLock.Unlock()
+	KillProcessGroup(process)
+}
+
+// waitRetryInterval 等待重试间隔，期间收到停止请求就立刻醒来并返回 true。
+// 原来这里是 time.Sleep：停止落在等待里得白等满整个间隔才生效，间隔设成几分钟时用户会以为停止没反应。
+func waitRetryInterval(run *executingRun, seconds int) bool {
+	if seconds <= 0 {
+		return false
+	}
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+
+	if run == nil {
+		<-timer.C
+		return false
+	}
+	select {
+	case <-run.stopCh: // 创建后不再替换，可以不持锁读
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // HasRunningProcess 判断执行器进程表里是否还登记着这个任务的进程。
@@ -263,6 +567,16 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 	e.processLock.Lock()
 	processesByTask := e.runningProcesses
 	e.runningProcesses = make(map[uint]map[int]*os.Process)
+	// 关机同样要拦住执行窗口：只杀已登记进程的话，落在窗口里的执行随后照样启动新进程，
+	// 被杀的那一轮还会按失败继续重试，面板退出后这些子进程（独立进程组）会变成孤儿继续跑。
+	// 关机不是手动停止，用 runStopHalt：只拦「继续启动新进程」，结算口径仍是失败，
+	// 再由关机流程的 MarkActiveTasksInterrupted 统一标成中断。
+	for _, runs := range e.executingRuns {
+		for run := range runs {
+			run.requestStopLocked(runStopHalt)
+			run.processes = make(map[int]*os.Process)
+		}
+	}
 	e.processLock.Unlock()
 
 	count := 0
@@ -310,6 +624,17 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		plan = parsedPlan
 		req.CommandPlan = parsedPlan
 	}
+
+	// 接手准备阶段打开的执行窗口（停止请求可能已经记在上面了）；直接调 runTask 的路径自己开一个。
+	// 从这里起，即便进程还没登记，StopTask 也能认出「这次执行正在进行」。
+	run := e.takePreparedRun(req)
+	if run == nil {
+		run = e.beginExecuting(req.TaskID)
+	}
+	// 关窗兜底：defer 后进先出，它在下面的结算 defer 之后才执行，
+	// 于是 panic、结算块自己出错这些路径都不会把窗口留下（endExecuting 幂等，正常路径重复调用无害）。
+	defer e.endExecuting(run)
+
 	startTime := time.Now()
 	exitCode := 0
 	success := false
@@ -372,8 +697,19 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 
 		// 主动停止：统一结算为 Aborted，跳过成功/失败通知，必要时单独发送终止通知。
-		// applyManualStopOverride 读即清标记，自然完成时返回原状态、manualAborted=false。
-		runStatus, logStatus, manualAborted := applyManualStopOverride(req.TaskID, runStatus, logStatus)
+		manualAborted := false
+		if e.runStopKind(run) == runStopManual {
+			// 本次执行自己收到过停止请求：不依赖那笔按任务 id 的手动停止标记（只有一笔，
+			// 多实例下同一次停止命中的两次执行会抢，抢输的被记成普通失败），各自判成已终止；
+			// 顺手把标记消费掉，免得串到下一次运行。
+			// runStopHalt（面板关闭）刻意不走这里：关机按失败结算，再由关机流程统一标成中断。
+			consumeManualStop(req.TaskID)
+			runStatus, logStatus, manualAborted = model.RunAborted, model.LogStatusAborted, true
+		} else if e.canClaimTaskManualStopMark(run) {
+			// 没被执行器停过，才去认领那笔任务级标记（外部停止路径只知道任务 id）。
+			// applyManualStopOverride 读即清，自然完成时返回原状态、manualAborted=false。
+			runStatus, logStatus, manualAborted = applyManualStopOverride(req.TaskID, runStatus, logStatus)
+		}
 		finalSuccess := runStatus == model.RunSuccess
 		finalAborted := runStatus == model.RunAborted
 
@@ -399,9 +735,9 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			"pid":               gorm.Expr("NULL"),
 		})
 
-		e.processLock.Lock()
-		delete(e.runningProcesses, req.TaskID)
-		e.processLock.Unlock()
+		// 只摘这次执行自己登记过的进程：整条 delete 会把同一任务另一个实例的进程一起抹掉。
+		// 执行窗口本身由 runTask 开头那个兜底 defer 关闭（它在本结算 defer 之后执行）。
+		e.releaseRunProcesses(run)
 
 		result := &ExecutionResult{
 			Success:  finalSuccess,
@@ -491,16 +827,35 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	installedDeps := make(map[string]bool)
 
 	for retries <= task.MaxRetries {
+		// 停止请求可能落在前置钩子阶段、上一轮进程被杀之后、重试等待里，或依赖自动安装后的重试之前。
+		// 每一轮开始先看一眼：已被停止就直接跳出，不再启动新进程。原来这里没有守卫——
+		// 被杀的那一轮算失败，循环照常重试、再起一个新进程，停止等于没停。
+		// 跳出后照常走后置脚本，再由结算统一判结果（手动停止判已终止，关机仍判失败）。
+		if kind := e.runStopKind(run); kind != runStopNone {
+			onOutput(stopNotice(kind, "取消后续执行"))
+			break
+		}
+
 		if retries > 0 {
 			onOutput(fmt.Sprintf("[第 %d 次重试，等待 %d 秒]\n", retries, task.RetryInterval))
-			time.Sleep(time.Duration(task.RetryInterval) * time.Second)
+			if waitRetryInterval(run, task.RetryInterval) {
+				// 等待期间收到停止请求：立刻醒来跳出，不必白等满整个重试间隔。
+				onOutput(stopNotice(e.runStopKind(run), "取消后续执行"))
+				break
+			}
 		}
 
 		outputCollector.Reset()
 		onStart := func(process *os.Process) {
-			e.registerRunningProcess(req.TaskID, process)
+			stopKind := e.registerRunningProcess(run, req.TaskID, process)
 			pid := process.Pid
 			database.DB.Model(task).Update("pid", pid)
+			if stopKind != runStopNone {
+				// 停止请求早于进程登记（本次修复的竞态窗口）：一登记就连进程组一起杀掉，
+				// 否则它会照常跑完、被结算成成功。结算口径由上面的停止种类决定。
+				onOutput(stopNotice(stopKind, "终止刚启动的进程"))
+				e.killRunningProcess(run, req.TaskID, process)
+			}
 		}
 		effectiveTimeout := timeout
 		if plan.TimeoutOverride != nil && *plan.TimeoutOverride > 0 {
@@ -579,9 +934,12 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		endTime.Format("2006-01-02 15:04:05"), duration, lastExitCode, completionNote))
 }
 
-func (e *TaskExecutor) registerRunningProcess(taskID uint, process *os.Process) {
+// registerRunningProcess 登记进程（任务进程表 + 这次执行自己的进程集合），
+// 并在同一把锁内回报「这次执行此刻是否已经收到停止请求」。
+// 回报非 runStopNone 说明停止早于进程登记（本次修复的竞态），调用方必须立刻把这个进程杀掉。
+func (e *TaskExecutor) registerRunningProcess(run *executingRun, taskID uint, process *os.Process) runStopKind {
 	if process == nil {
-		return
+		return runStopNone
 	}
 	e.processLock.Lock()
 	defer e.processLock.Unlock()
@@ -590,6 +948,14 @@ func (e *TaskExecutor) registerRunningProcess(taskID uint, process *os.Process) 
 		e.runningProcesses[taskID] = make(map[int]*os.Process)
 	}
 	e.runningProcesses[taskID][process.Pid] = process
+	if run == nil {
+		return runStopNone
+	}
+	if run.processes == nil {
+		run.processes = make(map[int]*os.Process)
+	}
+	run.processes[process.Pid] = process
+	return run.stop
 }
 
 func buildTaskNotificationChannelIDs(channelID *uint) []uint {
@@ -707,6 +1073,10 @@ var panelMetaLinePrefixes = []string{
 	"[依赖已安装 ",
 	"[重试启动失败:",
 	"[任务异常崩溃:",
+	// 执行器因停止 / 关机打进日志的提示行（stopNotice 产出的两种前缀）：
+	// 「取消后续执行」「终止刚启动的进程」都挂在这两个前缀下。
+	"[任务已被手动停止，",
+	"[面板正在关闭，",
 	// 子进程被信号杀掉时的可诊断提示（#113 排查里补的）。被信号杀必然结算为失败、
 	// 走的是不过滤的 failureExcerpt，所以登记它今天不改变任何行为；
 	// 登记只是守住「面板输出行必须在册」这条契约，免得以后有人把它挪进成功摘录。

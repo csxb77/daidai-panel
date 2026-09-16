@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <!-- 换文件名要同步 server/main.go 的 engine.StaticFile：漏改不是 404，是 200 + index.html。 -->
+    <!-- 换文件名要同步 server/static_frontend.go 的 staticFaviconFile（内嵌部署按它托管图标）：漏改的话图标会 404。 -->
     <link rel="icon" type="image/webp" href="/favicon-512.webp" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow, noarchive, nosnippet" />

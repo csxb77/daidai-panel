@@ -28,6 +28,9 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.GET("/:id/log-files/:filename/raw-ticket", middleware.RequireRole("viewer"), h.RawLogFileDownloadTicket)
 		tasks.GET("/:id/stats", middleware.RequireRole("viewer"), h.Stats)
 		tasks.GET("/export", middleware.RequireRole("viewer"), h.Export)
+		// 全部任务分组（`分组:` 标签，App 建的分组就是它）的名称与任务数，给网页顶栏的分组标签用（#130）。
+		// 静态段 groups 与同层的 /:id/... 共存，和 /export、/views 是同一个形态；复用组上的 OpenAPIAccess("tasks")。
+		tasks.GET("/groups", middleware.RequireRole("viewer"), h.ListGroups)
 		tasks.POST("/cron/parse", middleware.RequireRole("viewer"), h.CronParse)
 		tasks.GET("/cron/templates", middleware.RequireRole("viewer"), h.CronTemplates)
 

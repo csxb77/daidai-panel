@@ -189,7 +189,7 @@ func (h *TaskHandler) Create(c *gin.Context) {
 
 	response.Created(c, gin.H{
 		"message": "创建成功",
-		"data":    task.ToDict(),
+		"data":    taskDictWithEnabledSwitch(&task),
 	})
 }
 
@@ -328,7 +328,7 @@ func (h *TaskHandler) Update(c *gin.Context) {
 
 	response.Success(c, gin.H{
 		"message": "task updated",
-		"data":    task.ToDict(),
+		"data":    taskDictWithEnabledSwitch(&task),
 	})
 }
 
@@ -415,5 +415,5 @@ func (h *TaskHandler) Copy(c *gin.Context) {
 		response.InternalError(c, "复制任务失败")
 		return
 	}
-	response.Created(c, gin.H{"message": "复制成功", "data": newTask.ToDict()})
+	response.Created(c, gin.H{"message": "复制成功", "data": taskDictWithEnabledSwitch(&newTask)})
 }

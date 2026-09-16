@@ -549,7 +549,11 @@ func (s *SchedulerV2) AddJob(task *model.Task) error {
 	// 但用户的意图已经是禁用。漏掉这一条的话，只要中途有任何一次 AddJob（编辑保存、订阅同步、
 	// 备份恢复的全量重载）把条目加回来，这个任务就会带着活着的 cron 条目落成「已禁用」，
 	// 之后一直按点被触发执行 —— 比原来的缺陷更糟。
-	if task.Status == model.TaskStatusDisabled || hasPendingDisable(task) {
+	// 禁用中的任务被手动运行（RunNow 打的是同一笔标记，issue #133）同理：排队 / 运行期间编辑保存一次，
+	// 不能把它重新注册回去。
+	// 标记只在排队中 / 运行中作数（pendingDisableInEffect）：status 已经是明确的启用时以 status 为准，
+	// 残留的标记不能把一条被显式启用的任务挡在调度器外面。
+	if task.Status == model.TaskStatusDisabled || pendingDisableInEffect(task) {
 		return nil
 	}
 	if !task.UsesCronSchedule() {
@@ -741,7 +745,36 @@ func (s *SchedulerV2) RunNow(taskID uint) error {
 		RetryIndex:  0,
 	}
 
+	// 禁用中的任务也允许手动运行（handler 只拒绝「正在运行」），但这次运行不能顺手把它启用（issue #133）。
+	// 排队 / 运行期间 status 会被改写成 0.5 / 2，和启用任务一模一样；原来「跑完回到禁用」只靠
+	// 「调度器里没有这条任务」反推，而运行期间只要编辑保存一次（task_mutate 重载出 status=2 再 UpdateJob），
+	// AddJob 就会把它重新注册进调度器 —— 跑完被结算成启用、cron 条目也是活的，任务被静默重新启用。
+	// 所以入队前把「这次跑完仍是禁用」记成显式的待禁用标记：AddJob 认它不再注册，
+	// 执行结束 / 准备失败 / 停止 / 排队中被停止都认它落回禁用，用户点「启用」时照旧清掉。
+	// 批量运行、`ddp task run` 都走这里，一起覆盖。
+	// 已经有标记（更早一次、还没结算的运行打的）就不重打，入队失败时也只撤回自己这次打的。
+	markedPendingDisable := false
+	if task.Status == model.TaskStatusDisabled && !hasPendingDisable(&task) {
+		MarkPendingDisable(taskID)
+		markedPendingDisable = true
+	}
+
+	// 请求里这份快照要和下面写进库的「排队中」对齐（必须在入队前改，入队后 worker 可能已经在读它）。
+	// 准备阶段失败（OnTaskFailed）与放弃执行（releaseQueuedTaskStatus）都直接拿这份快照结算；
+	// 停在「禁用」的话会被一律判成禁用 —— 排队期间用户点了「启用」（撤掉标记、注册回调度器），
+	// 结果却是库里写着禁用、cron 条目活着，到点照样触发。对齐成排队中之后，
+	// 结算走 ResolveTaskInactiveStatus 的排队中分支：有标记（没人启用）落回禁用，没有标记回到启用。
+	// 正在运行的任务 handler 已经拒绝了，这里照 UPDATE 的条件保持原样。
+	if task.Status != model.TaskStatusRunning {
+		task.Status = model.TaskStatusQueued
+	}
+
 	if err := s.Enqueue(req); err != nil {
+		// 这次根本没入队、也就不会有结算，刚打的标记必须撤回，否则会一直挂在任务上：
+		// 等这条任务哪天被别的路径写回启用、再进入排队 / 运行时，会被错当成禁用意图。
+		if markedPendingDisable {
+			ClearPendingDisable(taskID)
+		}
 		return err
 	}
 

@@ -17,6 +17,8 @@ export interface ApiEndpoint {
   queryParams?: ApiParam[]
   bodyParams?: ApiParam[]
   helperExamples?: Record<string, string>
+  /** 生成「请求示例代码」时额外带上的请求头（例如 MCP 接口必须带的 Accept）；鉴权头不写在这里 */
+  extraHeaders?: Record<string, string>
   responseExample?: string
   responseFields?: ApiParam[]
   responseContentType?: string
@@ -536,9 +538,9 @@ panel.add_or_update_env(
           { name: 'keyword', type: 'string', description: '搜索关键字' },
           { name: 'page', type: 'integer', description: '页码，默认 1', example: '1' },
           { name: 'page_size', type: 'integer', description: '每页数量，默认 20', example: '20' },
-          { name: 'label', type: 'string', description: '按标签模糊匹配（labels LIKE %值%）。分组要连前缀一起传，例如「分组:日常」，只传「日常」会把普通标签也捞进来' },
-          { name: 'filters', type: 'string', description: '任务视图的筛选规则，JSON 字符串数组 [{field,operator,value}]。field 可选 command / name / cron_expression / status / labels / subscription；operator 可选 contains / not_contains / equals / not_equals；匹配一律先 trim 再转小写、不是正则；多条之间是 AND。status 的 value 用 1（已启用）/ 0（已禁用）/ 2（运行中）/ 0.5（排队中）。value 为空的规则会被整条丢弃，JSON 解析失败则静默降级为不筛选', example: '[{"field":"command","operator":"contains","value":"jd"}]' },
-          { name: 'sort_rules', type: 'string', description: '任务视图的排序规则，JSON 字符串数组 [{field,direction}]。field 可选 name / command / cron_expression / status / labels / subscription / created_at / last_run_at / next_run_at；direction 只认 desc，其它一律按 asc。⚠️ 置顶与状态分组【压在排序规则之上】，排序规则只在同一分区内生效：先按置顶分区（置顶的整体在前），再按状态分区（启用/排队中/运行中一组、禁用一组、其余一组），所以「按最后运行倒序」不会把置顶任务冲散、也不会把禁用任务混进启用任务中间。⚠️ 状态分区有一条【豁免】：当 sort_rules 的【第一条】规则 field = "status" 时，状态分区不生效，整份列表按 status 值原样排序（置顶分区仍然生效，不受影响）。理由是状态分区本身就是按 status 分的，再按 status 排一次等于自相矛盾——用户显式点了「按状态排序」，拿到的却是被状态分区钉死的固定组序。只看第一条是因为它才代表用户的主排序意图，第二条起是 tie-break。分区内多条规则按先后做 tie-break，全平手再回落默认排序：运行中优先 > 拖拽顺序（list_order）> 手工顺序（sort_order）> 创建时间。⚠️「运行中优先」与上面的置顶 / 状态分区【不是同一层】，别混为一谈：置顶与状态分区压在【所有】排序规则之上，而运行中优先只是默认排序链里的一环 —— 不传 sort_rules 时它把 status=2（运行中）的任务提到【本区】最前，传了 sort_rules 时只有规则全部打平才轮得到它。所以用户显式点了「名称 A→Z」，运行中不会越过他的规则插到前面。这一层只认 2（运行中），不认 0.5（排队中）——排队是几秒钟就过去的瞬时态，一并提上来只会让同一次运行多跳一次；任务跑完自动回到原位，list_order 不会被改写（拖拽顺序不受影响，PUT /api/tasks/sort 的「区」划分也不受影响）。last_run_at（最后运行）与 next_run_at（下次运行）是任务列表页两列的点击排序：next_run_at 不是数据库列，是按 cron 现算的快照，只能在内存里排；这两个字段的空值（从未运行、已禁用或非 cron 因而没有下次运行）在各自分区内一律排最后，不随 asc/desc 翻转。未知 field 静默回落默认排序，不报 400', example: '[{"field":"next_run_at","direction":"asc"}]' },
+          { name: 'label', type: 'string', description: '按标签模糊匹配（labels LIKE %值%）。分组要连前缀一起传，例如「分组:日常」，只传「日常」会把普通标签也捞进来；只想按分组精确筛选请用 filters 的 group 字段' },
+          { name: 'filters', type: 'string', description: '任务视图的筛选规则，JSON 字符串数组 [{field,operator,value}]。field 可选 command / name / cron_expression / status / labels / subscription / group；operator 可选 contains / not_contains / equals / not_equals；匹配一律先 trim 再转小写、不是正则；多条之间是 AND。status 的 value 用 1（已启用）/ 0（已禁用）/ 2（运行中）/ 0.5（排队中）。group 只认任务的分组名（labels 里 trim 后第一个名字非空的「分组:xxx」），value 填名字本身、不带「分组:」前缀，不会误中同名的普通标签或订阅名；没有分组的任务，equals / contains 不命中，not_equals / not_contains 命中；现有分组见 GET /api/tasks/groups。value 为空的规则会被整条丢弃，JSON 解析失败则静默降级为不筛选', example: '[{"field":"command","operator":"contains","value":"jd"}]' },
+          { name: 'sort_rules', type: 'string', description: '任务视图的排序规则，JSON 字符串数组 [{field,direction}]。field 可选 name / command / cron_expression / status / labels / subscription / group / created_at / last_run_at / next_run_at（group 按分组名比较、不区分大小写，没有分组的按空串参与比较）；direction 只认 desc，其它一律按 asc。⚠️ 置顶与状态分组【压在排序规则之上】，排序规则只在同一分区内生效：先按置顶分区（置顶的整体在前），再按状态分区（启用/排队中/运行中一组、禁用一组、其余一组），所以「按最后运行倒序」不会把置顶任务冲散、也不会把禁用任务混进启用任务中间。⚠️ 状态分区有一条【豁免】：当 sort_rules 的【第一条】规则 field = "status" 时，状态分区不生效，整份列表按 status 值原样排序（置顶分区仍然生效，不受影响）。理由是状态分区本身就是按 status 分的，再按 status 排一次等于自相矛盾——用户显式点了「按状态排序」，拿到的却是被状态分区钉死的固定组序。只看第一条是因为它才代表用户的主排序意图，第二条起是 tie-break。分区内多条规则按先后做 tie-break，全平手再回落默认排序：运行中优先 > 拖拽顺序（list_order）> 手工顺序（sort_order）> 创建时间。⚠️「运行中优先」与上面的置顶 / 状态分区【不是同一层】，别混为一谈：置顶与状态分区压在【所有】排序规则之上，而运行中优先只是默认排序链里的一环 —— 不传 sort_rules 时它把 status=2（运行中）的任务提到【本区】最前，传了 sort_rules 时只有规则全部打平才轮得到它。所以用户显式点了「名称 A→Z」，运行中不会越过他的规则插到前面。这一层只认 2（运行中），不认 0.5（排队中）——排队是几秒钟就过去的瞬时态，一并提上来只会让同一次运行多跳一次；任务跑完自动回到原位，list_order 不会被改写（拖拽顺序不受影响，PUT /api/tasks/sort 的「区」划分也不受影响）。last_run_at（最后运行）与 next_run_at（下次运行）是任务列表页两列的点击排序：next_run_at 不是数据库列，是按 cron 现算的快照，只能在内存里排；这两个字段的空值（从未运行、已禁用或非 cron 因而没有下次运行）在各自分区内一律排最后，不随 asc/desc 翻转。未知 field 静默回落默认排序，不报 400', example: '[{"field":"next_run_at","direction":"asc"}]' },
         ],
         responseExample: JSON.stringify({
           data: [{
@@ -547,6 +549,7 @@ panel.add_or_update_env(
             command: 'task sign.py',
             cron_expression: '0 9 * * *',
             status: 1,
+            enabled: true,
             last_run_status: 0,
             last_run_at: '2026-03-10T09:00:00',
             notify_on_abort: false,
@@ -555,6 +558,27 @@ panel.add_or_update_env(
           }],
           total: 1, page: 1, page_size: 20,
         }, null, 2),
+        responseFields: [
+          { name: 'data[].status', type: 'number', description: '运行状态：1 空闲（已启用）/ 0 已禁用 / 0.5 排队中 / 2 运行中。禁用的任务被手动运行期间也是 0.5 或 2，所以不能拿它判断启用开关' },
+          { name: 'data[].enabled', type: 'boolean', description: '启用开关，与是否正在运行无关：禁用的任务手动运行期间仍是 false，启用的任务运行中仍是 true。「启用 / 禁用」按钮应按它判断；老版本面板不下发这个字段，可回退为 status !== 0' },
+        ],
+      },
+      {
+        id: 'tasks-groups',
+        method: 'GET',
+        path: '/api/tasks/groups',
+        title: '获取任务分组',
+        description: '列出全部任务分组及各自的任务数，网页任务页顶栏的分组标签就用它。「分组」就是任务 labels 里的「分组:名称」标签（APP 的分组管理写的就是它）；一个任务有多个分组标签时只认第一个名字非空的。返回裸数组，按 name 升序（字节序）；一个分组都没有时返回 []。viewer 及以上角色可访问，应用令牌需要 tasks 权限。去重区分大小写（Prod 与 prod 算两个分组），而 filters 的 group 筛选不区分大小写。',
+        auth: 'jwt',
+        responseExample: JSON.stringify([
+          { name: '日常', count: 5 },
+          { name: '签到', count: 3 },
+        ], null, 2),
+        responseFields: [
+          { name: '[].name', type: 'string', description: '分组名（去掉「分组:」前缀并 trim 后的名字）' },
+          { name: '[].count', type: 'integer', description: '挂着这个分组的任务数' },
+          { name: '按分组筛选', type: 'tip', description: '把 name 原样作为 filters 的 group 值传给 GET /api/tasks，例如 [{"field":"group","operator":"equals","value":"日常"}]' },
+        ],
       },
       {
         id: 'tasks-create',
@@ -576,7 +600,10 @@ panel.add_or_update_env(
           { name: 'notify_on_abort', type: 'boolean', description: '主动终止时通知', example: 'false' },
           { name: 'notification_channel_id', type: 'integer', description: '指定通知渠道 ID，留空则发送到全部「默认推送」渠道（push_scope=default）', example: '3' },
         ],
-        responseExample: JSON.stringify({ message: '创建成功', data: { id: 1, name: '签到任务' } }, null, 2),
+        responseExample: JSON.stringify({ message: '创建成功', data: { id: 1, name: '签到任务', status: 1, enabled: true } }, null, 2),
+        responseFields: [
+          { name: 'data', type: 'object', description: '新任务的完整数据，含 enabled（新任务默认启用；示例只列出部分字段）' },
+        ],
       },
       {
         id: 'tasks-update',
@@ -599,7 +626,23 @@ panel.add_or_update_env(
           { name: 'notify_on_abort', type: 'boolean', description: '主动终止时通知' },
           { name: 'notification_channel_id', type: 'integer', description: '指定通知渠道 ID，设为 null 则恢复为发送到全部「默认推送」渠道' },
         ],
-        responseExample: JSON.stringify({ message: '更新成功' }, null, 2),
+        responseExample: JSON.stringify({ message: 'task updated', data: { id: 1, name: '签到任务', status: 1, enabled: true } }, null, 2),
+        responseFields: [
+          { name: 'data', type: 'object', description: '任务的最新数据，含 enabled（示例只列出部分字段）' },
+        ],
+      },
+      {
+        id: 'tasks-copy',
+        method: 'POST',
+        path: '/api/tasks/:id/copy',
+        title: '复制任务',
+        description: '复制指定任务，需要 operator 及以上角色。副本名为「原名 (副本)」，命令、定时规则、标签、通知与重试等配置照搬，不带置顶与运行记录。副本一律是禁用状态、不会自动运行，确认无误后再调 PUT /api/tasks/:id/enable 启用。成功返回 201；任务不存在返回 404，写库失败返回 500「复制任务失败」。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '要复制的任务 ID' }],
+        responseExample: JSON.stringify({ message: '复制成功', data: { id: 2, name: '签到任务 (副本)', status: 0, enabled: false } }, null, 2),
+        responseFields: [
+          { name: 'data', type: 'object', description: '副本的完整数据，含 enabled（恒为 false；示例只列出部分字段）' },
+        ],
       },
       {
         id: 'tasks-delete',
@@ -754,10 +797,41 @@ panel.add_or_update_env(
         method: 'PUT',
         path: '/api/tasks/:id/stop',
         title: '停止任务',
-        description: '停止正在执行的任务',
+        description: '停止排队中或正在运行的任务，需要 operator 及以上角色。停止后按启用开关回到空闲或禁用，上次结果记为已终止。任务没在排队或运行（也没有残留进程）时返回 200 与「任务未在运行」，不改任何字段，上次结果也保持原样。任务不存在返回 404。',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '任务 ID' }],
         responseExample: JSON.stringify({ message: '任务已停止' }, null, 2),
+        responseFields: [
+          { name: 'message', type: 'string', description: '一般为「任务已停止」；任务没在排队或运行时为「任务未在运行」' },
+        ],
+      },
+      {
+        id: 'tasks-enable',
+        method: 'PUT',
+        path: '/api/tasks/:id/enable',
+        title: '启用任务',
+        description: '打开任务的启用开关，需要 operator 及以上角色；cron 任务会重新注册到调度器，按定时规则自动运行。定时规则无效时返回 400，任务不存在返回 404。任务正在运行或排队中（例如禁用的任务被手动运行）时，本次执行不受影响、status 保持 2 或 0.5，结束后自动回到空闲；请以响应 data 里的 status 与 enabled 为准，不要自行把 status 改成 1。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '任务 ID' }],
+        responseExample: JSON.stringify({ message: '已启用', data: { id: 1, name: '签到任务', status: 1, enabled: true } }, null, 2),
+        responseFields: [
+          { name: 'message', type: 'string', description: '固定为「已启用」' },
+          { name: 'data', type: 'object', description: '任务的最新数据，含 enabled（示例只列出部分字段）' },
+        ],
+      },
+      {
+        id: 'tasks-disable',
+        method: 'PUT',
+        path: '/api/tasks/:id/disable',
+        title: '禁用任务',
+        description: '关闭任务的启用开关，需要 operator 及以上角色，禁用后不再按定时规则自动运行。任务正在运行时不会被中断：status 保持 2、enabled 立即变为 false，本次结束后落为禁用。任务不存在返回 404。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '任务 ID' }],
+        responseExample: JSON.stringify({ message: '已禁用', data: { id: 1, name: '签到任务', status: 0, enabled: false } }, null, 2),
+        responseFields: [
+          { name: 'message', type: 'string', description: '一般为「已禁用」；任务正在运行时为「已设置为禁用，当前执行结束后生效」' },
+          { name: 'data', type: 'object', description: '任务的最新数据，含 enabled（示例只列出部分字段）' },
+        ],
       },
       {
         id: 'tasks-sort',
@@ -1111,7 +1185,7 @@ Transfer-Encoding: chunked
         method: 'GET',
         path: '/api/envs',
         title: '获取所有环境变量',
-        description: '获取环境变量列表，支持 keyword 模糊搜索与 names / groups / enabled 精确筛选（各条件之间是 AND），支持分页；带 all=1 时一次返回全部（硬上限 5000）',
+        description: '获取环境变量列表，支持 keyword 模糊搜索与 names / groups / enabled 精确筛选（各条件之间是 AND），支持分页；带 all=1 时一次返回全部（硬上限 5000）。排列顺序：置顶区在前，区内按 position 升序；运行时同名变量（多账号）也按这个顺序用 & 拼接',
         auth: 'jwt',
         queryParams: [
           { name: 'keyword', type: 'string', description: '搜索关键字：对 变量名 / 变量值 / 备注 / 分组 四个字段做大小写不敏感的模糊匹配（UPPER LIKE %值%），四个字段之间是 OR、无法限定到某一个字段。要按变量名精确匹配请改用 names', example: 'JD_COOKIE' },
@@ -1130,6 +1204,8 @@ Transfer-Encoding: chunked
           { name: 'value', type: 'string', description: '变量值' },
           { name: 'enabled', type: 'boolean', description: '是否启用' },
           { name: 'remarks', type: 'string', description: '备注' },
+          { name: 'sort_order', type: 'integer', description: '所在区：1 为置顶区，0 为普通区，置顶区整体排在前面' },
+          { name: 'position', type: 'number', description: '区内排序值，越小越靠前，置顶区与普通区各自比较。拖拽排序、置顶 / 取消置顶都会改写它，也可以用 PUT /api/envs/:id 直接填' },
         ],
       },
       {
@@ -1184,6 +1260,7 @@ Transfer-Encoding: chunked
           { name: 'value', type: 'string', description: '变量值' },
           { name: 'remarks', type: 'string', description: '备注' },
           { name: 'group', type: 'string', description: '分组名称' },
+          { name: 'position', type: 'number', description: '区内排序值：越小越靠前，置顶区与普通区各自比较；只在值有变化时写入，必须是有限数字，否则返回 400。之后在列表里拖拽排序会把整区重新编号（步长 1000），手填的值会被覆盖。⚠️ 与 PUT /api/envs/sort 请求体里的 position（before / after 落点）同名不同义', example: '1500' },
         ],
         responseExample: JSON.stringify({ message: '更新成功' }, null, 2),
       },
@@ -1196,6 +1273,40 @@ Transfer-Encoding: chunked
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '变量 ID' }],
         responseExample: JSON.stringify({ message: '删除成功' }, null, 2),
+      },
+      {
+        id: 'envs-sort',
+        method: 'PUT',
+        path: '/api/envs/sort',
+        title: '调整环境变量顺序',
+        description: '环境变量页的拖拽排序。把 source_id 挪到 target_id 前面（position=after 时挪到后面）；不传 target_id 表示移到本区末尾。「区」指置顶区与普通区，两区分别排序：跨区返回 400「置顶项和普通项请分别排序，需要跨区移动时请使用置顶按钮」，源或目标变量不存在返回 404。兄弟项取整个区而不是当前页，所以分页、筛选时拖拽同样有效；一次调用会把该区整体按 1000 的步长重新编号 position，另一个区不动。position 与 PUT /api/tasks/sort 同名同义。',
+        auth: 'jwt',
+        bodyParams: [
+          { name: 'source_id', type: 'integer', required: true, description: '被拖动的变量 ID', example: '12' },
+          { name: 'target_id', type: 'integer', description: '落点变量 ID；不传表示移到本区末尾', example: '34' },
+          { name: 'position', type: 'string', description: '相对落点的位置：只认 after（插到目标之后，忽略大小写与首尾空格），不传或其它值一律按 before。⚠️ 与变量自身的数值字段 position（PUT /api/envs/:id 可写）同名不同义', example: 'after' },
+        ],
+        responseExample: JSON.stringify({ message: '排序更新成功' }, null, 2),
+      },
+      {
+        id: 'envs-move-top',
+        method: 'PUT',
+        path: '/api/envs/:id/move-top',
+        title: '置顶环境变量',
+        description: '把变量移入置顶区，追加到置顶区末尾，所以先置顶的排在前面。对已经在置顶区的变量再调用，直接返回成功、位置不变。已置顶的变量彼此的顺序不会被重排，新置顶的一律排在它们后面。⚠️ 这个顺序同时是运行时同名变量（多账号）用 & 拼接的顺序，也就是脚本里的「第 N 个账号」。变量不存在返回 404。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '变量 ID' }],
+        responseExample: JSON.stringify({ message: '已置顶' }, null, 2),
+      },
+      {
+        id: 'envs-cancel-top',
+        method: 'PUT',
+        path: '/api/envs/:id/cancel-top',
+        title: '取消置顶',
+        description: '把变量移回普通区，追加到普通区末尾。对本来就不在置顶区的变量调用，同样会把它挪到普通区末尾。变量不存在返回 404。',
+        auth: 'jwt',
+        pathParams: [{ name: 'id', type: 'integer', required: true, description: '变量 ID' }],
+        responseExample: JSON.stringify({ message: '已取消置顶' }, null, 2),
       },
     ],
   },
@@ -1217,22 +1328,22 @@ Transfer-Encoding: chunked
         method: 'POST',
         path: '/api/subscriptions',
         title: '创建订阅',
-        description: '创建新的仓库订阅',
+        description: '创建新的仓库订阅。白名单 / 黑名单 / 依赖规则里的正则片段会在保存时校验，写错返回 400 并点名字段、第几段和原因，例如「依赖规则第 2 段 `^jd[` 不是合法的正则表达式：missing closing ]: `[`（含 ^ $ ( ) [ ] { } ? \\ 或 .* .+ 的片段按正则解析，要写字面量请用 \\ 转义）」，此时订阅不会创建。',
         auth: 'jwt',
         bodyParams: [
           { name: 'name', type: 'string', required: true, description: '订阅名称' },
           { name: 'url', type: 'string', required: true, description: '仓库 URL（HTTP/HTTPS）' },
           { name: 'branch', type: 'string', description: '分支，默认 main', example: 'main' },
           { name: 'schedule', type: 'string', description: 'Cron 表达式', example: '0 0 * * *' },
-          { name: 'whitelist', type: 'string', description: '白名单：文件名/路径片段，「子串包含」匹配（非 glob、非正则），多个用 , 或 | 分隔；片段命中目录名时该目录下的全部文件（含多级子目录）都算命中。命中的文件才会检出落盘并建成定时任务；留空表示全部命中', example: 'jd_|jx_|jddj_' },
-          { name: 'blacklist', type: 'string', description: '黑名单：匹配规则同白名单（片段命中目录名时整个目录都被排除）。命中的文件既不检出也不建任务', example: 'backUp' },
-          { name: 'depend_on', type: 'string', description: '依赖规则：对应青龙 ql repo 的第 4 个参数 dependence，匹配规则同白名单（填 utils 会把 utils/ 目录下的文件一并检出）。命中的文件会被检出落盘供主脚本调用，但不会建成定时任务；白名单为空时本字段不生效', example: 'sendNotify|utils' },
-          { name: 'sub_path', type: 'string', description: '只检出仓库内的指定子目录（多个用 , 或 | 分隔），优先级高于白名单' },
+          { name: 'whitelist', type: 'string', description: '白名单：多个片段用 , 或 | 分隔（配对的括号里、被 \\ 转义的 , | 不拆）。普通片段按「子串包含」匹配文件名 / 路径（不是 glob），片段命中目录名时该目录下的全部文件（含多级子目录）都算命中；含 ^ $ ( ) [ ] { } ? \\ 或 .* .+ 的片段按正则（Go RE2 语法）匹配仓库内的相对路径（不锚定，路径分隔写 /），例如 ^jd[^_] 只命中仓库根目录下的 jdCookie.js 这类文件，想按字面匹配这些字符请用 \\ 转义。命中的文件才会建成定时任务。检出范围：没填 sub_path 时，只有普通片段就只检出命中的文件，出现正则片段则改为检出完整仓库（建任务仍按白名单筛）；填了 sub_path 时按子目录检出，白名单只决定建不建任务。留空表示全部命中', example: 'jd_|jx_|jddj_' },
+          { name: 'blacklist', type: 'string', description: '黑名单：写法与匹配规则同白名单（普通片段命中目录名时整个目录都被排除）。命中的文件不建任务；普通片段命中的文件也不检出，正则片段只影响建任务、文件仍会落盘', example: 'backUp' },
+          { name: 'depend_on', type: 'string', description: '依赖规则：对应青龙 ql repo 的第 4 个参数 dependence，写法与匹配规则同白名单（填 utils 会把 utils/ 目录下的文件一并检出）。命中的文件会被检出落盘供主脚本调用，但不会建成定时任务；含正则片段时改为检出完整仓库，填了 sub_path 也一样，但只给子目录里的脚本建定时任务。没填 sub_path 且白名单为空时本来就检出完整仓库，本字段不起作用', example: 'sendNotify|utils' },
+          { name: 'sub_path', type: 'string', description: '只检出仓库内的指定子目录（多个用 , 或 | 分隔），按路径匹配、不认正则。优先级高于白名单：填了它，白名单就不参与检出，只决定建不建任务。依赖规则含正则片段时会改为检出完整仓库，但仍只给子目录里的脚本建定时任务' },
           { name: 'save_dir', type: 'string', description: '脚本存放子目录，留空则按仓库名推导' },
           { name: 'pre_script', type: 'string', description: '拉取前指令：在 git 拉取之前执行的 Shell 命令，可用 $SUB_DIR / $SCRIPTS_DIR / $QL_DIR 等变量。非 0 退出会中断本次拉取并记为失败', example: 'mount -a' },
           { name: 'hook_script', type: 'string', description: '拉取后钩子：拉取成功后、同步定时任务之前执行的 Shell 命令，变量与失败语义同 pre_script', example: 'bash $SUB_DIR/copyfiles.sh' },
           { name: 'overwrite_mode', type: 'string', description: '覆盖拉取策略，仅对 git 仓库订阅生效：inherit=跟随系统设置里的「覆盖拉取（默认）」开关（默认值）、force=强制覆盖本地改动、preserve=拉取前暂存本地改动再恢复。作用域只有脚本文件（git 工作区），不影响任务的名称与定时；首次拉取（本地还没有仓库）不适用。不传或传非法值一律按 inherit 处理', example: 'preserve' },
-          { name: 'full_checkout', type: 'boolean', description: '完整检出，仅对 git 仓库订阅生效：true=放弃 sparse-checkout，拉取整个仓库（源码、资源、文档全部落盘，体积可能很大）；不传或 false=按「指定子目录 / 白名单 / 依赖规则」稀疏检出（默认）。不改变建任务的规则：仍然只有命中白名单的文件会被建成定时任务', example: 'true' },
+          { name: 'full_checkout', type: 'boolean', description: '完整检出，仅对 git 仓库订阅生效：true=放弃 sparse-checkout，拉取整个仓库（源码、资源、文档全部落盘，体积可能很大）；不传或 false=按「指定子目录 / 白名单 / 依赖规则」稀疏检出（默认）。不改变建任务的规则：仍然只有命中 sub_path 与白名单的文件会被建成定时任务。依赖规则有正则片段、或没填 sub_path 而白名单有正则片段时，默认就会检出完整仓库，但黑名单普通片段命中的文件仍不落盘；开启后它们也会落盘', example: 'true' },
           { name: 'auto_add_task_mode', type: 'string', description: '自动添加定时任务策略：inherit=跟随系统设置里的「自动添加定时任务（默认）」开关（默认值）、enabled=这条订阅强制建任务、disabled=这条订阅一律不建任务。作用域是拉取成功后「把命中的脚本同步成定时任务」这一步，不影响脚本文件的检出落盘；与只对 git 仓库订阅生效的 overwrite_mode / full_checkout 不同，本项对单文件订阅同样生效。不传或传非法值一律按 inherit 处理', example: 'disabled' },
           { name: 'auto_del_task_mode', type: 'string', description: '自动删除失效任务策略：inherit=跟随系统设置里的「自动删除失效任务（默认）」开关（默认值）、enabled=这条订阅强制删除源文件已消失的任务、disabled=源文件没了也保留任务。作用域是带本订阅标签、且命令以 task 开头的任务，包括被本订阅关联的自建任务：脚本从订阅里消失（上游删除、被白/黑名单排除、改了保存目录）后会连日志删除；node / python3 / desi 等写法的任务不在自动删除范围；同时被其他订阅使用的任务只移除本订阅的标签、不删除。不想删自己的任务就设为 disabled。与 overwrite_mode / full_checkout 不同，本项对单文件订阅同样生效。不传或传非法值一律按 inherit 处理', example: 'enabled' },
           { name: 'auto_add_task', type: 'boolean', description: '已废弃：仅作老客户端兼容保留，请改用 auto_add_task_mode。**这一列永远不会被写成 true** —— 创建时如果只给了这个布尔、没给三态字段，服务端会把 true 翻译成 auto_add_task_mode=enabled 再落库，本列恒为 false；同时给了合法三态时以三态为准。老库里为 true 的行会在升级时一次性迁移成 enabled 并把本列清零' },
@@ -1245,7 +1356,7 @@ Transfer-Encoding: chunked
         method: 'PUT',
         path: '/api/subscriptions/:id',
         title: '更新订阅',
-        description: '更新指定订阅配置。请求体为部分更新，字段与「创建订阅」一致（含 whitelist / blacklist / depend_on / sub_path / overwrite_mode / full_checkout / auto_add_task_mode / auto_del_task_mode），只提交需要修改的字段即可。其中 overwrite_mode 的取值为 inherit / force / preserve，非法值会被归一成 inherit；full_checkout 为布尔值，true 表示拉取整个仓库、false（默认）表示按子目录/白名单/依赖规则稀疏检出；auto_add_task_mode / auto_del_task_mode 的取值为 inherit / enabled / disabled，非字符串或非法值同样归一成 inherit，且对单文件订阅一样生效。已废弃的 auto_add_task / auto_del_task **不在更新白名单里**，传了会被直接忽略（老客户端兼容靠的是响应里仍然下发这两个字段，不是靠可写）。',
+        description: '更新指定订阅配置。请求体为部分更新，字段与「创建订阅」一致（含 whitelist / blacklist / depend_on / sub_path / overwrite_mode / full_checkout / auto_add_task_mode / auto_del_task_mode），只提交需要修改的字段即可。其中 overwrite_mode 的取值为 inherit / force / preserve，非法值会被归一成 inherit；full_checkout 为布尔值，true 表示拉取整个仓库、false（默认）表示按子目录/白名单/依赖规则稀疏检出；auto_add_task_mode / auto_del_task_mode 的取值为 inherit / enabled / disabled，非字符串或非法值同样归一成 inherit，且对单文件订阅一样生效。已废弃的 auto_add_task / auto_del_task **不在更新白名单里**，传了会被直接忽略（老客户端兼容靠的是响应里仍然下发这两个字段，不是靠可写）。白名单 / 黑名单 / 依赖规则只在提交的值与当前保存的值不同时才校验正则（没改动的旧值不会因此被拦下）；写错返回 400，同一请求里的其它字段也不会保存。',
         auth: 'jwt',
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '订阅 ID' }],
         responseExample: JSON.stringify({ message: '更新成功' }, null, 2),
@@ -1555,6 +1666,134 @@ if __name__ == '__main__':
     ],
   },
   {
+    key: 'mcp',
+    label: 'MCP',
+    endpoints: [
+      {
+        id: 'mcp-endpoint',
+        method: 'POST',
+        path: '/api/v1/mcp',
+        title: '连接 MCP 服务',
+        description: '面板内置的 MCP（Model Context Protocol）服务：Claude Desktop、Cursor、Cherry Studio 等 AI 客户端连上后可以查任务、看日志、巡检失败任务，管理员放开写入后还能运行任务、改环境变量、写脚本。完整用法（创建应用与勾选权限、各类客户端的配置、容器内的 stdio 命令 ddp mcp）见仓库 docs/mcp.md。开关：默认关闭，在「系统设置 → MCP 服务」启用，未启用时返回 403；改完立即生效，不需要重启。鉴权二选一：Authorization: Basic base64(app_key:app_secret)，直接用「Open API」页面创建的应用凭据；或 Authorization: Bearer <令牌>，即 POST /api/open-api/token 换来的应用令牌或面板的登录令牌。缺少凭据、凭据错误、应用已禁用、令牌无效或已过期都返回 401。能用哪些工具由应用勾选的权限范围决定，每次工具调用都记进「Open API」页面的调用日志，并计入应用的调用频率。协议是 Streamable HTTP 的无状态模式：请求体是 JSON-RPC 2.0，必须带 Content-Type: application/json 和 Accept: application/json, text/event-stream（缺前者回 415、缺后者回 400），每个 POST 独立处理、直接返回 JSON；GET / DELETE 返回 405。带 Origin 头的浏览器请求，来源必须与面板同源、在局域网 IP 下或在 config.yaml 的 cors.origins 里，否则返回 403。旧前缀 /api/mcp 同样可用。',
+        auth: 'jwt',
+        extraHeaders: { Accept: 'application/json, text/event-stream' },
+        bodyParams: [
+          { name: 'jsonrpc', type: 'string', required: true, description: '固定为 "2.0"', example: '2.0' },
+          { name: 'id', type: 'integer', required: true, description: '请求 ID，响应里原样带回', example: '1' },
+          { name: 'method', type: 'string', required: true, description: 'MCP 方法，常用 initialize / tools/list / tools/call。AI 客户端会自动完成这些调用，手工调试时直接发 tools/list 即可', example: 'tools/list' },
+          { name: 'params', type: 'object', description: '方法参数：tools/list 传 {}；tools/call 见「调用工具与工具清单」', example: '{}' },
+        ],
+        helperExamples: {
+          'curl 自测（Basic）': `curl -s ${getApiBaseOrigin()}/api/v1/mcp \\
+  -u 'app_key:app_secret' \\
+  -H 'Content-Type: application/json' \\
+  -H 'Accept: application/json, text/event-stream' \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'`,
+          '客户端配置（HTTP）': JSON.stringify({
+            mcpServers: {
+              'daidai-panel': {
+                url: `${getApiBaseOrigin()}/api/v1/mcp`,
+                headers: { Authorization: 'Basic <base64(app_key:app_secret)>' },
+              },
+            },
+          }, null, 2),
+          '客户端配置（stdio · Docker）': JSON.stringify({
+            mcpServers: {
+              'daidai-panel': {
+                command: 'docker',
+                args: ['exec', '-i', 'daidai-panel', 'ddp', 'mcp', '--app-key', '<app_key>', '--app-secret', '<app_secret>'],
+              },
+            },
+          }, null, 2),
+        },
+        responseExample: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            tools: [
+              {
+                name: 'list_tasks',
+                title: '查询任务列表',
+                description: '分页查询定时任务，可按关键词、运行状态、分组、标签筛选。返回精简字段：enabled 是启用开关（与是否正在运行无关），status_text 是运行状态。',
+                inputSchema: {
+                  type: 'object',
+                  properties: {
+                    keyword: { type: 'string', description: '按任务名称或命令模糊搜索' },
+                    group: { type: 'string', description: '按分组筛选（任务标签里的「分组:名称」，精确匹配名称）' },
+                  },
+                },
+                annotations: { title: '查询任务列表', readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+              },
+            ],
+          },
+        }, null, 2),
+        responseFields: [
+          { name: 'result.tools', type: 'array', description: '当前凭据可用的工具（name / title / description / inputSchema / annotations）。只开启 MCP 时是 11 个查询类工具，打开「允许写入与执行工具」后是 21 个；示例只列出一个、省略了部分参数' },
+          { name: 'result.tools[].annotations', type: 'object', description: 'readOnlyHint=true 为查询类工具；写入类为 false，其中会改动或删除已有数据的还带 destructiveHint=true' },
+          { name: '403', type: 'tip', description: 'MCP 服务未开启时返回 {"error":"MCP 服务未开启，请管理员在「系统设置 → MCP 服务」中启用"}；浏览器来源不在放行范围内也是 403' },
+          { name: '401', type: 'tip', description: '缺少凭据、应用凭据无效、应用已被禁用、令牌无效 / 过期 / 已撤销，都返回 {"error":"…"}，不含任何工具信息' },
+          { name: '405', type: 'tip', description: 'GET / DELETE 一律返回 405（带 Allow: POST）：服务是无状态的，不提供 SSE 长连接和会话' },
+        ],
+      },
+      {
+        id: 'mcp-tools',
+        method: 'POST',
+        path: '/api/v1/mcp',
+        title: '调用工具与工具清单',
+        description: '用 tools/call 调用工具：params.name 是工具名，params.arguments 是参数（每个工具的参数说明见 tools/list 返回的 inputSchema）。共 21 个工具，下表按「只读 / 写入」列出，并注明各自需要应用勾选的权限范围：11 个查询类工具开启 MCP 服务即可用；10 个写入与执行类工具还要在「系统设置 → MCP 服务」打开「允许写入与执行工具」，否则 tools/list 里看不到，直接调用也会失败。应用没勾选对应权限、参数不对或面板接口报错时，返回 result.isError=true，文本里带原因。单次输出上限约 64KB，超出会截断并注明，列表类工具可减小 page_size 或加关键词。list_envs 会遮蔽名称像凭据的变量值（规则与环境变量页一致），按关键词搜索时也不会按这些变量的值匹配。',
+        auth: 'jwt',
+        extraHeaders: { Accept: 'application/json, text/event-stream' },
+        bodyParams: [
+          { name: 'jsonrpc', type: 'string', required: true, description: '固定为 "2.0"', example: '2.0' },
+          { name: 'id', type: 'integer', required: true, description: '请求 ID，响应里原样带回', example: '2' },
+          { name: 'method', type: 'string', required: true, description: '固定为 tools/call', example: 'tools/call' },
+          { name: 'params', type: 'object', required: true, description: '{"name": 工具名, "arguments": 参数对象}', example: '{"name":"list_tasks","arguments":{"status":"running","page_size":5}}' },
+        ],
+        responseExample: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 2,
+          result: {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                items: [{ command: 'task jd_sign.js', cron_expression: '0 9 * * *', enabled: false, group: '日常', id: 12, last_run_status: 0, last_run_status_text: '成功', name: '京东签到', status: 2, status_text: '运行中' }],
+                page: 1,
+                page_size: 5,
+                total: 1,
+              }),
+            }],
+          },
+        }, null, 2),
+        responseFields: [
+          { name: 'result.content[0].text', type: 'string', description: '工具输出，统一是 JSON 文本；超过约 64KB 时截断并在末尾注明' },
+          { name: 'result.isError', type: 'boolean', description: '工具执行失败时为 true（参数不对、应用缺少权限、面板接口报错等），text 里是原因' },
+          { name: 'list_tasks', type: '只读', description: '权限 tasks。分页查询任务，可按关键词、运行状态、分组、标签筛选；enabled 是启用开关，status_text 是运行状态' },
+          { name: 'get_task', type: '只读', description: '权限 tasks。按 ID 查看任务完整配置' },
+          { name: 'get_task_log', type: '只读', description: '权限 tasks。任务最近一次执行的日志，过长只保留末尾' },
+          { name: 'list_logs', type: '只读', description: '权限 logs。执行记录，可按任务、结果筛选，适合巡检失败任务' },
+          { name: 'get_log', type: '只读', description: '权限 logs。按执行记录 ID 查看日志正文，过长只保留末尾' },
+          { name: 'list_envs', type: '只读', description: '权限 envs。查询环境变量，名称像凭据的变量值会被遮蔽' },
+          { name: 'list_scripts', type: '只读', description: '权限 scripts。脚本文件列表或目录树' },
+          { name: 'read_script', type: '只读', description: '权限 scripts。读取脚本内容，过长只返回开头' },
+          { name: 'list_subscriptions', type: '只读', description: '权限 subscriptions。查询订阅，含白名单、黑名单、依赖规则与最近拉取时间' },
+          { name: 'get_system_info', type: '只读', description: '权限 system。资源占用、面板版本、部署形态' },
+          { name: 'get_dashboard', type: '只读', description: '权限 system。概览页统计' },
+          { name: 'run_task', type: '写入', description: '权限 tasks。立即运行任务（禁用的任务也可以手动运行），结果用 get_task_log 查看' },
+          { name: 'stop_task', type: '写入', description: '权限 tasks。停止运行中或排队中的任务' },
+          { name: 'set_task_enabled', type: '写入', description: '权限 tasks。启用或禁用任务' },
+          { name: 'batch_task_action', type: '写入', description: '权限 tasks。批量 enable / disable / run / stop / pin / unpin / delete，delete 不删脚本文件' },
+          { name: 'create_env', type: '写入', description: '权限 envs。新建环境变量' },
+          { name: 'update_env', type: '写入', description: '权限 envs。按 ID 修改环境变量，只改传入的字段' },
+          { name: 'delete_env', type: '写入', description: '权限 envs。按 ID 删除环境变量' },
+          { name: 'save_script', type: '写入', description: '权限 scripts。新建或覆盖脚本，保留历史版本，可在网页端回滚' },
+          { name: 'run_script', type: '写入', description: '权限 scripts。调试运行脚本并等待最多约 50 秒；仍在运行时返回 run_id，用它再调用可继续取输出，加 stop: true 可停止' },
+          { name: 'pull_subscription', type: '写入', description: '权限 subscriptions。立即拉取订阅，在后台进行' },
+          { name: 'scripts 权限', type: 'tip', description: '保存脚本再运行，等于能在面板上执行任意代码；envs 权限能改写所有凭据。请只授予完全信任的客户端' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'config',
     label: '系统配置',
     endpoints: [
@@ -1747,6 +1986,8 @@ if __name__ == '__main__':
 
 export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, string> {
   const { method, path, bodyParams, auth } = endpoint
+  // 额外请求头（如 MCP 要求的 Accept）按声明顺序跟在鉴权头后面；没声明时三段示例与原来逐字相同。
+  const extraHeaderEntries = Object.entries(endpoint.extraHeaders ?? {})
   const url = `${getApiBaseOrigin()}${path}`
   const hasBody = bodyParams && bodyParams.length > 0 && method !== 'GET'
 
@@ -1760,7 +2001,8 @@ export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, stri
   if (hasBody) {
     bodyParams!.forEach(p => {
       if (p.example) {
-        if (p.type === 'integer') {
+        // number（如环境变量的 position 排序值）与 integer 一样按数字写进示例，否则会生成成字符串、发出去就 400
+        if (p.type === 'integer' || p.type === 'number') {
           bodyObj[p.name] = Number(p.example)
         } else if (p.type === 'boolean') {
           bodyObj[p.name] = p.example === 'true'
@@ -1774,7 +2016,7 @@ export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, stri
           bodyObj[p.name] = p.example
         }
       } else {
-        bodyObj[p.name] = p.type === 'integer' ? 0 : p.type === 'boolean' ? false : p.type === 'array' ? [] : p.type === 'object' ? {} : ''
+        bodyObj[p.name] = p.type === 'integer' || p.type === 'number' ? 0 : p.type === 'boolean' ? false : p.type === 'array' ? [] : p.type === 'object' ? {} : ''
       }
     })
   }
@@ -1784,21 +2026,28 @@ export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, stri
 
   let shell = `curl -X ${method} "${url}"`
   if (authHeader) shell += ` \\\n  ${authHeader}`
+  for (const [name, value] of extraHeaderEntries) shell += ` \\\n  -H "${name}: ${value}"`
   if (hasBody) shell += ` \\\n  -H "Content-Type: application/json" \\\n  -d '${bodyJson}'`
 
   let js = `const res = await fetch("${url}", {\n  method: "${method}",\n  headers: {\n    "Content-Type": "application/json",`
   if (auth === 'jwt') js += `\n    "Authorization": "Bearer <TOKEN>",`
+  for (const [name, value] of extraHeaderEntries) js += `\n    "${name}": "${value}",`
   js += `\n  },`
   if (hasBody) js += `\n  body: JSON.stringify(${bodyJson}),`
   js += `\n})\nconst data = await res.json()\nconsole.log(data)`
 
+  const pythonHeaders: string[] = []
+  if (auth === 'jwt') pythonHeaders.push(`"Authorization": "Bearer <TOKEN>"`)
+  for (const [name, value] of extraHeaderEntries) pythonHeaders.push(`"${name}": "${value}"`)
+  const pythonHeadersArg = pythonHeaders.length ? ', headers=headers' : ''
+
   let python = `import requests\n\n`
-  if (auth === 'jwt') python += `headers = {"Authorization": "Bearer <TOKEN>"}\n`
+  if (pythonHeaders.length) python += `headers = {${pythonHeaders.join(', ')}}\n`
   if (hasBody) {
     python += `data = ${bodyJson}\n`
-    python += `res = requests.${method.toLowerCase()}("${url}"${auth === 'jwt' ? ', headers=headers' : ''}, json=data)\n`
+    python += `res = requests.${method.toLowerCase()}("${url}"${pythonHeadersArg}, json=data)\n`
   } else {
-    python += `res = requests.${method.toLowerCase()}("${url}"${auth === 'jwt' ? ', headers=headers' : ''})\n`
+    python += `res = requests.${method.toLowerCase()}("${url}"${pythonHeadersArg})\n`
   }
   python += `print(res.json())`
 

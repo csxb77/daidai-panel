@@ -1,10 +1,25 @@
 <script setup lang="ts">
-import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  defineAsyncComponent,
+  onBeforeUnmount,
+  onMounted,
+  provide,
+  ref,
+  shallowRef,
+} from "vue";
 import {
   EDITOR_ENGINE_CHANGE_EVENT,
   readStoredEditorEngine,
   resolveEditorEngine,
 } from "@/utils/editorEngine";
+import {
+  MONACO_LOADING_DELAY_MS,
+  MONACO_LOAD_RETRY_KEY,
+  MonacoDiffLoadError,
+  MonacoDiffLoading,
+} from "@/utils/monacoWarmup";
+// 失败态按钮的样式在这里引、不在首屏的 monacoWarmup.ts 里引，理由同 CodeEditor.vue 那句
+import "element-plus/theme-chalk/el-button.css";
 
 /**
  * 版本对比编辑器（分发层）。
@@ -54,9 +69,27 @@ const props = withDefaults(
 const CodeMirrorDiffEditor = defineAsyncComponent(
   () => import("./CodeMirrorDiffEditor.vue"),
 );
-const MonacoDiffEditor = defineAsyncComponent(
-  () => import("./MonacoDiffEditor.vue"),
-);
+
+// Monaco 那份带加载态与失败态（#133 / #126）：loader 同时拉 monacoEngine、「重试」换一个新定义，
+// 理由与 CodeEditor.vue 里 MonacoEditor 那段注释逐条相同（那边写得全，这里不重抄）。
+// CodeMirror 那份不加：失败态里的「改用 CodeMirror」对它没有意义；它加载失败时仍由
+// main.ts 的 vite:preloadError 自动刷新兜底。
+function createMonacoDiffComponent() {
+  return defineAsyncComponent({
+    loader: () =>
+      Promise.all([
+        import("./MonacoDiffEditor.vue"),
+        import("@/utils/monacoEngine"),
+      ]).then(([diffModule]) => diffModule),
+    loadingComponent: MonacoDiffLoading,
+    delay: MONACO_LOADING_DELAY_MS,
+    errorComponent: MonacoDiffLoadError,
+  });
+}
+const MonacoDiffEditor = shallowRef(createMonacoDiffComponent());
+provide(MONACO_LOAD_RETRY_KEY, () => {
+  MonacoDiffEditor.value = createMonacoDiffComponent();
+});
 
 const engine = ref(resolveEditorEngine(readStoredEditorEngine()));
 

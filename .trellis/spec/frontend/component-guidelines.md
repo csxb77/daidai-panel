@@ -864,7 +864,7 @@ const currentChannelFields = computed(() =>
 > `mpnews`，而另外两处都有。
 
 > **系统配置侧走的是「专属表单 + schema 兜底」两层**：
-> `useSettingsConfig.ts` 的 `configForm` 保留 41 个键的硬编码，因为它们绑着
+> `useSettingsConfig.ts` 的 `configForm` 保留 44 个键的硬编码，因为它们绑着
 > SVG 上传、取色器实时预览、图片压缩、镜像源弹窗、备份内容 CSV ↔ 复选框等定制控件；
 > 其余项由 `settings/systemConfigSchema.ts` + `components/ExtraConfigCard.vue`
 > 按服务端 schema 兜底渲染。**谁进兜底区是拿 `configForm` 的键去减算出来的**，
@@ -874,3 +874,74 @@ const currentChannelFields = computed(() =>
 > 写入的安装事实）：渲染成只读行，不隐藏、不回写。
 > 保存统一走 `submitConfigs`，**只提交改动过的键** —— 服务端 `BatchSet` 逐键写入、
 > 中途 400 时前面的键已经落库，全量回写会造成半保存状态。
+
+---
+
+## Scenario: 日志窗口的实时流状态机（`done` / `waitingForLog` / 换代）
+
+> v3.2.8 把「打开排队中的任务只看到上一次运行的日志」「重连退避期间头部闪已完成」一并收口时定的口径。
+
+### 1. Scope / Trigger
+
+- 触发：修改 `web/src/views/tasks/components/LogViewer.vue` 的 `startStream` / `onEvent` / `onError` / `recoverStreamAfterError` / `pollPendingTaskUntilRunning` / `waitQueuedTaskThenPoll` / `handleVisibilityChange`，或改服务端 `done` 事件载荷时必须看本节。
+
+### 2. Contracts
+
+- `done` 事件有三种载荷，**语义完全不同**，不能合并处理：
+  - `finished`：服务端 0 等待，任务早就结束、日志已落库 → 可以复用并行预取的 latest-log。
+  - `finished-late`：服务端在短轮询里**真的等过** → 打开弹窗那一刻任务还在排队/启动，此刻按 `started_at` 取到的很可能是**上一次运行**的记录，必须作废预取并进等待链。
+  - `reconnect`：服务端主动断流要求重连 → **退避期间不得置 `done`**，否则头部会闪「已完成」（「点运行后立刻打开日志」每次都会碰到）。只有熔断跳闸、真正按完成收口时才置 `done=true`。
+- 进入等待链前，若正文还是空的（`!hasLogs`），必须**同步**把 `waitingForLog` 置真再 `await` 查状态：那一个 live-logs 往返里头部否则会是「已完成」。正文已有内容时不动（快任务推过历史，「已完成」是对的）。
+- `headerState` / 底栏 / 空态三处必须自洽：`waitingForLog=true` 时分别是「等待中」/「等待日志中」/「等待日志输出…」，不得出现「无日志」这类与状态矛盾的字。
+- **实时流出错后按状态分流**：运行中（2）才退避重连；排队中（0.5）且流里没有正文 → 与 `finished-late` 同路进等待链（直接从「排队中」那一步进，不要再绕一次 live-logs，那一个往返又会闪「已完成」）；其余按完成收口。
+- 任何 `await` 之后都要复查 `disposed` / `visible` / `taskId` / **`streamGeneration`**：用户在一个往返内关掉再打开同一任务时，旧链会对新会话开流或写排队文案。`streamGeneration` 只在 `cleanup()` 里自增，正常等待链中途不会换代。
+- `done=true` 且正文为空时，切回前台才允许补拉 latest-log；等待链进行中（`waitingForLog=true`）**必须不补拉**，否则会把上一次运行的日志渲染成本次结果。
+
+### 3. Tests Required（浏览器实测，演示站的假流只发 `finished`，两条路径都到不了）
+
+- 打开排队超过 1.5 秒的任务日志：头部「运行中」→「等待中」，全程不出现「已完成」；正文从「等待日志输出…」变「任务排队中…」。
+- 就在那一个往返里切后台再回来：不得出现 latest-log 请求，正文不得闪出上一次运行的日志。
+- 快任务（有输出）：仍显示「已完成」，不得出现「等待中」。
+- 等待中关窗再开同一任务：只应新开 1 条 `/stream`，不得出现两条并行的每秒 live-logs。
+- `done:reconnect` 退避期间：头部保持绿色「运行中」，底栏「实时采集中」。
+
+---
+
+## Scenario: 升级后的旧前端壳与「未保存内容」（issue #126）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `web/src/utils/chunkReload.ts`、`web/src/router/index.ts` 的 `onError`、`main.ts` 的 `vite:preloadError`、`MainLayout.vue` 的版本自检时必须看本节。
+
+### 2. Contracts
+
+- 自动刷新一次的三个调用方共用 `reloadOnce()`：`vite:preloadError`（任何动态 import 失败）、`router.onError`（切页 chunk 失败，刷新后落到目标页）、版本自检（后端版本比前端包新）。
+- **限次是硬约束**：60 秒内只自刷一次，时间戳记在 `sessionStorage`；读写不了时**宁可不刷**（记不住「刚刷过」就可能死循环）。
+- **页面上有未保存内容时不自动刷新**，改为一条带「刷新」按钮的提示：自动刷新会被任何一次 chunk 失败触发（含菜单预加载、编辑器预热），用户根本没点过刷新，内容却会丢。
+- **调用方不能自己猜 `reloadOnce` 为什么返回 false**。`wasLastReloadDeferred()` 只在「因未保存内容而暂缓」时为真，且在 `reloadOnce` 开头统一清零；路由据此决定要不要再弹红色「页面文件加载失败」。用 `hasUnsavedWork() && navigator.onLine !== false` 近似判断会在「有未保存内容 + 60 秒限次内」时一条提示都不弹（点了菜单没反应）。
+- 提示的 8 秒去重窗口在用户手动关闭提示时复位，否则关掉之后 8 秒内再失败会静默无提示。
+- 版本自检只认「后端更新」，不认「不一致」：反过来是部署本身的版本号没写对（自建镜像默认值、Magisk 本地打包默认值），按不一致比会每开一个标签页白刷一次。
+
+### 3. Tests Required（浏览器实测）
+
+- 在线 + 有未保存内容 + 限次外：只出一条黄色「面板已更新，保存后刷新页面即可」，不出红色。
+- 在线 + 有未保存内容 + 限次内：出红色提示（不能一条都没有）。
+- 关掉黄色提示后 8 秒内再失败：重新弹一条黄色。
+- 离线 + 有未保存内容：只出红色。
+- 无未保存内容 + 限次外：自动刷新并落到目标页。
+
+---
+
+## Scenario: 编辑器的行尾规范化（CodeMirror 6）
+
+- CodeMirror 6 按 `/\r\n?|\n/` 切行、`doc.toString()` 一律用 `\n` 拼回。载入 CRLF 内容后，如果用「文档内容 !== `props.modelValue`」判断要不要 `emit`，**一打开 CRLF 文件就会被判成「未保存」**（进而触发离开确认、挡住自动刷新）。
+- 口径：`updateListener` 判等时把 `props.modelValue` 的 `\r\n?` 规范成 `\n` 再比；`replaceDoc` 的判等**故意不规范化**——外部值是 CRLF 时一定整篇替换，切文件、放弃改动都不会被漏掉。
+- Monaco 保留 CRLF，没有这个问题；两个引擎的「保存后文件行尾」本来就不同，不要为了统一去改保存行为。
+- 凡是按行尾切分文本的地方一律用 `split(/\r\n|\n|\r/)`（脚本页行数、配置文件页行数），`split('\n')` 会让纯 CR 文件恒显示 1 行。
+
+---
+
+## Scenario: 列表页表头样式统一用令牌
+
+- 8 个列表页（环境变量、依赖、日志、开放接口、通知、任务、用户、订阅）的 `:header-cell-style` 取值必须是 `var(--el-fill-color-light)` / `var(--el-text-color-regular)`，不得写死 `#f8fafc` / `#64748b`：写死值在暗色下要靠 `!important` 补丁盖回来，而内联样式只有 `!important` 压得住，漏一页就是一块浅色表头。
+- `global.scss` 里那条 `html.dark` 表头补丁取的是同一对令牌，现在是兜底（防以后又有人写死浅色内联样式）。

@@ -40,6 +40,11 @@ type preparedTaskListItem struct {
 	// 拿到的时间点还可能已经跨过一个周期，导致排序结果和下发给前端的 next_run_at 对不上。
 	// 值为 nil 表示「算不出下次运行」（已禁用 / 非 cron 任务 / cron 表达式为空）。
 	nextRunAt *time.Time
+	// groupName 是这条任务的分组名（第一个非空的 `分组:` 标签，取法见 taskGroupNameFromLabels），
+	// 视图筛选 / 排序的 group 字段只认它（#130）。刻意不从 displayLabels 里取：
+	// 分组名在那里排第 0 位，和自定义标签、订阅名混在一起，按 labels 等于 X 会误中同名的标签。
+	// 空串表示没有分组。
+	groupName string
 }
 
 func (h *TaskHandler) List(c *gin.Context) {
@@ -180,12 +185,22 @@ func respondPreparedTaskList(c *gin.Context, prepared []preparedTaskListItem, to
 	response.Paginated(c, data, total, page, pageSize)
 }
 
+// taskDictWithEnabledSwitch 在 ToDict 之上补一个 enabled：启用开关位，与运行态无关（issue #133，契约 C1）。
+// 禁用中的任务被手动运行时 status 同样会走到 0.5 / 2，前端光看 status 分不出开关是开是关。
+// ToDict 在 model 包里、不能反向调 service，所以这一步只能放在 handler；
+// 任务列表与启用 / 禁用接口的响应都走这里，免得各写一份口径。
+func taskDictWithEnabledSwitch(task *model.Task) map[string]interface{} {
+	item := task.ToDict()
+	item["enabled"] = service.ResolveTaskEnabledSwitch(task)
+	return item
+}
+
 func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string, notificationChannels map[uint]taskNotificationChannelInfo) []preparedTaskListItem {
 	prepared := make([]preparedTaskListItem, 0, len(tasks))
 	for _, task := range tasks {
 		displayLabels, subscriptionLabels := buildPreparedTaskLabels(task.GetLabels(), subscriptionNames)
 
-		item := task.ToDict()
+		item := taskDictWithEnabledSwitch(&task)
 		item["display_labels"] = displayLabels
 		// 订阅名再单独下发一份，供前端「按类别隐藏标签」区分订阅标签与自定义标签：
 		// display_labels 是扁平数组，订阅名和自定义标签在里面长得一模一样，前端分不出来。
@@ -247,6 +262,7 @@ func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string,
 			displayLabels:      displayLabels,
 			subscriptionLabels: subscriptionLabels,
 			nextRunAt:          nextRunAt,
+			groupName:          taskGroupNameFromLabels(task.GetLabels()),
 		})
 	}
 	return prepared
@@ -353,7 +369,9 @@ func buildPreparedTaskLabels(labels []string, subscriptionNames map[uint]string)
 	// 分组名不参与这里任何一个集合（它在函数末尾单独 unshift），与订阅名重名时同样各留一条。
 	seenCustom := make(map[string]struct{})
 	seenSubscriptions := make(map[string]struct{})
-	groupName := ""
+	// 分组名的取法统一在 taskGroupNameFromLabels（视图筛选的 group 字段、GET /tasks/groups 都用它），
+	// 这里只负责把它放到第 0 位；下面逐条遍历时跳过分组标签。
+	groupName := taskGroupNameFromLabels(labels)
 
 	addLabel := func(label string) {
 		label = strings.TrimSpace(label)
@@ -368,12 +386,7 @@ func buildPreparedTaskLabels(labels []string, subscriptionNames map[uint]string)
 	}
 
 	for _, label := range labels {
-		trimmed := strings.TrimSpace(label)
-		if strings.HasPrefix(trimmed, taskGroupLabelPrefix) {
-			group := strings.TrimSpace(strings.TrimPrefix(trimmed, taskGroupLabelPrefix))
-			if group != "" && groupName == "" {
-				groupName = group
-			}
+		if strings.HasPrefix(strings.TrimSpace(label), taskGroupLabelPrefix) {
 			continue
 		}
 
@@ -511,6 +524,14 @@ func preparedTaskFilterValues(item preparedTaskListItem, field string) []string 
 		return item.displayLabels
 	case "subscription":
 		return item.subscriptionLabels
+	case "group":
+		// 只认分组名本身（#130，契约 C3），不看 display_labels：那里分组名和同名的自定义标签、订阅名混在一起。
+		// 没有分组时返回 nil —— equals / contains 为假，not_equals / not_contains 为真，与其它字段的空值口径一致。
+		// 🔴 老面板不认这个字段（落到 default 返回 nil），带 group 规则的视图还原到老面板上会筛成空列表。
+		if item.groupName == "" {
+			return nil
+		}
+		return []string{item.groupName}
 	default:
 		return nil
 	}
@@ -677,6 +698,9 @@ func comparePreparedTaskByRule(left, right preparedTaskListItem, rule taskListSo
 		return strings.Compare(strings.ToLower(strings.Join(left.displayLabels, ",")), strings.ToLower(strings.Join(right.displayLabels, ",")))
 	case "subscription":
 		return strings.Compare(strings.ToLower(strings.Join(left.subscriptionLabels, ",")), strings.ToLower(strings.Join(right.subscriptionLabels, ",")))
+	case "group":
+		// 与 labels / subscription 同一套比较口径：不区分大小写，没有分组的按空串参与比较（#130）。
+		return strings.Compare(strings.ToLower(left.groupName), strings.ToLower(right.groupName))
 	case "created_at":
 		// 按创建时间比较：早于为 -1、晚于为 1，相等返回 0，direction 由上层 sortPreparedTaskListItems 翻转
 		if left.task.CreatedAt.Before(right.task.CreatedAt) {

@@ -94,6 +94,22 @@ function selfHostedFontsPlugin(): Plugin {
   }
 }
 
+/**
+ * 前端包自己的版本号，供 define 写成构建期常量 __DD_WEB_VERSION__（契约 C10，类型声明在 src/shims.d.ts）。
+ *
+ * 用途只有一个：MainLayout 拿后端版本号和它比，不一致说明浏览器跑的是缓存里的旧前端壳，自动刷新一次
+ * （utils/chunkReload.ts）。侧栏徽标取的是后端版本，旧壳也显示新版本号，在此之前前端没有任何办法发现
+ * 「壳比后端旧」（issue #126）。发版时 scripts/release-preflight.ps1 会校验 web/package.json 与
+ * server/handler/version.go 版本号一致，这是版本自检不误刷的前提。
+ * 路径按本文件定位，不依赖 cwd。读不到版本号时给空串：版本自检把空串当成「无从比较」直接跳过，
+ * 失效方向是「不刷」而不是「乱刷」。
+ */
+function readWebPackageVersion(): string {
+  const packageJsonPath = fileURLToPath(new URL('./package.json', import.meta.url))
+  const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as { version?: unknown }
+  return typeof pkg.version === 'string' ? pkg.version : ''
+}
+
 export default defineConfig(({ mode }) => {
   // 只有 `vite build --mode demo`（npm run build:demo）会加载 web/.env.demo，
   // 从而拿到 VITE_DEMO=1；发布版构建走默认的 production 模式，读不到这个变量。
@@ -110,7 +126,9 @@ export default defineConfig(({ mode }) => {
       // demo 层连同 fixture 会被打进真实用户拿到的产物里（最坏情况：真实面板的请求被 mock 顶替）。
       //
       // 折叠成 '' 之后，`'' === '1'` 恒假，rollup 会把整段分支与对应 chunk 一起剔除。
-      'import.meta.env.VITE_DEMO': JSON.stringify(isDemoBuild ? '1' : '')
+      'import.meta.env.VITE_DEMO': JSON.stringify(isDemoBuild ? '1' : ''),
+      // 前端包版本号（契约 C10），见上面 readWebPackageVersion 的注释
+      __DD_WEB_VERSION__: JSON.stringify(readWebPackageVersion())
     },
     plugins: [
       vue(),

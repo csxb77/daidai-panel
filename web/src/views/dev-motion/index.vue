@@ -13,9 +13,10 @@
  *
  * 每一块都必须是【可交互】的：只摆静态样子没有意义，动效要能被真的触发出来。
  */
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onActivated } from 'vue'
 import { toast } from '@/utils/toast'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { readMotionPreference } from '@/utils/panelAppearance'
 import DdBadge from '@/components/ui/DdBadge.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
@@ -76,6 +77,45 @@ function onSplitCommand(key: string) {
   else if (key === 'stop') taskRunning.value = false
   ElMessage.info(`菜单项：${key}`)
 }
+
+// ===== 8. 弹窗 / 抽屉 / 确认框 =====
+const dialogVisible = ref(false)
+const fullscreenDialogVisible = ref(false)
+const drawerVisible = ref(false)
+
+function openConfirmDemo() {
+  ElMessageBox.confirm(
+    '确认框的进出场复用弹窗那组关键帧：从下方升起、轻微放大到位，离场向下淡出。',
+    '确认框',
+    { type: 'warning', confirmButtonText: '知道了', cancelButtonText: '取消' },
+  ).catch(() => {})
+}
+
+/**
+ * 当前生效的动效档位。验收动效前先看这一行：选的是「跟随系统」而系统又开着「减少动态效果」时，
+ * 本页所有动效都会被压到 1ms，看上去就是「没有动画」，别误判成改动没生效。
+ * 本页同样被 MainLayout 的 keep-alive 缓存，去个人设置切完档位再回来只触发 onActivated，所以两处都刷新。
+ */
+const motionStatus = ref('')
+
+function refreshMotionStatus() {
+  const preference = readMotionPreference()
+  if (preference === 'always') {
+    motionStatus.value = '始终开启：无论系统怎么设都完整播放'
+    return
+  }
+  if (preference === 'reduce') {
+    motionStatus.value = '减少动效：本页所有动效都被压到 1ms'
+    return
+  }
+  const systemReduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+  motionStatus.value = systemReduced
+    ? '跟随系统：系统开着「减少动态效果」，本页所有动效都被压到 1ms'
+    : '跟随系统：系统没开减少动态效果，完整播放'
+}
+
+onMounted(refreshMotionStatus)
+onActivated(refreshMotionStatus)
 </script>
 
 <template>
@@ -271,8 +311,11 @@ function onSplitCommand(key: string) {
     <section class="motion-section">
       <h2><span class="motion-section__no">04</span> Select 单选</h2>
       <p class="motion-section__desc">
-        面板展开从 <code>scaleY</code> 卷帘改成淡入 + 轻微上移，与全站语汇一致；
-        朝上弹出时位移自动反向。箭头翻转与选项 hover 都吃令牌，不再是 EP 默认的 all 0.3s。
+        面板展开从 <code>scaleY</code> 卷帘改成淡入 + 8px 位移，朝上弹出时位移自动反向。
+        位移走 CSS 的 <code>translate</code> 独立属性——EP 用内联 <code>transform</code> 给浮层定位，
+        class 里写 <code>transform</code> 会被它压掉。面板底色是半透明毛玻璃，
+        系统开了「降低透明度」或浏览器不支持时自动退回实色。
+        箭头翻转与选项 hover 都吃令牌，不再是 EP 默认的 all 0.3s。
       </p>
 
       <div class="motion-demo">
@@ -353,6 +396,7 @@ function onSplitCommand(key: string) {
       <p class="motion-section__desc">
         主体点了【直接执行】，右侧箭头才展开更多——主体不能执行操作的话，那只是个带标签的下拉。
         危险操作一律进菜单并标红加分隔线，绝不能放在「点了就执行」的主体上。
+        菜单普通项的字色加深到主文字色（EP 默认偏浅，不像可点的操作），危险项保持红字。
       </p>
 
       <div class="motion-demo">
@@ -416,10 +460,80 @@ function onSplitCommand(key: string) {
       </div>
     </section>
 
+    <!-- ============ 8. 弹窗 / 抽屉 / 确认框 ============ -->
+    <section class="motion-section">
+      <h2><span class="motion-section__no">08</span> 弹窗 / 抽屉 / 确认框</h2>
+      <p class="motion-section__desc">
+        弹窗从下方 16px 升起、同时从 0.98 放大到位；全屏弹窗只位移不缩放（缩放会让四条边露出遮罩）。
+        遮罩比弹窗快一拍先铺好底，确认框复用同一组关键帧，抽屉滑入吃同一档时长。
+        动画挂在 <code>.el-overlay-dialog</code> 上而不是 <code>.el-dialog</code> 上——
+        同一个弹窗第二次打开时 DOM 被复用，挂在 <code>.el-dialog</code> 上的动画不会重放，验收务必连开两次。
+      </p>
+
+      <div class="motion-demo">
+        <div class="motion-row">
+          <span class="motion-label">当前动效档位</span>
+          <span class="motion-hint">{{ motionStatus }}</span>
+          <router-link to="/profile" class="motion-link">去个人设置切换</router-link>
+        </div>
+
+        <div class="motion-row">
+          <span class="motion-label">弹窗</span>
+          <el-button size="small" @click="dialogVisible = true">普通弹窗</el-button>
+          <el-button size="small" @click="fullscreenDialogVisible = true">全屏弹窗</el-button>
+          <span class="motion-hint">关掉后再点一次：第二次打开也必须有升起动效</span>
+        </div>
+
+        <div class="motion-row">
+          <span class="motion-label">抽屉</span>
+          <el-button size="small" @click="drawerVisible = true">右侧抽屉</el-button>
+          <span class="motion-hint">滑入与遮罩同一时长，离场换更短的一档，尽快让位</span>
+        </div>
+
+        <div class="motion-row">
+          <span class="motion-label">确认框</span>
+          <el-button size="small" @click="openConfirmDemo">ElMessageBox.confirm</el-button>
+          <span class="motion-hint">EP 默认是从上方落下，这里改成与弹窗同向：从下方升起</span>
+        </div>
+      </div>
+    </section>
+
     <footer class="motion-footer">
-      系统「减少动态效果」开启时，以上全部动效会自动降级为 1ms
-      —— 时长与延迟都吃 <code>--dd-motion-*</code> 令牌，不写死毫秒数。
+      系统「减少动态效果」开启时，以上全部动效会自动降级为 1ms；
+      在「个人设置 → 界面动效」里可以改成「始终开启」或「减少动效」。
+      时长与延迟都吃 <code>--dd-motion-*</code> 令牌，不写死毫秒数。
     </footer>
+
+    <!-- 演示用的弹窗 / 抽屉刻意放在 .motion-section 外面：分节卡片的 rise-in 入场写了 both，
+         收尾后残留 transform: translateY(0)，会让卡片成为 position:fixed 后代的包含块，
+         弹窗放进卡片里，遮罩就只盖住那一张卡片。业务页的弹窗同样都挂在页面根下。 -->
+    <el-dialog v-model="dialogVisible" title="普通弹窗" width="480px">
+      <p class="motion-dialog-text">
+        关掉后再打开一次，确认第二次也有「从下方升起 + 轻微放大」的进场。
+        离场向下淡出，比进场短，尽快把焦点还给页面。
+      </p>
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="dialogVisible = false">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="fullscreenDialogVisible" title="全屏弹窗" fullscreen>
+      <p class="motion-dialog-text">
+        全屏弹窗贴满视口四边，进场只有位移、没有缩放，否则四条边会同时露出底下的遮罩。
+      </p>
+      <template #footer>
+        <el-button type="primary" @click="fullscreenDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 宽度用 min()：320~359px 宽的手机上写死 360px 会超出视口，而抽屉遮罩是 overflow:hidden，
+         标题左半截会被直接裁掉。EP 的 addUnit 对非纯数字字符串原样透传，min() 可以直接当宽度用。 -->
+    <el-drawer v-model="drawerVisible" title="右侧抽屉" size="min(360px, 100%)">
+      <p class="motion-dialog-text">
+        抽屉从右侧滑入，遮罩与面板取同一时长；离场换成更短的一档。
+      </p>
+    </el-drawer>
   </div>
 </template>
 
@@ -537,6 +651,24 @@ function onSplitCommand(key: string) {
   font-size: 12px;
   line-height: 1.6;
   color: var(--el-text-color-placeholder);
+}
+
+.motion-link {
+  font-size: 12px;
+  color: var(--el-color-primary);
+
+  // hover 只加下划线，不做位移（扁平规则）
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+// 演示弹窗 / 抽屉里的说明文字（slot 内容归本组件作用域，scoped 能命中）
+.motion-dialog-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
 }
 
 .motion-footer {

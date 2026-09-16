@@ -18,7 +18,7 @@ import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
 import TaskDeleteDialog from './components/TaskDeleteDialog.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
-import { getDisplayTaskLabels, classifyDisplayTaskLabels } from './taskLabels'
+import { getDisplayTaskLabels, classifyDisplayTaskLabels, isTaskSwitchOn } from './taskLabels'
 import type { DisplayTaskLabelKind } from './taskLabels'
 import { splitTaskCommandDisplay } from './taskCommand'
 import { usePageActivity } from '@/composables/usePageActivity'
@@ -39,6 +39,11 @@ const { isMobile, width: viewportWidth } = useResponsive()
 const isNarrowDesktop = computed(() => !isMobile.value && viewportWidth.value < 1600)
 const { isPageActive } = usePageActivity()
 let statusTimer: ReturnType<typeof setInterval> | null = null
+// 列表请求序号闸。loadTasks 在整页十几处被调用（切视图 / 分组、翻页、筛选、排序、增删改后重拉、keep-alive 回页……），
+// 几次请求可能同时在飞，返回顺序没有保证；原来是「后到者赢」，快速连点标签时列表会显示旧筛选的结果、
+// 高亮却停在新标签上。现在每次 loadTasks 自增序号，只有最新一次能写回 tasks / total；
+// 3 秒状态轮询与运行后的回读不自增，只在发请求时记下序号，飞行期间一旦有新的 loadTasks 发出就丢弃自己的结果。
+let loadTasksSeq = 0
 
 const TASK_PAGE_SIZE_STORAGE_KEY = 'dd:tasks:page_size'
 const supportedTaskPageSizes = [10, 20, 50, 100]
@@ -545,8 +550,10 @@ async function initSortable() {
 
         // 桶判定：后端只允许「置顶状态相同 + 状态分组相同」的任务互拖，跨桶回 400。
         // 落点前后两侧都不是同桶 ⇒ 真的拖进别的区了，先拦下并弹回原位；
-        // 只有后一条不同桶（前一条同桶）⇒ 落点就是本区末尾，target 留空即可 ——
-        // 后端约定「target_id 缺省 = 移到本区末尾」，语义正好对上。
+        // 后一条同桶 ⇒ 插到它前面；否则前一条同桶 ⇒ 插到它后面（position:'after'，服务端 task_sort.go 早已支持）。
+        // 🔴 「只有前一条同桶」时不能再发空 target：服务端把缺省 target 当成「移到整桶末尾」，而整桶是跨页、
+        // 不看筛选的 —— 分页或筛选下把任务拖到本页（或筛选结果）底部，它会越过所有没显示出来的同桶任务，
+        // 被甩到最后一页之后。两种插法都以「看得见的邻居」为锚，对整桶也成立（与环境变量页 #131 同一写法）。
         const nextRow = tasks.value[newIndex + 1]
         const prevRow = tasks.value[newIndex - 1]
         const nextSameBucket = !!nextRow && inSameTaskBucket(sourceItem, nextRow)
@@ -558,7 +565,11 @@ async function initSortable() {
         }
 
         try {
-          await taskApi.sort(sourceItem.id, nextSameBucket ? nextRow.id : undefined)
+          if (nextSameBucket) {
+            await taskApi.sort(sourceItem.id, nextRow.id)
+          } else {
+            await taskApi.sort(sourceItem.id, prevRow.id, 'after')
+          }
         } catch (err: any) {
           ElMessage.error(err?.response?.data?.error || err?.message || '排序失败')
           void loadTasks()
@@ -694,12 +705,16 @@ function startStatusPolling() {
       stopStatusPolling()
       return
     }
+    // 记下发请求这一刻的列表请求序号（见 loadTasksSeq）
+    const seq = loadTasksSeq
     try {
       const res = await taskApi.list(buildTaskListParams())
       // await 之后必须再判一次：停轮询只清掉了定时器，挡不住**已经在飞**的这一次请求。
       // 拖拽开始时若上一轮 tick 的响应还在路上，回来后动 tasks.value
       // 会把正在拖的那一行重画掉，onEnd 再按下标取值就取到了对不上的数据。
       if (!canPollTaskStatus.value) return
+      // 飞行期间 loadTasks 又发起了新的一次（切筛选、翻页……）：这份是按旧参数拿的，不能再写回列表
+      if (seq !== loadTasksSeq) return
       // 优先就地刷字段（顺序纹丝不动），只有这一页的成员关系真变了才整表替换 ——
       // 两条路各自的理由与代价见 mergeTaskListInPlace 的注释。
       if (!mergeTaskListInPlace(res.data, res.total)) {
@@ -729,16 +744,23 @@ function syncStatusPolling() {
 }
 
 async function loadTasks() {
+  // 请求序号闸（说明见 loadTasksSeq）：记下本次序号，响应回来时已经不是最新一次就整个丢弃
+  const seq = ++loadTasksSeq
   loading.value = true
   try {
     const res = await taskApi.list(buildTaskListParams())
+    if (seq !== loadTasksSeq) return
     tasks.value = res.data
     total.value = res.total
     syncStatusPolling()
   } catch {
+    // 过期请求的失败同样丢弃：更新的那次还在飞，这时报「加载失败」只会误导
+    if (seq !== loadTasksSeq) return
     ElMessage.error('加载任务列表失败')
   } finally {
-    loading.value = false
+    // loading 仍是「列表请求在飞」的意思，只是改由最新一次收尾：旧请求先回来就把它置 false 的话，
+    // 新请求还没回、表格已经撤掉加载态露出旧数据（initSortable 也会提前按旧行挂上拖拽实例）
+    if (seq === loadTasksSeq) loading.value = false
   }
 
   // 行是整批换掉的，拖拽实例要跟着重挂（initSortable 里会先 destroy 旧的）
@@ -850,11 +872,22 @@ function handleSearch() {
   void loadTasks()
 }
 
+// 状态标签配色（issue #133）：禁用灰、排队橙、运行中绿、空闲蓝。
+// 运行中的呼吸点（.pulse-dot）取 currentColor，换成 success 后自动跟着变绿；暗色由 EP 令牌自动适配。
+// 任务详情弹窗（TaskDetail.vue）另有一份同色映射，改这里记得同步那边。
 function getStatusType(status: number) {
   if (status === 0) return 'info'
   if (status === 0.5) return 'warning'
-  if (status === 2) return 'warning'
-  return 'success'
+  if (status === 2) return 'success'
+  return 'primary'
+}
+
+// 状态标签的附加 class：运行中挂呼吸点排版；空闲挂 dd-tag--idle（global.scss，契约 C6），
+// 把 primary 浅色标签的边框加深一档到 primary-light-7（EP 默认 light-8），与 issue 里要的配色对上。
+function getStatusTagClass(status: number) {
+  if (status === 2) return 'tag-with-dot'
+  if (getStatusType(status) === 'primary') return 'dd-tag--idle'
+  return ''
 }
 
 function getStatusText(status: number) {
@@ -880,11 +913,18 @@ function handlePageSizeChange() {
   void loadTasks()
 }
 
+// 「已终止」（issue #133）：从橙改成比「未运行」更深的灰 —— type 仍是 info，
+// 再挂 dd-tag--aborted（global.scss，契约 C6，令牌派生、暗色自动变深）。
+// 不照抄 issue 里给的十六进制：写死的灰在暗色下会变成一块亮斑（design-system 硬规则 1）。
 function getRunStatusType(status: number | null) {
   if (status === null) return 'info'
   if (status === 0) return 'success'
-  if (status === 2) return 'warning'
+  if (status === 2) return 'info'
   return 'danger'
+}
+
+function getRunStatusClass(status: number | null) {
+  return status === 2 ? 'dd-tag--aborted' : ''
 }
 
 function getRunStatusText(status: number | null) {
@@ -1094,8 +1134,12 @@ async function runTaskNow(task: any) {
     // 置顶效果留到用户下次主动刷新 / 切筛选时才体现，理由与轮询同源，见 mergeTaskListInPlace。
     // 只有这一页的成员关系真变了（典型是在第 2 页点运行、那一行被提到第 1 页）才整表替换，
     // 这条代价与取舍同样写在 mergeTaskListInPlace 的注释里。
+    // 记下发请求这一刻的列表请求序号（见 loadTasksSeq）
+    const seq = loadTasksSeq
     try {
       const res = await taskApi.list(buildTaskListParams())
+      // 飞行期间 loadTasks 又发起了新的一次：这份结果已过期，交给那一次写回（它收尾时也会 syncStatusPolling）
+      if (seq !== loadTasksSeq) return
       if (!mergeTaskListInPlace(res.data, res.total)) {
         tasks.value = res.data
         total.value = res.total
@@ -1127,7 +1171,9 @@ async function handleStop(task: any) {
     await ElMessageBox.confirm(`确认停止定时任务「${task.name}」吗？`, '停止确认', { type: 'warning' })
     await taskApi.stop(task.id)
     ElMessage.success('任务已停止')
-    task.status = 1
+    // 乐观赋值按开关位还原（issue #133）：原来无条件写 1，被手动运行的禁用任务停下后会闪一下「空闲中」，
+    // 等 loadTasks 回来才变回「禁用中」。服务端停止后同样按开关位结算，这里与它一致。
+    task.status = isTaskSwitchOn(task) ? 1 : 0
     loadTasks()
   } catch (err: any) {
     if (err === 'cancel' || err?.toString() === 'cancel') return
@@ -1138,7 +1184,10 @@ async function handleStop(task: any) {
 async function handleToggle(task: any) {
   if (!ensureCanOperate()) return
   try {
-    if (task.status === 0) {
+    // 按开关位分支而不是 status === 0（issue #133）：被手动运行的禁用任务 status 是 0.5 / 2，
+    // 原来会走进下面的「禁用」分支，服务端只打一个待禁用标记、回一句「当前执行结束后生效」——
+    // 用户既没法在它运行期间把它启用，还被文案误导。运行中禁用的那段文案仍按 status === 2 判。
+    if (!isTaskSwitchOn(task)) {
       await ElMessageBox.confirm(`确认启用定时任务「${task.name}」吗？`, '启用确认', { type: 'info' })
       const res = await taskApi.enable(task.id)
       ElMessage.success(res.message || '已启用')
@@ -1240,11 +1289,17 @@ async function handlePin(task: any) {
  * 菜单只剩「日志文件」。两支都是「2 字主体 + caret + 外置日志按钮」，宽度完全一致。
  *
  * 「删除」不可撤销，只能待在菜单里，并且 danger + divided，绝不上主体。
+ *
+ * 第一项「启用 / 禁用」按开关位（isTaskSwitchOn）而不是 status === 0 判（issue #133）：
+ * 被手动运行的禁用任务 status 是 0.5 / 2，原来这里会显示成「禁用」。
+ * 「禁用」项标红（danger）是 issue #133 要的配色，与删除同一套红字 + 悬停淡红底；
+ * 但它可撤销、又是第一项，所以【不加】divided —— 分隔线只留给不可撤销的删除。
  */
 function taskActionItems(row: any): SplitButtonItem[] {
   const op = canOperateTasks.value
+  const switchOn = isTaskSwitchOn(row)
   return [
-    { key: 'toggle', label: row.status === 0 ? '启用' : '禁用', visible: op },
+    { key: 'toggle', label: switchOn ? '禁用' : '启用', danger: switchOn, visible: op },
     { key: 'edit', label: '编辑', visible: op },
     { key: 'detail', label: '详情', visible: op },
     { key: 'logFiles', label: '日志文件' },
@@ -1513,8 +1568,11 @@ async function handleImport(event: Event) {
           :class="{ 'is-narrow': isNarrowDesktop, 'is-swapped-out': selectedIds.length === 0 }"
         >
           <span class="batch-actions__count">已选 {{ selectedIds.length }} 项</span>
-          <!-- 按钮顺序刻意让两个红按钮不相邻：danger-plain 的「批量禁用」与实心 danger 的「批量删除」
-               中间隔了 5 个按钮。删除也不放最右边缘（那一侧最容易被甩动鼠标顺手点到，代价还不可逆），
+          <!-- 三个红按钮（issue #133 起「批量停止」也改成 danger plain，与「批量禁用」同色同形）：
+               「批量禁用」与「批量停止」之间隔一个「批量运行」，「批量停止」与实心 danger 的「批量删除」之间
+               隔「添加标签」「批量置顶」两个 —— 任意两个红按钮都不相邻，实心的删除与空心的两个也拉开了距离。
+               两个空心红按钮文案不同、又都有二次确认兜底，窄桌面短文案（禁用 / 停止）下也不至于点错后果不可逆。
+               删除也不放最右边缘（那一侧最容易被甩动鼠标顺手点到，代价还不可逆），
                由无害的「取消选择」殿后；logs / envs 两页同序。 -->
           <!-- 窄桌面（<1600px，含 14 寸笔记本 1920×1080 缩放 150% 后的 1280 等效视口）用短文案：
                长文案下这一排放不下，会换行把工具栏从 39px 顶成两行。
@@ -1524,7 +1582,7 @@ async function handleImport(event: Event) {
           <el-button @click="handleBatchAction('enable')">{{ isNarrowDesktop ? '启用' : '批量启用' }}</el-button>
           <el-button type="danger" plain @click="handleBatchAction('disable')">{{ isNarrowDesktop ? '禁用' : '批量禁用' }}</el-button>
           <el-button @click="handleBatchAction('run')">{{ isNarrowDesktop ? '运行' : '批量运行' }}</el-button>
-          <el-button type="warning" plain @click="handleBatchAction('stop')">{{ isNarrowDesktop ? '停止' : '批量停止' }}</el-button>
+          <el-button type="danger" plain @click="handleBatchAction('stop')">{{ isNarrowDesktop ? '停止' : '批量停止' }}</el-button>
           <el-button @click="openBatchAddLabel">添加标签</el-button>
           <el-button @click="handleBatchPin">{{ isNarrowDesktop ? '置顶' : '批量置顶' }}</el-button>
           <el-button type="danger" @click="handleBatchAction('delete')">{{ isNarrowDesktop ? '删除' : '批量删除' }}</el-button>
@@ -1634,7 +1692,7 @@ async function handleImport(event: Event) {
               </div>
               <!-- 与桌面表格同一套 out-in 过渡：轮询把状态换掉时先淡出旧值再淡入新值。 -->
               <Transition name="dd-status-switch" mode="out-in">
-                <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
+                <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="getStatusTagClass(row.status)">
                   <span v-if="row.status === 2" class="pulse-dot"></span>
                   {{ getStatusText(row.status) }}
                 </el-tag>
@@ -1695,7 +1753,7 @@ async function handleImport(event: Event) {
               <div class="dd-mobile-card__value">
                 <div class="last-run-result">
                   <Transition name="dd-status-switch" mode="out-in">
-                    <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" size="small">
+                    <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" :class="getRunStatusClass(row.last_run_status)" size="small">
                       {{ getRunStatusText(row.last_run_status) }}
                     </el-tag>
                   </Transition>
@@ -1726,14 +1784,20 @@ async function handleImport(event: Event) {
           </div>
 
           <div class="dd-mobile-card__actions task-card__actions">
+            <!-- 「停止」与桌面 Split Button 的主体同色：issue #133 起从 warning 改成 danger（与「批量删除」一致）。
+                 运行中且开关开着时，它会与右边空心红的「禁用」相邻 —— 两者实心 / 空心、文案都不同，且都有二次确认。 -->
             <el-button v-if="canOperateTasks && row.status !== 2" type="primary" size="small" @click="handleRun(row)">运行</el-button>
-            <el-button v-else-if="canOperateTasks" type="warning" size="small" @click="handleStop(row)">停止</el-button>
-            <el-button v-if="canOperateTasks" :type="row.status === 0 ? 'success' : 'danger'" size="small" plain @click="handleToggle(row)">
-              {{ row.status === 0 ? '启用' : '禁用' }}
+            <el-button v-else-if="canOperateTasks" type="danger" size="small" @click="handleStop(row)">停止</el-button>
+            <!-- 按开关位而不是 status === 0 判（issue #133），理由见 isTaskSwitchOn -->
+            <el-button v-if="canOperateTasks" :type="isTaskSwitchOn(row) ? 'danger' : 'success'" size="small" plain @click="handleToggle(row)">
+              {{ isTaskSwitchOn(row) ? '禁用' : '启用' }}
             </el-button>
             <el-button size="small" @click="openLogViewer(row)">实时日志</el-button>
             <el-button v-if="canOperateTasks" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-dropdown trigger="click" placement="bottom-end">
+            <!-- 挂与桌面 Split Button 同一个 popper-class：菜单项字色加深（契约 C7）与删除项的红字 + 悬停淡红底
+                 都由 global.scss 里 .dd-split-button__popper 那几条全局规则统一给，两端观感一致。
+                 原来删除靠内联 span 染红，悬停时却是 EP 默认的主题色淡底，和桌面对不上。 -->
+            <el-dropdown trigger="click" placement="bottom-end" popper-class="dd-split-button__popper">
               <el-button size="small">
                 更多
                 <el-icon><More /></el-icon>
@@ -1744,9 +1808,7 @@ async function handleImport(event: Event) {
                   <el-dropdown-item @click="openLogFiles(row)">日志文件</el-dropdown-item>
                   <el-dropdown-item v-if="canOperateTasks" @click="handleCopy(row)">复制</el-dropdown-item>
                   <el-dropdown-item v-if="canOperateTasks" @click="handlePin(row)">{{ row.is_pinned ? '取消置顶' : '置顶' }}</el-dropdown-item>
-                  <el-dropdown-item v-if="canOperateTasks" divided @click="handleDelete(row)">
-                    <span style="color: var(--el-color-danger)">删除</span>
-                  </el-dropdown-item>
+                  <el-dropdown-item v-if="canOperateTasks" divided class="dd-split-button__item--danger" @click="handleDelete(row)">删除</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -1768,7 +1830,7 @@ async function handleImport(event: Event) {
         @selection-change="handleSelectionChange"
         @sort-change="handleTableSortChange"
         style="width: 100%"
-        :header-cell-style="{ background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '13px' }"
+        :header-cell-style="{ background: 'var(--el-fill-color-light)', color: 'var(--el-text-color-regular)', fontWeight: 600, fontSize: '13px' }"
         :row-style="{ cursor: 'pointer' }"
         :row-class-name="getRowClassName"
       >
@@ -1866,7 +1928,7 @@ async function handleImport(event: Event) {
                  key 必须绑【状态值】：绑 row.id 的话同一行永远是同一个 key，节点被原地复用，
                  过渡一次都不会触发。 -->
             <Transition name="dd-status-switch" mode="out-in">
-              <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
+              <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="getStatusTagClass(row.status)">
                 <span v-if="row.status === 2" class="pulse-dot"></span>
                 {{ getStatusText(row.status) }}
               </el-tag>
@@ -1924,7 +1986,7 @@ async function handleImport(event: Event) {
                    是全表最值得被看见的一次变化。key 走 String()：last_run_status 为 null（未运行）时
                    直接绑 null 会被 Vue 当成「没有 key」，和有 key 的节点比较时行为不稳定。 -->
               <Transition name="dd-status-switch" mode="out-in">
-                <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" size="small">
+                <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" :class="getRunStatusClass(row.last_run_status)" size="small">
                   {{ getRunStatusText(row.last_run_status) }}
                 </el-tag>
               </Transition>
@@ -1963,11 +2025,15 @@ async function handleImport(event: Event) {
                    触发器贴在表格最右侧，DdSplitButton 默认 placement="bottom-end" 让菜单右对齐触发器。
                    EP 在 dropdown.vue 里把 fallback-placements 写死成 ['bottom','top']（2.13.5 仍是如此，
                    props 覆盖不掉），靠近视口底部放不下时仍会退回居中的 top —— 这属于 EP 限制；
-                   但按钮组已从 228px 收到 80px，就算退回居中，菜单也只在表格内挪一点，不会被顶到窗口边。 -->
+                   但按钮组已从 228px 收到 80px，就算退回居中，菜单也只在表格内挪一点，不会被顶到窗口边。
+
+                   「停止」主体从 warning 改成 danger（issue #133，与「批量删除」同色）。改的只是颜色：
+                   主体仍是「点错代价最小」的那个操作（停止有二次确认、可以再点运行），DdSplitButton 的约定不受影响；
+                   实心 danger 的 caret 中缝白线 global.scss 早已覆盖。 -->
               <DdSplitButton
                 v-if="canOperateTasks"
                 :label="row.status === 2 ? '停止' : '运行'"
-                :type="row.status === 2 ? 'warning' : 'primary'"
+                :type="row.status === 2 ? 'danger' : 'primary'"
                 size="small"
                 :items="taskActionItems(row)"
                 @click="row.status === 2 ? handleStop(row) : handleRun(row)"

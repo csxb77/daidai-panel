@@ -125,13 +125,15 @@ export function useScriptExecution({ selectedFile, fileContent }: UseScriptExecu
   })
 
   onMounted(() => {
+    // 只挂 pagehide、不挂 beforeunload：有未保存内容时 beforeunload 会弹离开确认（见 utils/chunkReload.ts），
+    // 挂在它上面的监听不管用户点不点「取消」都会执行，留在页面上的调试就被白白停掉了。
+    // pagehide 只在真正离开时派发：刷新、关标签页、跳走都会触发，离开确认被取消时不会。
+    // 进往返缓存时也会派发（persisted 为 true），handleWindowPageHide 不看 persisted、照停，不会漏停。
     window.addEventListener('pagehide', handleWindowPageHide)
-    window.addEventListener('beforeunload', handleWindowPageHide)
   })
 
   onBeforeUnmount(() => {
     window.removeEventListener('pagehide', handleWindowPageHide)
-    window.removeEventListener('beforeunload', handleWindowPageHide)
     void stopDebugRun()
     void stopRunnerRun()
   })

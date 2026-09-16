@@ -25,6 +25,9 @@ import {
   LOG_STATUS_FAILED,
   LOG_STATUS_RUNNING,
   LOG_STATUS_SUCCESS,
+  RUN_STATUS_ABORTED,
+  RUN_STATUS_FAILED,
+  RUN_STATUS_SUCCESS,
   TASK_STATUS_DISABLED,
   TASK_STATUS_ENABLED,
   TASK_STATUS_RUNNING,
@@ -174,17 +177,24 @@ const ALL_HOURS = everyHours(1)
  *      单个任务频次过高会让那 5 行变成同一个任务名刷屏，是另一种「一眼假」；
  *   3. 备份 / 归档 / 清理这几个夜间维护任务排在 00:00–00:05，
  *      模拟真实运维面板的「零点批处理窗口」，让一天的最开头就有一批记录。
+ *
+ * 【分组】8 个任务带了 App 写的 `分组:` 标签，分成三组，网页顶栏的分组标签就来自这里（issue #130）：
+ *   夜间维护（1 / 2 / 10）、巡检（4 / 8 / 11）、数据（6 / 9）。
+ *   「数据」刻意与任务 5 的普通标签「数据」同名：按分组筛只出 6 / 9；按「标签 等于 数据」则 5 / 6 / 9 都出
+ *   （展示标签里含分组名，服务端就是这样）—— 用来演示分组筛选不会误中同名的普通标签。
+ *   组里既有禁用任务（6）也有运行中任务（8 / 9），开关位与运行态分开这件事（issue #133）在分组视图里同样看得到。
+ *   分组标签一律跟在普通标签后面，与 App 追加的写法一致；展示时服务端会把分组名提到第 0 位。
  */
 const TASK_SEEDS: TaskSeed[] = [
   {
     id: 1, name: '每日数据备份', command: 'bash ops/backup_data.sh', taskType: 'cron',
-    cron: '0 0 * * *', status: TASK_STATUS_ENABLED, labels: ['备份'], pinned: true,
+    cron: '0 0 * * *', status: TASK_STATUS_ENABLED, labels: ['备份', '分组:夜间维护'], pinned: true,
     timeout: 3600, channelId: 1, notifyOnFailure: true, createdDaysAgo: 96,
     runHours: [0], durMin: 92, durMax: 214, failRate: 0.02, timeoutRate: 0, abortRate: 0.01,
   },
   {
     id: 2, name: '清理临时文件', command: 'bash ops/clean_tmp.sh', taskType: 'cron',
-    cron: '5 0 * * *', status: TASK_STATUS_ENABLED, labels: ['清理'],
+    cron: '5 0 * * *', status: TASK_STATUS_ENABLED, labels: ['清理', '分组:夜间维护'],
     timeout: 600, channelId: null, notifyOnFailure: true, createdDaysAgo: 96,
     runHours: [0], runMinutes: [5], durMin: 1.4, durMax: 4.8, failRate: 0.01, timeoutRate: 0, abortRate: 0,
   },
@@ -196,11 +206,12 @@ const TASK_SEEDS: TaskSeed[] = [
   },
   {
     id: 4, name: '检查 SSL 证书', command: 'bash monitor/check_ssl.sh', taskType: 'cron',
-    cron: '0 7 * * *', status: TASK_STATUS_ENABLED, labels: ['监控'],
+    cron: '0 7 * * *', status: TASK_STATUS_ENABLED, labels: ['监控', '分组:巡检'],
     timeout: 300, channelId: 2, notifyOnFailure: true, createdDaysAgo: 74,
     runHours: [7], durMin: 0.9, durMax: 3.4, failRate: 0.05, timeoutRate: 0, abortRate: 0,
   },
   {
+    // 普通标签「数据」与 6 / 9 的分组「数据」刻意同名，它自己不在这个分组里（见上方【分组】）
     id: 5, name: '更新 IP 数据库', command: 'node data/update_ipdb.mjs', taskType: 'cron',
     cron: '0 23 * * 0', status: TASK_STATUS_ENABLED, labels: ['数据'],
     timeout: 1800, channelId: null, notifyOnFailure: true, createdDaysAgo: 61,
@@ -208,7 +219,7 @@ const TASK_SEEDS: TaskSeed[] = [
   },
   {
     id: 6, name: '数据库优化', command: 'bash ops/db_optimize.sh', taskType: 'cron',
-    cron: '0 4 * * 0', status: TASK_STATUS_DISABLED, labels: ['数据库'],
+    cron: '0 4 * * 0', status: TASK_STATUS_DISABLED, labels: ['数据库', '分组:数据'],
     timeout: 3600, channelId: 1, notifyOnFailure: true, createdDaysAgo: 55,
     runHours: [], durMin: 38, durMax: 92, failRate: 0, timeoutRate: 0, abortRate: 0,
   },
@@ -223,7 +234,7 @@ const TASK_SEEDS: TaskSeed[] = [
     // 每 20 分钟一次的健康巡检：它和「监控指标采集」「同步配置文件」「对象存储同步」
     // 一起撑起「今天」的样本量，让访客无论几点打开，今日执行数都不会退化成个位数。
     id: 8, name: '系统健康检查', command: 'bash monitor/health_check.sh', taskType: 'cron',
-    cron: '*/20 * * * *', status: TASK_STATUS_RUNNING, labels: ['监控'], pinned: true,
+    cron: '*/20 * * * *', status: TASK_STATUS_RUNNING, labels: ['监控', '分组:巡检'], pinned: true,
     timeout: 180, channelId: 2, notifyOnFailure: true, createdDaysAgo: 47,
     runHours: ALL_HOURS, runMinutes: everyMinutes(20),
     durMin: 0.6, durMax: 2.9, failRate: 0.05, timeoutRate: 0.005, abortRate: 0.004,
@@ -233,19 +244,19 @@ const TASK_SEEDS: TaskSeed[] = [
     // 而手动任务在任意时刻处于运行中都说得通（有人刚点了「运行」）。
     // 反过来把两条都挂在高频巡检任务上，仪表盘「最近执行」的 5 行里就有 2 行是同一个名字。
     id: 9, name: '离线报表导出', command: 'python3 report/export_offline.py', taskType: 'manual',
-    cron: '', status: TASK_STATUS_RUNNING, labels: ['报表'],
+    cron: '', status: TASK_STATUS_RUNNING, labels: ['报表', '分组:数据'],
     timeout: 1800, channelId: null, pythonVersion: '3.11', createdDaysAgo: 33,
     runHours: [15], runEveryDays: 3, durMin: 24, durMax: 88, failRate: 0.06, timeoutRate: 0, abortRate: 0.12,
   },
   {
     id: 10, name: '日志归档压缩', command: 'bash ops/archive_logs.sh', taskType: 'cron',
-    cron: '2 0 * * *', status: TASK_STATUS_ENABLED, labels: ['清理'],
+    cron: '2 0 * * *', status: TASK_STATUS_ENABLED, labels: ['清理', '分组:夜间维护'],
     timeout: 1200, channelId: null, notifyOnFailure: true, createdDaysAgo: 33,
     runHours: [0], runMinutes: [2], durMin: 6.2, durMax: 27, failRate: 0.02, timeoutRate: 0, abortRate: 0,
   },
   {
     id: 11, name: '监控指标采集', command: 'python3 monitor/collect_metrics.py', taskType: 'cron',
-    cron: '*/30 * * * *', status: TASK_STATUS_ENABLED, labels: ['监控'],
+    cron: '*/30 * * * *', status: TASK_STATUS_ENABLED, labels: ['监控', '分组:巡检'],
     timeout: 300, channelId: 2, notifyOnFailure: true, pythonVersion: '3.12', createdDaysAgo: 26,
     runHours: ALL_HOURS, runMinutes: everyMinutes(30),
     durMin: 1.1, durMax: 5.2, failRate: 0.04, timeoutRate: 0, abortRate: 0.004,
@@ -282,6 +293,8 @@ function buildTasks(now: number): DemoTask[] {
       cron_expression: seed.cron,
       task_type: seed.taskType,
       status: seed.status,
+      // 种子里的两个运行中任务（8 / 9）都是启用任务在跑，没有待禁用标记（开关位为开）
+      pending_disable: false,
       labels: [...seed.labels],
       // last_run_at / last_run_status 在日志生成之后统一回填，保证与日志表一致
       last_run_at: null,
@@ -340,6 +353,26 @@ export function logStatusOfKind(kind: DemoLogKind): number {
     default:
       // fail 与 timeout 在服务端是同一个状态：超时是面板杀进程，退出码同样非零
       return LOG_STATUS_FAILED
+  }
+}
+
+/**
+ * 执行日志的状态 → 任务的「上次结果」（last_run_status）。
+ *
+ * 两套常量不是一回事（见 types.ts 的 RUN_STATUS_*）：已终止在日志上是 3、在任务上是 2。
+ * 直接把日志状态抄到任务上，最近一次被终止的任务在列表和详情里会显示成「失败」。
+ * 运行中返回 null，沿用演示站原来的口径（任务还没有这次的结果）。
+ */
+export function runStatusOfLogStatus(status: number): number | null {
+  switch (status) {
+    case LOG_STATUS_SUCCESS:
+      return RUN_STATUS_SUCCESS
+    case LOG_STATUS_ABORTED:
+      return RUN_STATUS_ABORTED
+    case LOG_STATUS_RUNNING:
+      return null
+    default:
+      return RUN_STATUS_FAILED
   }
 }
 
@@ -496,7 +529,7 @@ function applyLastRunFromLogs(tasks: DemoTask[], logs: DemoTaskLog[]) {
     const task = tasks.find((item) => item.id === log.task_id)
     if (!task) continue
     task.last_run_at = log.started_at
-    task.last_run_status = log.status === LOG_STATUS_RUNNING ? null : log.status
+    task.last_run_status = runStatusOfLogStatus(log.status)
     task.last_running_time = log.duration
   }
 }

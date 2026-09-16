@@ -15,6 +15,7 @@ import {
 import { taskApi } from '@/api/task'
 import { openAuthorizedEventStream, type EventStreamConnection } from '@/utils/sse'
 import { useResponsive } from '@/composables/useResponsive'
+import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE } from '@/utils/ansi'
 
 const props = defineProps<{
@@ -28,33 +29,15 @@ const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
-// 「自动跟随」偏好：以前每次打开弹窗都被强制重置成暂停，用户每看一次实时日志就要重新点一下开关。
-// 默认值仍是 '0'（暂停），保证没设置过的老用户升级后第一眼观感不变。
-const LOG_FOLLOW_STORAGE_KEY = 'dd:tasks:log_follow'
-
-function readStoredAutoScroll(): boolean {
-  if (typeof window === 'undefined') {
-    return false
+// #133：日志自动跟随改为「最新一行在可视区就跟随、用户上翻即暂停」的青龙式判定，
+// 由 useLogAutoFollow 统一承担，原来的「跟随」开关与其持久化偏好已删除。
+// 旧的持久化键清一次，避免留下无用的孤儿键（历史值不再读取）。
+try {
+  if (typeof window !== 'undefined') {
+    window.localStorage.removeItem('dd:tasks:log_follow')
   }
-  try {
-    // 只认字面量 '1'，其余（null / 手改坏的值）一律回落默认的暂停态
-    return window.localStorage.getItem(LOG_FOLLOW_STORAGE_KEY) === '1'
-  } catch {
-    // 隐私模式下访问 localStorage 会直接抛错，这里必须吞掉：
-    // 这个函数是在 setup 顶层同步调用的，漏出去会让整个弹窗组件初始化失败。
-    return false
-  }
-}
-
-function persistAutoScroll(enabled: boolean) {
-  if (typeof window === 'undefined') {
-    return
-  }
-  try {
-    window.localStorage.setItem(LOG_FOLLOW_STORAGE_KEY, enabled ? '1' : '0')
-  } catch {
-    // 隐私模式 / 存储配额满：记不住偏好不影响当前这次查看，静默忽略
-  }
+} catch {
+  // 隐私模式 / 存储不可用：清不清都不影响本次查看，静默忽略
 }
 
 // 日志正文改成「按行 + 按块」增量渲染。
@@ -80,7 +63,10 @@ const NEVER_RAN_MESSAGE = '该任务还没有日志记录'
 const NEVER_RAN_HINT = '任务执行一次后就会出现日志'
 const loading = ref(false)
 const logContainerRef = ref<HTMLElement>()
-const autoScroll = ref(readStoredAutoScroll())
+// 日志自动跟随：运行态由日志流自己判定，容器随 destroy-on-close 弹窗重建时组合式会自动重挂监听
+const follow = useLogAutoFollow(logContainerRef)
+// 供模板读取的跟随态（顶层 ref 在模板里会自动解包）
+const isFollowing = follow.following
 const fontSize = ref<'sm' | 'md' | 'lg'>('md')
 const wrap = ref(true)
 // 渲染窗口封顶：默认只渲染最后 5000 行，避免超长日志把 DOM 撑到几十万节点，
@@ -117,6 +103,7 @@ let prefetchedLatestLogAbort: AbortController | null = null
 // TinyLog 就 break，并不会等满轮询窗口）。TTL 只是「谁都没作废它、它却放了很久」的兜底。
 const LATEST_LOG_PREFETCH_TTL = 1200
 // reconnect 风暴熔断：连续重连且无新数据时累加，超过上限即按完成处理，避免无限重连+全量重渲染卡顿。
+// done:reconnect 与实时流出错后的重连共用这一个计数（见 scheduleStreamReconnect）。
 let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 5
 
@@ -128,9 +115,34 @@ const TASK_STATUS_RUNNING = 2
 // 但任务可能长期卡在排队中，所以要有这个兜底，不能无限轮询。
 const WAITING_POLL_LIMIT = 60
 let waitingPollCount = 0
+// C-log-follow-4 ②：等待链（keepWaitingForPendingTask / 排队轮询 pollPendingTaskUntilRunning）查到任务已在运行、
+// 从轮询切回实时 SSE 之后置 true；流里收到真实数据、或重新打开 / 切换任务起新会话时复位。
+// 作用是「一次等待里只切一次」，防的是「日志行已建、日志文件还没写出第一行」这个窗口：
+// 没有 TinyLog 的运行任务（conc / SuppressLiveOutput）切回流后，服务端运行中分支要空等约 60s 才回 done:finished
+// （server/handler/log.go）；收口时 latest-log 回退读日志文件，文件还是空的就又落回等待链，不设闸会每轮再切一次、再空等 60s。
+// 文件写出第一行后（执行器一开跑就写「=== 开始执行 ===」），latest-log 拿得到正文、渲染后不再进等待链，这道闸就用不上了。
+let waitingSwitchedToStream = false
+
+// 等待链此刻能不能切回实时 SSE（C-log-follow-4 ②）：
+// - latest 模式本来就是一次性拉「最近结果」、后面没有 SSE，不能被等待链悄悄变成实时流；
+// - reconnect 熔断已跳闸（连续空重连超过上限）：那边已判定为无可续流的实时日志，再开流就是把风暴请回来；
+// - 这次等待已经切过一次、切回去一条数据都没来（见 waitingSwitchedToStream）。
+function canSwitchWaitingToStream() {
+  return props.mode !== 'latest'
+    && reconnectAttempts <= MAX_RECONNECT_ATTEMPTS
+    && !waitingSwitchedToStream
+}
 // 组件卸载标记：等待轮询中间夹着一次 await（查任务状态），
 // 卸载/关闭正好落在这一拍时，后面绝不能再把新的定时器挂上去。
 let disposed = false
+// 每次 cleanup（关窗、切任务、重开流、改走一次性拉取、卸载）都换一代。
+// 实时流出错后的异步收尾（recoverStreamAfterError）靠它认出：await 期间别的路径已经接手，自己该作废了。
+let streamGeneration = 0
+// 运行态是否已定性。首个信号（首包 / done:reconnect / 等待态查到运行中）到来时置 true，
+// 只认定一次——认定后用户的暂停/跟随选择由 useLogAutoFollow 维护，不能每来一条消息就重新贴底。
+// 用 ref 是因为「已暂停跟随」弱提示要靠它把「已判定为运行中」这一态接进模板：
+// 未判定时（流刚开、正文还空）headerState 也是 'running'，不 gate 的话提示会在每次打开时闪一下。
+const runStateDecided = ref(false)
 
 // 下面这批 computed 都要跟着行缓冲走，读一下 logRevision 建立依赖即可
 const activeRenderWindow = computed(() => renderWindowExpanded.value ? 0 : RENDER_WINDOW_CHUNKS)
@@ -189,8 +201,9 @@ function expandRenderWindow() {
   void nextTick(() => {
     const el = logContainerRef.value
     if (!el) return
-    // 补齐的内容是往上长的，按高度差补偿滚动位置，避免视口整个跳走
-    el.scrollTop = previousTop + (el.scrollHeight - previousHeight)
+    // 补齐的内容是往上长的，按高度差补偿滚动位置，避免视口整个跳走。
+    // 走 follow.setScrollTop 带上程序标记，避免这次写入被自动跟随误读成用户上翻。
+    follow.setScrollTop(previousTop + (el.scrollHeight - previousHeight))
   })
 }
 
@@ -216,20 +229,98 @@ watch(() => props.taskId, (taskId, previousTaskId) => {
   }
 })
 
-watch(autoScroll, (enabled) => {
-  // 写回必须放在 if (enabled) 外面，否则只存得住「开」、存不住「关」。
-  // 只有 live 模式的切换才算用户偏好：latest 分支会程序性地强制关掉跟随（见 loadLatestOnly），
-  // 那不是用户的选择，写回去会把已经存好的「跟随」抹成「暂停」。
-  if (props.mode !== 'latest') {
-    persistAutoScroll(enabled)
+// 运行态由日志流自己判定，不新增 prop、不额外请求：收到首包（或 done:reconnect / 等待态查到运行中）
+// 才认定任务在跑并开启跟随，且只认定一次。
+function markRunning() {
+  if (runStateDecided.value) return
+  runStateDecided.value = true
+  follow.begin(true)
+}
+
+// C-log-follow-4：finished-late / 排队态修复（只动前端）。
+// finished-late 说明打开弹窗时任务还在排队/启动，此刻按 started_at 取到的很可能是【上一次运行】的日志。
+// 这里查一次真实状态：仍在排队就继续等、真正开跑就切回实时 SSE、确实结束了才回落到渲染最近一次日志。
+// 另一个入口是 keepWaitingForPendingTask 查到排队中之后的下一拍（#115 等待链，C-log-follow-4 ②）；
+// 实时流出错后查到排队中（recoverStreamAfterError）则从 waitQueuedTaskThenPoll 这一步直接进链。
+async function pollPendingTaskUntilRunning(scrollMode: 'top' | 'bottom' | 'preserve') {
+  const taskId = props.taskId
+  // 进链时的代号，作用同 recoverStreamAfterError：一次正常等待（排队→排队→开跑）里没有任何路径会换代——
+  // 换代只发生在 cleanup()，而这条链每两步之间只有一个 setTimeout，中途不 cleanup；
+  // 切回实时流的 startStream(true) 也排在下面那次检查之后。所以代号一变就只可能是别的路径已经接手
+  // （关窗后重开同一个任务、切回前台重开流），这条旧链必须就地作废，
+  // 否则它会对新会话 startStream(true) 或再挂一条排队轮询。
+  const generation = streamGeneration
+  if (disposed || !props.visible || !taskId) {
+    return
   }
-  if (enabled) {
-    scheduleScrollToBottom()
+  let status: number | null = null
+  try {
+    const live = await taskApi.liveLogs(taskId)
+    status = typeof live?.status === 'number' ? live.status : null
+  } catch {
+    // 状态查不到就不猜，直接退回渲染最近一次日志
   }
-})
+  // await 这一拍里用户可能关掉弹窗、切了任务、组件被卸载，或者别的路径已经接手（见上面的代号）
+  if (disposed || !props.visible || props.taskId !== taskId || generation !== streamGeneration) {
+    return
+  }
+  if (status === TASK_STATUS_RUNNING) {
+    // 已经真正开跑：先开启跟随再切回实时流。startStream(true) 会 begin(true, keepFollowing)，
+    // 服务端命中 TinyLog 后先推历史再实时推送，#133 的跟随随之生效。
+    // 记下「这次等待已切过一次流」：切回去若一条数据都没来又落回等待链，keepWaitingForPendingTask 就改回轮询
+    waitingSwitchedToStream = true
+    waitingForLog.value = false
+    follow.begin(true)
+    void startStream(true)
+    return
+  }
+  if (status === TASK_STATUS_QUEUED) {
+    waitQueuedTaskThenPoll(scrollMode)
+    return
+  }
+  // 不再排队/运行、或查不到状态：回落到按最近一次日志渲染（与旧行为一致）
+  waitingForLog.value = false
+  follow.end()
+  void fetchLatestLog(0, follow.following.value ? 'bottom' : 'preserve')
+}
+
+// 等待链的「排队中」这一步：显示排队文案，1s 后再查一次状态，到兜底上限就停。
+// pollPendingTaskUntilRunning 查到排队中时走这里；recoverStreamAfterError 刚查过、已知是排队中，也直接从这里进链——
+// 再绕一趟 pollPendingTaskUntilRunning 会多发一次 live-logs，那一个往返里头部还会先闪一下「已完成」。
+function waitQueuedTaskThenPoll(scrollMode: 'top' | 'bottom' | 'preserve') {
+  if (waitingPollCount < WAITING_POLL_LIMIT) {
+    waitingPollCount++
+    waitingForLog.value = true
+    emptyMessage.value = '任务排队中，开始执行后会出现日志…'
+    emptyHint.value = '正在等待日志写入，出现后会自动显示，不用手动重开'
+    // 与等待轮询共用 reconnectTimer，切后台再回来时会另起一条链，不掐掉旧的会叠出多条并行轮询
+    if (reconnectTimer !== null) {
+      clearTimeout(reconnectTimer)
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      void pollPendingTaskUntilRunning(scrollMode)
+    }, 1000)
+    return
+  }
+  // 到达兜底上限、任务仍在排队：与 keepWaitingForPendingTask 的上限口径一致，停轮询并如实说明。
+  // 不能回落到渲染最近一次日志——此刻取到的必然是【上一次运行】的，拿它冒充本次结果正是这里要修的问题。
+  waitingForLog.value = false
+  follow.end()
+  emptyMessage.value = '还没有产生日志（任务一直停在排队中）'
+  emptyHint.value = '已停止自动刷新，重新打开这个窗口可以继续等'
+}
 
 async function startStream(isReconnect = false) {
-  const savedScrollTop = isReconnect ? logContainerRef.value?.scrollTop ?? null : null
+  // 上一次非跟随的重连一条数据都没等到又要重连（实时流出错后的连续重连、切后台两次）时，
+  // 正文已被清空、scrollTop 已被夹到 0，要沿用那次还没用上的恢复位置，否则已暂停的用户会被送回顶部。
+  // pendingScrollRestore 非空只可能是这种情况：它只在非跟随的重连里写入、在第一次 flush 数据时消费。
+  const savedScrollTop = isReconnect
+    ? (pendingScrollRestore ?? logContainerRef.value?.scrollTop ?? null)
+    : null
+  // 重连前先记住当前跟随态：resetLogOutput 会清空容器、scrollTop 被夹到 0，
+  // 那一下非程序性的 scroll 会把已暂停的用户误判回跟随，所以必须显式保住（见 useLogAutoFollow 的重置风险）。
+  const wasFollowing = isReconnect ? follow.following.value : false
   cleanup()
   resetLogOutput()
   done.value = false
@@ -238,20 +329,24 @@ async function startStream(isReconnect = false) {
   emptyHint.value = ''
   waitingForLog.value = false
   loading.value = !isReconnect
-  pendingScrollRestore = isReconnect && savedScrollTop !== null ? savedScrollTop : null
+  // 只有「非跟随的重连」才需要恢复原滚动位置；跟随中的重连直接贴到最新即可。
+  pendingScrollRestore = isReconnect && !wasFollowing && savedScrollTop !== null ? savedScrollTop : null
   if (!isReconnect) {
     // 用户主动打开/切换任务重新起流：清零重连计数，确保熔断只针对一次会话内的连续空重连。
     reconnectAttempts = 0
     // 等日志的轮询次数同理，只在一次会话内累计
     waitingPollCount = 0
-    // 这里刻意不再重置 autoScroll —— 跟随开关已经是持久化偏好，重开弹窗/刷新页面都要沿用上次的选择。
-    // 初始视口方向随之二选一：以前无条件滚顶的前提是「打开一定是暂停态、从头看」，
-    // 恢复成跟随后仍滚顶会出现「开关显示跟随、内容却停在顶部」的割裂。
-    if (autoScroll.value) {
-      scheduleScrollToBottom()
-    } else {
-      scheduleScrollToTop()
-    }
+    waitingSwitchedToStream = false
+    // 运行态先「未判定」：正文此刻为空，先停在顶部，等收到第一个信号再定性为运行/未运行。
+    // 用 begin(false) 而不是 end()：begin(false) 会把 following 明确重置为 false，
+    // 避免沿用上一次查看留下的跟随态（end() 只冻结、不重置 following）。
+    runStateDecided.value = false
+    follow.begin(false)
+    scheduleScrollToTop()
+  } else {
+    // 重连即续流，任务确实在跑；keepFollowing 保住重连前的暂停/跟随选择。
+    runStateDecided.value = true
+    follow.begin(true, { keepFollowing: wasFollowing })
   }
 
   if (!props.taskId) {
@@ -279,11 +374,15 @@ async function startStream(isReconnect = false) {
       }
       // 收到真实日志数据 = 有实质进展，不算空重连风暴，重置熔断计数。
       reconnectAttempts = 0
+      // 同理：等待链切回来的流确实来了数据，这次「切流」有效，之后再掉回等待链可以重新切（见 waitingSwitchedToStream）
+      waitingSwitchedToStream = false
       // 🔴 同时作废预取：这一份快照是「打开弹窗那一刻」拍的，比流里正在到达的内容更旧。
       // 只靠 TTL 挡不住这条路径 —— 任务在 1.2s 内跑完时，done 到达时预取仍在有效期内，
       // 复用它就会用旧快照（甚至是上一次运行的日志、或一条 content 为空的新记录）
       // 覆盖掉刚流完的正确输出。预取只服务「服务端立刻回 done、流里一个字节都没有」这一条路径。
       dropPrefetchedLatestLog()
+      // 收到首包 = 任务在跑：认定运行中并开启跟随（只认定一次，之后由 useLogAutoFollow 维护）
+      markRunning()
       pendingSseChunks.push(data)
       scheduleBufferFlush()
     },
@@ -292,26 +391,28 @@ async function startStream(isReconnect = false) {
         return
       }
       flushBufferedLogs()
-      done.value = true
       cleanup()
       if (event.data === 'reconnect') {
         // reconnect 意味着服务端已经找到 TinyLog、任务确实在跑，接下来会重新推一遍历史。
         // 预取那份快照到这里已经没有意义（而且重连很可能 150ms 就回来，TTL 根本挡不住），直接作废。
         dropPrefetchedLatestLog()
-        reconnectAttempts++
-        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+        // 服务端已找到 TinyLog、任务确实在跑：认定运行中并开启跟随。
+        // 若这是流的第一个信号，下面 startStream(true) 捕获的 wasFollowing 才会是 true、能续上跟随。
+        markRunning()
+        // 退避的 0.5~5s 里不置 done：任务确实在跑，头部保持「运行中」。以前一进这个分支就置 done，
+        // 「点运行后立刻打开日志」这条最常见的路径每次都会闪一下「已完成」。
+        // 退避期间 done 为假，切回前台时 handleVisibilityChange 走「重开流」而不是「done 且无正文就补拉」：
+        // startStream(true) 先 cleanup() 清掉这里挂的定时器，始终只剩一条流，也不会补拉一份旧快照。
+        if (!scheduleStreamReconnect()) {
           // 连续多次重连都没有新数据：判定为无可续流的实时日志，按完成处理，停止重连风暴。
-          void fetchLatestLog(0, autoScroll.value ? 'bottom' : 'preserve')
-          return
+          done.value = true
+          follow.end()
+          void fetchLatestLog(0, follow.following.value ? 'bottom' : 'preserve')
         }
-        // 退避重连：第 1 次 500ms，逐次翻倍，封顶 5s，降低无效重连对前端的冲击。
-        const delay = Math.min(500 * 2 ** (reconnectAttempts - 1), 5000)
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null
-          void startStream(true)
-        }, delay)
         return
       }
+      // 其余载荷（finished / finished-late / 未知）才是这条流真正收口
+      done.value = true
       // 🔴 done 的三种载荷里，只有 'finished'（服务端 0 等待、任务早就结束、日志早已落库）
       // 才允许复用并行预取。'finished-late' 说明服务端在短轮询里真的等过 ——
       // 也就是打开弹窗那一刻任务还在排队/运行，那时按 started_at DESC 取到的很可能是
@@ -321,19 +422,112 @@ async function startStream(isReconnect = false) {
       // 未知载荷按 finished 处理（向后兼容旧服务端与演示站的假流）。
       if (event.data === 'finished-late') {
         dropPrefetchedLatestLog()
+        // C-log-follow-4：finished-late 说明打开时任务还在排队/启动，此刻按 started_at 取到的
+        // 很可能是【上一次运行】的日志。先查真实状态：仍在排队就继续等、真正开跑就切回实时流，
+        // 不拿旧快照冒充本次结果；确实结束了才回落到渲染最近一次日志。
+        // 上面刚置了 done，而下面这一步要先 await 一次 live-logs：那一个往返里 waitingForLog 还是假、
+        // headerState 就是 done，头部会闪一下「已完成」（打开排队超过 1.5s 的任务日志每次都碰得到）。
+        // 所以正文还空着时先进「等待中」：头部/底栏与后面的排队文案连贯，这一拍切回前台也不会去补拉
+        // 上一次运行的日志（handleVisibilityChange 看 waitingForLog）。等待链的每个出口都会收掉这一态——
+        // 查到运行中、不再排队/查不到状态时置 false，查到排队中则换成排队文案接着等。
+        // 正文非空说明是快任务、历史已经推完，这一轮确实结束了，「已完成」是对的，不动。
+        if (!hasLogs.value) {
+          waitingForLog.value = true
+        }
+        void pollPendingTaskUntilRunning('bottom')
+        return
       }
-      void fetchLatestLog(0, autoScroll.value ? 'bottom' : 'preserve')
+      follow.end()
+      void fetchLatestLog(0, follow.following.value ? 'bottom' : 'preserve')
     },
     onError() {
       flushBufferedLogs()
       loading.value = false
-      done.value = true
       cleanup()
       // 流本身出错时无从判断服务端处于哪条路径，预取一律作废、老老实实重新请求。
       dropPrefetchedLatestLog()
-      void fetchLatestLog(0, hasLogs.value ? 'preserve' : 'top')
+      // 先不置 done、不冻结跟随：任务多半还在跑，查过真实状态再决定重连、进等待链还是收口
+      void recoverStreamAfterError()
     }
   })
+}
+
+// 退避重连，done:reconnect 与实时流出错两处共用：计一次连续空重连，没超上限就按退避间隔重开流、返回 true；
+// 超过上限（熔断跳闸）返回 false，由调用方按完成收口。
+function scheduleStreamReconnect() {
+  reconnectAttempts++
+  if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+    return false
+  }
+  // 退避重连：第 1 次 500ms，逐次翻倍，封顶 5s，降低无效重连对前端的冲击。
+  const delay = Math.min(500 * 2 ** (reconnectAttempts - 1), 5000)
+  // 同一时刻只留一个定时器（与等待轮询、404 重试共用 reconnectTimer）
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+  }
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    void startStream(true)
+  }, delay)
+  return true
+}
+
+// 实时流出错（断网、代理重置、移动端切后台被掐断）：sse.ts 不重试，直接交给 onError。
+// 以前这里一律 done=true 再渲染 latest-log：运行期间 LatestLog 会回退读日志文件、正文非空，进不了 #115 的等待链，
+// 于是任务明明还在跑，头部却变成「已完成」，之后也不再更新。
+// 现在先查一次真实状态再分流：
+// - 运行中（2）：走 done:reconnect 那套退避重连（同一个熔断计数与上限），头部保持「运行中」，
+//   暂停 / 跟随选择由 startStream(true) 带过去；
+// - 排队中（0.5）：与 finished-late 同一条路，进 pollPendingTaskUntilRunning 的等待链，开跑那一拍再切回实时流。
+//   不能也走空重连：SSE 持续失败时会先白白耗光熔断，跳闸后 canSwitchWaitingToStream() 一直为假，任务开跑也切不回实时流；
+// - 查不到状态、任务已结束、熔断已跳闸，或排队中却不该进等待链（见函数体），才照旧按完成收口。
+async function recoverStreamAfterError() {
+  const taskId = props.taskId
+  // onError 里的 cleanup() 已经换过代，这里记下的是出错之后的这一代
+  const generation = streamGeneration
+  if (!disposed && props.visible && taskId) {
+    let status: number | null = null
+    try {
+      const live = await taskApi.liveLogs(taskId)
+      status = typeof live?.status === 'number' ? live.status : null
+    } catch {
+      // 状态查不到就不猜，按原来的方式收口
+    }
+    // await 这一拍里用户可能关掉弹窗、切了任务、组件被卸载，或者别的路径（如切回前台重开流）已经接手
+    if (disposed || !props.visible || props.taskId !== taskId || generation !== streamGeneration) {
+      return
+    }
+    // 排队中、这条流又一行正文都没收到（多半是打开以来一直在排队；重连刚清空正文、任务跑完又排上队也会走到这里，
+    // 与流没断时服务端回 finished-late 的结果一致）：此刻 latest-log 取到的不是正在等的这一轮，不能拿它收口。
+    // 按 finished-late 的口径进等待链：先置 done（等待期间切回前台不补拉、不重开流，见 handleVisibilityChange），
+    // 头部由 waitingForLog 显示「等待中」；不 markRunning、不动 waitingSwitchedToStream，开跑后由等待链切流时再定。
+    // 以下两种落到下面收口：
+    // - 流里已经来过正文：刚才看的那一轮已经跑完、任务又排上了队，latest-log 就是这一轮，按完成渲染它
+    //   （与流没断时服务端在这一轮结束时回 done:finished 的结果一致）；进等待链反而会让正文和「等待中」「无日志」对不上；
+    // - canSwitchWaitingToStream() 为假（这条流是等待链切过来的、一条数据都没等到）：与等待链自己切不了流时一样，
+    //   改走 latest-log（此刻它就是切流时开跑的那一轮），取不到正文仍会进 #115 等待链。
+    if (status === TASK_STATUS_QUEUED && !hasLogs.value && canSwitchWaitingToStream()) {
+      done.value = true
+      waitQueuedTaskThenPoll('bottom')
+      return
+    }
+    if (status === TASK_STATUS_RUNNING) {
+      // 与 done:reconnect 同理：流出错前一条数据都没来时先认定运行中，
+      // 下面 startStream(true) 捕获的 wasFollowing 才会是 true、能续上跟随；已判定过的保住用户的选择
+      markRunning()
+      if (scheduleStreamReconnect()) {
+        return
+      }
+      // 熔断已跳闸：落到下面按完成收口
+    }
+  }
+  done.value = true
+  // 日志流结束：冻结跟随态，后续最后一次整体替换按冻结时的状态处理
+  follow.end()
+  // 跟随中就贴底（与 done:finished 同口径）。只看 hasLogs 不够：连续重连时每次 startStream(true) 都先清空正文，
+  // 熔断跳闸走到这里时 hasLogs 已是 false，跟随中的用户会被甩到快照顶部；
+  // 流恰好在任务结束时断开时，快照比屏幕上多出的结尾几行也会留在视口下方。
+  void fetchLatestLog(0, follow.following.value ? 'bottom' : (hasLogs.value ? 'preserve' : 'top'))
 }
 
 // 作废预取。四处在用：流里收到第一段真实数据、收到 done:reconnect、
@@ -364,9 +558,8 @@ async function loadLatestOnly() {
   waitingForLog.value = false
   waitingPollCount = 0
   loading.value = true
-  // latest 是一次性拉取的「最近结果」，后面没有 SSE 续流，跟随开关点了也没有实质作用，
-  // 所以这一支仍然强制暂停 + 从头看；持久化的跟随偏好只在 live 模式恢复（见 startStream）。
-  autoScroll.value = false
+  // latest 是一次性拉取的「最近结果」，后面没有 SSE 续流，冻结跟随、从头看即可。
+  follow.end()
   scheduleScrollToTop()
 
   if (!props.taskId) {
@@ -416,8 +609,9 @@ async function takeLatestLog(): Promise<any> {
 // 任务会长时间停在「排队中」，这段时间 task_logs 里一行都没有，
 // 老逻辑重试 5 次（2.5s）就把「该任务还没有日志记录」定死，而且之后再也不会自己纠正。
 //
-// 返回 true = 已经接管（安排了下一次轮询，或者写好了「等到上限」的说明），调用方直接 return；
+// 返回 true = 已经接管（安排了下一次轮询、切回了实时流，或者写好了「等到上限」的说明），调用方直接 return；
 // 返回 false = 可以按调用方原本的文案收口。
+// 运行中（2）不再轮询 latest-log、改为切回实时流；排队中（0.5）的下一拍改为先查状态 —— 理由见函数体（C-log-follow-4 ②）。
 async function keepWaitingForPendingTask(retryCount: number, scrollMode: 'top' | 'bottom' | 'preserve') {
   const taskId = props.taskId
   if (!disposed && props.visible && taskId) {
@@ -434,6 +628,19 @@ async function keepWaitingForPendingTask(retryCount: number, scrollMode: 'top' |
     if (pending && !disposed && props.visible && props.taskId === taskId) {
       if (waitingPollCount < WAITING_POLL_LIMIT) {
         waitingPollCount++
+        // C-log-follow-4 ②：任务已经在跑，就别再每秒拉 latest-log —— 那样一旦拿到正文只会渲染一次快照、
+        // 之后既不续流也不再轮询，任务后面的输出进不来。直接切回实时流：服务端命中 TinyLog 后先推历史再实时推送，
+        // 还没建出 TinyLog 时它会在运行中分支里等，出现后回 done:reconnect。
+        // markRunning()：运行态还没判定时等同 follow.begin(true)（开启跟随）；流里来过数据、已经判定过的，
+        // 保住用户当时的暂停 / 跟随选择，交给 startStream(true) 的 keepFollowing 续上。
+        // 切不了的场合（见 canSwitchWaitingToStream）落到下面，照旧按「任务已开始」等待、轮询 latest-log。
+        if (status === TASK_STATUS_RUNNING && canSwitchWaitingToStream()) {
+          waitingSwitchedToStream = true
+          waitingForLog.value = false
+          markRunning()
+          void startStream(true)
+          return true
+        }
         waitingForLog.value = true
         emptyMessage.value = status === TASK_STATUS_QUEUED
           ? '任务排队中，开始执行后会出现日志…'
@@ -446,7 +653,14 @@ async function keepWaitingForPendingTask(retryCount: number, scrollMode: 'top' |
         }
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null
-          void fetchLatestLog(retryCount, scrollMode)
+          // 排队中：下一拍改走「先查状态」的排队轮询（与它共用 reconnectTimer 和 waitingPollCount 上限）。
+          // 继续先拉 latest-log 的话，任务在这 1s 里开跑并写出了第一行，就会被当成快照渲染一次然后停住（同上），
+          // 先查状态才能在变成 2 的那一拍切回实时流。切不了流的场合仍按原来的节奏拉 latest-log。
+          if (status === TASK_STATUS_QUEUED && canSwitchWaitingToStream()) {
+            void pollPendingTaskUntilRunning(scrollMode)
+          } else {
+            void fetchLatestLog(retryCount, scrollMode)
+          }
         }, 1000)
         return true
       }
@@ -590,13 +804,13 @@ function flushBufferedLogs() {
   if (pendingScrollRestore !== null) {
     const target = pendingScrollRestore
     pendingScrollRestore = null
+    // 用带程序标记的写入恢复位置，避免这次 scroll 被自动跟随误读成用户上翻
     void nextTick(() => {
-      if (logContainerRef.value) {
-        logContainerRef.value.scrollTop = target
-      }
+      follow.setScrollTop(target)
     })
-  } else if (autoScroll.value) {
-    scheduleScrollToBottom()
+  } else {
+    // 跟随中就贴到最新，暂停时什么都不做（由 useLogAutoFollow 按 live && following 判定）
+    follow.onContentChange()
   }
 }
 
@@ -635,6 +849,8 @@ function scrollToTop() {
 }
 
 function cleanup() {
+  // 换代：让还在 await 里的出错收尾作废，见 streamGeneration
+  streamGeneration++
   if (logFlushTimer !== null) {
     clearTimeout(logFlushTimer)
     logFlushTimer = null
@@ -666,12 +882,16 @@ function handleVisibilityChange() {
   hiddenAt = null
 
   if (done.value) {
-    if (!hasLogs.value) {
+    // 等待链（排队中轮询 pollPendingTaskUntilRunning / #115 等日志轮询）还在跑时不补拉，由它们按自己的节奏刷新：
+    // 排队期间照常 fetchLatestLog 会取到【上一次运行】的日志并当成本次结果渲染出来。
+    if (!hasLogs.value && !waitingForLog.value) {
       void fetchLatestLog()
     }
     return
   }
 
+  // done 为假也包括出错后 / done:reconnect 后的退避重连期间：这里直接重开流，
+  // startStream 里的 cleanup() 会清掉待发的重连定时器并换代，始终只剩一条流
   if (wasBackgrounded) {
     void startStream(true)
   }
@@ -681,6 +901,14 @@ function cycleFontSize() {
   if (fontSize.value === 'sm') fontSize.value = 'md'
   else if (fontSize.value === 'md') fontSize.value = 'lg'
   else fontSize.value = 'sm'
+  // 字号变化会改变内容总高度，跟随中要重新贴底（原实现漏了这一步）
+  follow.onContentChange()
+}
+
+function toggleWrap() {
+  wrap.value = !wrap.value
+  // 换行切换同样会改变内容总高度，跟随中要重新贴底
+  follow.onContentChange()
 }
 
 async function handleCopy() {
@@ -800,9 +1028,13 @@ function handleClose() {
           <div class="viewer-hero-meta">
             <span class="viewer-hero-meta-item">{{ lineCount }} 行</span>
             <span v-if="byteLabel" class="viewer-hero-meta-item">{{ byteLabel }}</span>
-            <span class="viewer-hero-meta-item">
-              {{ autoScroll ? '自动跟随底部' : '已暂停自动滚动' }}
-            </span>
+            <!-- 删掉了「跟随」开关，只在【已判定为运行中】且已暂停时给一行弱提示，告诉用户怎么恢复。
+                 gate 上 runStateDecided：未判定时正文还空、headerState 也是 'running'，
+                 不 gate 会在每次打开时闪一下这句提示。 -->
+            <span
+              v-if="runStateDecided && headerState === 'running' && !isFollowing"
+              class="viewer-hero-meta-item viewer-hero-meta-item--paused"
+            >已暂停跟随 · 滚到底部恢复</span>
           </div>
         </div>
 
@@ -817,7 +1049,7 @@ function handleClose() {
             <button
               class="tool-btn"
               :class="{ 'tool-btn--active': wrap }"
-              @click="wrap = !wrap"
+              @click="toggleWrap"
               aria-label="切换换行"
             >
               <el-icon :size="15"><Switch /></el-icon>
@@ -834,9 +1066,6 @@ function handleClose() {
               <el-icon :size="15"><Download /></el-icon>
             </button>
           </el-tooltip>
-          <div class="auto-scroll-toggle">
-            <el-switch v-model="autoScroll" size="small" inline-prompt active-text="跟随" inactive-text="暂停" />
-          </div>
           <button class="tool-btn tool-btn--close" @click="handleClose" aria-label="关闭">
             <el-icon :size="16"><Close /></el-icon>
           </button>
@@ -956,9 +1185,11 @@ function handleClose() {
   // 运行/成功/失败的状态 chip，属于天然胶囊 → pill 档
   border-radius: var(--dd-radius-pill);
 
+  // #133：运行中标签改用 success 绿，与任务页 getStatusType 的「运行中 success」保持一致。
+  // 等待日志态共用这一档（也是「进行中」），一并转绿。
   &--running {
-    background: color-mix(in srgb, var(--el-color-warning) 14%, transparent);
-    color: var(--el-color-warning);
+    background: color-mix(in srgb, var(--el-color-success) 14%, transparent);
+    color: var(--el-color-success);
   }
 
   &--done {
@@ -987,6 +1218,11 @@ function handleClose() {
 
 .viewer-hero-meta-item {
   font-family: var(--dd-font-ui);
+
+  // 「已暂停跟随」弱提示：比其它元信息更淡一点，不抢注意力
+  &--paused {
+    color: var(--el-text-color-placeholder);
+  }
 }
 
 /* Status orb：状态底块，靠底色区分运行/成功/失败 */
@@ -1003,7 +1239,8 @@ function handleClose() {
 }
 
 .status-orb--running {
-  background: color-mix(in srgb, var(--el-color-warning) 14%, transparent);
+  // 与头部「运行中」标签一致转为 success 绿（#133）
+  background: color-mix(in srgb, var(--el-color-success) 14%, transparent);
 }
 
 .status-orb--done {
@@ -1027,7 +1264,8 @@ function handleClose() {
   // 白名单：形状承载语义 —— 8×8 的呼吸点是「运行中」的状态灯，与 global.scss 的 .pulse-dot 同类，
   // 方化后就是一小块色斑、看不出是状态灯。两种 shape 模式下都固定圆形，不吃 --dd-radius-* 刻度。
   border-radius: 50%;
-  background: var(--el-color-warning);
+  // 与头部「运行中」标签一致转为 success 绿（#133）
+  background: var(--el-color-success);
   animation: orb-core 1.4s ease-in-out infinite;
 }
 
@@ -1036,7 +1274,7 @@ function handleClose() {
   inset: 0;
   // 涟漪是从 .status-orb 里放大出来的一层，形状必须跟底块同档，否则放大过程中会露出错位的角
   border-radius: var(--dd-radius-control);
-  background: color-mix(in srgb, var(--el-color-warning) 40%, transparent);
+  background: color-mix(in srgb, var(--el-color-success) 40%, transparent);
   animation: orb-ripple 1.8s ease-out infinite;
 }
 
@@ -1142,7 +1380,23 @@ function handleClose() {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
+// 页面自带的「减少动效」规则统一走这个包装（C8 动效偏好，本文件下方状态灯那段也用它）：
+// - 跟随系统：媒体查询里带 :root:not(.dd-motion-force)，个人设置选「始终开启」时不生效；
+// - 个人设置选「减少动效」：html.dd-motion-off 下不看系统同样生效。
+// 与 global.scss 末尾「减少动效」段同一口径；前缀包在 :where() 里，特异性与改动前的裸选择器相同，层叠结果不变。
+@mixin dd-page-reduced-motion {
+  @media (prefers-reduced-motion: reduce) {
+    :where(:root:not(.dd-motion-force)) {
+      @content;
+    }
+  }
+
+  :where(html.dd-motion-off) {
+    @content;
+  }
+}
+
+@include dd-page-reduced-motion {
   .tool-btn--close {
     transition: none;
 
@@ -1155,10 +1409,6 @@ function handleClose() {
 .tool-btn-label {
   font-weight: 600;
   letter-spacing: 0.4px;
-}
-
-.auto-scroll-toggle {
-  margin-left: 4px;
 }
 
 /* =============== Body =============== */
@@ -1287,7 +1537,9 @@ function handleClose() {
   letter-spacing: 0.4px;
 
   &--live {
-    color: var(--el-color-warning);
+    // #133：与头部「运行中」标签一致用 success 绿（原为 warning 橙：头部改绿之后一橙一绿，两处对不上）。
+    // 「等待日志中」共用这一档，与头部等待态同样走 success。
+    color: var(--el-color-success);
     font-weight: 600;
 
     &::before {
@@ -1321,7 +1573,8 @@ function handleClose() {
   50% { opacity: 0.35; }
 }
 
-@media (prefers-reduced-motion: reduce) {
+// 走上面 dd-page-reduced-motion 的包装（C8 动效偏好）
+@include dd-page-reduced-motion {
   .status-orb-core,
   .status-orb-ripple,
   .viewer-statusbar-item--live::before { animation: none; }

@@ -2062,7 +2062,23 @@ function rerunLog(log: any) {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
+// 页面自带的「减少动效」规则统一走这个包装（C8 动效偏好）：
+// - 跟随系统：媒体查询里带 :root:not(.dd-motion-force)，个人设置选「始终开启」时不生效；
+// - 个人设置选「减少动效」：html.dd-motion-off 下不看系统同样生效。
+// 与 global.scss 末尾「减少动效」段同一口径；前缀包在 :where() 里，特异性与改动前的裸选择器相同，层叠结果不变。
+@mixin dd-page-reduced-motion {
+  @media (prefers-reduced-motion: reduce) {
+    :where(:root:not(.dd-motion-force)) {
+      @content;
+    }
+  }
+
+  :where(html.dd-motion-off) {
+    @content;
+  }
+}
+
+@include dd-page-reduced-motion {
   .stat-card--cinematic,
   .panel {
     animation: none;

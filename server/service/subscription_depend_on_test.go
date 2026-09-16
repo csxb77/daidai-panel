@@ -174,18 +174,31 @@ func TestBuildSparseCheckoutPatternsIncludesDependencySide(t *testing.T) {
 		}
 	})
 
-	t.Run("依赖含元字符逐条跳过并告警", func(t *testing.T) {
-		// 与白名单不同：漏一条依赖只会「少落一个辅助文件」，退化到改造前的行为，
-		// 方向安全，所以逐条跳过而不是整体退回完整检出。
+	t.Run("依赖含正则片段时放宽成整仓检出并告警", func(t *testing.T) {
+		// #129 之前这条是「逐条跳过」：`^jd[^_]` 含 gitignore 元字符，跳过后 jdCookie.js 既不落盘、
+		// Go 侧也认不出来，主脚本 require 时报找不到模块——正是 issue 里的现象。
+		// 现在它按正则识别；正则表达不成 sparse 规则，按「档 1」放弃包含侧限制、检出完整仓库，
+		// 由 Go 侧认出依赖文件（依然不建任务）。没有黑名单时就是空规则。
 		sub := &model.Subscription{Whitelist: "jd_", DependOn: "^jd[^_]|sendNotify"}
 		patterns, warnings := buildSubscriptionSparseCheckoutPatterns(sub)
-		want := []string{"**/*jd_*", "**/*jd_*/**", "**/*sendNotify*", "**/*sendNotify*/**"}
-		if !reflect.DeepEqual(patterns, want) {
-			t.Fatalf("sparse patterns = %#v, want %#v", patterns, want)
+		if len(patterns) != 0 {
+			t.Fatalf("依赖含正则片段时应放宽成完整检出, got %#v", patterns)
 		}
 		joined := strings.Join(warnings, "\n")
-		if !strings.Contains(joined, "^jd[^_]") {
-			t.Fatalf("被跳过的依赖模式必须点名, got %#v", warnings)
+		for _, keyword := range []string{"^jd[^_]", "正则", "完整仓库"} {
+			if !strings.Contains(joined, keyword) {
+				t.Fatalf("告警应包含 %q, got %#v", keyword, warnings)
+			}
+		}
+		if strings.Contains(joined, "已并入检出范围") {
+			t.Errorf("整仓检出时不该再说依赖片段「已并入检出范围」, got %#v", warnings)
+		}
+		// Go 侧：jdCookie.js 被认成依赖文件（不建任务），jd_ 开头的仍按白名单建任务。
+		if !isSubscriptionDependencyOnlyFile(sub, "jdCookie.js") {
+			t.Error("jdCookie.js 应被依赖规则的正则片段认成依赖文件")
+		}
+		if isSubscriptionDependencyOnlyFile(sub, "jd_bean_change.js") {
+			t.Error("命中白名单的 jd_bean_change.js 不应被当成依赖文件")
 		}
 	})
 }
@@ -193,7 +206,7 @@ func TestBuildSparseCheckoutPatternsIncludesDependencySide(t *testing.T) {
 // 降级路径不能被依赖规则破坏：包含侧一旦退回「完整检出」，patterns 必须保持为空，
 // 否则 sparse-checkout 会被依赖模式重新激活成「只检出依赖文件」，白名单文件全丢。
 func TestBuildSparseCheckoutPatternsDependencyDoesNotBreakFullCheckoutFallback(t *testing.T) {
-	t.Run("白名单含元字符退回完整检出", func(t *testing.T) {
+	t.Run("白名单含正则片段退回完整检出", func(t *testing.T) {
 		sub := &model.Subscription{Whitelist: "^jd[^_]", DependOn: "sendNotify|utils"}
 		patterns, warnings := buildSubscriptionSparseCheckoutPatterns(sub)
 		if len(patterns) != 0 {
@@ -242,6 +255,10 @@ func TestIsSubscriptionDependencyOnlyFile(t *testing.T) {
 		{"sendNotify.js", true},
 		{"utils/date.js", true},
 		{"JS_USER_AGENTS.js", true},
+		// `^jd[^_]` 是正则片段（#129）：仓库根下 jd 开头、第三个字符不是 _ 的文件是依赖
+		{"jdCookie.js", true},
+		// 锚定在仓库相对路径的开头：子目录里的 jdCookie.js 不命中这一段（其余片段也都不命中）
+		{"scripts/jdCookie.js", false},
 		// 命中白名单（哪怕也命中依赖）→ 按白名单算，照常建任务
 		{"jd_bean_change.js", false},
 		{"jx_sign.js", false},
@@ -483,7 +500,7 @@ func TestSyncSubscriptionTasksDependencyNoOpWhenWhitelistEmpty(t *testing.T) {
 	}
 }
 
-// 真机 git 验证：用户那条真实指令下，仅命中依赖的辅助文件必须真的被检出到工作区，
+// 真机 git 验证：用户那条真实指令的普通依赖片段下，仅命中依赖的辅助文件必须真的被检出到工作区，
 // 而白名单/依赖都没命中的文件不能落盘。这是「拉了库但任务一跑就缺依赖」的直接修复点。
 func TestPullGitRepoWithCallbackChecksOutDependencyFiles(t *testing.T) {
 	root := testutil.SetupTestEnv(t)
@@ -526,7 +543,10 @@ func TestPullGitRepoWithCallbackChecksOutDependencyFiles(t *testing.T) {
 		SaveDir:   "jdpro-depend-repo",
 		Whitelist: qlRepoWhitelist,
 		Blacklist: qlRepoBlacklist,
-		DependOn:  qlRepoDependOn,
+		// 只留依赖规则的普通片段：本用例守的是「普通依赖片段并入 sparse 包含侧、两边都没命中的不落盘」。
+		// #129 起完整指令里的 `^jd[^_]` 是正则片段，会把检出放宽成整仓（other_task.js、README.md 也会落盘），
+		// 那条链路见 TestPullGitRepoWithCallbackRegexDependencyChecksOutJdCookie。
+		DependOn: qlRepoPlainDependOn,
 	}
 	authCfg, err := buildGitAuthConfig(os.Environ(), sub.URL, sub, "")
 	if err != nil {

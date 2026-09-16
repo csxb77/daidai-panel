@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
@@ -151,7 +152,13 @@ func appendEnvToSortBucket(tx *gorm.DB, env *model.EnvVar, sortOrder int) error 
 	}).Error
 }
 
-func reorderEnvWithinSortBucket(tx *gorm.DB, sourceID uint, targetID *uint) error {
+// reorderEnvWithinSortBucket 把 source 挪到同一个置顶桶里 target 的前面（insertAfter 时是后面），再把整桶重编号。
+//
+// targetID 为 nil 表示移到桶末尾（老客户端的写法，保留）。insertAfter 对应 PUT /envs/sort 的 position:"after"，
+// 与 PUT /tasks/sort 同名同义（契约 C4）：前端落在可见列表最后一行时发「插到上一行之后」，
+// 不必再靠「target 为空 = 整桶末尾」—— 那样分页 / 筛选下拖到本页底部，会越过所有没显示的项被甩到整桶最后，
+// 置顶项也永远拖不到置顶区末尾（落点的下一行必然是普通项，会被当成跨区拦下来，issue #131）。
+func reorderEnvWithinSortBucket(tx *gorm.DB, sourceID uint, targetID *uint, insertAfter bool) error {
 	var source model.EnvVar
 	if err := tx.First(&source, sourceID).Error; err != nil {
 		return fmt.Errorf("源环境变量不存在")
@@ -178,12 +185,6 @@ func reorderEnvWithinSortBucket(tx *gorm.DB, sourceID uint, targetID *uint) erro
 		return err
 	}
 
-	ordered := make([]model.EnvVar, 0, len(siblings))
-	insertIndex := len(siblings) - 1
-	if insertIndex < 0 {
-		insertIndex = 0
-	}
-
 	filtered := make([]model.EnvVar, 0, len(siblings))
 	for _, item := range siblings {
 		if item.ID == source.ID {
@@ -192,7 +193,7 @@ func reorderEnvWithinSortBucket(tx *gorm.DB, sourceID uint, targetID *uint) erro
 		filtered = append(filtered, item)
 	}
 
-	insertIndex = len(filtered)
+	insertIndex := len(filtered)
 	if targetID != nil {
 		insertIndex = -1
 		for idx, item := range filtered {
@@ -204,8 +205,13 @@ func reorderEnvWithinSortBucket(tx *gorm.DB, sourceID uint, targetID *uint) erro
 		if insertIndex == -1 {
 			return fmt.Errorf("目标环境变量不存在")
 		}
+		if insertAfter {
+			insertIndex++
+		}
 	}
 
+	// 用独立的底层数组拼装，避免 append 回写到 filtered 上把后半段覆盖掉。
+	ordered := make([]model.EnvVar, 0, len(filtered)+1)
 	ordered = append(ordered, filtered[:insertIndex]...)
 	ordered = append(ordered, source)
 	ordered = append(ordered, filtered[insertIndex:]...)
@@ -558,6 +564,11 @@ type updateEnvRequest struct {
 	Group   *string   `json:"group"`
 	Groups  *[]string `json:"groups"`
 	Enabled *bool     `json:"enabled"`
+	// Position 是桶内排序值（越小越靠前；置顶区与普通区各自比较），#131 起允许手填（契约 C5）。
+	// 可选：App 只发 name/value/remarks/group(s)，不传就不动。拖拽排序会把整桶重编号成 1000/2000/…，
+	// 手填的值只保证相对顺序。
+	// 🔴 与 PUT /envs/sort 请求体里的 position（"before" / "after" 落点）同名不同义，别混用。
+	Position *float64 `json:"position"`
 }
 
 func (h *EnvHandler) Update(c *gin.Context) {
@@ -610,6 +621,17 @@ func (h *EnvHandler) Update(c *gin.Context) {
 	}
 	if req.Enabled != nil && *req.Enabled != env.Enabled {
 		updates["enabled"] = *req.Enabled
+	}
+	if req.Position != nil {
+		// 排序值必须是有限数。JSON 本身写不出 NaN / Inf（1e999 这类溢出值在上面绑定时就报错了），这里是兜底：
+		// 非有限值一旦落库，列表顺序 —— 也就是运行时同名多账号的拼接顺序 —— 会变得不可预期。
+		if math.IsNaN(*req.Position) || math.IsInf(*req.Position, 0) {
+			response.BadRequest(c, "排序值必须是有限数字")
+			return
+		}
+		if *req.Position != env.Position {
+			updates["position"] = *req.Position
+		}
 	}
 
 	// 青龙风格：(name, remarks) 不再是业务唯一键，同 name + 同 remarks 允许多条，
@@ -802,11 +824,16 @@ func (h *EnvHandler) Sort(c *gin.Context) {
 	var req struct {
 		SourceID uint  `json:"source_id" binding:"required"`
 		TargetID *uint `json:"target_id"`
+		// Position 是落点：插到 target 的前面还是后面，与 PUT /tasks/sort 同名同义（契约 C4）。
+		// 只认 "after"，空串和拼错的值一律按 "before"，App 只传 source/target 不受影响。
+		// 🔴 与 env 行上的数值字段 position（桶内排序值，PUT /envs/:id 可写）同名不同义，别混用。
+		Position string `json:"position"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
 		return
 	}
+	insertAfter := strings.EqualFold(strings.TrimSpace(req.Position), "after")
 
 	var source model.EnvVar
 	if err := database.DB.First(&source, req.SourceID).Error; err != nil {
@@ -815,7 +842,7 @@ func (h *EnvHandler) Sort(c *gin.Context) {
 	}
 
 	if err := database.DB.Transaction(func(tx *gorm.DB) error {
-		return reorderEnvWithinSortBucket(tx, req.SourceID, req.TargetID)
+		return reorderEnvWithinSortBucket(tx, req.SourceID, req.TargetID, insertAfter)
 	}); err != nil {
 		switch err.Error() {
 		case "源环境变量不存在", "目标环境变量不存在":
@@ -1146,6 +1173,13 @@ func (h *EnvHandler) Import(c *gin.Context) {
 	})
 }
 
+// MoveToTop 把变量移入置顶区，追加到置顶区【末尾】（#131：先置顶的排在前面）。
+//
+// 原来取「置顶区最小 position - 1000」，后置顶的反而挤到最上面。现在与取消置顶同一个套路
+// （appendEnvToSortBucket：桶内最大 position + 1000）。
+// 存量不迁移：已置顶项彼此的相对顺序原样保留 —— 拖拽会把整桶重编号，分不清哪些顺序是用户手调的，
+// 反转会毁掉手工排好的顺序；升级后新置顶的一律排在它们后面。
+// 🔴 这个顺序同时是运行时同名多账号用 & 拼接的顺序（脚本里的「第 N 个账号」），语义变化要写进发布说明。
 func (h *EnvHandler) MoveToTop(c *gin.Context) {
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 32)
 	var env model.EnvVar
@@ -1154,23 +1188,15 @@ func (h *EnvHandler) MoveToTop(c *gin.Context) {
 		return
 	}
 
+	// 已经在置顶区就原样返回（幂等）：Web 菜单按状态互斥不会发出这种请求，但 Open API 可以直调，
+	// 再追加一次会把它从置顶区中间挪到末尾，等于偷偷改了用户排好的顺序。
+	if env.SortOrder == envPinnedSortOrder {
+		response.Success(c, gin.H{"message": "已置顶"})
+		return
+	}
+
 	if err := database.DB.Transaction(func(tx *gorm.DB) error {
-		var firstPinned model.EnvVar
-		err := tx.Where("sort_order = ?", envPinnedSortOrder).
-			Order("position ASC, id ASC").
-			First(&firstPinned).Error
-
-		newPos := envPositionStep
-		if err == nil {
-			newPos = firstPinned.Position - envPositionStep
-		} else if err != gorm.ErrRecordNotFound {
-			return err
-		}
-
-		return tx.Model(&env).Updates(map[string]interface{}{
-			"sort_order": envPinnedSortOrder,
-			"position":   newPos,
-		}).Error
+		return appendEnvToSortBucket(tx, &env, envPinnedSortOrder)
 	}); err != nil {
 		response.InternalError(c, "置顶失败")
 		return

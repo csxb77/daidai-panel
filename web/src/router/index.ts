@@ -1,5 +1,18 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import {
+  isChunkLoadError,
+  isChunkReloadPending,
+  reloadOnce,
+  wasLastReloadDeferred,
+} from '@/utils/chunkReload'
+import {
+  isMonacoEditorRoute,
+  scheduleIdleMonacoWarmup,
+  shouldWarmMonaco,
+  warmMonaco,
+} from '@/utils/monacoWarmup'
 import { getCachedPanelTitle, loadPanelSettings } from '@/utils/panelSettings'
 
 const roleLevel: Record<string, number> = {
@@ -67,8 +80,9 @@ function normalizePreloadPath(path: string) {
   return clean.length > 1 ? clean.replace(/\/$/, '') : clean
 }
 
-export function preloadRouteByPath(path: string) {
-  const normalizedPath = normalizePreloadPath(path)
+// 只拉路由 chunk，不做别的。空闲批量预加载（preloadPanelRoutes）直接走这里；
+// 菜单悬停 / 聚焦 / 点击走下面的 preloadRouteByPath，那边多一步编辑器页的 Monaco 预热。
+function preloadRouteChunk(normalizedPath: string): Promise<unknown> {
   const loader = routePreloaders[normalizedPath]
   if (!loader || preloadedRoutes.has(normalizedPath)) return Promise.resolve()
 
@@ -80,14 +94,39 @@ export function preloadRouteByPath(path: string) {
   })
 }
 
+export function preloadRouteByPath(path: string) {
+  const normalizedPath = normalizePreloadPath(path)
+  const routeLoaded = preloadRouteChunk(normalizedPath)
+  // 悬停预热 Monaco（#133）：停在「脚本管理 / 配置文件」上，用户多半马上要进编辑页。
+  // 排在路由 chunk 之后：进页面先得有页面本身，Monaco 晚一拍到也比跟页面 chunk 抢带宽强；
+  // 路由早就预加载过时 routeLoaded 是已 resolve 的 promise，下一个微任务就开始。
+  // warmMonaco 自己记忆化，反复悬停不会重复下载；门槛（引擎、网络、内存、可见性）见 shouldWarmMonaco。
+  // 演示站也保留这一条（演示站只关空闲预热）。
+  if (isMonacoEditorRoute(normalizedPath) && shouldWarmMonaco()) {
+    void routeLoaded.then(() => warmMonaco())
+  }
+  return routeLoaded
+}
+
 export function preloadPanelRoutes(paths: string[]) {
   if (typeof window === 'undefined') return
 
-  const queue = [...new Set(paths.map(normalizePreloadPath))]
-    .filter((path) => routePreloaders[path] && !preloadedRoutes.has(path))
+  const normalizedPaths = [...new Set(paths.map(normalizePreloadPath))]
+  const queue = normalizedPaths.filter((path) => routePreloaders[path] && !preloadedRoutes.has(path))
+  // Monaco 空闲预热（#133）排在这一批路由 chunk 全部落地之后，不跟切页真正要用的 chunk 抢带宽；
+  // 只在这批菜单里有编辑器页时才排：viewer 进不去脚本管理 / 配置文件，替他预热纯属白下几 MB。
+  // 用 normalizedPaths 而不是 queue 判断：编辑器页的 chunk 早被悬停预加载过时不在 queue 里，
+  // 但 Monaco 未必热过。
+  const warmMonacoWhenDrained = normalizedPaths.some(isMonacoEditorRoute)
+  const pending: Promise<unknown>[] = []
 
   const scheduleNext = () => {
-    if (queue.length === 0) return
+    if (queue.length === 0) {
+      if (warmMonacoWhenDrained) {
+        void Promise.allSettled(pending).then(() => scheduleIdleMonacoWarmup())
+      }
+      return
+    }
 
     const idleWindow = window as Window & {
       requestIdleCallback?: (
@@ -102,10 +141,11 @@ export function preloadPanelRoutes(paths: string[]) {
       // requestIdleCallback 超时触发时 timeRemaining 可能为 0；此时至少推进一小批，避免队列一直空转。
       const shouldForceRun = !deadline || deadline.didTimeout
       while (queue.length > 0 && count < 2 && (shouldForceRun || deadline.timeRemaining() > 8)) {
-        void preloadRouteByPath(queue.shift()!)
+        pending.push(preloadRouteChunk(queue.shift()!))
         count += 1
       }
-      if (queue.length > 0) scheduleNext()
+      // 队列空了也要再进一次：收尾（排 Monaco 空闲预热）在 scheduleNext 的空队列分支里做
+      scheduleNext()
     }
 
     if (idleWindow.requestIdleCallback) {
@@ -325,6 +365,32 @@ router.afterEach((to) => {
   const title = to.meta.title as string | undefined
   const panelTitle = getCachedPanelTitle()
   document.title = title ? `${panelTitle} - ${title}` : panelTitle
+})
+
+// chunk 加载失败（多半是面板升级后浏览器手里还是旧页面，旧文件名已被删除）→ 自动刷新一次，并直接落到
+// 用户要去的那一页（#126，细节见 utils/chunkReload.ts）。
+// href 用 router.resolve 算，带上 base：面板挂在反代子路径 / Pages 项目站下时，裸 to.fullPath 会跳到站点根。
+// 条件里的 isChunkReloadPending()：切页的 chunk 失败时，main.ts 的 vite:preloadError 监听**先**跑，已经安排了
+// 刷新并 preventDefault —— 那次 import 被改成 resolve undefined，这里收到的就不是网络错误，而是 vue-router 自己的
+// `Couldn't resolve component "default" at "/xxx"`。本页已经在等着刷新，说明这次失败的导航就是那次 chunk 失败，
+// 照样把落点补上。
+router.onError((error, to) => {
+  // 注册了 onError 之后 vue-router 就不再替我们打印未处理的导航错误（triggerError 只在没有监听者时才
+  // console.error），这里照旧打出来，别让导航错误从此静默。
+  console.error(error)
+  if (!isChunkLoadError(error) && !isChunkReloadPending()) return
+  if (reloadOnce('route', router.resolve(to.fullPath).href)) return
+  // reloadOnce 因「页面上有未保存的内容」暂缓时，它已经弹过「面板已更新，保存后刷新页面即可」（同一批失败
+  // 8 秒内只弹一条，切页时先跑的 vite:preloadError 那次多半已经弹过）。这里再叠一条「请检查网络」，
+  // 两条说的原因互相矛盾，升级场景下还会误导。
+  // 读的是 reloadOnce 自己记下的原因，不是「当前有没有未保存内容」：离线、60 秒限次、sessionStorage 不可用
+  // 这三种情况都在未保存那一步之前就返回了，一条提示都没弹，于是自然落到下面的红色提示 —— 离线时
+  // 「检查网络」恰好说对了，另外两种至少告诉用户发生了什么。上面那次 reloadOnce 与这里之间全是同步代码，
+  // 读到的必定是它那一次的结果。
+  if (wasLastReloadDeferred()) return
+  // 60 秒内刚自动刷新过（或离线、或当前环境记不住刷新次数），不再自刷：至少告诉用户发生了什么，
+  // 否则就是「点了菜单没反应」。
+  ElMessage.error('页面文件加载失败，请检查网络后刷新页面重试')
 })
 
 void loadPanelSettings().then(() => {

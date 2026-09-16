@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Check, CopyDocument, Document, Refresh, Setting, Switch } from '@element-plus/icons-vue'
 import { configScriptApi } from '@/api/system'
 import CodeEditor from '@/components/CodeEditor.vue'
+import { setUnsavedWork } from '@/utils/chunkReload'
 import { copyText } from '@/utils/clipboard'
 import {
+  EDITOR_ENGINE_CHANGE_EVENT,
   persistEditorEngine,
   readStoredEditorEngine,
   resolveEditorEngine,
@@ -138,9 +140,14 @@ onActivated(() => {
   void ensureEditorPreferencesLoaded()
 })
 
-onBeforeUnmount(() => {
-  window.removeEventListener(EDITOR_PREFERENCES_CHANGE_EVENT, syncPreferences)
-})
+// 引擎偏好不只在本页齿轮菜单里改：编辑器加载失败时的「改用 CodeMirror」（utils/monacoWarmup.ts）、
+// 脚本页的同一个菜单，都会走 persistEditorEngine 派发 EDITOR_ENGINE_CHANGE_EVENT。
+// 编辑器靠 engine-resolved 跟得上，菜单里的「当前」只能靠这个监听跟：
+// 不监听就要等下次进页面（onActivated）才更新，期间勾着的是已经不在用的那个引擎。
+// 从存储重读而不是沿用本地值：存储写不进去时编辑器实际按 auto 解析，菜单也该显示 auto。
+function syncEditorEngine() {
+  editorEngine.value = readStoredEditorEngine()
+}
 
 const hasChanged = computed(() => content.value !== savedContent.value)
 const lineCount = computed(() => content.value === '' ? 0 : content.value.split(/\r\n|\n|\r/).length)
@@ -151,13 +158,35 @@ const byteSizeLabel = computed(() => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 })
 
+// 有未保存修改时登记到 utils/chunkReload.ts：面板升级后的自动刷新改为提示「保存后刷新」，
+// 关标签页 / 按 F5 也会先弹离开确认（没改动时不拦）。
+// 直接复用标题行「有未保存修改 / 已保存」那枚标签的 hasChanged，不另算一套：
+// 保存成功、点「刷新」重新读取文件、读取失败都会让它回落。
+// 被 keep-alive 缓存、切到别的页面时不撤：没保存的内容仍在内存里，整页刷新一样会丢，只在卸载时撤。
+const UNSAVED_WORK_KEY = 'config-file'
+
+watch(
+  hasChanged,
+  (dirty) => {
+    setUnsavedWork(UNSAVED_WORK_KEY, dirty)
+  },
+  { immediate: true },
+)
+
 onMounted(() => {
   void loadConfigScript()
   window.addEventListener(EDITOR_PREFERENCES_CHANGE_EVENT, syncPreferences)
+  window.addEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEditorEngine)
   // 服务端那份偏好在这里拉一次（函数自己记忆化，重复调用不会重复发请求），
   // 拉回来之后它会派发变更事件，由上面的监听把新值刷进来。
   // 刻意不放进 main.ts 的启动流程：编辑器不在首屏，没必要给每一次打开面板都多加一个请求。
   void ensureEditorPreferencesLoaded()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener(EDITOR_PREFERENCES_CHANGE_EVENT, syncPreferences)
+  window.removeEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEditorEngine)
+  setUnsavedWork(UNSAVED_WORK_KEY, false)
 })
 
 async function loadConfigScript(showSuccess = false) {

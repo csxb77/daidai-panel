@@ -226,3 +226,66 @@ export async function fetchAndApplyPanelAppearance() {
     // ignore startup appearance load failures
   }
 }
+
+/**
+ * 界面动效偏好（个人设置页「界面动效」）。
+ *
+ * - system（默认）：<html> 上什么都不挂，跟随系统的 prefers-reduced-motion；
+ * - always：挂 dd-motion-force，系统开着「减少动态效果」也照常播放动画；
+ * - reduce：挂 dd-motion-off，不看系统，一律把动效压到几乎不可见。
+ * 两个 class 的实际作用写在 styles/global.scss 文件末尾「减少动效」那一段。
+ *
+ * 刻意做成本机偏好（localStorage），不进服务端的 system_configs：
+ * 它回答的是「这台设备前的人想不想看动画」，和 panel_shape_style 那种「整个面板长什么样」不是一类；
+ * 放进系统配置还会让 APP 的 schema 驱动设置页多出一个点了没用的开关。
+ * 默认必须是 system：「始终开启」会覆盖系统的无障碍偏好，只能由用户自己选。
+ */
+export type MotionPreference = 'system' | 'always' | 'reduce'
+
+// 命名沿用 dd:appearance:* 这一组（与圆角缓存键 dd:appearance:shape 同级）
+const MOTION_PREFERENCE_STORAGE_KEY = 'dd:appearance:motion'
+const MOTION_FORCE_CLASS = 'dd-motion-force'
+const MOTION_OFF_CLASS = 'dd-motion-off'
+
+function normalizeMotionPreference(raw?: string | null): MotionPreference | null {
+  const value = String(raw ?? '').trim().toLowerCase()
+  if (value === 'system' || value === 'always' || value === 'reduce') return value
+  return null
+}
+
+export function readMotionPreference(): MotionPreference {
+  // 隐私模式 / 禁用站点存储时读 localStorage 会直接抛错；这里在 createApp 之前执行，不兜住会白屏
+  try {
+    if (typeof window === 'undefined') return 'system'
+    return normalizeMotionPreference(window.localStorage.getItem(MOTION_PREFERENCE_STORAGE_KEY)) ?? 'system'
+  } catch {
+    return 'system'
+  }
+}
+
+/**
+ * 把动效偏好挂到 <html> 上，返回最终生效的档位。
+ *
+ * 传了合法值：以它为准并写进本机缓存（个人设置页切换时走这条，即时生效、无需刷新）；
+ * 不传或值不认识：按本机缓存重放一遍（main.ts 在 createApp 之前走这条）。
+ *
+ * ⚠️ main.ts 里这一次必须在首帧之前同步执行：挂晚了，「始终开启」的用户首屏动画会先被系统设置
+ *    压成 1ms，「减少动效」的用户则会先看到一遍完整动画 —— 与 applyPanelShapeStyle 防闪形同理。
+ */
+export function applyMotionPreference(raw?: string | null): MotionPreference {
+  const explicit = normalizeMotionPreference(raw)
+  const next = explicit ?? readMotionPreference()
+  if (explicit) {
+    try {
+      window.localStorage.setItem(MOTION_PREFERENCE_STORAGE_KEY, explicit)
+    } catch {
+      // 写不进去（隐私模式）只是下次打开要重新选，不影响本次生效
+    }
+  }
+
+  if (typeof document === 'undefined') return next
+  const classList = document.documentElement.classList
+  classList.toggle(MOTION_FORCE_CLASS, next === 'always')
+  classList.toggle(MOTION_OFF_CLASS, next === 'reduce')
+  return next
+}

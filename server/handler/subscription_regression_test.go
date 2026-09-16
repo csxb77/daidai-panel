@@ -601,3 +601,138 @@ func TestSubscriptionUpdateKeepsExistingTokenWhenAuthTokenOmitted(t *testing.T) 
 		t.Fatalf("expected auth type token after update, got %q", updated.EffectiveAuthType())
 	}
 }
+
+// #129：白名单 / 黑名单 / 依赖规则里含正则触发字符的片段按正则解析，编译不过就在保存时 400，
+// 文案点名字段与第几段，一条都不落库；合法正则原样保存（青龙 ql repo 一键识别填进来的就是这种值）。
+func TestSubscriptionCreateRejectsInvalidRegexFilters(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	operator := testutil.MustCreateUser(t, "subscription-regex-creator", "operator")
+	token := testutil.MustCreateAccessToken(t, operator.Username, operator.Role)
+	engine := newProtectedRouter()
+	headers := map[string]string{"Authorization": "Bearer " + token}
+
+	cases := []struct {
+		name         string
+		body         string
+		wantKeywords []string
+	}{
+		{
+			name:         "regex-whitelist-sub",
+			body:         `{"name":"regex-whitelist-sub","type":"git-repo","url":"https://github.com/example/regex-whitelist.git","whitelist":"jd_|^jd["}`,
+			wantKeywords: []string{"白名单", "第 2 段", "^jd[", "转义"},
+		},
+		{
+			name:         "regex-blacklist-sub",
+			body:         `{"name":"regex-blacklist-sub","type":"git-repo","url":"https://github.com/example/regex-blacklist.git","blacklist":"(backUp"}`,
+			wantKeywords: []string{"黑名单", "第 1 段", "(backUp"},
+		},
+		{
+			name:         "regex-depend-sub",
+			body:         `{"name":"regex-depend-sub","type":"git-repo","url":"https://github.com/example/regex-depend.git","depend_on":"sendNotify|utils|a{2,1}"}`,
+			wantKeywords: []string{"依赖规则", "第 3 段", "a{2,1}"},
+		},
+	}
+	for _, tc := range cases {
+		rec := performJSONRequest(engine, http.MethodPost, "/api/v1/subscriptions", tc.body, headers, "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("[%s] expected 400, got %d, body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+		message, _ := decodeJSONMap(t, rec)["error"].(string)
+		for _, keyword := range tc.wantKeywords {
+			if !strings.Contains(message, keyword) {
+				t.Errorf("[%s] error message should contain %q, got %q", tc.name, keyword, message)
+			}
+		}
+		var count int64
+		database.DB.Model(&model.Subscription{}).Where("name = ?", tc.name).Count(&count)
+		if count != 0 {
+			t.Fatalf("[%s] invalid regex should not be persisted, found %d rows", tc.name, count)
+		}
+	}
+
+	okBody := `{"name":"regex-ok-sub","type":"git-repo","url":"https://github.com/example/regex-ok.git","whitelist":"jd_|jx_|jddj_","blacklist":"back[Uu]p","depend_on":"^jd[^_]|USER|JD|function|sendNotify|utils"}`
+	rec := performJSONRequest(engine, http.MethodPost, "/api/v1/subscriptions", okBody, headers, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for valid regex, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var sub model.Subscription
+	if err := database.DB.Where("name = ?", "regex-ok-sub").First(&sub).Error; err != nil {
+		t.Fatalf("query subscription: %v", err)
+	}
+	if sub.DependOn != "^jd[^_]|USER|JD|function|sendNotify|utils" || sub.Blacklist != "back[Uu]p" {
+		t.Fatalf("regex filters should be persisted verbatim, got depend_on=%q blacklist=%q", sub.DependOn, sub.Blacklist)
+	}
+}
+
+// App 每次保存都把 whitelist / blacklist / depend_on 原样回传：库里的存量值（升级前保存的、青龙备份导入的）
+// 就算不是合法正则，只要这次没改它，就不能挡住用户改别的字段。值与库里不同时才校验。
+func TestSubscriptionUpdateValidatesOnlyChangedRegexFilters(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	operator := testutil.MustCreateUser(t, "subscription-regex-editor", "operator")
+	token := testutil.MustCreateAccessToken(t, operator.Username, operator.Role)
+	engine := newProtectedRouter()
+	headers := map[string]string{"Authorization": "Bearer " + token}
+
+	sub := model.Subscription{
+		Name:      "regex-dirty-sub",
+		Type:      model.SubTypeGitRepo,
+		URL:       "https://github.com/example/regex-dirty.git",
+		Enabled:   true,
+		Whitelist: "jd_",
+		DependOn:  "^jd[",
+	}
+	if err := database.DB.Create(&sub).Error; err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	subPath := "/api/v1/subscriptions/" + strconv.FormatUint(uint64(sub.ID), 10)
+	reload := func() model.Subscription {
+		t.Helper()
+		var current model.Subscription
+		if err := database.DB.First(&current, sub.ID).Error; err != nil {
+			t.Fatalf("reload subscription: %v", err)
+		}
+		return current
+	}
+
+	// 1) App 的保存形状：三个字段原样回传，只改名字 → 200，存量脏值原样保留。
+	rec := performJSONRequest(engine, http.MethodPut, subPath,
+		`{"name":"regex-dirty-renamed","whitelist":"jd_","blacklist":"","depend_on":"^jd["}`, headers, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unchanged dirty value should not block the update, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if current := reload(); current.Name != "regex-dirty-renamed" || current.DependOn != "^jd[" {
+		t.Fatalf("expected rename applied and depend_on kept, got name=%q depend_on=%q", current.Name, current.DependOn)
+	}
+
+	// 2) 依赖规则改成另一个非法值 → 400，同一请求里的其它字段也不落库。
+	rec = performJSONRequest(engine, http.MethodPut, subPath, `{"name":"should-not-apply","depend_on":"^jd[|sendNotify"}`, headers, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("changed invalid depend_on should be rejected, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if message, _ := decodeJSONMap(t, rec)["error"].(string); !strings.Contains(message, "依赖规则第 1 段") {
+		t.Fatalf("error should point at 依赖规则第 1 段, got %q", message)
+	}
+	if current := reload(); current.Name != "regex-dirty-renamed" || current.DependOn != "^jd[" {
+		t.Fatalf("rejected update must not write anything, got name=%q depend_on=%q", current.Name, current.DependOn)
+	}
+
+	// 3) 白名单改成非法值 → 400。
+	rec = performJSONRequest(engine, http.MethodPut, subPath, `{"whitelist":"(jd_"}`, headers, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("changed invalid whitelist should be rejected, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if message, _ := decodeJSONMap(t, rec)["error"].(string); !strings.Contains(message, "白名单第 1 段") {
+		t.Fatalf("error should point at 白名单第 1 段, got %q", message)
+	}
+
+	// 4) 改成合法正则 → 200，原样落库。
+	rec = performJSONRequest(engine, http.MethodPut, subPath, `{"depend_on":"^jd[^_]|sendNotify"}`, headers, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid regex should be accepted, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if current := reload(); current.DependOn != "^jd[^_]|sendNotify" {
+		t.Fatalf("expected depend_on updated verbatim, got %q", current.DependOn)
+	}
+}

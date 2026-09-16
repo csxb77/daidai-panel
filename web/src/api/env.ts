@@ -8,6 +8,22 @@ export type EnvPayload = {
   groups?: string[]
 }
 
+/**
+ * PUT /envs/:id 的请求体。字段全是可选的：服务端用指针字段判断，没传的字段不改（App 只发前 5 个）。
+ */
+export type EnvUpdatePayload = {
+  name?: string
+  value?: string
+  remarks?: string
+  group?: string
+  groups?: string[]
+  enabled?: boolean
+  // 契约 C5：env 的浮点排序值，同一个置顶桶里越小越靠前；服务端拒绝 NaN / Infinity（400）。
+  // 只有用户在编辑弹窗里真的改了才带上，没改就别发，免得把值原样写回一遍。
+  // ⚠️ 和下面 sort() 的 position（'before' | 'after'，插入方位）同名不同义，别混用。
+  position?: number
+}
+
 /** /envs/names 的一项：变量名 + 全库同名条数（不随当前筛选变化） */
 export type EnvNameOption = {
   name: string
@@ -29,7 +45,7 @@ export const envApi = {
     return request.post('/envs', data) as Promise<{ message: string; data: any }>
   },
 
-  update(id: number, data: any) {
+  update(id: number, data: EnvUpdatePayload) {
     return request.put(`/envs/${id}`, data) as Promise<{ message: string; data: any }>
   },
 
@@ -65,8 +81,13 @@ export const envApi = {
     return request.put('/envs/batch/group', { ids, groups }) as Promise<{ message: string }>
   },
 
-  sort(sourceId: number, targetId?: number) {
-    return request.put('/envs/sort', { source_id: sourceId, target_id: targetId }) as Promise<{ message: string }>
+  // 契约 C4（与 /tasks/sort 同名同义）：position 缺省按 'before'，把 source 插到 target 前面；
+  // 'after' 插到 target 后面。target 与 source 必须同一个置顶桶（sort_order 相同），跨桶服务端回 400。
+  // targetId 留空 = 移到本桶末尾，这是老语义，只留给老调用方（App 不传 position，行为不变）。
+  // Web 端已经不用它了：分页或筛选时，「本桶末尾」不等于可见列表的末尾，见 envs/index.vue 的 onEnd。
+  // position 为 undefined 时 JSON 里不带这个键，和加这个参数之前发的请求逐字节相同。
+  sort(sourceId: number, targetId?: number, position?: 'before' | 'after') {
+    return request.put('/envs/sort', { source_id: sourceId, target_id: targetId, position }) as Promise<{ message: string }>
   },
 
   moveToTop(id: number) {

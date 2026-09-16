@@ -501,22 +501,24 @@ func pullGitRepoWithCallback(ctx context.Context, sub *model.Subscription, authC
 // subscriptionSparseUnsafeChars 列出会让 sparse-checkout「静默少匹配」的 gitignore 元字符。
 //
 // `git sparse-checkout set --no-cone` 用的是 gitignore 语法：`?` 匹配任意单字符、
-// `[...]` 是字符类、`\` 是转义符。我们把用户填的过滤词包成 `**/*词*` 时，
-// 词里若含这些字符，git 会按通配语义解释而不是字面量，结果往往是
-// 「一个文件都没检出、且完全不报错」——本类 bug 最难排查的形态。
+// `[...]` 是字符类、`\` 是转义符。路径里若含这些字符，git 会按通配语义解释而不是字面量，
+// 结果往往是「一个文件都没检出、且完全不报错」——本类 bug 最难排查的形态。
+//
+// #129 之后它只管「指定子目录」：白名单 / 黑名单 / 依赖规则里含这些字符的片段一律按正则识别
+// （它们都在正则触发字符里，见 subscriptionRegexTriggerChars），另走「整仓检出 + Go 侧按正则匹配」。
 //
 // `*` 刻意不在此列：它只会放宽匹配、不会导致漏检出，方向是安全的。
-// `|` 也不在此列：它在 gitignore 里就是普通字符，现在已经在
-// splitSubscriptionFilterPatterns 阶段被当作分隔符拆掉了。
+// `|` 也不在此列：它在 gitignore 里就是普通字符，拆分阶段已经被当作分隔符拆掉了。
 const subscriptionSparseUnsafeChars = "?[]\\"
 
 // subscriptionSparseUnsafeCharsHint 是给用户看的可读版本（日志里直接打元字符会糊成一团）。
 const subscriptionSparseUnsafeCharsHint = "? [ ] \\"
 
-// splitSubscriptionSparseTargets 把过滤字段拆成两组：
-// 能安全下发给 sparse-checkout 的模式，和含 gitignore 元字符、下发后会静默失配的模式。
+// splitSubscriptionSparseTargets 把「指定子目录」拆成两组：
+// 能安全下发给 sparse-checkout 的路径，和含 gitignore 元字符、下发后会静默失配的路径。
+// 子目录是精确路径字段、不参与 #129 的正则识别，所以用的是改造前的拆分器（splitSubscriptionPlainPatterns）。
 func splitSubscriptionSparseTargets(raw string) (safe []string, risky []string) {
-	for _, p := range splitSubscriptionFilterPatterns(raw) {
+	for _, p := range splitSubscriptionPlainPatterns(raw) {
 		p = normalizeSubscriptionFilterTarget(p)
 		if p == "" || isWildcardFilterPattern(p) {
 			continue
@@ -528,20 +530,6 @@ func splitSubscriptionSparseTargets(raw string) (safe []string, risky []string) 
 		safe = append(safe, p)
 	}
 	return safe, risky
-}
-
-// splitSubscriptionSparseDependencyTargets 在 splitSubscriptionDependencyPatterns 之上，
-// 再按 gitignore 元字符把依赖模式分成「能安全下发」和「下发会静默失配」两组。
-func splitSubscriptionSparseDependencyTargets(raw string) (safe []string, risky []string, notes []string) {
-	patterns, skippedNotes := splitSubscriptionDependencyPatterns(raw)
-	for _, p := range patterns {
-		if strings.ContainsAny(p, subscriptionSparseUnsafeChars) {
-			risky = append(risky, p)
-			continue
-		}
-		safe = append(safe, p)
-	}
-	return safe, risky, skippedNotes
 }
 
 func formatSubscriptionPatternList(patterns []string) string {
@@ -563,10 +551,23 @@ func formatSubscriptionFileList(files []string, limit int) string {
 
 // buildSubscriptionSparseCheckoutPatterns 返回下发给 git sparse-checkout 的规则，
 // 以及需要打给用户看的告警（调用方负责 emit）。
+//
+// 白名单 / 黑名单 / 依赖规则里的正则片段（#129，见 subscription_patterns.go）表达不成 gitignore 规则，
+// 统一按「档 1」处理：
+//   - 包含侧出现正则片段（白名单含正则，或包含侧已有限制时依赖规则含正则）→ 放弃包含侧的 sparse 限制、
+//     检出完整仓库，由 Go 侧匹配器决定哪些是依赖文件、哪些建任务（只剩黑名单时照旧用 `*` + 排除规则）；
+//   - 黑名单的正则片段不下发排除规则，文件照常落盘，由 Go 侧按正则排除（不建任务）；
+//   - 编译失败的正则片段逐条跳过并告警。
+//
+// 普通片段生成的规则与改造前逐字节一致（subscription_pattern_pin_test.go 钉着）。
 func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns []string, warnings []string) {
 	if sub == nil {
 		return nil, nil
 	}
+
+	whitelist := compileSubscriptionPatternSet(sub.Whitelist, subscriptionPatternWhitelist)
+	blacklist := compileSubscriptionPatternSet(sub.Blacklist, subscriptionPatternBlacklist)
+	depend := compileSubscriptionPatternSet(sub.DependOn, subscriptionPatternDepend)
 
 	// 完整检出：用户明确要整个仓库（青龙生态里那些要读仓库 src/ 自行编译的脚本）。
 	// 返回空规则之后有两处顺带生效，不用再各写一遍开关：
@@ -585,14 +586,17 @@ func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns 
 	// 开不开这个开关结果完全一样。无条件打的话，用户会照着提示去设置里找一个
 	// 自己从来没配过的白名单，或误以为曾经配过、被这个开关吞掉了。
 	if sub.FullCheckout {
+		// 非法正则照样要点名：完整检出只放开落盘范围，白 / 黑名单、依赖规则仍然决定建不建任务。
+		// 没有非法片段时 invalid 为 nil，下面两个返回值与改造前完全一样。
+		invalid := subscriptionInvalidPatternWarnings(&whitelist, &blacklist, &depend)
 		if strings.TrimSpace(sub.SubPath) == "" &&
 			strings.TrimSpace(sub.Whitelist) == "" &&
 			strings.TrimSpace(sub.Blacklist) == "" {
-			return nil, nil
+			return nil, invalid
 		}
-		return nil, []string{
+		return nil, append([]string{
 			"[提示] 已按订阅设置检出整个仓库：指定子目录/白名单/黑名单本次都不限制落盘范围，但仍然照常决定给哪些脚本建定时任务",
-		}
+		}, invalid...)
 	}
 
 	seen := map[string]bool{}
@@ -624,7 +628,7 @@ func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns 
 	//   - 一旦包含侧多了 `**/*jd_*/**` 这种直接命中子文件的规则，非递归的
 	//     `!**/*backUp*`（只匹配到 backUp 目录条目本身）就压不住它了，本来挡得住的
 	//     文件反而会落盘。
-	//   - Go 侧 checkBlacklist 对完整相对路径做 strings.Contains，本来就是递归语义；
+	//   - Go 侧 checkBlacklist 对完整相对路径做子串包含（正则片段按正则），本来就是递归语义；
 	//     递归排除只是让 git 侧与它对齐，不会多挡任何「本来会被建成定时任务」的文件。
 	addFragmentPatterns := func(fragment string, exclude bool) {
 		prefix := ""
@@ -636,20 +640,19 @@ func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns 
 	}
 
 	subPaths, unsafeSubPaths := splitSubscriptionSparseTargets(sub.SubPath)
-	whitelist, unsafeWhitelist := splitSubscriptionSparseTargets(sub.Whitelist)
-	blacklist, unsafeBlacklist := splitSubscriptionSparseTargets(sub.Blacklist)
+	plan := resolveSubscriptionIncludePlan(subPaths, unsafeSubPaths, &whitelist)
 
-	// 包含侧（指定子目录 / 白名单）是「或」语义：只跳过其中一条不安全的子模式，
+	// 包含侧（指定子目录 / 白名单）是「或」语义：只跳过其中一条表达不了的子模式，
 	// 会让那条本该命中的文件静默检不出来，用户看到的还是「拉取成功但任务是空的」。
-	// 所以只要有一条不安全，就整体放弃包含侧的 sparse 限制、改为检出完整仓库，
-	// 再交给 Go 侧的 matchesSubscriptionFilters 决定给哪些脚本建任务。
+	// 所以子目录含 git 元字符、或白名单含正则片段时，都整体放弃包含侧的 sparse 限制、改为检出完整仓库，
+	// 再交给 Go 侧的匹配器（subscriptionFilterMatcher）决定给哪些脚本建任务。
 	// 宁可多落几个文件，也不要静默丢文件。
-	switch {
-	case len(unsafeSubPaths) > 0:
+	switch plan {
+	case subscriptionIncludeUnsafeSubPath:
 		warnings = append(warnings, fmt.Sprintf(
 			"[警告] 指定子目录 %s 含 git 通配特殊字符（%s），无法安全转成 sparse-checkout 规则；本次改为检出完整仓库，请改用不含这些字符的普通路径片段",
 			formatSubscriptionPatternList(unsafeSubPaths), subscriptionSparseUnsafeCharsHint))
-	case len(subPaths) > 0:
+	case subscriptionIncludeSubPath:
 		// 指定子目录优先级最高：它代表用户明确只想要仓库里的某几个目录/文件。
 		//
 		// 这里刻意**不**走 addFragmentPatterns：子目录填的是明确路径（`scripts/daily`），
@@ -660,69 +663,99 @@ func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns 
 		for _, p := range subPaths {
 			addPattern(p)
 		}
-	case len(unsafeWhitelist) > 0:
+	case subscriptionIncludeWhitelistRegex:
 		warnings = append(warnings, fmt.Sprintf(
-			"[警告] 白名单 %s 含 git 通配特殊字符（%s），无法安全转成 sparse-checkout 规则；本次改为检出完整仓库，扫描任务时仍按白名单过滤。白名单是「子串包含」匹配，不支持正则",
-			formatSubscriptionPatternList(unsafeWhitelist), subscriptionSparseUnsafeCharsHint))
-	default:
+			"[提示] 白名单 %s 含正则片段，git sparse-checkout 表达不了正则；本次检出完整仓库，建任务时再由面板按白名单筛选（普通片段按子串包含，正则片段按正则匹配仓库相对路径）",
+			formatSubscriptionPatternList(whitelist.regexFragments())))
+	case subscriptionIncludeWhitelist:
 		// 没有指定子目录时，才用白名单限制真实检出的文件范围。
-		// 白名单历史上是「完整相对路径的子串包含匹配」（见 matchesSubscriptionWhitelist），
+		// 白名单的普通片段是「完整相对路径的子串包含匹配」（见 matchesSubscriptionWhitelist），
 		// 所以片段命中目录名时，目录里的文件也算命中——成对下发递归规则才对得上。
-		for _, p := range whitelist {
+		for _, p := range whitelist.sparseTargets() {
 			addFragmentPatterns(p, false)
 		}
+	}
+	// 编译失败的白名单片段逐条跳过（它们本来就一个文件都匹配不到）。子目录优先时白名单不参与检出，
+	// 但仍然决定建不建任务，所以不论走哪条分支都要点名。
+	if warning := whitelist.invalidWarning(); warning != "" {
+		warnings = append(warnings, warning)
 	}
 
 	// 依赖规则并进「包含侧」：命中的文件会被检出落盘（主脚本 require 的辅助库），
 	// 但 Go 侧的任务候选筛选仍然只认白名单，所以它们不会被建成定时任务，
-	// 见 isSubscriptionDependencyOnlyFile。
+	// 见 isSubscriptionDependencyOnlyFile。按指定子目录检出时还有子目录护栏：子目录外的依赖文件一律不建任务
+	// （白名单留空时 isSubscriptionDependencyOnlyFile 一个都摘不掉，全靠护栏，见 newSubscriptionFilterMatcher）。
 	//
-	// 守卫 `len(patterns) > 0` 是本次改造最关键的一处，去掉会直接把订阅打空：
-	//   - 上面的 switch 因元字符退回完整检出时 patterns 为空 → 本来就全量落盘，
+	// 守卫 `plan.restrictsCheckout()`（改造前写作 `len(patterns) > 0`，两者等价）是这里最关键的一处，
+	// 去掉会直接把订阅打空：
+	//   - 上面的 switch 退回完整检出时 patterns 为空 → 本来就全量落盘，
 	//     依赖规则天然满足；此时若追加依赖模式，sparse-checkout 反而会被激活成
 	//     「只检出依赖文件」，白名单文件全丢。
 	//   - 用户既没填子目录也没填白名单时 patterns 同样为空 → 本来就检出全部文件
 	//     （白名单为空 = 全部文件都算命中白名单），追加依赖模式一样会把「全量」
 	//     缩成「只有依赖」，主脚本反而没了。
-	if len(patterns) > 0 {
-		dependPatterns, unsafeDepend, dependNotes := splitSubscriptionSparseDependencyTargets(sub.DependOn)
-		// 依赖片段最典型的写法就是目录名（青龙那条真实指令里的 `utils`），
-		// 主脚本 require('./utils/xxx') 要的是目录里的文件而不是目录条目本身，
-		// 所以这里同样成对下发递归规则。
-		for _, p := range dependPatterns {
-			addFragmentPatterns(p, false)
-		}
-		if len(dependPatterns) > 0 {
+	if plan.restrictsCheckout() {
+		if depend.hasRegex() {
+			// 档 1：依赖规则的正则片段表达不成 sparse 规则。只跳过它会「少落一个辅助文件」——
+			// 这正是 #129 要修的问题（主脚本 require('./jdCookie') 一跑就报找不到模块），
+			// 所以改为放弃包含侧的 sparse 限制、检出完整仓库，由 Go 侧按依赖规则认出依赖文件（不建任务）。
+			// 建任务的集合不因此变大：子目录有护栏（newSubscriptionFilterMatcher 的 subPathScope），
+			// 白名单照常过滤，兜底 #2 也按放宽前的范围判断（见 scanSubscriptionTaskCandidates）。
+			patterns = nil
+			seen = map[string]bool{}
+			scopeNote := ""
+			if plan == subscriptionIncludeSubPath {
+				scopeNote = "；指定子目录本次不再限制落盘范围，但仍然只给子目录里的脚本建定时任务"
+			}
 			warnings = append(warnings, fmt.Sprintf(
-				"[依赖规则] %s 已并入检出范围：命中的文件会被拉取到脚本目录供主脚本调用，但不会建成定时任务（只有命中白名单的文件才建任务）",
-				formatSubscriptionPatternList(dependPatterns)))
+				"[提示] 依赖规则 %s 含正则片段，git sparse-checkout 表达不了正则；本次检出完整仓库，由面板按依赖规则识别依赖文件（依赖文件照旧不建定时任务）%s",
+				formatSubscriptionPatternList(depend.regexFragments()), scopeNote))
+		} else {
+			dependPatterns := depend.sparseTargets()
+			// 依赖片段最典型的写法就是目录名（青龙那条真实指令里的 `utils`），
+			// 主脚本 require('./utils/xxx') 要的是目录里的文件而不是目录条目本身，
+			// 所以这里同样成对下发递归规则。
+			for _, p := range dependPatterns {
+				addFragmentPatterns(p, false)
+			}
+			if len(dependPatterns) > 0 {
+				taskScope := "只有命中白名单的文件才建任务"
+				if plan == subscriptionIncludeSubPath {
+					taskScope = "只给指定子目录里命中白名单的脚本建任务"
+				}
+				warnings = append(warnings, fmt.Sprintf(
+					"[依赖规则] %s 已并入检出范围：命中的文件会被拉取到脚本目录供主脚本调用，但不会建成定时任务（%s）",
+					formatSubscriptionPatternList(dependPatterns), taskScope))
+			}
 		}
-		// 依赖规则跳过一条只会「少落一个辅助文件」，退化到改造前的行为（主脚本照常检出、
-		// 照常建任务，只是跑起来可能缺依赖），方向安全，所以逐条跳过而不像白名单那样整体退回。
-		// 但必须打出来：静默少一个 sendNotify.js，用户看到的是任务跑起来才报错。
-		if len(unsafeDepend) > 0 {
+		if dependNotes := depend.notes(); len(dependNotes) > 0 {
 			warnings = append(warnings, fmt.Sprintf(
-				"[警告] 依赖规则 %s 含 git 通配特殊字符（%s），已跳过对应的检出规则；这些依赖文件不会被拉取，主脚本运行时可能因缺少依赖而失败，请改用不含这些字符的普通文件名片段",
-				formatSubscriptionPatternList(unsafeDepend), subscriptionSparseUnsafeCharsHint))
-		}
-		if len(dependNotes) > 0 {
-			warnings = append(warnings, fmt.Sprintf(
-				"[提示] 依赖规则中的 %s 含空格/中文或过长，已按文字备注跳过、未参与文件检出；依赖规则现在是功能性字段，请填写文件名片段（多个用 `,` 或 `|` 分隔，匹配方式是「子串包含」）",
-				formatSubscriptionPatternList(dependNotes)))
+				"[提示] 依赖规则中的 %s 含空格/中文或过长，已按文字备注跳过、未参与文件检出；依赖规则现在是功能性字段，请填写文件名片段（多个用 `,` 或 `|` 分隔；普通片段按「子串包含」匹配，含 %s 的片段按正则匹配）",
+				formatSubscriptionPatternList(dependNotes), subscriptionRegexTriggerHint))
 		}
 	} else if strings.TrimSpace(sub.DependOn) != "" {
 		warnings = append(warnings, "[提示] 未配置指定子目录/白名单（或包含侧已退回完整检出），本次检出完整仓库，依赖规则无需额外生效")
 	}
-
-	// 黑名单是「排除」语义：跳过一条不安全的排除规则，只会让对应文件多落一份盘，
-	// Go 侧的 checkBlacklist 仍然会把它们挡在定时任务之外，方向是安全的，逐条跳过即可。
-	if len(unsafeBlacklist) > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"[警告] 黑名单 %s 含 git 通配特殊字符（%s），已跳过对应的 sparse-checkout 排除规则；这些文件仍会落盘，但不会被建成定时任务",
-			formatSubscriptionPatternList(unsafeBlacklist), subscriptionSparseUnsafeCharsHint))
+	// 依赖规则里编译失败的片段逐条跳过：只会「少认一个依赖文件」，方向安全，但必须打出来——
+	// 静默少一个 jdCookie.js，用户看到的是任务跑起来才报错。
+	if warning := depend.invalidWarning(); warning != "" {
+		warnings = append(warnings, warning)
 	}
 
-	if len(blacklist) == 0 {
+	// 黑名单是「排除」语义：正则片段表达不成排除规则，跳过它只会让对应文件多落一份盘，
+	// Go 侧的 checkBlacklist 会按正则把它们挡在定时任务之外，方向是安全的，逐条跳过即可。
+	// （改造前这里的承诺并不成立：`back[Uu]p` 在 Go 侧被当成字面量，一个文件都挡不住。）
+	if regexBlacklist := blacklist.regexFragments(); len(regexBlacklist) > 0 {
+		warnings = append(warnings, fmt.Sprintf(
+			"[提示] 黑名单 %s 含正则片段，git sparse-checkout 表达不了正则，已跳过对应的排除规则；这些文件仍会落盘，但面板会按正则把它们排除在定时任务之外",
+			formatSubscriptionPatternList(regexBlacklist)))
+	}
+	if warning := blacklist.invalidWarning(); warning != "" {
+		warnings = append(warnings, warning)
+	}
+
+	blacklistTargets := blacklist.sparseTargets()
+	if len(blacklistTargets) == 0 {
 		// 包含侧被迫放弃、又没有可用排除规则时 patterns 为空，
 		// 等价于「不做任何过滤」，直接返回空让调用方关掉 sparse-checkout。
 		return patterns, warnings
@@ -735,7 +768,7 @@ func buildSubscriptionSparseCheckoutPatterns(sub *model.Subscription) (patterns 
 	}
 	// 排除规则必须排在包含规则之后：sparse-checkout 是「最后匹配者胜出」，
 	// 只有这样 `!**/*backUp*/**` 才能压住前面 `**/*jd_*/**` 对 backUp/jd_old.js 的命中。
-	for _, p := range blacklist {
+	for _, p := range blacklistTargets {
 		addFragmentPatterns(p, true)
 	}
 
@@ -997,8 +1030,8 @@ func subscriptionFilterContains(target string, pattern string) bool {
 	return strings.Contains(target, pattern)
 }
 
-// splitSubscriptionFilterPatterns 把「指定子目录 / 白名单 / 黑名单」这三个过滤字段
-// 拆成一组独立模式。分隔符同时接受 `,` 和 `|`。
+// splitSubscriptionFilterPatterns 把「白名单 / 黑名单 / 依赖规则」这三个过滤字段
+// 拆成一组独立模式（去重、保持顺序）。分隔符同时接受 `,` 和 `|`。
 //
 // 为什么必须认 `|`：用户最主要的配置来源是青龙的 `ql repo` 命令，它的第 2/3/4 个
 // 位置参数是 `grep -E` 模式，天然用 `|` 分隔：
@@ -1013,19 +1046,35 @@ func subscriptionFilterContains(target string, pattern string) bool {
 //
 // 表现就是「git 拉取成功、日志没有任何报错、但扫描 0 个候选文件、一个定时任务都没建」。
 //
-// 注意：这里只改「分隔」，不引入正则。本项目既有语义是子串包含
-// （见 subscriptionFilterContains），贸然改成正则会让现存配置里含 `.` `*` `+` `(`
-// 的普通子串行为突变，属于破坏性变更。
+// #129 起拆分器只在「顶层」拆（有配对的括号里、方括号表达式里、被 `\` 转义的分隔符不拆，见
+// splitSubscriptionPatternSegments），让 `(jd|jx)_`、`a{1,3}` 这类正则片段不再被拆坏；
+// 不含 ( [ { \ 的输入与改造前逐字节一致。空段照旧丢弃：`jd_||jx_`、`|jd_|` 这类首尾/连续分隔符很常见，
+// 而空模式会让 subscriptionFilterContains 恒 false，也会让 sparse-checkout 生成 `**/**` 这种含义跑偏的规则。
+//
+// 注意：正则只对「含正则触发字符」的片段生效（见 subscription_patterns.go），普通片段仍是子串包含。
+// 贸然把整个字段当正则，会让现存配置里含 `.` `*` `+` 的普通子串（a.b、jd_*.js、c++）行为突变。
 func splitSubscriptionFilterPatterns(raw string) []string {
+	var patterns []string
+	seen := make(map[string]bool)
+	for _, pattern := range splitSubscriptionPatternSegments(raw) {
+		if seen[pattern] {
+			continue
+		}
+		seen[pattern] = true
+		patterns = append(patterns, pattern)
+	}
+	return patterns
+}
+
+// splitSubscriptionPlainPatterns 是改造前的拆分器：在每一个 `,` `|` 处拆，不看括号与转义。
+// 只给「指定子目录」用——它是精确路径字段、不参与正则识别，行为必须原样保留。
+func splitSubscriptionPlainPatterns(raw string) []string {
 	var patterns []string
 	seen := make(map[string]bool)
 	for _, pattern := range strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == '|'
 	}) {
 		pattern = strings.TrimSpace(pattern)
-		// 空段必须丢弃：`jd_||jx_`、`jd_,,jx_`、`|jd_|` 这类首尾/连续分隔符很常见，
-		// 而空模式会让 subscriptionFilterContains 恒 false，
-		// 也会让 sparse-checkout 生成 `**/**` 这种含义完全跑偏的规则。
 		if pattern == "" || seen[pattern] {
 			continue
 		}
@@ -1036,26 +1085,15 @@ func splitSubscriptionFilterPatterns(raw string) []string {
 }
 
 func hasNonWildcardSubscriptionFilter(raw string) bool {
-	for _, pattern := range splitSubscriptionFilterPatterns(raw) {
-		if !isWildcardFilterPattern(pattern) {
-			return true
-		}
-	}
-	return false
+	set := compileSubscriptionPatternSet(raw, subscriptionPatternWhitelist)
+	return set.hasNonWildcard()
 }
 
+// matchesSubscriptionWhitelist 是单文件判定（测试与零散调用用）；扫描整个目录时走
+// subscriptionFilterMatcher，每次同步只编译一次。
 func matchesSubscriptionWhitelist(sub *model.Subscription, filePath string) bool {
-	hasNonWildcard := false
-	for _, pattern := range splitSubscriptionFilterPatterns(sub.Whitelist) {
-		if isWildcardFilterPattern(pattern) {
-			return true
-		}
-		hasNonWildcard = true
-		if subscriptionFilterContains(filePath, pattern) {
-			return true
-		}
-	}
-	return !hasNonWildcard
+	set := compileSubscriptionPatternSet(sub.Whitelist, subscriptionPatternWhitelist)
+	return set.whitelistMatches(filePath)
 }
 
 func matchesSubscriptionFilters(sub *model.Subscription, filePath string) bool {
@@ -1107,22 +1145,21 @@ func looksLikeSubscriptionDependencyNote(pattern string) bool {
 // splitSubscriptionDependencyPatterns 把「依赖规则」字段拆成真正参与匹配的模式，
 // 以及被判定为文字备注、直接跳过的片段（调用方负责把 notes 打到日志里）。
 //
-// 分隔符与白/黑名单完全一致（`,` 和 `|`），匹配语义也一致（子串包含，不是正则）。
+// 分隔符与白/黑名单完全一致（`,` 和 `|`），匹配语义也一致：普通片段是子串包含（返回规整后的文本），
+// 含正则触发字符的片段按正则（返回原文）；编译失败的正则片段不参与匹配，不在返回值里。
 //
 // 通配符（`*` / `all` / `全部`）刻意跳过而不是「全部当依赖」：依赖命中的文件不建任务，
 // 若把整个仓库都算成依赖，等于一个定时任务都建不出来。跳过后依赖规则视为未配置，
 // 行为与改造前一致。
 func splitSubscriptionDependencyPatterns(raw string) (patterns []string, notes []string) {
-	for _, p := range splitSubscriptionFilterPatterns(raw) {
-		p = normalizeSubscriptionFilterTarget(p)
-		if p == "" || isWildcardFilterPattern(p) {
-			continue
+	set := compileSubscriptionPatternSet(raw, subscriptionPatternDepend)
+	for _, f := range set.fragments {
+		switch f.kind {
+		case subscriptionFragmentSubstring, subscriptionFragmentRegex:
+			patterns = append(patterns, f.text)
+		case subscriptionFragmentNote:
+			notes = append(notes, f.text)
 		}
-		if looksLikeSubscriptionDependencyNote(p) {
-			notes = append(notes, p)
-			continue
-		}
-		patterns = append(patterns, p)
 	}
 	return patterns, notes
 }
@@ -1132,13 +1169,8 @@ func matchesSubscriptionDependency(sub *model.Subscription, filePath string) boo
 	if sub == nil {
 		return false
 	}
-	patterns, _ := splitSubscriptionDependencyPatterns(sub.DependOn)
-	for _, pattern := range patterns {
-		if subscriptionFilterContains(filePath, pattern) {
-			return true
-		}
-	}
-	return false
+	set := compileSubscriptionPatternSet(sub.DependOn, subscriptionPatternDepend)
+	return set.anyMatches(filePath)
 }
 
 // isSubscriptionDependencyOnlyFile 判断文件是不是「只因为依赖规则才落盘」的辅助库文件。
@@ -1161,18 +1193,12 @@ func isSubscriptionDependencyOnlyFile(sub *model.Subscription, filePath string) 
 	return matchesSubscriptionDependency(sub, filePath)
 }
 
-// checkBlacklist 复用 splitSubscriptionFilterPatterns，不再自己写一份 strings.Split(",")。
+// checkBlacklist 与白名单共用同一套拆分与匹配（subscriptionPatternSet），不再自己写一份 strings.Split(",")。
 // 之前那份重复实现是 `|` 分隔失效的三个现场之一：白名单改好了黑名单还是不认 `|`。
+// 返回 true 表示没被黑名单排除。通配写法跳过（黑名单填 `*` 不等于「全部排除」）。
 func checkBlacklist(sub *model.Subscription, filePath string) bool {
-	for _, pattern := range splitSubscriptionFilterPatterns(sub.Blacklist) {
-		if isWildcardFilterPattern(pattern) {
-			continue
-		}
-		if subscriptionFilterContains(filePath, pattern) {
-			return false
-		}
-	}
-	return true
+	set := compileSubscriptionPatternSet(sub.Blacklist, subscriptionPatternBlacklist)
+	return !set.anyMatches(filePath)
 }
 
 func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
@@ -1223,7 +1249,7 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 	// 扫到 0 个文件是「静默失败」最典型的落点：拉取全绿、日志无错、任务列表空。
 	// 把最可能的三个原因直接摊开，别让用户去猜。
 	if scannedFileCount == 0 {
-		emit("[提示] 没有扫描到任何候选脚本，常见原因：1) 指定子目录/白名单/黑名单把文件全过滤掉了（多个模式用 `,` 或 `|` 分隔，匹配方式是「子串包含」而非正则）；2) 上一步 sparse-checkout 规则没命中任何文件；3) 系统设置 repo_file_extensions 不含该脚本扩展名")
+		emit("[提示] 没有扫描到任何候选脚本，常见原因：1) 指定子目录/白名单/黑名单把文件全过滤掉了（多个片段用 `,` 或 `|` 分隔；普通片段按「子串包含」匹配，含 " + subscriptionRegexTriggerHint + " 的片段按正则匹配仓库相对路径）；2) 上一步 sparse-checkout 规则没命中任何文件；3) 系统设置 repo_file_extensions 不含该脚本扩展名")
 		// 只有依赖文件落了盘、主脚本一个没扫到，说明白名单和依赖规则填反了。
 		// 这是「依赖规则改成功能性」之后最容易出现的新型误配，单独点名。
 		if len(dependencyFiles) > 0 {
@@ -1515,6 +1541,7 @@ func countSubscriptionScriptFiles(scriptsDir string, allowedExts map[string]bool
 	if _, err := os.Stat(scriptsDir); err != nil {
 		return 0
 	}
+	matcher := newSubscriptionFilterMatcher(sub)
 	count := 0
 	filepath.Walk(scriptsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1528,7 +1555,7 @@ func countSubscriptionScriptFiles(scriptsDir string, allowedExts map[string]bool
 			return nil
 		}
 		relPath := subscriptionRelativeScriptPath(scriptsDir, path, info)
-		if shouldManageSubscriptionFile(sub, relPath, allowedExts) {
+		if matcher.shouldManage(relPath, allowedExts) {
 			count++
 		}
 		return nil
@@ -1644,47 +1671,16 @@ func subscriptionRelativeScriptPath(root, path string, info os.FileInfo) string 
 	return filepath.Base(path)
 }
 
+// shouldManageSubscriptionFile 是单文件判定：扩展名、子目录护栏、白 / 黑名单都过了才建任务。
+// 扫描整个目录时走 subscriptionFilterMatcher（每次同步只编译一次），这里是给测试与零散调用的包装。
+//
+// 子目录护栏是「完整检出」开关的配套：`sub_path` 在整个 service 里只有 sparse-checkout 那一处引用，
+// 它对建任务范围的约束一直靠「不在子目录里的文件根本不落盘」间接实现；打开完整检出、依赖规则的正则片段
+// 把检出放宽成整仓（#129）、或依赖规则的普通片段并进检出范围之后，子目录外也有文件落盘，这条间接约束随之失效，
+// 要在 Go 侧补回来。这几种情况的语义都是「多落一些文件到磁盘上给脚本自己读」，不是「多建一堆任务」。
+// 细节见 newSubscriptionFilterMatcher。
 func shouldManageSubscriptionFile(sub *model.Subscription, filePath string, allowedExts map[string]bool) bool {
-	ext := strings.ToLower(filepath.Ext(filePath))
-	if !allowedExts[ext] {
-		return false
-	}
-	if !matchesFullCheckoutSubPathScope(sub, filePath) {
-		return false
-	}
-	return matchesSubscriptionFilters(sub, filePath)
-}
-
-// matchesFullCheckoutSubPathScope 是「完整检出」开关的配套护栏：把建任务的范围重新限回「指定子目录」。
-//
-// 为什么需要它：`sub_path` 在整个 service 里**只有 sparse-checkout 那一处引用**——
-// 它对「哪些文件会被建成定时任务」的约束，一直是靠「不在子目录里的文件根本不落盘」间接实现的。
-// 打开完整检出后整仓文件都落盘了，这条间接约束随之消失：
-// 一个填了 `sub_path=qinglong/DefaultTasks`、白名单留空、开了自动建任务的订阅，
-// 会把仓库里每一个 .sh/.js/.py（含 tools/、examples/、ci/ 下的）都建成定时任务并真的按 cron 跑起来，
-// 而「自动删除失效任务」（auto_del_task_mode / auto_del_cron）不会帮用户收回去——
-// 那一项只删「订阅源里已经消失的脚本」对应的任务。用户的感受是「只开了一个检出开关，任务列表凭空多出几十条」。
-//
-// 这个开关的语义是「多落一些文件到磁盘上给脚本自己读」，不是「多建一堆任务」，所以这里补回来。
-//
-// 优先级刻意与 buildSubscriptionSparseCheckoutPatterns 的 switch 保持一致：
-// 子目录含 git 元字符（risky）时那边本来就退回整仓检出、不做任何限制，这里也不加约束，
-// 否则会出现「文件全落盘、任务却一个都不建」这种更难查的不对称。
-func matchesFullCheckoutSubPathScope(sub *model.Subscription, filePath string) bool {
-	if sub == nil || !sub.FullCheckout {
-		return true
-	}
-	safe, risky := splitSubscriptionSparseTargets(sub.SubPath)
-	if len(risky) > 0 || len(safe) == 0 {
-		return true
-	}
-	rel := strings.TrimPrefix(filepath.ToSlash(filePath), "./")
-	for _, target := range safe {
-		if rel == target || strings.HasPrefix(rel, target+"/") {
-			return true
-		}
-	}
-	return false
+	return newSubscriptionFilterMatcher(sub).shouldManage(filePath, allowedExts)
 }
 
 // collectSubscriptionTaskCandidates 返回任务候选，以及「仅因依赖规则落盘、刻意不建任务」
@@ -1789,11 +1785,14 @@ func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptio
 	//     兜底一触发就会把 sendNotify.js / utils/*.js 这些库文件全建成定时任务 ——
 	//     正好是「依赖规则改成功能性」最需要避免的副作用。摘掉之后 allFiles 的内容
 	//     与改造前（依赖文件压根不落盘）等价，兜底 #2 的判定结果也就完全不变。
+	// 三个过滤字段每次同步只编译一次（正则片段要编译，不能对每个文件重来一遍）。
+	matcher := newSubscriptionFilterMatcher(sub)
+
 	var dependencyOnly []string
 	if strings.TrimSpace(sub.DependOn) != "" {
 		kept := allFiles[:0]
 		for _, f := range allFiles {
-			if isSubscriptionDependencyOnlyFile(sub, f.relPath) {
+			if matcher.isDependencyOnly(f.relPath) {
 				dependencyOnly = append(dependencyOnly, filepath.ToSlash(f.relPath))
 				continue
 			}
@@ -1802,20 +1801,19 @@ func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptio
 		allFiles = kept
 	}
 
-	// 兜底 #2：白/黑名单填错了导致全部被过滤 → 自动忽略过滤规则
-	effectiveSub := sub
+	// 兜底 #2：白/黑名单填错了导致全部被过滤 → 自动忽略过滤规则。
+	// 依赖规则的正则片段把检出放宽成整仓时，只按放宽前本来就会落盘的范围判断，见 countsTowardWhitelistFallback；
+	// 白名单自己的正则片段让本次检出整仓时不兜底，见 allowsWhitelistFallback。
+	effective := matcher
 	if (sub.Whitelist != "" || sub.Blacklist != "") && len(allFiles) > 0 {
 		matchedCount := 0
 		for _, f := range allFiles {
-			if matchesSubscriptionFilters(sub, f.relPath) {
+			if matcher.countsTowardWhitelistFallback(f.relPath) && matcher.matchesFilters(f.relPath) {
 				matchedCount++
 			}
 		}
-		if matchedCount == 0 && hasNonWildcardSubscriptionFilter(sub.Whitelist) {
-			fallback := *sub
-			fallback.Whitelist = ""
-			fallback.Blacklist = ""
-			effectiveSub = &fallback
+		if matchedCount == 0 && matcher.whitelist.hasNonWildcard() && matcher.allowsWhitelistFallback() {
+			effective = matcher.withoutWhiteBlacklist()
 		}
 	}
 
@@ -1823,7 +1821,7 @@ func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptio
 		path := f.path
 		info := f.info
 
-		if !shouldManageSubscriptionFile(effectiveSub, f.relPath, options.allowedExts) {
+		if !effective.shouldManage(f.relPath, options.allowedExts) {
 			continue
 		}
 

@@ -121,7 +121,7 @@
             >清空</el-button
           >
         </div>
-        <pre v-html="androidInstallLogHtml"></pre>
+        <pre ref="androidLogRef" v-html="androidInstallLogHtml"></pre>
       </div>
     </el-card>
 
@@ -508,8 +508,8 @@
         style="width: 100%"
         @selection-change="handleSelectionChange"
         :header-cell-style="{
-          background: '#f8fafc',
-          color: '#64748b',
+          background: 'var(--el-fill-color-light)',
+          color: 'var(--el-text-color-regular)',
           fontWeight: 600,
           fontSize: '13px',
         }"
@@ -945,6 +945,7 @@ import {
 } from "@/utils/sse";
 import { usePageActivity } from "@/composables/usePageActivity";
 import { useResponsive } from "@/composables/useResponsive";
+import { useLogAutoFollow } from "@/composables/useLogAutoFollow";
 import { useAuthStore } from "@/stores/auth";
 import { useBadgesStore } from "@/stores/badges";
 import { canAdminister } from "@/utils/roles";
@@ -965,6 +966,9 @@ const androidInstallLog = ref<string[]>([]);
 const androidInstallLogHtml = computed(() =>
   ansiToHtml(normalizeAnsi(androidInstallLog.value.join("\n"))),
 );
+// Android 运行时安装日志的自动跟随：安装中上翻即暂停，滚回底部恢复
+const androidLogRef = ref<HTMLElement>();
+const androidFollow = useLogAutoFollow(androidLogRef);
 let androidInstallAbort: AbortController | null = null;
 
 async function loadAndroidStatus() {
@@ -1104,6 +1108,9 @@ const logRowRemoved = ref(false);
 const currentLogRow = ref<any | null>(null);
 let eventSource: EventStreamConnection | null = null;
 const logContainerRef = ref<HTMLElement>();
+// 依赖安装日志弹窗的自动跟随：安装中上翻即暂停、滚回底部恢复；已结束记录停在顶部不跟随。
+// 弹窗不带 destroy-on-close、容器常驻，所以每次 viewLog 都要 begin/end 重置状态。
+const installFollow = useLogAutoFollow(logContainerRef);
 let depsLogBuffer: string[] = [];
 let depsLogFlushRaf = 0;
 const createType = ref("nodejs");
@@ -1831,6 +1838,8 @@ function viewLog(row: any) {
   closeSSE();
 
   if (logDone.value) {
+    // 已结束记录：一次性加载、停在顶部，不跟随
+    installFollow.end();
     depsApi
       .getStatus(row.id)
       .then((res) => {
@@ -1842,19 +1851,16 @@ function viewLog(row: any) {
     return;
   }
 
+  // 安装/卸载进行中：开启自动跟随
+  installFollow.begin(true);
   const url = `/api/v1/deps/${row.id}/log-stream`;
   eventSource = openAuthorizedEventStream(url, {
     onMessage(data) {
       depsLogBuffer.push(data);
       if (!depsLogFlushRaf) {
         depsLogFlushRaf = requestAnimationFrame(() => {
-          logContent.value += depsLogBuffer.join("\n") + "\n";
-          depsLogBuffer = [];
           depsLogFlushRaf = 0;
-          if (logContainerRef.value) {
-            logContainerRef.value.scrollTop =
-              logContainerRef.value.scrollHeight;
-          }
+          flushDepsLogBuffer();
         });
       }
     },
@@ -1863,6 +1869,9 @@ function viewLog(row: any) {
         return;
       }
       logDone.value = true;
+      // 先把还挂在 rAF 里的最后一批冲进去（按跟随态贴底），再冻结跟随态
+      flushDepsLogBuffer();
+      installFollow.end();
       closeSSE();
       // data 携带的是结束原因：真实终态（installed/failed/...）表示任务确实结束了；
       // timeout 只代表服务端把这条日志流收了，任务本身可能还在跑，不能当成结束。
@@ -1873,11 +1882,28 @@ function viewLog(row: any) {
     },
     onError() {
       logDone.value = true;
+      flushDepsLogBuffer();
+      installFollow.end();
       closeSSE();
       logStreamNotice.value = "日志流已断开，任务可能仍在进行";
       loadData();
     },
   });
+}
+
+// 把还挂在 rAF 里、没来得及 flush 的安装日志立刻冲进去。结束（done / onError）时必须先调它再 end()：
+// 最后几行常与 done 同一帧到达，留给 rAF 的话那次 onContentChange 会落在 end() 之后被忽略，
+// 跟随中的用户就看不到结尾那几行（旧实现在 rAF 里无条件贴底，没有这个问题）。
+function flushDepsLogBuffer() {
+  if (depsLogFlushRaf) {
+    cancelAnimationFrame(depsLogFlushRaf);
+    depsLogFlushRaf = 0;
+  }
+  if (depsLogBuffer.length === 0) return;
+  logContent.value += depsLogBuffer.join("\n") + "\n";
+  depsLogBuffer = [];
+  // 跟随中贴到最新，暂停时什么都不做（由 useLogAutoFollow 判定）
+  installFollow.onContentChange();
 }
 
 function closeSSE() {
@@ -1895,6 +1921,23 @@ watch(showLogDialog, (val) => {
     logRowRemoved.value = false;
   }
 });
+
+// Android 运行时安装日志：安装开始（名字非空）时开启跟随，结束时冻结
+watch(androidInstallingName, (name) => {
+  if (name) {
+    androidFollow.begin(true);
+  } else {
+    androidFollow.end();
+  }
+});
+
+// 安装日志是原地 push 的数组，靠长度变化触发跟随贴底
+watch(
+  () => androidInstallLog.value.length,
+  () => {
+    androidFollow.onContentChange();
+  },
+);
 
 /**
  * 拉一次 GET /deps/mirrors 并写进 mirrorMeta，返回是否成功。

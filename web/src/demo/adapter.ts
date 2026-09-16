@@ -5,6 +5,7 @@ import request from '@/api/request'
 import { EDITOR_PREFERENCES_DEFAULTS } from '@/utils/editorPreferences'
 import notificationTypesFixture from './fixtures/notification-types.json'
 import {
+  appendEnvToSortBucket,
   appendTaskRunLog,
   buildDashboard,
   buildLogContent,
@@ -12,6 +13,7 @@ import {
   buildScriptTree,
   buildSystemBadges,
   buildSystemStats,
+  buildTaskGroups,
   db,
   executeDemoTaskScriptDeletion,
   filterEnvs,
@@ -19,6 +21,7 @@ import {
   filterTasks,
   findScriptFile,
   findTask,
+  isTaskActiveStatus,
   isValidEnvName,
   joinEnvGroups,
   nextEnvPosition,
@@ -30,6 +33,7 @@ import {
   reorderEnv,
   reorderTask,
   saveScriptContent,
+  settleTaskRunStatus,
   sortEnvs,
   splitEnvGroups,
   toEnvDict,
@@ -39,8 +43,15 @@ import {
 import type { DemoTaskScriptDeleteResult } from './db'
 import { DEMO_PANEL_VERSION, demoPanelSettings } from './shortcuts'
 import { cancelDemoTaskRun, startDemoTaskRun } from './taskRuns'
-import type { DemoOpenApp, DemoTask, DemoTaskLog, DemoUser } from './types'
-import { TASK_STATUS_DISABLED, TASK_STATUS_ENABLED, TASK_STATUS_RUNNING } from './types'
+import type { DemoEnvVar, DemoOpenApp, DemoTask, DemoTaskLog, DemoUser } from './types'
+import {
+  LOG_STATUS_ABORTED,
+  LOG_STATUS_RUNNING,
+  RUN_STATUS_ABORTED,
+  TASK_STATUS_DISABLED,
+  TASK_STATUS_ENABLED,
+  TASK_STATUS_RUNNING,
+} from './types'
 
 /**
  * ⚠️ fixtures/notification-types.json 与 fixtures/configs.json 是【生成产物，不要手改】。
@@ -837,6 +848,7 @@ function createTask(body: Record<string, any>): DemoTask {
     cron_expression: String(body['cron_expression'] ?? ''),
     task_type: String(body['task_type'] ?? 'cron'),
     status: TASK_STATUS_ENABLED,
+    pending_disable: false,
     labels: Array.isArray(body['labels']) ? body['labels'].map((label: unknown) => String(label)) : [],
     last_run_at: null,
     last_run_status: null,
@@ -876,6 +888,60 @@ function requireTask(ctx: DemoRequestContext): DemoTask {
   return task
 }
 
+/**
+ * 启用，复刻服务端 validateAndEnableTask（task_control.go，issue #133）。单个启用与两个批量启用入口都走这里。
+ *
+ * 排队中 / 运行中（典型场景：禁用任务被手动运行，菜单如实给出「启用」）【不能】把 status 写成启用：
+ * 列表会立刻显示成空闲、停止按钮随之消失，可这次执行其实还在跑。只撤掉待禁用标记，
+ * 本次执行结算时（settleTaskRunStatus）自然落回启用；响应里 status 保持 0.5 / 2，enabled 为 true。
+ * 服务端还会校验定时规则、重新注册调度，演示站没有调度器，这两步不模拟。
+ */
+function enableDemoTask(task: DemoTask) {
+  task.pending_disable = false
+  if (!isTaskActiveStatus(task.status)) task.status = TASK_STATUS_ENABLED
+  task.updated_at = nowIso()
+}
+
+/**
+ * 禁用，复刻服务端 disableTaskAndRemoveSchedule，返回值就是服务端给的 message。单个禁用与两个批量禁用入口都走这里。
+ *
+ * 运行中不能直接写禁用（同上，停止按钮会消失），只打待禁用标记、开关位立刻变成关，等本次执行结算时落成禁用。
+ * 排队中的任务服务端是直接写禁用的（只有运行中才打标记），这里照抄。
+ */
+function disableDemoTask(task: DemoTask): string {
+  if (task.status === TASK_STATUS_RUNNING) {
+    task.pending_disable = true
+    return '已设置为禁用，当前执行结束后生效'
+  }
+  task.status = TASK_STATUS_DISABLED
+  task.updated_at = nowIso()
+  return '已禁用'
+}
+
+/**
+ * 停止，复刻服务端 PUT /tasks/:id/stop；批量停止（PUT /tasks/batch 的 stop）也走这里。
+ *
+ * 状态按开关位还原（issue #133）：禁用任务被手动运行后停下，回到禁用，不再像原来那样一律变成启用。
+ * 「上次结果」记成已终止：任务上是 RUN_STATUS_ABORTED（2），不是日志上的 LOG_STATUS_ABORTED（3）。
+ */
+function stopDemoTask(task: DemoTask) {
+  // 先撤掉兜底定时器，否则 9 秒后它会把这条刚被终止的记录又翻成成功
+  cancelDemoTaskRun(task.id)
+  const running = db().logs.find((row) => row.task_id === task.id && row.status === LOG_STATUS_RUNNING)
+  if (running) {
+    const elapsedSeconds = Math.max(0, (Date.now() - new Date(running.started_at).getTime()) / 1000)
+    running.status = LOG_STATUS_ABORTED
+    running.kind = 'abort'
+    running.duration = Math.round(elapsedSeconds * 10) / 10
+    running.ended_at = nowIso()
+    task.last_running_time = running.duration
+  }
+  settleTaskRunStatus(task)
+  task.last_run_status = RUN_STATUS_ABORTED
+  task.pid = null
+  task.updated_at = nowIso()
+}
+
 route('GET', '/tasks', (ctx) => {
   const page = paginate(filterTasks(ctx.params), ctx.params)
   return { ...page, data: page.data.map(toTaskDict) }
@@ -896,6 +962,11 @@ route('GET', '/tasks/notification-channels', () => ({
 // 兜底体是对象，页面上的 .map / .filter 会直接抛错，必须单独列出来。
 // 同类的还有 GET /tasks/{id}/log-files。
 route('GET', '/tasks/views', () => [...db().taskViews].sort((left, right) => left.sort_order - right.sort_order))
+
+// 任务分组（issue #130，契约 C2）同样返回【裸数组】[{ name, count }]，按 name 字节序升序，没有分组时是 []。
+// 不铺的话会落进兜底体 {data:[]}：前端按「没有分组」静默处理，演示站上就看不到顶栏的分组标签。
+// 静态路径先进 exactRoutes，不会被 /tasks/:id 系列抢走。口径见 db.ts 的 buildTaskGroups。
+route('GET', '/tasks/groups', () => buildTaskGroups())
 
 route('POST', '/tasks/views', (ctx) => {
   const body = bodyObject(ctx)
@@ -1101,10 +1172,12 @@ route('POST', '/tasks/delete-preview', (ctx) => {
   return { data: planDemoTaskScriptDeletion(raw as number[]).preview }
 })
 
+// 批量启用 / 禁用与单个同一套口径（服务端 BatchEnable / BatchDisable 也是逐个调 validateAndEnableTask /
+// disableTaskAndRemoveSchedule）：运行中的任务只改开关位、不改 status，见 enableDemoTask / disableDemoTask。
 route('PUT', '/tasks/batch/enable', (ctx) => {
   const ids = idList(ctx, 'task_ids', 'ids')
   for (const task of db().tasks) {
-    if (ids.includes(task.id)) task.status = TASK_STATUS_ENABLED
+    if (ids.includes(task.id)) enableDemoTask(task)
   }
   return { message: `已启用 ${ids.length} 个任务`, success_count: ids.length }
 })
@@ -1112,7 +1185,7 @@ route('PUT', '/tasks/batch/enable', (ctx) => {
 route('PUT', '/tasks/batch/disable', (ctx) => {
   const ids = idList(ctx, 'task_ids', 'ids')
   for (const task of db().tasks) {
-    if (ids.includes(task.id)) task.status = TASK_STATUS_DISABLED
+    if (ids.includes(task.id)) disableDemoTask(task)
   }
   return { message: `已禁用 ${ids.length} 个任务`, success_count: ids.length }
 })
@@ -1173,10 +1246,10 @@ route('PUT', '/tasks/batch', (ctx) => {
 
   switch (action) {
     case 'enable':
-      current.tasks.forEach((task) => { if (ids.includes(task.id)) task.status = TASK_STATUS_ENABLED })
+      current.tasks.forEach((task) => { if (ids.includes(task.id)) enableDemoTask(task) })
       break
     case 'disable':
-      current.tasks.forEach((task) => { if (ids.includes(task.id)) task.status = TASK_STATUS_DISABLED })
+      current.tasks.forEach((task) => { if (ids.includes(task.id)) disableDemoTask(task) })
       break
     case 'delete': {
       // 删脚本开关只在 action=delete 时读，其它 action 带了也忽略、响应里不出现 scripts（与服务端一致）。
@@ -1195,6 +1268,14 @@ route('PUT', '/tasks/batch', (ctx) => {
       ids.forEach((id) => {
         const task = findTask(id)
         if (task) appendTaskRunLog(task, 'ok', 2 + Math.random() * 6)
+      })
+      break
+    case 'stop':
+      // 服务端批量停止只处理运行中的任务（排队中的会被跳过，是服务端的既有行为），状态同样按开关位还原。
+      // 以前这里落进 default 什么都不做，批量停止在演示站上等于没点。
+      ids.forEach((id) => {
+        const task = findTask(id)
+        if (task && task.status === TASK_STATUS_RUNNING) stopDemoTask(task)
       })
       break
     default:
@@ -1287,33 +1368,25 @@ route('PUT', '/tasks/:id/run', (ctx) => {
 
 route('PUT', '/tasks/:id/stop', (ctx) => {
   const task = requireTask(ctx)
-  // 先撤掉兜底定时器，否则 9 秒后它会把这条刚被终止的记录又翻成成功
-  cancelDemoTaskRun(task.id)
-  const running = db().logs.find((row) => row.task_id === task.id && row.status === 2)
-  if (running) {
-    running.status = 3
-    running.kind = 'abort'
-    running.duration = Math.round(((Date.now() - new Date(running.started_at).getTime()) / 1000) * 10) / 10
-    running.ended_at = nowIso()
-  }
-  task.status = TASK_STATUS_ENABLED
-  task.pid = null
-  task.updated_at = nowIso()
+  // 复刻服务端 Stop：没在排队 / 运行、也没记着进程时什么都不改。否则一调空闲任务，
+  // 「上次结果」就被改成已终止（开放 API / MCP 能对任意 id 调，服务端本轮刚修掉这一条）。
+  if (!isTaskActiveStatus(task.status) && !task.pid) return { message: '任务未在运行' }
+  stopDemoTask(task)
   return { message: '任务已停止' }
 })
 
+// 启用 / 禁用的响应 data 带 enabled（契约 C1）：运行中的禁用任务点「启用」后 status 仍是 2、enabled 为 true，
+// 运行中点「禁用」则是 status 2、enabled 为 false —— 页面要以响应为准，不能乐观地改写 status。
 route('PUT', '/tasks/:id/enable', (ctx) => {
   const task = requireTask(ctx)
-  task.status = TASK_STATUS_ENABLED
-  task.updated_at = nowIso()
+  enableDemoTask(task)
   return { message: '已启用', data: toTaskDict(task) }
 })
 
 route('PUT', '/tasks/:id/disable', (ctx) => {
   const task = requireTask(ctx)
-  task.status = TASK_STATUS_DISABLED
-  task.updated_at = nowIso()
-  return { message: '已禁用', data: toTaskDict(task) }
+  const message = disableDemoTask(task)
+  return { message, data: toTaskDict(task) }
 })
 
 route('PUT', '/tasks/:id/pin', (ctx) => {
@@ -1558,11 +1631,25 @@ route('POST', '/envs/export-files', (ctx) => {
 route('PUT', '/envs/sort', (ctx) => {
   const body = bodyObject(ctx)
   const targetRaw = body['target_id']
+  // position 是落点（契约 C4，与 PUT /tasks/sort 同名同义）：只认 "after"（去首尾空白、不区分大小写），
+  // 不传、空串、拼错一律按 before —— App 只传 source / target，行为不变。
+  // 🔴 与 env 行上的数值字段 position（桶内排序值，PUT /envs/:id 可写）同名不同义，别混用。
+  const positionRaw = body['position']
+  // 服务端这个字段是 string：传了数字、布尔、对象在 JSON 绑定时就 400；null 与不传同义
+  if (positionRaw !== undefined && positionRaw !== null && typeof positionRaw !== 'string') {
+    return badRequest('请求参数错误')
+  }
+  const insertAfter = typeof positionRaw === 'string' && positionRaw.trim().toLowerCase() === 'after'
   const result = reorderEnv(
     Number(body['source_id']),
     targetRaw === undefined || targetRaw === null ? undefined : Number(targetRaw),
+    insertAfter,
   )
-  if (!result.ok) return notFound(result.error)
+  if (!result.ok) {
+    // 与服务端一致：源 / 目标不存在回 404，跨区（置顶项与普通项混排）回 400
+    if (result.error === '源环境变量不存在' || result.error === '目标环境变量不存在') return notFound(result.error)
+    return badRequest(result.error)
+  }
   return { message: '排序更新成功' }
 })
 
@@ -1716,33 +1803,63 @@ route('PUT', '/envs/:id/disable', (ctx) => {
 
 route('PUT', '/envs/:id/move-top', (ctx) => {
   const env = requireEnv(ctx)
-  const pinned = db().envs.filter((row) => row.sort_order === 1)
-  const min = pinned.reduce((acc, row) => Math.min(acc, row.position), Number.POSITIVE_INFINITY)
-  env.sort_order = 1
-  env.position = Number.isFinite(min) ? min - 1000 : 1000
+  // 已经在置顶区就原样返回（幂等），复刻服务端 MoveToTop：再追加一次会把它从置顶区中间挪到末尾，
+  // 等于偷偷改了用户排好的顺序。Web 菜单按状态互斥不会发这种请求，但 Open API 可以直调。
+  if (env.sort_order === 1) return { message: '已置顶' }
+  // 追加到置顶区【末尾】（issue #131：先置顶的排在前面），即置顶区最大 position + 1000，空桶给 1000。
+  // 原来取「置顶区最小 position - 1000」，后置顶的反而挤到最上面。
+  // 🔴 这个顺序同时是运行时同名多账号用 & 拼接的顺序（脚本里的「第 N 个账号」）。
+  appendEnvToSortBucket(env, 1)
   return { message: '已置顶' }
 })
 
 route('PUT', '/envs/:id/cancel-top', (ctx) => {
-  const env = requireEnv(ctx)
-  env.sort_order = 0
-  env.position = nextEnvPosition(0)
+  // 追加到普通区末尾。对本来就在普通区的变量不幂等（会被挪到普通区末尾），与服务端 CancelMoveToTop 一致
+  appendEnvToSortBucket(requireEnv(ctx), 0)
   return { message: '已取消置顶' }
 })
 
+/**
+ * 编辑变量，复刻服务端 EnvHandler.Update：
+ *   - 先把所有字段校验完、攒出「真的变了」的改动，任何一项不合法就整单 400、一个字段都不写；
+ *   - 一项都没变时回「未检测到字段变更」，不动 updated_at；
+ *   - 字段为 null 与没传同义（服务端是指针字段，JSON null 解出来就是 nil）。
+ */
 route('PUT', '/envs/:id', (ctx) => {
   const env = requireEnv(ctx)
   const body = bodyObject(ctx)
-  if (body['name'] !== undefined) {
-    const name = String(body['name']).trim()
-    if (!isValidEnvName(name)) return notFound('变量名格式无效')
-    env.name = name
+  const present = (key: string) => body[key] !== undefined && body[key] !== null
+  const updates: Partial<DemoEnvVar> = {}
+
+  // position 是 *float64：不是数字在 JSON 绑定时就整单 400，早于下面所有字段的校验，所以放最前面。
+  // 1e999 这类溢出值服务端同样在绑定时回这一句（JSON.parse 会把它解成 Infinity，这里一并拦下）；
+  // JSON 本身写不出 NaN / Infinity，服务端那句「排序值必须是有限数字」经 HTTP 走不到。
+  if (present('position') && (typeof body['position'] !== 'number' || !Number.isFinite(body['position']))) {
+    return badRequest('请求参数错误')
   }
-  if (body['value'] !== undefined) env.value = String(body['value'])
-  if (body['remarks'] !== undefined) env.remarks = String(body['remarks'])
-  if (Array.isArray(body['groups'])) env.group = joinEnvGroups(body['groups'].map((item: unknown) => String(item)))
-  else if (body['group'] !== undefined) env.group = joinEnvGroups([String(body['group'])])
-  if (typeof body['enabled'] === 'boolean') env.enabled = body['enabled']
+
+  if (present('name')) {
+    const name = String(body['name']).trim()
+    if (!name) return badRequest('变量名不能为空')
+    if (!isValidEnvName(name)) return badRequest('变量名格式无效')
+    if (name !== env.name) updates.name = name
+  }
+  if (present('value') && String(body['value']) !== env.value) updates.value = String(body['value'])
+  if (present('remarks') && String(body['remarks']) !== env.remarks) updates.remarks = String(body['remarks'])
+  if (Array.isArray(body['groups']) || present('group')) {
+    // groups（数组）优先于 group（逗号串），与服务端一致
+    const group = Array.isArray(body['groups'])
+      ? joinEnvGroups(body['groups'].map((item: unknown) => String(item)))
+      : joinEnvGroups([String(body['group'])])
+    if (group !== env.group) updates.group = group
+  }
+  if (typeof body['enabled'] === 'boolean' && body['enabled'] !== env.enabled) updates.enabled = body['enabled']
+  // 桶内排序值（契约 C5）：越小越靠前，置顶区与普通区各自比较；值变了才写（类型已在最前面校验过）。
+  // 🔴 与 PUT /envs/sort 请求体里的 position（"before" / "after" 落点）同名不同义。
+  if (present('position') && body['position'] !== env.position) updates.position = body['position']
+
+  if (Object.keys(updates).length === 0) return { message: '未检测到字段变更', data: toEnvDict(env) }
+  Object.assign(env, updates)
   env.updated_at = nowIso()
   return { message: '更新成功', data: toEnvDict(env) }
 })

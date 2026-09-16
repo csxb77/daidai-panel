@@ -7,6 +7,7 @@ import CaptchaConfigCard from './components/CaptchaConfigCard.vue'
 import ExtraConfigCard from './components/ExtraConfigCard.vue'
 import IPWhitelistCard from './components/IPWhitelistCard.vue'
 import LoginLogsCard from './components/LoginLogsCard.vue'
+import McpConfigCard from './components/McpConfigCard.vue'
 import OverviewHeroCard from './components/OverviewHeroCard.vue'
 import OverviewStatsCard from './components/OverviewStatsCard.vue'
 import PanelLogCard from './components/PanelLogCard.vue'
@@ -86,6 +87,7 @@ const {
   handleSaveProxy,
   handleSaveCaptcha,
   handleSaveSessionConfig,
+  handleSaveMcpConfig,
   handleSaveBackupSchedule
 } = config
 
@@ -226,7 +228,7 @@ function handleTabChange(tab: string) {
     void loadSystemStats()
     void loadSystemInfo()
     void loadUpdatePreferences()
-  } else if (tab === 'config' || tab === 'task-exec' || tab === 'proxy' || tab === 'captcha' || tab === 'alert') {
+  } else if (tab === 'config' || tab === 'task-exec' || tab === 'proxy' || tab === 'captcha' || tab === 'alert' || tab === 'mcp') {
     void loadSystemConfigs()
   } else if (tab === 'panel-log') {
     void loadPanelLogs()
@@ -326,9 +328,8 @@ watch(
         />
 
         <!--
-          兜底卡片：渲染面板注册了、但本页没有专属表单的配置项（当前是运行时日志输出、
-          守护方式、systemd 服务名三项，都属于「面板与运行时」分组，所以挂在这个标签页）。
-          没有这类配置项时整卡不渲染，页面与改造前完全一致。
+          兜底卡片：渲染面板注册了、但本页没有专属表单的配置项，按服务端 schema 分组展示；
+          哪些项进兜底区由 useSettingsConfig 的差集算出，不在这里写死。没有这类配置项时整卡不渲染。
         -->
         <ExtraConfigCard
           v-if="extraConfigGroups.length"
@@ -401,6 +402,15 @@ watch(
           :form="configForm"
           :captcha-feature-implemented="captchaFeatureImplemented"
           :on-save="handleSaveCaptcha"
+        />
+      </el-tab-pane>
+
+      <el-tab-pane v-if="isAdmin" label="MCP 服务" name="mcp">
+        <McpConfigCard
+          :configs-loading="configsLoading"
+          :configs-saving="configsSaving"
+          :form="configForm"
+          :on-save="handleSaveMcpConfig"
         />
       </el-tab-pane>
 

@@ -40,6 +40,7 @@ import {
 } from "@/utils/editorPreferences";
 import type { EditorPreferences } from "@/utils/editorPreferences";
 import {
+  EDITOR_ENGINE_CHANGE_EVENT,
   persistEditorEngine,
   readStoredEditorEngine,
   resolveEditorEngine,
@@ -48,6 +49,7 @@ import type {
   EditorEngine,
   ResolvedEditorEngine,
 } from "@/utils/editorEngine";
+import { setUnsavedWork } from "@/utils/chunkReload";
 
 const fileContent = defineModel<string>("fileContent", { required: true });
 const isEditing = defineModel<boolean>("isEditing", { required: true });
@@ -122,7 +124,9 @@ const fileSizeLabel = computed(() => {
 
 const lineCountLabel = computed(() => {
   if (props.isBinary || !fileContent.value) return "";
-  const count = fileContent.value.split("\n").length;
+  // 三种行尾都算一次换行：编辑器会把正文原样留着（CRLF、单 CR 都可能），
+  // 只按 "\n" 切会把「只用单个 CR 换行」的文件数成 1 行。口径与配置文件页一致。
+  const count = fileContent.value.split(/\r\n|\n|\r/).length;
   return `${count} 行`;
 });
 
@@ -235,8 +239,33 @@ function selectEditorEngine(next: EditorEngine) {
   persistEditorEngine(next); // 内部会派发 EDITOR_ENGINE_CHANGE_EVENT，已挂载的编辑器跟着换
 }
 
+// 引擎偏好不只在本页齿轮菜单里改：编辑器加载失败时的「改用 CodeMirror」（utils/monacoWarmup.ts）、
+// 配置文件页的同一个菜单，都会走 persistEditorEngine 派发 EDITOR_ENGINE_CHANGE_EVENT。
+// 编辑器和状态条靠 engine-resolved 跟得上，菜单里的「当前」只能靠这个监听跟：
+// 不监听就要等下次进页面（onActivated）才更新，期间勾着的是已经不在用的那个引擎。
+// 从存储重读而不是沿用本地值：存储写不进去时编辑器实际按 auto 解析，菜单也该显示 auto。
+function syncEditorEngine() {
+  editorEngine.value = readStoredEditorEngine();
+}
+
+// 有未保存改动时登记到 utils/chunkReload.ts：面板升级后的自动刷新改为提示「保存后刷新」，
+// 关标签页 / 按 F5 也会先弹离开确认（没改动时不拦）。
+// 条件与 hero 上的「未保存」圆点相同（圆点在 v-else 分支里，隐含 selectedFile 非空），不另算一套：
+// hasChanges 由父组件按「正文 ≠ 已保存正文」算，保存、放弃改动、切换文件、删除当前文件都会让它回落。
+// 被 keep-alive 缓存、切到别的页面时不撤：没保存的内容仍在内存里，整页刷新一样会丢，只在卸载时撤。
+const UNSAVED_WORK_KEY = "scripts-editor";
+
+watch(
+  () => Boolean(props.selectedFile) && props.hasChanges,
+  (dirty) => {
+    setUnsavedWork(UNSAVED_WORK_KEY, dirty);
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   window.addEventListener(EDITOR_PREFERENCES_CHANGE_EVENT, syncPreferences);
+  window.addEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEditorEngine);
   // 服务端那份偏好在这里拉一次（函数自己记忆化，重复调用不会重复发请求），
   // 拉回来之后它会派发变更事件，由上面的监听把新值刷进来。
   // 刻意不放进 main.ts 的启动流程：编辑器不在首屏，没必要给每一次打开面板都多加一个请求。
@@ -245,6 +274,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener(EDITOR_PREFERENCES_CHANGE_EVENT, syncPreferences);
+  window.removeEventListener(EDITOR_ENGINE_CHANGE_EVENT, syncEditorEngine);
+  setUnsavedWork(UNSAVED_WORK_KEY, false);
 });
 
 // 脚本页被 keep-alive 缓存，第二次进来只触发 onActivated 不触发 onMounted。
@@ -1014,8 +1045,26 @@ watch(
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .unsaved-dot {
+// 页面自带的「减少动效」规则统一走这个包装（C8 动效偏好，本文件末尾编辑器入场那段也用它）：
+// - 跟随系统：媒体查询里带 :root:not(.dd-motion-force)，个人设置选「始终开启」时不生效；
+// - 个人设置选「减少动效」：html.dd-motion-off 下不看系统同样生效。
+// 与 global.scss 末尾「减少动效」段同一口径；前缀包在 :where() 里，不给选择器额外加特异性。
+@mixin dd-page-reduced-motion {
+  @media (prefers-reduced-motion: reduce) {
+    :where(:root:not(.dd-motion-force)) {
+      @content;
+    }
+  }
+
+  :where(html.dd-motion-off) {
+    @content;
+  }
+}
+
+@include dd-page-reduced-motion {
+  // 必须带上 .unsaved-pulse：呼吸点的 animation 写在 .unsaved-pulse 里的嵌套规则上（特异性高一级），
+  // 原来的裸 .unsaved-dot 压不过它、一直是死规则（只是 global.scss 的通配段把时长压成 1ms 兜住了，看不出来）。
+  .unsaved-pulse .unsaved-dot {
     animation: none;
   }
 }
@@ -1348,7 +1397,8 @@ watch(
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
+// 走上面 dd-page-reduced-motion 的包装（C8 动效偏好）
+@include dd-page-reduced-motion {
   .scripts-editor {
     animation: none;
   }

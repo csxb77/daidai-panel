@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, nextTick, computed, watch, type CSSProperties } from 'vue'
-import { envApi, type EnvNameOption } from '@/api/env'
+import { ref, onMounted, onBeforeUnmount, onDeactivated, nextTick, computed, watch, type CSSProperties } from 'vue'
+import { envApi, type EnvNameOption, type EnvUpdatePayload } from '@/api/env'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { copyText } from '@/utils/clipboard'
 import EnvBatchGroupDialog from './components/EnvBatchGroupDialog.vue'
@@ -10,9 +10,14 @@ import EnvImportDialog from './components/EnvImportDialog.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
+// ArrowDown 不在 main.ts 的全局图标表里，要单独引；本页其余图标（Lock / Unlock / View / Hide / Check …）都是全局注册的
+import { ArrowDown } from '@element-plus/icons-vue'
+import { maskEnvValue, shouldMaskEnvValue, type EnvValueMaskMode } from '@/utils/envSecret'
 
 const envTableDensityStorageKey = 'daidai-env-table-density'
 const envPageSizeStorageKey = 'daidai-env-page-size'
+// 值的遮蔽模式（#127），和上面两项是同一类本地偏好，键名沿用本页 daidai-env-* 前缀
+const envMaskModeStorageKey = 'daidai-env-mask-mode'
 const envAllFetchBatchSize = 100
 const { isMobile } = useResponsive()
 
@@ -25,6 +30,8 @@ type EnvFormModel = {
   remarks: string
   group?: string
   groups: string[]
+  // 排序值（#131，即接口里的 position）。编辑时带进弹窗；弹窗只在用户真改过时才把它放进 save 的数据里
+  position?: number | null
 }
 
 const envList = ref<any[]>([])
@@ -76,12 +83,32 @@ const mobileEmptyDescription = computed(() =>
   statusFilter.value ? '当前筛选条件下暂无环境变量' : '暂无环境变量'
 )
 const envTableClass = computed(() => ['env-table', 'env-table--' + tableDensity.value])
-const envTableHeaderStyle = { background: '#f8fafc', color: '#64748b', fontWeight: 600, fontSize: '13px' }
+const envTableHeaderStyle = { background: 'var(--el-fill-color-light)', color: 'var(--el-text-color-regular)', fontWeight: 600, fontSize: '13px' }
 const tableDensity = ref<'comfortable' | 'compact'>(
   typeof window !== 'undefined' && window.localStorage.getItem(envTableDensityStorageKey) === 'compact'
     ? 'compact'
     : 'comfortable'
 )
+
+// ===== 敏感值遮蔽（issue #127）=====
+// 只管显示：接口、复制按钮、编辑弹窗、导出一律仍是明文，理由见 utils/envSecret.ts 文件头。
+// 三态是页面级本地偏好，默认「自动」（只遮名字像凭据的变量），存取方式与表格密度、每页条数相同。
+const envMaskMode = ref<EnvValueMaskMode>(readEnvMaskMode())
+// 用小眼睛临时揭示过的行 id。刻意不持久化：loadData（刷新 / 翻页 / 改筛选 / 保存后重拉）和切换模式时都会清空，
+// 看完一眼就收回，不会因为「上次点开忘了关」一直明文挂在屏幕上。
+// Set 放进 ref 后是响应式集合：模板里的 has() 会被追踪，add / delete / clear 都会触发重渲染，不用每次换新 Set。
+const revealedEnvIds = ref(new Set<number>())
+const envMaskModeOrder: EnvValueMaskMode[] = ['auto', 'all', 'none']
+const envMaskModeMeta: Record<EnvValueMaskMode, { label: string; short: string; hint: string }> = {
+  auto: { label: '自动', short: '自动遮蔽', hint: '按变量名识别凭据类变量' },
+  all: { label: '全部遮蔽', short: '全部遮蔽', hint: '所有变量的值都遮住' },
+  none: { label: '全部明文', short: '全部明文', hint: '不遮蔽，直接显示原值' }
+}
+// 模式切换按钮的 title 和 aria-label：说清「自动」认哪些名字，以及遮蔽管不到哪里
+const envMaskModeTitle = computed(() => {
+  const rule = envMaskMode.value === 'auto' ? '（变量名含 TOKEN、SECRET、PASSWORD、COOKIE、KEY 等时遮住）' : ''
+  return `值的显示方式：${envMaskModeMeta[envMaskMode.value].short}${rule}。只影响本页显示，复制、编辑、导出仍是明文`
+})
 
 const showEditDialog = ref(false)
 const editDialogMode = ref<'create' | 'edit'>('create')
@@ -330,6 +357,8 @@ function queueDesktopTableReady() {
   })
 }
 
+// 拖拽成功后本地行上的 position 已经过期（原因见 openEdit 的注释）；loadData 拿回新列表时复位
+let envPositionsStale = false
 let loadDataDepth = 0
 async function loadData() {
   if (loadDataDepth >= 3) {
@@ -341,6 +370,8 @@ async function loadData() {
   loadDataDepth += 1
   loading.value = true
   selectedIds.value = []
+  // 临时揭示只管当前这一屏：一刷新、翻页、改筛选、保存后重拉，就全部收回遮蔽（#127）
+  revealedEnvIds.value.clear()
   try {
     const params = {
       keyword: keyword.value || undefined,
@@ -370,6 +401,8 @@ async function loadData() {
         return
       }
     }
+    // 列表刚从服务端整份拿回来，每行的 position 都是新的
+    envPositionsStale = false
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '加载环境变量失败')
   } finally {
@@ -425,6 +458,12 @@ onBeforeUnmount(() => {
     sortableInstance.destroy()
     sortableInstance = null
   }
+})
+
+// 本页在 MainLayout 的 keep-alive 里：切到别的菜单既不卸载也不重跑 loadData，revealedEnvIds 会原样留着。
+// 临时揭示（#127）必须在离开时收回，否则点开的明文会一直挂着，隔几个小时切回来还是明文，和「只看一眼」对不上。
+onDeactivated(() => {
+  revealedEnvIds.value.clear()
 })
 
 // 拖拽时把被拖行每个单元格宽度锁成固定 px，避免 forceFallback 克隆行脱离表格后列宽塌陷
@@ -504,18 +543,35 @@ async function initSortable() {
 
         const movedItem = envList.value.splice(oldIndex, 1)[0]
         envList.value.splice(newIndex, 0, movedItem)
-        const nextItem = envList.value[newIndex + 1]
-        const sourceSortOrder = Number(sourceItem.sort_order || 0)
-        const targetSortOrder = nextItem ? Number(nextItem.sort_order || 0) : sourceSortOrder
 
-        if (targetSortOrder !== sourceSortOrder) {
+        // 桶判定（#131）：后端只允许同一个置顶桶（sort_order 相同）里互拖，跨桶回 400。
+        // 以前只看落点的后一条，有两种落点会出错：
+        //   ① 置顶项拖到置顶区最后一格时，后一条必然是第一条普通项 ⇒ 永远被拦，置顶区里排不到末尾；
+        //   ② 落点是本页最后一行时后一条不存在，发出去的 target 为空，服务端把它当成「移到整桶末尾」⇒
+        //      分页或筛选时拖到可见列表底部，实际会越过所有没显示的项，被甩到最后一页之后。
+        // 现在照任务页（tasks/index.vue 的 onEnd）同时看前后两条：
+        //   后一条同桶 ⇒ 插到它前面；否则前一条同桶 ⇒ 插到它后面（position:'after'，契约 C4）；
+        //   两边都不同桶，才是真的拖进了另一个区，拦下来并弹回原位。
+        // 两种插法都以「看得见的邻居」为锚，分页、筛选时对整个桶也成立，所以不再发空 target。
+        // 和任务页唯一的差别：任务页在「只有前一条同桶」时发空 target（本区末尾），这里改发 after，原因就是 ②。
+        const nextItem = envList.value[newIndex + 1]
+        const prevItem = envList.value[newIndex - 1]
+        const nextSameBucket = !!nextItem && inSameEnvSortBucket(sourceItem, nextItem)
+        const prevSameBucket = !!prevItem && inSameEnvSortBucket(sourceItem, prevItem)
+        if (!nextSameBucket && !prevSameBucket) {
           ElMessage.warning('置顶区和普通区请分别排序，跨区移动请使用置顶按钮')
           void loadData()
           return
         }
 
         try {
-          await envApi.sort(sourceItem.id, nextItem?.id)
+          if (nextSameBucket) {
+            await envApi.sort(sourceItem.id, nextItem.id)
+          } else {
+            await envApi.sort(sourceItem.id, prevItem.id, 'after')
+          }
+          // 服务端已把整个桶重编号，本地行上的 position 从这一刻起过期；打开编辑弹窗时会单独取新值
+          envPositionsStale = true
         } catch (err: any) {
           ElMessage.error(err?.response?.data?.error || err?.message || '排序失败')
           void loadData()
@@ -588,7 +644,22 @@ function openDuplicate(row: any) {
   showEditDialog.value = true
 }
 
-function openEdit(row: any) {
+async function openEdit(row: any) {
+  // 列表接口本来就下发 position（float）；老数据或演示站缺这个字段时传 null，弹窗里的排序值框就是空的
+  let position: number | null = typeof row.position === 'number' ? row.position : null
+  // 拖拽是乐观更新、成功后不重拉列表，可服务端已经把整个桶重编号成 1000、2000…，本地行上的 position 还是拖之前的旧数。
+  // 弹窗「排序值」读的就是它：用户照着旧数去填，会排到意想不到的位置。所以拖过之后，单独取一次这一条的最新值。
+  // 不在拖完后直接重拉整页或回填 position：el-table 对 data 是 deep watch，后台改行字段会触发整表 setData，
+  // 碰上下一次拖拽进行中就会把正在拖的行重画掉（任务页为同一个原因在拖拽期间停轮询）。
+  // 取不到就退回行上的值，不拦着打开弹窗（request 拦截器不弹全局错误提示，这里静默即可）。
+  if (envPositionsStale) {
+    try {
+      const res = await envApi.get(row.id)
+      if (typeof res?.data?.position === 'number') position = res.data.position
+    } catch {
+      // 退回行上的旧值
+    }
+  }
   editDialogMode.value = 'edit'
   currentEditEnv.value = {
     id: row.id,
@@ -596,7 +667,8 @@ function openEdit(row: any) {
     value: row.value || '',
     remarks: row.remarks || '',
     group: row.group || '',
-    groups: normalizeGroupList(row.groups?.length ? row.groups : row.group)
+    groups: normalizeGroupList(row.groups?.length ? row.groups : row.group),
+    position
   }
   showEditDialog.value = true
 }
@@ -612,13 +684,18 @@ async function handleSave(data: EnvFormModel | EnvFormModel[]) {
       await envApi.create(data)
       ElMessage.success('创建成功')
     } else {
-      await envApi.update(data.id, {
+      const payload: EnvUpdatePayload = {
         name: data.name,
         value: data.value,
         remarks: data.remarks,
         group: data.group,
         groups: data.groups
-      })
+      }
+      // 排序值（契约 C5）：弹窗只在用户真改过时才把 position 放进 data，有就带、没有就不带
+      if (typeof data.position === 'number') {
+        payload.position = data.position
+      }
+      await envApi.update(data.id, payload)
       ElMessage.success('更新成功')
     }
     showEditDialog.value = false
@@ -635,6 +712,11 @@ async function handleSave(data: EnvFormModel | EnvFormModel[]) {
 
 function isTopPinned(row: any) {
   return Number(row.sort_order || 0) > 0
+}
+
+// 拖拽排序的「桶」= sort_order 相同的一批（0 普通 / 1 置顶），和服务端 reorderEnvWithinSortBucket 的跨桶校验同一口径
+function inSameEnvSortBucket(a: any, b: any) {
+  return Number(a?.sort_order || 0) === Number(b?.sort_order || 0)
 }
 
 // 置顶与禁用是两个正交状态，返回空格分隔的多类名。
@@ -913,6 +995,63 @@ async function copyEnvValue(value: string) {
   }
 }
 
+// 存储里读出来的值、下拉菜单的 command 都是外部输入，统一过这一道再用
+function isEnvValueMaskMode(value: unknown): value is EnvValueMaskMode {
+  return value === 'auto' || value === 'all' || value === 'none'
+}
+
+function readEnvMaskMode(): EnvValueMaskMode {
+  if (typeof window === 'undefined') return 'auto'
+  try {
+    const raw = window.localStorage.getItem(envMaskModeStorageKey)
+    if (isEnvValueMaskMode(raw)) return raw
+  } catch {
+    // 隐私模式或禁用站点数据时读存储会抛错：按默认「自动」走，宁可多遮
+  }
+  return 'auto'
+}
+
+function persistEnvMaskMode(mode: EnvValueMaskMode) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(envMaskModeStorageKey, mode)
+  } catch {
+    // 写不进存储只是下次打开回到默认，这次切换照样生效
+  }
+}
+
+function handleEnvMaskModeCommand(command: string | number | object) {
+  if (!isEnvValueMaskMode(command)) return
+  if (envMaskMode.value === command) return
+  envMaskMode.value = command
+  persistEnvMaskMode(command)
+  // 换模式时把临时揭示的行一起收回：不然在「全部遮蔽」下点开的几行，切走再切回来还开着，和刚选的模式对不上
+  revealedEnvIds.value.clear()
+}
+
+// 按当前模式，这一行本来要不要遮（不看临时揭示）。空值没什么可遮的：显示「-」，也不给小眼睛
+function isEnvValueMaskable(row: any) {
+  return Boolean(row?.value) && shouldMaskEnvValue(row.name, envMaskMode.value)
+}
+
+function isEnvValueRevealed(row: any) {
+  return revealedEnvIds.value.has(row.id)
+}
+
+function toggleEnvValueReveal(row: any) {
+  if (revealedEnvIds.value.has(row.id)) {
+    revealedEnvIds.value.delete(row.id)
+  } else {
+    revealedEnvIds.value.add(row.id)
+  }
+}
+
+// 值单元格要显示的文本。遮着的时候 title 也必须用它：title 挂原值的话，鼠标一停上去就把遮住的内容露出来了
+function envValueDisplay(row: any) {
+  if (!row?.value) return '-'
+  return isEnvValueMaskable(row) && !isEnvValueRevealed(row) ? maskEnvValue(row.value) : row.value
+}
+
 function formatDateTime(t: string | null) {
   if (!t) return '-'
   const d = new Date(t)
@@ -1025,6 +1164,32 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         </div>
       </div>
       <div class="toolbar__right">
+        <!-- 值的显示方式（#127 三态）：手机端没有表头，所以放在这里；桌面端在「值」列表头上，理由见那里的注释。
+             只放一颗 32×32 的图标按钮：右区还要装「导出」「新建变量」，320 宽的屏幕放不下带字的按钮。
+             菜单内容与表头那一份逐字相同，改一处要同步另一处。 -->
+        <el-dropdown v-if="isMobile" trigger="click" placement="bottom-end" @command="handleEnvMaskModeCommand">
+          <el-button
+            class="env-mask-mode-btn"
+            :class="{ 'is-unmasked': envMaskMode === 'none' }"
+            :title="envMaskModeTitle"
+            :aria-label="envMaskModeTitle"
+          >
+            <el-icon><Unlock v-if="envMaskMode === 'none'" /><Lock v-else /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-for="mode in envMaskModeOrder" :key="mode" :command="mode">
+                <span class="env-mask-option" :class="{ 'is-active': envMaskMode === mode }">
+                  <el-icon class="env-mask-option__check"><Check /></el-icon>
+                  <span class="env-mask-option__text">
+                    <span class="env-mask-option__label">{{ envMaskModeMeta[mode].label }}</span>
+                    <span class="env-mask-option__hint">{{ envMaskModeMeta[mode].hint }}</span>
+                  </span>
+                </span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <!-- 原来是一个「…」更多下拉：主体只能展开菜单，最常用的导出永远要点两次，
              按钮上也看不出这里能干什么。改成真正的 Split Button：
              主体「导出」直接下载 JSON（默认/往返格式），其余格式与导入留在菜单里。 -->
@@ -1122,7 +1287,18 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
               <div class="dd-mobile-card__field dd-mobile-card__field--full">
                 <span class="dd-mobile-card__label">值</span>
                 <div class="dd-mobile-card__value env-value-cell">
-                  <span class="env-value-text">{{ row.value || '-' }}</span>
+                  <span class="env-value-text">{{ envValueDisplay(row) }}</span>
+                  <!-- 小眼睛（#127）：和桌面值列同一套判定，只有当前模式会遮这一行时才出现；
+                       与旁边的复制按钮同样是裸 link 按钮、不套 tooltip（触屏没有 hover），所以另挂 aria-label -->
+                  <el-button
+                    v-if="isEnvValueMaskable(row)"
+                    size="small"
+                    link
+                    :aria-label="isEnvValueRevealed(row) ? `重新遮住 ${row.name} 的值` : `临时查看 ${row.name} 的明文`"
+                    @click.stop="toggleEnvValueReveal(row)"
+                  >
+                    <el-icon :size="14"><Hide v-if="isEnvValueRevealed(row)" /><View v-else /></el-icon>
+                  </el-button>
                   <el-button v-if="row.value" size="small" link @click.stop="copyEnvValue(row.value)">
                     <el-icon :size="14"><CopyDocument /></el-icon>
                   </el-button>
@@ -1264,10 +1440,71 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
             </div>
           </template>
         </el-table-column>
+        <!-- 值列（#127 起可遮蔽）。加了小眼睛之后把像素账重算了一遍，结论是 min-width 280 不用动：
+             可用内容宽 = 280 − 24（EP .cell 左右 padding 各 12）= 256px；.env-value-cell 是 flex + gap:4px，
+             行内图标按钮一颗 18px（图标 14 + padding 2×2，与 .env-copy-btn / .env-name-filter-btn 同款），每多一颗再多一份 gap 4px。
+               · 明文行（「全部明文」下的所有行、「自动」下名字不像凭据的行）：不渲染小眼睛，文本 + 复制，与改动前逐像素相同；
+               · 遮着的行：遮罩定长，最长 12 个等宽字符（前 3 + 6 个 * + 后 3），13px 等宽字约 7.8px/字 ≈ 94px，
+                 + 眼睛 18 + 复制 18 + 2 × 4 = 138px，离 256 还空着 118px；
+               · 用小眼睛临时揭示的那一行：明文 + 眼睛 + 复制，文本可见宽比改动前少 18 + 4 = 22px。
+             只有第三种会变窄，而它是用户点出来的临时态（刷新 / 翻页 / 切模式就收回），title 也挂着全文。
+             为它把列加宽 22px 的话，宽屏下 EP 会按四个弹性列的 min-width 比例重新分剩余宽度，名称 / 备注 / 分组三列都跟着变，不值得。
+             表头多了模式切换：cell padding 24 +「值」13 + gap 8 + 触发按钮
+             （锁 14 + EP 给图标后文字的 6 + 4 字 × 12 + 箭头前 2 + 箭头 12 + padding 2×2 = 86）≈ 131px，也装得下。 -->
         <el-table-column prop="value" label="值" min-width="280">
+          <template #header>
+            <div class="env-value-header">
+              <span>值</span>
+              <!-- 桌面端的三态切换就放在它管的这一列表头上：选的是「这一列怎么显示」，放这里一眼就对得上。
+                   也不去挤工具栏右区：右区再宽一点，1280 宽 + 展开侧栏时左边的筛选区就要换成两行（账见 .toolbar__search 的注释）。
+                   手机端没有表头，工具栏右区另有一份同样的菜单，改一处要同步另一处。 -->
+              <el-dropdown trigger="click" placement="bottom-start" @command="handleEnvMaskModeCommand">
+                <el-button
+                  class="env-mask-mode-trigger"
+                  :class="{ 'is-unmasked': envMaskMode === 'none' }"
+                  size="small"
+                  link
+                  :title="envMaskModeTitle"
+                  :aria-label="envMaskModeTitle"
+                >
+                  <el-icon :size="14"><Unlock v-if="envMaskMode === 'none'" /><Lock v-else /></el-icon>
+                  <span>{{ envMaskModeMeta[envMaskMode].short }}</span>
+                  <el-icon :size="12" class="env-mask-mode-trigger__caret"><ArrowDown /></el-icon>
+                </el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-for="mode in envMaskModeOrder" :key="mode" :command="mode">
+                      <span class="env-mask-option" :class="{ 'is-active': envMaskMode === mode }">
+                        <el-icon class="env-mask-option__check"><Check /></el-icon>
+                        <span class="env-mask-option__text">
+                          <span class="env-mask-option__label">{{ envMaskModeMeta[mode].label }}</span>
+                          <span class="env-mask-option__hint">{{ envMaskModeMeta[mode].hint }}</span>
+                        </span>
+                      </span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </template>
           <template #default="{ row }">
             <div class="env-value-cell">
-              <span class="env-value-text" :title="row.value || ''">{{ row.value || '-' }}</span>
+              <!-- title 与正文同源：遮着时悬停也只看到遮罩，否则鼠标一停就露馅 -->
+              <span class="env-value-text" :title="row.value ? envValueDisplay(row) : ''">{{ envValueDisplay(row) }}</span>
+              <!-- 小眼睛只在「当前模式会遮这一行」时出现：明文行放一颗「查看明文」没有意义，还白占 22px。
+                   图标表示点下去会做什么（与开放 API 页的密钥揭示同一套约定）：遮着显示 View，揭示后显示 Hide。 -->
+              <el-tooltip v-if="isEnvValueMaskable(row)" :content="isEnvValueRevealed(row) ? '重新遮住' : '临时查看明文'" placement="top">
+                <el-button
+                  class="env-reveal-btn"
+                  size="small"
+                  link
+                  :aria-label="isEnvValueRevealed(row) ? `重新遮住 ${row.name} 的值` : `临时查看 ${row.name} 的明文`"
+                  @click.stop="toggleEnvValueReveal(row)"
+                >
+                  <el-icon :size="14"><Hide v-if="isEnvValueRevealed(row)" /><View v-else /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <!-- 复制仍然复制明文（与开放 API 页一致）：遮蔽防的是肩窥和截图，不是防自己用 -->
               <el-tooltip v-if="row.value" content="复制" placement="top">
                 <el-button class="env-copy-btn" size="small" link @click.stop="copyEnvValue(row.value)">
                   <el-icon :size="14"><CopyDocument /></el-icon>
@@ -1411,12 +1648,14 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
           <el-icon><CopyDocument /></el-icon>复制
         </el-button>
       </div>
+      <!-- 导出预览刻意保持明文（主动导出要的就是原值，#127），不受页面遮蔽模式影响，所以在这里提醒一句 -->
       <el-alert
         type="info"
         :closable="false"
         show-icon
         style="margin-bottom: 12px"
         :title="`导出范围：${exportScopeText}`"
+        description="内容是明文，包含凭据，不受页面遮蔽设置影响。复制、截图或分享前请留意。"
       />
       <pre class="export-preview">{{ exportContent }}</pre>
     </el-dialog>
@@ -2026,7 +2265,10 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 //   3) 移动端卡片里的同款复制按钮本来就是常驻的，两端不一致。
 // 顺带说明：本页操作栏（.action-btns）一直就是常驻的，没有任何 hover/opacity 门控 ——
 // 那是要守住的不变量，别顺手给它加 hover 显隐。
-.env-copy-btn {
+// 值列的小眼睛（.env-reveal-btn，#127）与复制按钮同一款：尺寸 18px（图标 14 + padding 2×2）也是值列 min-width
+// 那笔像素账的来源，改这里要回去同步。它同样常驻、不做 hover 显隐，理由同下面 1)~3)。
+.env-copy-btn,
+.env-reveal-btn {
   flex-shrink: 0;
   color: var(--el-text-color-secondary);
   padding: 2px;
@@ -2037,6 +2279,87 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 
 .env-remarks-text {
   color: var(--el-text-color-regular);
+}
+
+// 值列表头：「值」+ 三态切换（#127）排成一行
+.env-value-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+// 表头里的模式切换：link 按钮，字重压回 500，不和加粗的列名抢眼。
+// 「全部明文」是三档里最不设防的一档，用警示色标出来，扫一眼表头就知道现在什么都没遮。
+.env-mask-mode-trigger {
+  font-weight: 500;
+  color: var(--el-text-color-secondary);
+  padding: 2px;
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  // 类名刻意不叫 is-plain：那是 EP 给 plain 按钮的状态类，.el-button.is-plain 会改掉 hover / focus 时的边框与底色
+  &.is-unmasked {
+    color: var(--el-color-warning);
+  }
+}
+
+// EP 只给「图标后面紧跟的文字」加 6px 左边距，文字后面的箭头要自己隔开一点
+.env-mask-mode-trigger__caret {
+  margin-left: 2px;
+}
+
+// 手机工具栏里的同一个切换：纯图标按钮，padding 收成 8px，正好是与同排按钮等高的 32×32
+.env-mask-mode-btn {
+  padding: 8px;
+
+  &.is-unmasked {
+    color: var(--el-color-warning);
+  }
+}
+
+// 三态菜单项：勾 + 名称 + 一行说明。菜单虽然 teleport 到了 body，但这些 span 是写在本组件模板里的，
+// 仍然带本组件的 scoped 标记，所以样式可以留在 scoped 块里（只有 EP 自己渲染的 li 命中不到）。
+.env-mask-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.env-mask-option__check {
+  flex-shrink: 0;
+  // 图标 14px，和第一行 20px 行高垂直居中
+  margin-top: 3px;
+  color: var(--el-color-primary);
+  // 不是当前项也要占位，三项的文字才能左对齐
+  visibility: hidden;
+}
+
+.env-mask-option.is-active .env-mask-option__check {
+  visibility: visible;
+}
+
+.env-mask-option__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.env-mask-option__label {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--el-text-color-primary);
+}
+
+.env-mask-option.is-active .env-mask-option__label {
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.env-mask-option__hint {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--el-text-color-secondary);
 }
 
 .env-empty-text {

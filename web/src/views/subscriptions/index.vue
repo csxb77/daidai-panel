@@ -9,6 +9,7 @@ import {
   type EventStreamConnection,
 } from "@/utils/sse";
 import { useResponsive } from "@/composables/useResponsive";
+import { useLogAutoFollow } from "@/composables/useLogAutoFollow";
 import { useAuthStore } from "@/stores/auth";
 import { useBadgesStore } from "@/stores/badges";
 import { canAdminister } from "@/utils/roles";
@@ -42,6 +43,15 @@ const filteredSubList = computed(() => {
     return subList.value.filter((s) => !s.enabled);
   return subList.value.filter((s) => s.type === typeFilter.value);
 });
+
+// 表头只引用语义令牌，明暗两套都成立；取值与 global.scss 里 .el-table th 的规则同口径。
+// 原先写死的 #f8fafc / #64748b 在暗色下全靠 html.dark 那条 !important 补丁盖掉，明色下字色还压着全局规则。
+const subTableHeaderStyle = {
+  background: "var(--el-fill-color-light)",
+  color: "var(--el-text-color-regular)",
+  fontWeight: 600,
+  fontSize: "13px",
+};
 
 const showEditDialog = ref(false);
 const showLogDialog = ref(false);
@@ -165,6 +175,10 @@ const pullRunning = ref(false);
 const pullingSubId = ref<number | null>(null);
 let pullEventSource: EventStreamConnection | null = null;
 const pullLogRef = ref<HTMLElement>();
+// 拉取日志的自动跟随（#133）：最新一行在可视区内就贴底跟随，用户上翻超过阈值即暂停、滚回底部恢复。
+// 拉取日志弹窗不带 destroy-on-close、容器常驻，所以每次打开（beginPullSession / reattachPullStream）
+// 都要 begin(true) 重置，否则会沿用上一次拉取结束时冻结下来的跟随态。
+const pullFollow = useLogAutoFollow(pullLogRef);
 let pullBuffer: string[] = [];
 let pullFlushRaf = 0;
 
@@ -735,6 +749,12 @@ async function handleToggle(row: any) {
   }
 }
 
+// 禁用行整行弱化（#133，照环境变量页 getRowClassName 的禁用分支）。类名只用于样式，
+// 弱化的写法与三条坑见 <style> 里 .sub-row-disabled 那段注释。
+function getRowClassName({ row }: { row: any }) {
+  return row.enabled ? "" : "sub-row-disabled";
+}
+
 /**
  * 操作列 Split Button 的菜单项。
  *
@@ -743,9 +763,10 @@ async function handleToggle(row: any) {
  * 删除不可撤销，只能待在菜单里并加 divided + danger——「点了就执行」的主体位置
  * 绝不能放这种一击致命的操作。
  *
- * 这几项都不随行状态变化：订阅的「启用/禁用」是独立的「启用」列上的 el-switch，
- * 不在本操作列里，所以这里没有需要 visible 联动的互斥项；「停止拉取」也只挂在
- * 拉取日志弹窗的 footer（handleStopPull），本来就不属于这一列。
+ * 这几项都不随行状态变化：订阅的「启用/禁用」外置在本列 Split Button 右侧的独立按钮上
+ *（#133 起与环境变量页同一形态，原来那一整列「启用」el-switch 已删），刻意不在菜单里再放一份——
+ * 已外置的操作不进菜单，否则同一件事两个入口、还得按行状态做 visible 联动；
+ * 「停止拉取」也只挂在拉取日志弹窗的 footer（handleStopPull），本来就不属于这一列。
  */
 const subActionItems: SplitButtonItem[] = [
   { key: "logs", label: "拉取日志" },
@@ -786,6 +807,8 @@ function beginPullSession(subId: number, baseline: number | null) {
   pullOutcome.value = "idle";
   pullRunning.value = true;
   pullingSubId.value = subId;
+  // 新一次拉取：日志从空开始增长，默认跟随。容器常驻，不重置的话会沿用上一次 end() 冻结的跟随态。
+  pullFollow.begin(true);
   showPullLog.value = true;
 }
 
@@ -812,6 +835,11 @@ function reattachPullStream(subId: number) {
   // 关弹窗时 handlePullDialogClose 已经 bump 过一次（作废在途的查库结果），
   // 这里再 bump 出一个「当前有效」的会话号，让本次重连的 resolvePullOutcome 能写进状态。
   pullSession = ++pullSessionSeq;
+
+  // 重连 = 用户重新打开了弹窗：正文刚清空、后端马上整体补发 history()，按新会话跟随即可。
+  // 不沿用关弹窗前的暂停态——那次暂停对应的阅读位置已随正文清空不存在了；
+  // 关弹窗时 handlePullDialogClose 已 end() 冻结，这里必须 begin(true) 解冻，否则补发的日志不会贴底。
+  pullFollow.begin(true);
 
   showPullLog.value = true;
   // connectPullStream 内部第一件事就是 closePullStream()，已有连接会先关再连，不会叠加。
@@ -929,11 +957,8 @@ function connectPullStream(id: number) {
       pullBuffer.push(data);
       if (!pullFlushRaf) {
         pullFlushRaf = requestAnimationFrame(() => {
-          pullLogLines.value.push(...pullBuffer);
-          pullBuffer = [];
           pullFlushRaf = 0;
-          if (pullLogRef.value)
-            pullLogRef.value.scrollTop = pullLogRef.value.scrollHeight;
+          flushPullBuffer();
         });
       }
     },
@@ -941,6 +966,9 @@ function connectPullStream(id: number) {
       if (event.event !== "done") return;
 
       const session = pullSession;
+      // 先把还挂在 rAF 里的最后一批冲进去（跟随中会贴底）；冻结跟随态的 end() 要等下面
+      // 补完提示行之后再调——end() 之后 onContentChange 是空操作，理由见 flushPullBuffer。
+      flushPullBuffer();
       pullRunning.value = false;
       pullingSubId.value = null;
       closePullStream();
@@ -970,15 +998,16 @@ function connectPullStream(id: number) {
       // 这条流一行日志都补发不出来。空日志配一个孤零零的状态太突兀，补一行指路。
       // 放在 pullStopRequested 分支之前：用户点过停止后关掉弹窗再打开，同样是空日志。
       // 最常见的触发路径就是「拉取途中关掉弹窗，等跑完之后再打开」。
-      if (
-        reason === "not_running" &&
-        pullLogLines.value.length === 0 &&
-        pullBuffer.length === 0
-      ) {
+      // 上面已同步 flush 过，缓冲一定是空的，所以只看已渲染的行数。
+      if (reason === "not_running" && pullLogLines.value.length === 0) {
         pullLogLines.value.push(
           "[提示] 本次拉取已结束，完整日志请在订阅列表的「日志」中查看",
         );
+        pullFollow.onContentChange();
       }
+      // 这条连接不会再有新输出：冻结跟随态，此后滚动不再改变它、也不再自动贴底。
+      // 必须排在 flush 与补提示行之后，否则结尾那几行与提示行都不会贴底。
+      pullFollow.end();
 
       if (pullStopRequested) {
         pullOutcome.value = "aborted";
@@ -996,6 +1025,9 @@ function connectPullStream(id: number) {
       pullOutcome.value = "disconnected";
     },
     onError() {
+      // 与 done 同理：先冲掉 rAF 里的最后一批（跟随中会贴底），再冻结跟随态
+      flushPullBuffer();
+      pullFollow.end();
       pullRunning.value = false;
       pullingSubId.value = null;
       closePullStream();
@@ -1003,6 +1035,22 @@ function connectPullStream(id: number) {
       pullOutcome.value = pullStopRequested ? "aborted" : "disconnected";
     },
   });
+}
+
+// 把还挂在 rAF 里、没来得及 flush 的拉取日志立刻冲进去，并按跟随态贴底（与 deps 安装日志同一写法）。
+// done / onError 时必须先调它再 end()：最后几行常与 done 同一帧到达，留给 rAF 的话那次
+// onContentChange 会落在 end() 之后被忽略，跟随中的用户就看不到结尾那几行
+//（旧实现在 rAF 里无条件贴底，没有这个问题）。
+function flushPullBuffer() {
+  if (pullFlushRaf) {
+    cancelAnimationFrame(pullFlushRaf);
+    pullFlushRaf = 0;
+  }
+  if (pullBuffer.length === 0) return;
+  pullLogLines.value.push(...pullBuffer);
+  pullBuffer = [];
+  // 跟随中贴到最新，暂停时什么都不做（由 useLogAutoFollow 判定）
+  pullFollow.onContentChange();
 }
 
 function closePullStream() {
@@ -1017,6 +1065,9 @@ function handlePullDialogClose() {
   // 递增会话号即可让 resolvePullOutcome 的守卫把结果整个丢弃。
   pullSession = ++pullSessionSeq;
   closePullStream();
+  // 流已切断、不会再有新输出：冻结跟随态（弹窗隐藏期间 ResizeObserver 回调也就不会再去贴底）。
+  // 重新打开只有 beginPullSession / reattachPullStream 两条路，都会 begin(true) 重置。
+  pullFollow.end();
   // 这里刻意不动 pullRunning / pullingSubId / pullBaselineLogId / pullStopRequested：
   // 后端拉取还在跑，这四个值是重新打开弹窗时 reattachPullStream 恢复现场的依据。
 }
@@ -1234,7 +1285,12 @@ function viewLogDetail(log: any) {
     </div>
 
     <div v-if="isMobile" class="dd-mobile-list">
-      <div v-for="row in filteredSubList" :key="row.id" class="dd-mobile-card">
+      <div
+        v-for="row in filteredSubList"
+        :key="row.id"
+        class="dd-mobile-card"
+        :class="{ 'subscription-card--disabled': !row.enabled }"
+      >
         <div class="dd-mobile-card__header">
           <div class="dd-mobile-card__title-wrap">
             <div class="subscription-card__title-row">
@@ -1243,7 +1299,20 @@ function viewLogDetail(log: any) {
                   :model-value="isSelected(row.id)"
                   @change="toggleSelected(row.id, $event)"
                 />
-                <span class="dd-mobile-card__title">{{ row.name }}</span>
+                <!-- 启用状态圆点（#133）：卡片里原来的「启用」字段（el-switch）已删，启用/禁用改由这枚圆点
+                     + 操作区的「禁用 / 启用」按钮承载，与桌面表格同一套东西（a11y 三件套见 .sub-status-dot 的注释）。
+                     圆点与标题包成一组：标题允许折行，而 .dd-mobile-card__selection 是 align-items:center，
+                     两者平级的话名称折两行时圆点会落在两行中线上；组内顶对齐 + 圆点 margin-top 把它钉在首行。 -->
+                <div class="subscription-card__name">
+                  <span
+                    class="sub-status-dot"
+                    :class="{ 'is-enabled': row.enabled }"
+                    role="img"
+                    :title="row.enabled ? '已启用' : '已禁用'"
+                    :aria-label="row.enabled ? '已启用' : '已禁用'"
+                  />
+                  <span class="dd-mobile-card__title">{{ row.name }}</span>
+                </div>
               </div>
               <!--
                 标签整体包一层：title-row 是 space-between，直接并排放两个标签会被拉开到两端。
@@ -1274,7 +1343,7 @@ function viewLogDetail(log: any) {
                   同步任务三态只标 disabled 这一档：全局默认是「开」，enabled 与绝大多数订阅的
                   实际行为一致，标出来全是噪音；「这条订阅不建/不删任务」才是意料之外、
                   值得在列表里一眼看到的状态。inherit 同理不标（写法照上面的 overwrite_mode）。
-                  桌面表格刻意不加这两个标签：名称列 min-width 只有 120，
+                  桌面表格刻意不加这两个标签：名称列 min-width 136 扣掉名称前状态圆点那 16px 只剩 120，
                   再挂标签会把订阅名挤到第二行，见下面表格里那段宽度测算。
                 -->
                 <el-tag
@@ -1323,16 +1392,9 @@ function viewLogDetail(log: any) {
                 row.schedule || "手动拉取"
               }}</span>
             </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">启用</span>
-              <div class="dd-mobile-card__value">
-                <el-switch
-                  :model-value="row.enabled"
-                  size="small"
-                  @change="handleToggle(row)"
-                />
-              </div>
-            </div>
+            <!-- 原来这里还有一格「启用」（el-switch），已删除（#133，与环境变量页统一）：启用态改由标题前的圆点表达、
+                 切换改由下面操作区的「禁用 / 启用」按钮执行，与桌面端同源。少一格不会留空洞：移动卡片只在
+                 isMobile（≤768px）时渲染，而 ≤768px 下 .dd-mobile-card__grid 是单列纵向堆叠。 -->
             <div class="dd-mobile-card__field">
               <span class="dd-mobile-card__label">最后拉取</span>
               <span class="dd-mobile-card__value">{{
@@ -1341,19 +1403,26 @@ function viewLogDetail(log: any) {
             </div>
           </div>
 
+          <!-- 5 颗按钮排成 3 + 2：拉取 | 禁用·启用 | 日志 / 编辑 | 删除（顺序对齐环境变量页「主操作 → 开关 → 其它 → 删除」）。
+               「禁用 / 启用」的 type/plain 与桌面操作列那颗逐字一致，直接复用 handleToggle（确认框、报错、loadData 都在里面）。
+               「删除」刻意改成实心 danger：启用态下「禁用」已是 danger + plain，删除若仍是 plain，两颗外观逐字相同，
+               用户分不出哪颗不可逆（与 design-system §4.2「批量禁用 plain / 批量删除实心」同一套层级）。 -->
           <div class="dd-mobile-card__actions subscription-card__actions">
             <el-button size="small" type="success" @click="handlePull(row)"
               >拉取</el-button
+            >
+            <el-button
+              size="small"
+              :type="row.enabled ? 'danger' : 'default'"
+              :plain="row.enabled"
+              @click="handleToggle(row)"
+              >{{ row.enabled ? "禁用" : "启用" }}</el-button
             >
             <el-button size="small" @click="openLogs(row.id)">日志</el-button>
             <el-button size="small" type="primary" plain @click="openEdit(row)"
               >编辑</el-button
             >
-            <el-button
-              size="small"
-              type="danger"
-              plain
-              @click="handleDelete(row.id)"
+            <el-button size="small" type="danger" @click="handleDelete(row.id)"
               >删除</el-button
             >
           </div>
@@ -1371,19 +1440,35 @@ function viewLogDetail(log: any) {
         :data="filteredSubList"
         v-loading="loading"
         @selection-change="handleSelectionChange"
+        :row-class-name="getRowClassName"
         style="width: 100%"
-        :header-cell-style="{
-          background: '#f8fafc',
-          color: '#64748b',
-          fontWeight: 600,
-          fontSize: '13px',
-        }"
+        :header-cell-style="subTableHeaderStyle"
       >
         <el-table-column type="selection" width="40" />
-        <el-table-column prop="name" label="名称" min-width="120">
+        <!-- min-width 120 → 136（#133）：名称前多了一枚 8px 状态圆点，外加圆点与名称之间的一份 gap 8px，
+             合计 +16px（与环境变量页名称列 188 → 204 那笔账同一口径）。不补回来的话订阅名的可见宽度会净减 16px，
+             省略号提前出现、标签也更容易被挤到第二行。下面标签那段测算说的是扣掉圆点之后的 120，不受影响。 -->
+        <el-table-column prop="name" label="名称" min-width="136">
           <template #default="{ row }">
             <div class="sub-name-cell">
-              <span class="sub-name-text">{{ row.name }}</span>
+              <!-- 圆点与名称必须包成一组（.sub-name-main）：外层 .sub-name-cell 是 flex-wrap，
+                   两者若是平级 flex 项，长名称会整块掉到第二行、把圆点孤零零留在第一行。
+                   圆点只表达订阅自身的启用开关（二态）；右边「状态」列是拉取结果（正常绿 / 失败红），两者含义不同，
+                   同一行出现「红点 + 正常绿标」时靠圆点的 title / aria-label 区分，见 .sub-status-dot 的注释。
+                   订阅级「自动建 / 删任务」三态与它正交，不揉进圆点（一枚点表达不了 2 个字段 × 3 档）。 -->
+              <span class="sub-name-main">
+                <span
+                  class="sub-status-dot"
+                  :class="{ 'is-enabled': row.enabled }"
+                  role="img"
+                  :title="row.enabled ? '已启用' : '已禁用'"
+                  :aria-label="row.enabled ? '已启用' : '已禁用'"
+                />
+                <!-- 单行省略，全称靠 title 兜底（design-system §4.1：省略后必须挂 title） -->
+                <span class="sub-name-text" :title="row.name">{{
+                  row.name
+                }}</span>
+              </span>
               <el-tag
                 size="small"
                 :type="row.type === 'git-repo' ? '' : 'warning'"
@@ -1396,8 +1481,8 @@ function viewLogDetail(log: any) {
                 绝大多数订阅都是 inherit，常驻一列会白占桌面表格本就紧张的宽度（操作列已 fixed）。
 
                 文案在桌面端缩成「覆盖 / 保留」，与同格的「Git / 文件」一个风格（那两个也是桌面缩写、
-                移动端卡片才用全称）：这一列 min-width 只有 120，而「Git」+「强制覆盖」两个 small round
-                标签加 gap 粗算已经 124px、比列宽本身还宽，订阅名一个字都放不下，
+                移动端卡片才用全称）：这一列 min-width 136 扣掉名称前状态圆点那 16px，留给「名称 + 标签」的只有 120，
+                而「Git」+「强制覆盖」两个 small round 标签加 gap 粗算已经 124px、比这 120 本身还宽，订阅名一个字都放不下，
                 force/preserve 那几行会靠 .sub-name-cell 的 flex-wrap 掉到第二行、行高比 inherit 行高一截。
                 缩写后两个标签约 96px，常规订阅名能和标签同排。
                 全称走 title 兜底（设计规范：省略后必须挂 title）。
@@ -1465,15 +1550,6 @@ function viewLogDetail(log: any) {
             </Transition>
           </template>
         </el-table-column>
-        <el-table-column label="启用" width="60" align="center">
-          <template #default="{ row }">
-            <el-switch
-              :model-value="row.enabled"
-              size="small"
-              @change="handleToggle(row)"
-            />
-          </template>
-        </el-table-column>
         <el-table-column prop="last_pull_at" label="最后拉取" width="150">
           <template #default="{ row }">
             <span v-if="row.last_pull_at" class="time-text">{{
@@ -1488,21 +1564,50 @@ function viewLogDetail(log: any) {
           改成 Split Button：主体是最高频、且还有一道确认框兜底的「拉取」，
           其余收进菜单，删除标红并用分隔线隔开。
 
-          列宽 220 → 130：EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，
-          可用内容宽 = 列宽 - 24。主体「拉取」2 字 ≈ 24px + 按钮左右内边距 16px = 40px，
-          加 caret 半边 24px 共 64px，130 给出 106px 可用宽，余量充足；
-          按钮组一旦超出可用宽，.cell 会变成可滚动容器，点右侧 caret 时整行会被滚偏且不复位。
+          #133 起这一格是两个元素（与环境变量页、定时任务页同一形态）：左边 Split Button（拉取 ▾），
+          右边外置的「禁用 / 启用」按钮 —— 原来那一整列「启用」（el-switch，width 60）已删，这是唯一的切换入口。
+
+          列宽 130 → 172（与环境变量页、定时任务页取同一个值）：
+          EP 的 .el-table .cell 是 padding:0 12px + overflow:hidden，可用内容宽 = 172 - 24 = 148px。
+          实测口径（size="small"，见 design-system §5「split-button 的 caret 是 32px」）：
+            主体 = 中文字数 × 12（字宽）+ 22（EP small 的 padding 5px 11px）+ 2（边框）
+            caret = 32，且不受 size 影响；el-button-group 组内相邻按钮还有 -1px 负边距
+          「拉取」= 2×12+22+2 = 48 → 48+32-1 = 79px；「禁用」/「启用」同为 2 字 = 48px；
+          中间 gap 4px（.action-btns 已把 EP 的 `.el-button + .el-button` 外边距清零，间距只由 gap 决定）。
+          合计 79 + 4 + 48 = 131px，148 - 131 = 17px 余量。
+          ⚠️ 本处旧注释按「caret 半边 24px」估算，是错的（会系统性偏小约 14px），别再照它把列宽收窄回去。
+          按钮组一旦超出可用宽，.cell 会变成可滚动容器，点右侧按钮时整行会被滚偏且不复位。
+
+          整表最小宽度账：删掉「启用」列 −60、操作列 +42、名称列 +16（状态圆点），
+          各列最小宽度合计 920 → 918px，窄窗口的横向溢出不会比改动前更坏。
         -->
-        <el-table-column label="操作" width="130" fixed="right" align="center">
+        <el-table-column label="操作" width="172" fixed="right" align="center">
           <template #default="{ row }">
-            <DdSplitButton
-              label="拉取"
-              type="success"
-              size="small"
-              :items="subActionItems"
-              @click="handlePull(row)"
-              @command="(key: string) => onSubAction(key, row)"
-            />
+            <div class="action-btns">
+              <DdSplitButton
+                label="拉取"
+                type="success"
+                size="small"
+                :items="subActionItems"
+                @click="handlePull(row)"
+                @command="(key: string) => onSubAction(key, row)"
+              />
+              <!-- 「启用 / 禁用」外置成一级按钮，位置、type/plain 组合与环境变量页操作列逐字一致：
+                   禁用 = danger + plain（白底红字红描边），启用 = default（EP 白底）。
+                   直接复用 handleToggle —— 二次确认、错误提示、loadData 全在里面，不要再写一份。
+
+                   ⚠️ design-system §4.2 的内容约定是「危险按钮不放最外侧」。这里照抄环境变量页（#109-4）
+                   那次有意识的让步：handleToggle 带 ElMessageBox 二次确认，点错的代价是按一下 Esc；
+                   真正不可逆的「删除」仍然待在 Split 菜单里（danger + divided），没有被提到外侧。 -->
+              <el-button
+                size="small"
+                :type="row.enabled ? 'danger' : 'default'"
+                :plain="row.enabled"
+                @click="handleToggle(row)"
+              >
+                {{ row.enabled ? "禁用" : "启用" }}
+              </el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -1595,7 +1700,8 @@ function viewLogDetail(log: any) {
               line-height: 1.4;
             "
           >
-            留空拉取全部内容，填写后仅检出指定子目录（如 scripts/daily, utils）
+            留空拉取全部内容，填写后仅检出指定子目录（如 scripts/daily,
+            utils）；依赖规则里有正则片段时会改为检出完整仓库，但仍只给子目录里的脚本建定时任务
           </div>
         </el-form-item>
         <el-form-item
@@ -1691,10 +1797,26 @@ function viewLogDetail(log: any) {
             }}
           </div>
         </el-form-item>
+        <!--
+          白名单 / 黑名单 / 依赖规则三个字段共用同一套匹配口径（#129，与后端 S2 同源，改文案前先对一遍后端）：
+            - 只在顶层的 , 或 | 处拆成片段，括号 / 方括号里的 , 与 | 属于正则本身、不拆；
+            - 普通片段按「子串包含」匹配（行为与改动前逐字节一致），片段命中目录名时目录下全部文件一并命中；
+            - 含 ^ $ ( ) [ ] { } ? \ 任一字符，或含 .* / .+ 的片段按正则（Go RE2，与青龙 grep -E 同口径）
+              匹配仓库相对路径，不锚定；单独一个 + 不算触发字符，所以 jd_*.js、.github 这类写法仍按子串包含；
+            - 「全部」类写法（* / ** / *.* / .* / all / 全部）与「含空格或中文 = 文字备注」的判定照旧先跑。
+          检出侧的代价要在文案里如实写：git 的 sparse-checkout 规则表达不了正则，所以
+            - 依赖规则里一出现正则片段就改为检出完整仓库；填了「指定子目录」也一样，但建任务仍限在子目录里；
+            - 白名单的正则片段只在【没填「指定子目录」】时才改为整仓：子目录优先，填了子目录时白名单本来就不参与检出
+              （后端 resolveSubscriptionIncludePlan 的判定顺序是 子目录 → 白名单正则 → 白名单普通片段），
+              所以白名单与「指定子目录」「完整检出」三处说明都要带上这个条件，别写成「只要有正则就整仓」；
+            - 黑名单的正则片段同理下发不了排除规则，只能保证不建任务、做不到不落盘。
+          整仓之后由面板按规则挑依赖文件与要建任务的脚本。
+          非法正则由后端在保存时回 400（点名字段、第几段与 RE2 报错），handleSave 原样展示后端文案，前端不重复校验。
+        -->
         <el-form-item label="白名单" class="form-item--full">
           <el-input
             v-model="editForm.whitelist"
-            placeholder="文件名/路径片段（`,` 或 `|` 分隔，如 jd_|jx_）"
+            placeholder="文件名/路径片段或正则（`,` 或 `|` 分隔，如 jd_|jx_）"
           />
           <div
             style="
@@ -1704,15 +1826,19 @@ function viewLogDetail(log: any) {
               line-height: 1.4;
             "
           >
-            匹配方式是「子串包含」，不是正则也不是
-            glob。片段命中目录名时，该目录下的全部文件（含多级子目录）都算命中。命中白名单的文件会被检出落盘，并建成定时任务。主脚本
+            多个片段用 , 或 |
+            分隔；普通片段按「子串包含」匹配（不是
+            glob），片段命中目录名时，该目录下的全部文件（含多级子目录）都算命中；含
+            ^ $ ( ) [ ] { } ? \ 或 .* .+ 的片段按正则（与青龙一致）匹配仓库相对路径，例如
+            ^jd[^_]，要按字面匹配这些字符时用 \ 转义（路径分隔请写
+            /）。命中白名单的文件会被检出落盘，并建成定时任务；没填「指定子目录」时，白名单里只要有正则片段，拉取就会改为检出完整仓库（检出规则表达不了正则），建任务仍按白名单判断。主脚本
             require 的辅助库文件请填到下面的「依赖规则」，不必再塞进白名单。
           </div>
         </el-form-item>
         <el-form-item label="黑名单">
           <el-input
             v-model="editForm.blacklist"
-            placeholder="文件名/路径片段（`,` 或 `|` 分隔，如 backUp）"
+            placeholder="文件名/路径片段或正则（`,` 或 `|` 分隔，如 backUp）"
           />
           <div
             style="
@@ -1722,13 +1848,15 @@ function viewLogDetail(log: any) {
               line-height: 1.4;
             "
           >
-            匹配方式同白名单（子串包含）。片段命中目录名时，该目录下的全部文件都会被排除，既不落盘也不建任务；黑名单对白名单与依赖规则都生效。
+            匹配方式同白名单：多个片段用 , 或 | 分隔；普通片段按「子串包含」匹配；含
+            ^ $ ( ) [ ] { } ? \ 或 .* .+ 的片段按正则（与青龙一致）匹配仓库相对路径，例如
+            ^jd[^_]。黑名单对白名单与依赖规则都生效：普通片段命中目录名时，该目录下的全部文件都会被排除，既不落盘也不建任务；正则片段只保证不建任务——检出规则表达不了正则，命中的文件仍可能落盘。
           </div>
         </el-form-item>
         <el-form-item label="依赖规则" class="form-item--full">
           <el-input
             v-model="editForm.depend_on"
-            placeholder="辅助库文件名/路径片段（`,` 或 `|` 分隔，如 sendNotify|utils）"
+            placeholder="辅助库文件名/路径片段或正则（`,` 或 `|` 分隔，如 ^jd[^_]|sendNotify|utils）"
           />
           <div
             style="
@@ -1739,9 +1867,12 @@ function viewLogDetail(log: any) {
             "
           >
             对应青龙 ql repo 的第 4
-            个参数。命中的文件会被拉取到脚本目录供主脚本调用，但<strong>不会</strong>建成定时任务——只有命中白名单的文件才建任务；黑名单对两者都生效。匹配方式同白名单（子串包含，片段命中目录名时目录下的全部文件一并检出，所以填
-            utils 就能把 utils/date.js
-            带下来）。含空格或中文的内容会被当作文字备注跳过，不参与检出。
+            个参数。命中的文件会被拉取到脚本目录供主脚本调用，但<strong>不会</strong>建成定时任务——只有命中白名单的文件才建任务；黑名单对两者都生效。匹配方式同白名单：多个片段用
+            , 或 | 分隔；普通片段按「子串包含」匹配，片段命中目录名时目录下的全部文件一并检出，所以填
+            utils 就能把 utils/date.js 带下来；含 ^ $ ( ) [ ] { } ? \ 或 .* .+
+            的片段按正则（与青龙一致）匹配仓库相对路径，例如 ^jd[^_]
+            能把仓库根目录下的 jdCookie.js
+            带下来，有正则片段时拉取会改为检出完整仓库。含空格或中文的内容会被当作文字备注跳过，不参与检出。
           </div>
         </el-form-item>
         <!--
@@ -1756,6 +1887,10 @@ function viewLogDetail(log: any) {
           （见 server/service/subscription.go，依赖规则此时也只会打一条「本次检出完整仓库」的提示），
           也就是这类订阅本来就是整仓落盘。不写清楚的话，按第一句理解的用户开了开关后
           会发现磁盘占用和拉取行为纹丝不动，只会怀疑功能没生效。
+          #129 起依赖规则里出现正则片段、或没填「指定子目录」而白名单里出现正则片段时（子目录优先于白名单，
+          见白名单上方那段注释），后端同样放弃 sparse 限制、改为整仓检出（git 的检出规则表达不了正则），
+          但仍下发「*」加黑名单普通片段的排除规则、那些文件不落盘；打开开关则直接返回空规则、它们也会落盘，
+          所以说明文字写明这点差别，别写成「开不开没有区别」；填了子目录时白名单的正则片段不影响检出范围，开关照常有区别。
         -->
         <el-form-item
           v-if="editForm.type === 'git-repo'"
@@ -1776,7 +1911,7 @@ function viewLogDetail(log: any) {
               line-height: 1.4;
             "
           >
-            默认关闭，只把命中「指定子目录 / 白名单 / 依赖规则」的文件检出到本地；如果「指定子目录」「白名单」「黑名单」<strong>都留空</strong>，这条订阅本来就不产生任何检出过滤规则、拉的就是整个仓库，此时开不开这个开关都没有区别。开启后会<strong>拉取整个仓库</strong>——源码、资源、文档全都落盘，<strong>体积可能很大</strong>，仅在脚本运行时需要读取仓库里脚本之外的其它文件（如
+            默认关闭，只把命中「指定子目录 / 白名单 / 依赖规则」的文件检出到本地；如果「指定子目录」「白名单」「黑名单」<strong>都留空</strong>，这条订阅本来就不产生任何检出过滤规则、拉的就是整个仓库，此时开不开这个开关都没有区别；依赖规则里有正则片段、或没填「指定子目录」而白名单里有正则片段时，默认就会检出完整仓库（检出规则表达不了正则），但黑名单普通片段命中的文件仍不落盘，打开开关后它们也会落盘。开启后会<strong>拉取整个仓库</strong>——源码、资源、文档全都落盘，<strong>体积可能很大</strong>，仅在脚本运行时需要读取仓库里脚本之外的其它文件（如
             src 源码、配置、模板）时才开启。开启<strong>不改变建任务的规则</strong>：仍然只有命中「指定子目录 +
             白名单」的脚本会被建成定时任务，落盘的其它文件只是给脚本自己读。
           </div>
@@ -2316,9 +2451,51 @@ function viewLogDetail(log: any) {
   // 遇到超长订阅名时让标签整块掉到第二行，而不是把订阅名挤成一列一个字。
   flex-wrap: wrap;
 }
+// 圆点 + 名称这一组（#133）。flex: 0 1 auto 而不是 1 1 auto：不抢剩余空间，
+// 常规长度的名称后面标签仍紧贴着名字（与改动前逐像素一致）；名称超长时这一组的假想宽度
+//（max-content）一行放不下 ⇒ 被外层 flex-wrap 单独放在第一行、标签掉到第二行，
+// 再按 flex-shrink 收到行宽，靠 min-width:0 让里面的 .sub-name-text 出省略号。
+// 外层 .sub-name-cell 保持 wrap 不动（design-system §4.1：名称行别改 nowrap，否则标签会把名字挤成 0 宽）。
+.sub-name-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
 .sub-name-text {
+  min-width: 0;
   font-weight: 500;
   color: var(--el-text-color-primary);
+  // 单行省略写在基态，不分宽窄桌面（design-system §5「长文本列的单行省略只写在 .is-compact 里」那条坑）。
+  // EP 的 .el-table .cell 是 white-space:normal + overflow-wrap:break-word，nowrap 会把它压住；
+  // word-break: normal 是防御性的：项目里长文本常顺手写 break-all，它会让 text-overflow 失效（§4.1）。
+  // 全称由模板上的 :title 兜底。
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: normal;
+}
+
+// 订阅启用状态灯（#133）：名称前的 8×8 圆点，绿 = 已启用 / 红 = 已禁用，桌面名称格与移动卡标题同用，
+// 与环境变量页 .env-status-dot 同一套东西。刻意在本页 scoped 复制一份、不抽公共组件：
+// 两处样式都很短，而 global.scss 与公共组件目录本轮是别组并行改动的热点文件。
+//
+// 🔴 固定 50%：design-system §1「状态圆点」白名单（收尾时在那张表里登记 .sub-status-dot），不是漏改。
+//    8×8 的盒子吃 control(6px) 也会被圆角等比收缩夹回 4px = 正圆，写令牌只是绕远路。
+// 取色只用 --el-color-success / --el-color-danger 语义令牌，暗色自动适配，不要写死十六进制。
+// 红绿是最典型的色觉障碍撞色对，而且同一行右边还有「状态」列的拉取结果（正常绿 / 失败红），
+// 只靠颜色分不清「哪个红是禁用、哪个红是失败」—— 模板上 title（悬停）与 role="img" + aria-label（读屏）
+// 必须同时挂；role 不能省：光有 aria-label 的裸 <span> 不是可访问对象，读屏一般不会念出来。
+.sub-status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-danger);
+}
+.sub-status-dot.is-enabled {
+  background: var(--el-color-success);
 }
 .url-text {
   font-family: var(--dd-font-mono);
@@ -2352,9 +2529,11 @@ function viewLogDetail(log: any) {
     margin-left: 0;
   }
 
-  :deep(.el-button) {
-    padding: 4px 8px;
-  }
+  // 原来这里还有一条 `:deep(.el-button) { padding: 4px 8px }` 的收窄覆写，已删（#133）：
+  // 操作列宽已按 172 与 EP small 档默认内边距 5px 11px 重算（见模板里操作列的注释），
+  // 环境变量页、定时任务页也早已去掉同一条；留着它按钮会比那两页窄一截，宽度账也对不上。
+  // 同样用 .action-btns 的 SSH 密钥弹窗（两颗 small text 按钮、列宽 150）按默认内边距算是
+  // 48 + 4 + 48 = 100 ≤ 150 − 24 = 126，不受影响。
 }
 
 // 分页条：与定时任务页/执行日志页一致的间距收敛
@@ -2406,8 +2585,64 @@ function viewLogDetail(log: any) {
   flex-wrap: wrap;
   flex-shrink: 0;
 }
+// 移动卡片操作区（#133）：按钮从 4 颗变成 5 颗（拉取 / 禁用·启用 / 日志 / 编辑 / 删除），
+// 一行三个排成 3 + 2（gap 8px ⇒ 基准宽 33.33% − 6px 差不多正好三列），第二行两颗靠 flex-grow 各摊一半，
+// 与环境变量页 .env-card__actions 同一写法。原来的 calc(50% − 4px) 会排成 2 + 2 + 1，
+// 第 5 颗「删除」孤零零占满一整行，视觉最重的按钮反而最显眼。
+// global.scss ≤768px 那组 :has 网格规则只覆盖 1~3 颗，5 颗时走 flex 基态，排布由这条决定。
+// 极窄机型（320px）核算：卡片内容宽约 296px（同环境变量页），三列每列约 93px，
+// 最长文案 2 字 = 2×12 + 22（EP small 内边距）+ 2（边框）= 48px，放得下。
 .subscription-card__actions > * {
-  flex: 1 1 calc(50% - 4px);
+  flex: 1 1 calc(33.33% - 6px);
+}
+
+// 移动卡标题前的圆点 + 标题（#133）。标题允许折行（global 的 .dd-mobile-card__title 带 word-break），
+// 所以这一组顶对齐，再给圆点一个 margin-top 把它钉在【首行】中线上：
+// 标题 15px × line-height 1.4 = 21px 一行，(21 − 8) / 2 = 6.5px。
+// 这两个数取自 global.scss 的 .dd-mobile-card__title，改那边的字号 / 行高要回来同步。
+// min-width:0 让标题能在 .dd-mobile-card__selection（inline-flex）里收窄折行，而不是撑破卡片。
+.subscription-card__name {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+
+  .dd-mobile-card__title {
+    min-width: 0;
+  }
+
+  .sub-status-dot {
+    margin-top: calc((15px * 1.4 - 8px) / 2);
+  }
+}
+
+/* ---- 禁用行 / 禁用卡弱化（#133，照环境变量页 .env-row-disabled / .env-card--disabled） ---- */
+// 弱化靠「浅底 + 名称降一档语义令牌」，不是变淡（整行 opacity 在明色下「看得出调暗」与「读得清」
+// 不能同时成立，对比度实算见 envs/index.vue 的 Disabled Row 注释）：
+// 名称 --el-text-color-primary → --el-text-color-regular，仍过 WCAG AA。
+// 圆点、操作列的「启用」按钮、类型 / 覆盖标签与状态列一律不动：前两者是启用态的载体，
+// 后两者与启用态正交（而且「状态」列本身就是拉取结果，弱化它会误导成「拉取出了问题」）。
+// 🔴 绝不要给 tr / td 写 opacity：操作列是 fixed="right"，EP 的固定列是 sticky + z-index，
+//    opacity < 1 会造出新的层叠上下文、打乱固定列层级。
+// 🔴 选择器里的 .el-table 不能删：要靠它压过 EP 固定列的
+//    `.el-table__body-wrapper tr td.el-table-fixed-column--right { background: inherit }`(0,2,2)，
+//    否则禁用行最右边的操作格会退回普通底色，整行浅底缺一块。
+// 🔴 不要用 --el-fill-color-light：那是 EP 的行 hover 底色，禁用行会看起来像被永久悬停。
+//    悬停禁用行时 EP 的 hover 底会盖过这条，是期望行为，别去 !important 强压。
+:deep(.el-table .sub-row-disabled > td) {
+  background: var(--el-fill-color-lighter);
+}
+
+// 桌面名称与移动卡标题共用同一档降级
+:deep(.sub-row-disabled) .sub-name-text,
+.subscription-card--disabled .dd-mobile-card__title {
+  color: var(--el-text-color-regular);
+}
+
+// 禁用移动卡：global.scss 的 `.dd-mobile-card { background }` 是 (0,1,0)（暗色下没有另写），
+// 这条 scoped 之后是 (0,2,0)，压得过。
+.subscription-card--disabled {
+  background: var(--el-fill-color-lighter);
 }
 
 .pull-log-content {
@@ -2463,17 +2698,19 @@ function viewLogDetail(log: any) {
   background: var(--el-text-color-placeholder);
 }
 
+// 三档色标只引用 EP 语义色令牌（与名称前的 .sub-status-dot、上方 .pull-running 同源），
+// 暗色由 EP 的 dark css-vars 接管，不写十六进制（design-system 硬规则 1）。
 .pull-status.is-running .pull-status__mark,
 .pull-status.is-aborted .pull-status__mark {
-  background: #f59e0b;
+  background: var(--el-color-warning);
 }
 
 .pull-status.is-success .pull-status__mark {
-  background: #10b981;
+  background: var(--el-color-success);
 }
 
 .pull-status.is-failed .pull-status__mark {
-  background: #ef4444;
+  background: var(--el-color-danger);
 }
 
 .settings-hint {
