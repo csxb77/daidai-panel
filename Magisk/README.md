@@ -12,12 +12,12 @@
 
 | | `daidai-panel-magisk-vX.Y.Z.zip` | `daidai-panel-magisk-debian-vX.Y.Z.zip` |
 |---|---|---|
-| 容器基础系统 | Alpine 3.18（musl） | Debian 12 bookworm（glibc） |
-| rootfs 下载 | NJU 镜像站，约 3 MB | GitHub Release 资产，约 27 MB |
+| 容器基础系统 | Alpine 3.23（musl） | Debian 12 bookworm（glibc） |
+| rootfs 下载 | NJU 镜像站，约 4 MB | GitHub Release 资产，约 27 MB |
 | 包管理器 | `apk` | `apt-get` |
-| 装完占用 | 约 300–500 MB | **约 800 MB**（实测） |
+| 装完占用 | 约 300–500 MB | **约 800 MB**（Node 仍由 apt 安装时的实测值，改装官方 Node 后未重新实测） |
 | 磁盘要求 | ≥ 1.5 GB | ≥ 2.5 GB |
-| Python / Node | 3.11 / 18.x | 3.11 / 18.x（**持平，不是升级**） |
+| Python / Node | 3.12 / 24.x | 3.11 / 24.x |
 | 跑 glibc 预编译产物 | ❌ | ✅ |
 
 **默认选 Alpine**：体积小、装得快、下载量小，绝大多数定时任务脚本够用。
@@ -73,8 +73,8 @@
   - APatch
 - Android 6.0 (API 23) 及以上。**建议 Android 8.0+**；Android 6.x / 7.x 属于「可以尝试」而不是「保证可用」——少数机型受 SELinux 策略 / 内核挂载限制起不了容器。安装过程中会**实际探测一次容器能否启动**，起不来会当场中止并说明原因，不会让你装完重启后才发现用不了
 - CPU 架构：**仅 `arm64`（aarch64）**。x86_64 设备会在安装时被明确拦下——模块自带的容器运行时 `rurima` 只有 aarch64 构建，在 x86_64 上无法执行
-- 剩余可用空间：**Alpine 版 ≥ 1.5 GB**（rootfs ~300 MB + 依赖 + 数据 / 日志）；**Debian 版 ≥ 2.5 GB**（rootfs 解压 ~103 MB，装完 python / node / npm / git / 构建工具并清掉 apt 缓存后，根文件系统实测约 800 MB）
-- **安装阶段需要联网**（下载 rootfs + 联网装 python3 / nodejs / git 等；Alpine 侧累计约 50 MB，Debian 侧约 300 MB）
+- 剩余可用空间：**Alpine 版 ≥ 1.5 GB**（rootfs ~300 MB + 依赖 + 数据 / 日志）；**Debian 版 ≥ 2.5 GB**（rootfs 解压 ~103 MB，装完 python / node / npm / git / 构建工具并清掉 apt 缓存后，根文件系统实测约 800 MB —— 这是 Node 仍由 apt 安装时测的，改装官方 Node 二进制后没有重新实测）
+- **安装阶段需要联网**（下载 rootfs + 联网装 python3 / nodejs / git 等；Alpine 侧累计约 150 MB（按 Alpine 3.23 aarch64 的 APKINDEX 统计的包体积，没有在真机上实装量过；大头是 gcc / g++ 编译工具链与 Node.js），Debian 侧 apt 约 300 MB 以内（这个数字是 apt 还在装 Node 时的量），另外还要从 npmmirror / nodejs.org 下载一个 Node.js 官方包）
 
 ## 安装
 
@@ -129,6 +129,7 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 1. 想用某个**由模块脚本实现**的新能力。例如 v3.0.4 的「停止面板服务」：它靠新版 `service.sh` / `action.sh` 实现，在线升级上来的用户面板里那个按钮会显示为禁用，并提示当前外壳版本。
 2. 某个版本的新面板**无法**在旧外壳上运行。这种情况面板会在检查更新时直接拒绝并提示重刷 ZIP，不会硬装上去（判据是后端的 `requiredMagiskShellVersion`，只有真正不兼容时才会提高）。
 3. 从 v3.0.2 或更早版本升级——在线升级能力本身要先随 v3.0.3 装上，所以这一跳必须刷 ZIP。
+4. 想拿到**容器系统包**的升级。rootfs 和 `apk` / `apt-get` 装的包（包括 Node.js、Python 本身）只在刷 ZIP 时安装，在线升级一概不碰，也不会有任何提示。例如容器 Node.js 从 18 升到 24（Alpine 版随之换成 Alpine 3.23、Python 3.11 → 3.12；Debian 版改装 nodejs.org 官方 Node 24）：在线升级上来的用户容器里仍是 Node 18，要重刷一次对应版本的 ZIP 才能拿到。重刷后首次开机，Alpine 版原来记在 Python 3.11 下的依赖会自动改到 3.12 并在后台重装，Node 依赖会自动 `npm rebuild` 一次原生扩展（失败的包到「依赖管理」里重装即可）。
 
 > 说明：需要管理器版本支持 `updateJson`（Magisk v24.0+、KernelSU、APatch 新版均支持）。如果你自己 fork 了本项目发版，请把 `module.prop` 里的 `linzixuanzz/daidai-panel` 替换成自己的仓库路径即可；`customize.sh` 里 Debian rootfs 的下载地址同样写着这个仓库路径，也要一起改。
 
@@ -145,7 +146,7 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 
 ## 脚本运行时
 
-`customize.sh` 会在安装阶段进容器执行一遍包安装，两个 flavor 装的是同一套能力，只是包名不同：
+`customize.sh` 会在安装阶段进容器执行一遍包安装，两个 flavor 装的是同一套能力，只是包名不同（全部联网安装，ZIP 里不带任何离线包）：
 
 | 用途 | Alpine (`apk add`) | Debian (`apt-get install`) |
 |------|--------------------|----------------------------|
@@ -153,12 +154,23 @@ updateJson=https://github.com/linzixuanzz/daidai-panel/releases/latest/download/
 | 基础工具 | `coreutils` | `coreutils` |
 | 编译工具链 | `build-base` `libtool` | `build-essential` `libtool` |
 | Python | `python3` `python3-dev` `py3-pip` | `python3` `python3-dev` `python3-pip` **`python3-venv`** |
-| Node.js | `nodejs` `npm` | `nodejs` `npm` |
+| Node.js | `nodejs` `npm`（Alpine 3.23 仓库，24.x） | **不走 apt**：nodejs.org 官方 v24 二进制（见下文） |
 | 网络工具 | `curl` `wget` `git` `jq` `netcat-openbsd` | `curl` `wget` `git` `jq` `netcat-openbsd` |
 | SSH / TLS | `openssh` `openssl` | `openssh-client` `openssh-server` `openssl` **`ca-certificates`** |
-| 用户 / 系统 | `shadow` `tzdata` `procps` + 离线 `linux-pam` | `passwd` `tzdata` `procps`（PAM 由 openssh-server 带入） |
+| 用户 / 系统 | `shadow` `tzdata` `procps` | `passwd` `tzdata` `procps`（PAM 由 openssh-server 带入） |
 
 加粗的两个是 Debian 独有的补充项：bookworm 把 `ensurepip` 拆到了 `python3-venv`（没有它 `python3 -m venv` 直接失败，而面板每次开机都要建 venv）；`debian:bookworm-slim` 不带根证书，`ca-certificates` 不装的话 `pip` / `npm` / `git` 走 HTTPS 会全线报错。
+
+**Node.js 的来源两个 flavor 不一样**：
+
+| | Alpine | Debian |
+|---|---|---|
+| 来源 | `apk add nodejs npm`（Alpine 3.23 仓库） | nodejs.org 官方二进制 `node-v24.21.0-linux-arm64.tar.gz` |
+| 下载 | 与其他 apk 包一起走 `mirrors.nju.edu.cn` | 先走 npmmirror（`registry.npmmirror.com`，nodejs.org 的同步镜像），失败再回退 nodejs.org |
+| 校验 | apk 自带签名校验 | 按写死在 `customize.sh` 里的 SHA256 逐个源校验，不通过就换下一个源 |
+| 安装位置 | `/usr/bin/node` | 解压到 `/usr/local`（`/usr/local/bin/node`，`npm` 随官方包自带） |
+
+Debian 不用 apt 装 Node，是因为 bookworm 仓库里只有 Node 18，已于 2025-04-30 停止维护。两个源都没装上时，安装会在运行时验证那一步中止，并单独提示「Node.js 官方二进制没装上」，不会被误报成 apt 镜像源不可用。
 
 npm 默认镜像源两边都已切到 `npmmirror.com`；apk / apt 源都指向 `mirrors.nju.edu.cn`。
 
@@ -300,8 +312,8 @@ EXTRA_CORS_ORIGINS="https://panel.example.com,https://xx.trycloudflare.com"
 
 > **模块每次开机会按 `ports.conf` 重写容器里的 SSH 配置**（自 v3.0.7 起）：`sshd_config` 中的
 > `Port` / `PermitRootLogin` / `PasswordAuthentication` 三项会被删净后重新写入，
-> Debian 容器还会同步写一份 `/etc/ssh/sshd_config.d/00-daidai.conf`
-> （它的 `sshd_config` 顶部有未注释的 `Include`，而 OpenSSH 是「**第一次取到的值胜出**」，
+> Debian 容器与 Alpine 3.23 容器还会同步写一份 `/etc/ssh/sshd_config.d/00-daidai.conf`
+> （两者默认的 `sshd_config` 顶部都有未注释的 `Include`，而 OpenSSH 是「**第一次取到的值胜出**」，
 > 不写这份 drop-in 的话主文件里的配置随时可能被静默覆盖）。
 >
 > 这与面板的 `config.yaml` 是同一套逻辑：**由 `ports.conf` 单向决定，不保留手改**。
@@ -414,7 +426,7 @@ bash Magisk/build.sh 3.2.9 arm64 debian
 | `alpine`（默认，不传第 3 个参数） | `dist/daidai-panel-magisk-v<版本>.zip` |
 | `debian` | `dist/daidai-panel-magisk-debian-v<版本>.zip` |
 
-`module.prop` 里的 `version` / `versionCode` 会自动按参数同步。两个 ZIP 唯一的结构差异是：Debian 包里的 `flavor` 文件内容是 `debian`，且**不含** `apk/` 目录（那两个离线包是 aarch64 Alpine 专用）。
+`module.prop` 里的 `version` / `versionCode` 会自动按参数同步。两个 ZIP 唯一的结构差异是：Debian 包里的 `flavor` 文件内容是 `debian`，`module.prop` 的 `updateJson` 指向 `update-debian.json`。
 
 > **本地打 Debian 包能直接装**：`customize.sh` 里的 rootfs 地址是
 > `releases/latest/download/daidai-debian-rootfs-arm64.tar.gz` 这个固定跳转，
@@ -423,7 +435,7 @@ bash Magisk/build.sh 3.2.9 arm64 debian
 前置依赖：
 
 - **Go 1.22+**（静态编译 `CGO_ENABLED=0`）
-- **Node.js 20+**（首次构建自动跑 `npm ci && npm run build`，已有 `web/dist` 会跳过）
+- **Node.js 24**（首次构建自动跑 `npm ci && npm run build`，已有 `web/dist` 会跳过）
 
 > ⚠️ **跑过 `npm run build:demo` 之后别直接打包**：在线演示 Demo 与发布版写的是同一个
 > `web/dist`，Demo 产物里有整套浏览器内 mock 层，还带 `/daidai-panel/` 的 base 前缀。
@@ -445,15 +457,15 @@ bash Magisk/build.sh 3.2.9 arm64 debian
 
 | | rootfs 下载 | 装依赖 |
 |---|---|---|
-| Alpine | ~3 MB，NJU 镜像站 | 约 50 MB，`apk` 走 `mirrors.nju.edu.cn` |
-| Debian | ~27 MB，GitHub Release | 约 300 MB，`apt-get` 走 `mirrors.nju.edu.cn` |
+| Alpine | ~4 MB，NJU 镜像站 | 约 150 MB，`apk` 走 `mirrors.nju.edu.cn` |
+| Debian | ~27 MB，GitHub Release | `apt-get` 约 300 MB 以内，走 `mirrors.nju.edu.cn`（不通时依次回退 TUNA / 阿里云 / Debian 官方）；另有 Node.js 官方包走 npmmirror，不通时回退 nodejs.org |
 
 公司 / 学校网络被墙的话挂 VPN 重装即可。Debian 版还多一层：rootfs 放在 GitHub Release 上，国内直连 GitHub 不稳定的话这一步更容易失败。
 
 两步都有失败保护，但机制不同：
 
 - **下载 / 解压 rootfs**：失败直接 abort。
-- **装依赖**：`apk add` / `apt-get install` 都可能「部分成功」，光看退出码不可靠，所以装完后会再进一次容器逐个验证 `python3` / `node` / `npm` / `git` / `bash` 能否执行并报出版本。任一缺失就 abort，并列出**具体缺了哪些**。这条验证对两个 flavor 用的是同一份清单。
+- **装依赖**：`apk add` / `apt-get install` 都可能「部分成功」，光看退出码不可靠，所以装完后会再进一次容器逐个验证 `python3` / `node` / `npm` / `git` / `bash` 能否执行并报出版本，并且校验 `node` 的**大版本必须是 24**（能执行但版本不对同样算失败，会打出实际版本号）。任一缺失或版本不符就 abort，并列出**具体缺了哪些**。这条验证对两个 flavor 用的是同一份清单。
 
 两种情况都不会损坏已有数据：升级安装时用户数据在清 rootfs 之前就已经备份到 `/data/adb/daidai-panel/update-data-backup/`，abort 后备份原样保留，下次安装会自动恢复。
 

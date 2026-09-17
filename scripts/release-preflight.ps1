@@ -193,11 +193,12 @@ $expectedDockerMatrix = @(
     [pscustomobject]@{ Job = "alpine"; Tag = "latest-3.10";  LegacyTag = "latest3.10"; Mode = "single"; Python = "3.10"; Suffix = "-3.10";            LegacySuffix = "";             FullTools = "false"; Platforms = "linux/amd64,linux/arm64" };
     [pscustomobject]@{ Job = "alpine"; Tag = "latest-3.11";  LegacyTag = "latest3.11"; Mode = "single"; Python = "3.11"; Suffix = "-3.11";            LegacySuffix = "";             FullTools = "false"; Platforms = "linux/amd64,linux/arm64" };
     [pscustomobject]@{ Job = "alpine"; Tag = "latest-all";   LegacyTag = "latestall";  Mode = "all";    Python = "3.12"; Suffix = "-all";             LegacySuffix = "";             FullTools = "false"; Platforms = "linux/amd64,linux/arm64" };
-    [pscustomobject]@{ Job = "debian"; Tag = "debian";       LegacyTag = "";           Mode = "single"; Python = "3.12"; Suffix = "-debian";          LegacySuffix = "";             FullTools = "false"; Platforms = "linux/amd64,linux/arm64,linux/arm/v7" };
-    [pscustomobject]@{ Job = "debian"; Tag = "debian-full";  LegacyTag = "";           Mode = "single"; Python = "3.12"; Suffix = "-debian-full";     LegacySuffix = "";             FullTools = "true";  Platforms = "linux/amd64,linux/arm64,linux/arm/v7" };
-    [pscustomobject]@{ Job = "debian"; Tag = "debian-3.10";  LegacyTag = "debian3.10"; Mode = "single"; Python = "3.10"; Suffix = "-debian-3.10";     LegacySuffix = "-debian3.10";  FullTools = "false"; Platforms = "linux/amd64,linux/arm64,linux/arm/v7" };
-    [pscustomobject]@{ Job = "debian"; Tag = "debian-3.11";  LegacyTag = "debian3.11"; Mode = "single"; Python = "3.11"; Suffix = "-debian-3.11";     LegacySuffix = "-debian3.11";  FullTools = "false"; Platforms = "linux/amd64,linux/arm64,linux/arm/v7" };
-    [pscustomobject]@{ Job = "debian"; Tag = "debian-all";   LegacyTag = "debianall";  Mode = "all";    Python = "3.12"; Suffix = "-debian-all";      LegacySuffix = "-debianall";   FullTools = "false"; Platforms = "linux/amd64,linux/arm64,linux/arm/v7" }
+    # Debian 只发 amd64 / arm64：node:24 基础镜像没有 linux/386 与 linux/arm/v7 manifest，写进去构建必失败。
+    [pscustomobject]@{ Job = "debian"; Tag = "debian";       LegacyTag = "";           Mode = "single"; Python = "3.12"; Suffix = "-debian";          LegacySuffix = "";             FullTools = "false"; Platforms = "linux/amd64,linux/arm64" };
+    [pscustomobject]@{ Job = "debian"; Tag = "debian-full";  LegacyTag = "";           Mode = "single"; Python = "3.12"; Suffix = "-debian-full";     LegacySuffix = "";             FullTools = "true";  Platforms = "linux/amd64,linux/arm64" };
+    [pscustomobject]@{ Job = "debian"; Tag = "debian-3.10";  LegacyTag = "debian3.10"; Mode = "single"; Python = "3.10"; Suffix = "-debian-3.10";     LegacySuffix = "-debian3.10";  FullTools = "false"; Platforms = "linux/amd64,linux/arm64" };
+    [pscustomobject]@{ Job = "debian"; Tag = "debian-3.11";  LegacyTag = "debian3.11"; Mode = "single"; Python = "3.11"; Suffix = "-debian-3.11";     LegacySuffix = "-debian3.11";  FullTools = "false"; Platforms = "linux/amd64,linux/arm64" };
+    [pscustomobject]@{ Job = "debian"; Tag = "debian-all";   LegacyTag = "debianall";  Mode = "all";    Python = "3.12"; Suffix = "-debian-all";      LegacySuffix = "-debianall";   FullTools = "false"; Platforms = "linux/amd64,linux/arm64" }
 )
 
 $alpineJobText = $alpineJobMatch.Groups["body"].Value

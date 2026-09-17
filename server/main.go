@@ -169,6 +169,9 @@ func main() {
 	}
 
 	verifyInstalledDeps()
+	// Node 换了大版本（刷新版 Magisk 模块、换 Docker 镜像）后 deps/nodejs 里原生扩展的 ABI 会对不上。
+	// 排在启动校验之后：它排队的 Node 依赖重装与这里的 npm rebuild 共用同一把包操作锁，后台串行、不阻塞启动。
+	service.RebuildNodeDependenciesIfABIChanged()
 	handler.FinalizePendingAutoUpdateOnStartup()
 	if err := service.EnsureBuiltinNotifyHelpers(cfg.Data.ScriptsDir); err != nil {
 		log.Printf("prepare builtin notify helpers failed: %v", err)

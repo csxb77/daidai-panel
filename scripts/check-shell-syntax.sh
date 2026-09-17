@@ -115,13 +115,21 @@ extract_heredoc() {  # $1=清洗过的源文件 $2=起始标记 $3=输出路径
 }
 
 HEREDOC_COUNT=0
-check_heredoc() {  # $1=源文件 $2=标记 $3=最少行数
-  local src clean out
+# 第 4 个参数声明这段脚本在容器里由谁解释，决定跑哪几道检查：
+#   posix —— 由 busybox ash 解释（Alpine），或两个 flavor 都会跑到（追加进两边装依赖脚本的公共段、
+#            开机脚本正文），bash / dash / ash 三道都要过；
+#   bash  —— 只在 Debian 容器里由 /bin/bash 解释（customize.sh 给 debian flavor 选的 $CTR_SHELL），
+#            只过 bash -n。这种段落里写 [[ ]]、数组、${var//a/b} 之类 bash 专有语法是合法的，
+#            再让 dash / ash 去解析只会误报，逼着人把正确的脚本改坏。
+# bash 模式会少跑两道检查，所以它必须和段落自己的 shebang（#!/bin/bash）对得上：
+# 对不上说明这段的解释器已经变了，门禁却还按旧假设在跳过检查。
+check_heredoc() {  # $1=源文件 $2=标记 $3=最少行数 $4=posix|bash
+  local clean out mode="$4"
   clean="$TMP/$(printf '%s' "$1" | tr '/' '_')"
   out="$TMP/heredoc_$2.sh"
   extract_heredoc "$clean" "$2" "$out"
   local n; n=$(wc -l < "$out")
-  echo "$1 :: $2（$n 行）"
+  echo "$1 :: $2（$n 行，$mode）"
   if [ "$n" -lt "$3" ]; then
     echo "  抽到 $n 行，少于预期的 $3 行 —— 抽取规则失配，本检查已空转"
     FAILED=1
@@ -129,6 +137,26 @@ check_heredoc() {  # $1=源文件 $2=标记 $3=最少行数
   fi
   HEREDOC_COUNT=$((HEREDOC_COUNT + 1))
   check_one "$out" bash "bash"
+  case "$mode" in
+    posix) ;;
+    bash)
+      local shebang; shebang=$(head -n1 "$out")
+      if [ "$shebang" != "#!/bin/bash" ]; then
+        printf '  %-8s FAIL\n' "shebang"
+        echo "      声明为 bash 专用段，但首行是「$shebang」而不是 #!/bin/bash —— 解释器假设已失效，"
+        echo "      请确认它在容器里到底由谁解释，再改这里的声明（posix 段要多过 dash / ash 两道）"
+        FAILED=1
+        return 1
+      fi
+      echo "  dash/ash SKIP（#!/bin/bash 段，只由 Debian 容器的 bash 解释）"
+      return 0
+      ;;
+    *)
+      echo "  !! check_heredoc 的第 4 个参数只能是 posix 或 bash，实际是「$mode」"
+      FAILED=1
+      return 1
+      ;;
+  esac
   if command -v dash >/dev/null 2>&1; then
     check_one "$out" dash "dash"
   fi
@@ -145,9 +173,13 @@ check_heredoc() {  # $1=源文件 $2=标记 $3=最少行数
   fi
 }
 
-check_heredoc Magisk/service.sh   CONTAINER_EOF        100
-check_heredoc Magisk/customize.sh DEPS_COMMON_EOF       30
-check_heredoc Magisk/customize.sh DEPS_PKG_ALPINE_EOF    5
+check_heredoc Magisk/service.sh   CONTAINER_EOF        100 posix
+check_heredoc Magisk/customize.sh DEPS_COMMON_EOF       30 posix
+check_heredoc Magisk/customize.sh DEPS_PKG_ALPINE_EOF    5 posix
+# Debian 装依赖脚本（apt 加固 / 镜像源回退 / 批量装包 / Node 官方二进制下载）约 195 行。
+# 下限取 120：抽取规则一旦失配（起始标记改写成 <<'X'、改名）抽到的是 0 行，远低于它；
+# 删几段注释、挪一两个步骤又不至于误报。
+check_heredoc Magisk/customize.sh DEPS_PKG_DEBIAN_EOF  120 bash
 
 echo "共检查 $HEREDOC_COUNT 段容器脚本"
 

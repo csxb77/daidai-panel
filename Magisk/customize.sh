@@ -5,9 +5,10 @@
 # 方案：借鉴 v2.0.5 的容器方案
 #   1. 释放 rurima (静态 arm64) 到 /system/bin （由 Magisk 魔挂）
 #   2. 按 flavor 下载 rootfs 解压到 rootfs 目录
-#        alpine —— Alpine 3.18 minirootfs（NJU 镜像站，musl）
+#        alpine —— Alpine 3.23 minirootfs（NJU 镜像站，musl）
 #        debian —— CI 自建的 Debian bookworm 精简 rootfs（Release 资产，glibc）
 #   3. 通过 rurima ruri 进入容器，用 apk / apt-get 安装 python3 / nodejs / npm / git / curl / bash 等
+#      （Debian 的 Node.js 不走 apt：bookworm 仓库只有 18.x，改装 nodejs.org 官方 v24 二进制）
 #   4. 面板后端 daidai-server (CGO_ENABLED=0 静态 Go 二进制) 放进容器 /usr/local/bin/
 #   5. 运行时由 service.sh 通过 rurima ruri 进入容器启动 daidai-server，
 #      单端口 5700 由 daidai-server 直接托管 API + 前端静态文件 (web_dir)
@@ -68,20 +69,28 @@ if [ "$FLAVOR" = "debian" ]; then
   # 装依赖失败时的报错文案要说清「从哪儿下」：Debian 侧现在有一串镜像源回退，
   # 只写 NJU 会让用户误以为换个源就能好，其实四个都试过了。
   CTR_PKG_SOURCE="镜像站（NJU / TUNA / 阿里云 / Debian 官方，按序自动回退）"
-  CTR_DEPS_SIZE="约 300MB"
+  # 300MB 是 apt 还在装 nodejs / npm 时的量。Node 改走官方二进制后 apt 这一侧只会更少，
+  # 但没有重新实测过，所以只写成上限，不编一个新数字。
+  CTR_DEPS_SIZE="约 300MB 以内"
   CTR_BASHRC="/etc/bash.bashrc"
   # rootfs 与面板版本没有任何耦合，所以用 releases/latest/download/ 这个固定跳转地址，
   # 不拼版本号：URL 可硬编码，本地构建一个尚未发版的版本也照样装得上。
   ROOTFS_URL="https://github.com/linzixuanzz/daidai-panel/releases/latest/download/daidai-debian-rootfs-arm64.tar.gz"
 else
   CTR_SHELL=/bin/ash
-  CTR_NAME="Alpine 3.18"
+  CTR_NAME="Alpine 3.23"
   CTR_PKG_TOOL="apk"
   # Alpine 侧仍然只有 NJU 一个源，文案与改动前逐字一致
   CTR_PKG_SOURCE="mirrors.nju.edu.cn"
-  CTR_DEPS_SIZE="约 50MB"
+  # 下载量是按 Alpine 3.23 aarch64 的 APKINDEX 对装依赖那条 apk add 清单统计的包体积（2026-09-17），
+  # 没有在真机上实装量过：扣掉 minirootfs 已带的包，需新下载约 145 MiB（152 MB），大头是 gcc 约 52 MiB、
+  # nodejs 24 约 18 MiB、g++ 与 python3-dev 各约 16 MiB。原来的「约 50MB」在 3.18 上就已经偏小三倍。
+  # 换 rootfs 版本或改 apk 清单后要按索引重新统计，README 里的两处一起改（README 也要写明是按索引统计的）。
+  CTR_DEPS_SIZE="约 150MB"
   CTR_BASHRC="/etc/bash/bashrc"
-  ROOTFS_URL="https://mirrors.nju.edu.cn/alpine/v3.18/releases/aarch64/alpine-minirootfs-3.18.9-aarch64.tar.gz"
+  # 选 3.23 是因为它是目前唯一一个 nodejs 为 24.x、python3 又还在面板支持范围
+  # （3.10–3.12）内的 Alpine 版本：3.22 的 nodejs 还是 22，3.24 的 python3 已经是 3.14。
+  ROOTFS_URL="https://mirrors.nju.edu.cn/alpine/v3.23/releases/aarch64/alpine-minirootfs-3.23.5-aarch64.tar.gz"
 fi
 
 # 安装中途 abort 时告诉用户：已备份的数据还在，下次安装会自动恢复。
@@ -120,7 +129,8 @@ get_current_version() {
 
 # ---- 架构检查 ------------------------------------------------------------
 # 只放行 arm64。容器运行时 system/bin/rurima 是 AArch64 静态二进制
-# （ELF64 EXEC, e_machine=0xb7），随包的离线 apk 也都是 arch=aarch64。
+# （ELF64 EXEC, e_machine=0xb7），两个 flavor 的 rootfs、Debian 版下载的官方 Node
+# 也都只取 aarch64 / linux-arm64 构建。
 # 之前这里同时放行 x64，结果是 x86_64 设备能通过检查、能选中 amd64 后端，
 # 然后在 exec rurima 时失败 —— 表现为"装完了但用不了"。宁可明确说不支持。
 if [ "$ARCH" = "x64" ] || [ "$ARCH" = "x86_64" ]; then
@@ -419,7 +429,7 @@ if ! busybox wget --no-check-certificate -O $TMPDIR/rootfs.tar.gz "$ROOTFS_URL";
     ui_print "!"
     ui_print "! Debian 版的 rootfs（约 27MB）放在 GitHub Release 上，且要跟一次 302"
     ui_print "! 跳转，国内直连经常不稳定。可以挂代理 / 换网络后重试，"
-    ui_print "! 或者改装 Alpine 版（rootfs 走国内镜像站，只有 3MB）。"
+    ui_print "! 或者改装 Alpine 版（rootfs 走国内镜像站，只有 4MB 左右）。"
   fi
   warn_backup_preserved
   abort "! 安装已中止：rootfs 下载失败，请检查网络后重试"
@@ -433,13 +443,6 @@ if ! tar -xf $TMPDIR/rootfs.tar.gz -C $rootfs; then
   abort "! 安装已中止：rootfs 解压失败"
 fi
 
-# 离线 apk（linux-pam / shadow）塞进容器 /tmp —— 只有 Alpine 需要：
-# 随包的这两个 apk 是 aarch64 Alpine 专用，Debian 侧的同等能力（passwd / libpam）
-# 由 apt 直接提供，build.sh 打 debian 包时也根本不会拷 apk/ 目录进来。
-if [ "$FLAVOR" = "alpine" ]; then
-  mv $MODPATH/apk $rootfs/tmp 2>/dev/null
-fi
-rm -rf $MODPATH/apk 2>/dev/null
 rm -f $MODPATH/rootfs.tar.gz 2>/dev/null
 
 # ---- 容器能力探测 --------------------------------------------------------
@@ -702,8 +705,12 @@ apt-get install -y --no-install-recommends ca-certificates || \
 #   openssh    -> openssh-client + openssh-server
 #   shadow     -> passwd（bookworm 预装，显式列出只为把对应关系写死在这里）
 #   其余同名：bash / bash-completion / coreutils / curl / wget / git / jq /
-#             openssl / libtool / python3 / python3-dev / nodejs / npm /
+#             openssl / libtool / python3 / python3-dev /
 #             tzdata / procps / netcat-openbsd
+#   nodejs / npm 是唯一【不】对齐的一项：bookworm 仓库里只有 Node 18（已停止维护），
+#             Debian 侧改装 nodejs.org 官方 v24 二进制，见这批 apt 之后的 Node 下载段。
+#             npm 随官方包自带，apt 也就不再装 npm —— apt 的 npm 依赖 apt 的 nodejs，
+#             装了会再带进一套 Node 18 和一大串 node-* 包，容器里同时躺着两个 node。
 # 两个 Debian 独有的追加项：
 #   python3-venv       bookworm 把 ensurepip 拆出去了，没有它 python3 -m venv 直接失败，
 #                      而 service.sh 每次开机都要建 deps/python/<小版本> 这个 venv
@@ -713,11 +720,10 @@ apt-get install -y --no-install-recommends \
   bash bash-completion coreutils build-essential \
   curl wget git jq openssh-client openssh-server openssl libtool \
   python3 python3-dev python3-pip python3-venv \
-  nodejs npm \
   passwd tzdata procps netcat-openbsd \
   ca-certificates
 
-# openssh-server 单独复核一次。上面那一批有 25 个包、约 300MB，在手机上跨镜像源下载，
+# openssh-server 单独复核一次。上面那一批列了 21 个包、连同依赖几百 MB，在手机上跨镜像源下载，
 # 单个包 404 / 中途断网 / dpkg 停在 unpacked 未 configure，都不会让那条命令返回非 0
 # （脚本刻意不加 set -e，理由见文件上方注释）。
 # 而 openssh-server 一旦停在「已解包未配置」，/etc/ssh/sshd_config 这个 conffile 照样落盘，
@@ -738,6 +744,62 @@ rm -f /usr/sbin/policy-rc.d
 # 删了等于每次运行期装包又回到没有 Retries / 没有 Sandbox 覆写的裸状态。
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+
+# ---- Node.js：nodejs.org 官方 v24 二进制（不走 apt）----
+# bookworm 的 apt 只有 Node 18（2025-04-30 已停止维护），Alpine 版随 3.23 仓库拿到的是 24，
+# Debian 侧只能装官方构建才能对齐。放在 apt 整批装完之后：下载要用那批里的 curl 与根证书。
+#
+# .tar.gz 而不是 .tar.xz：debian:bookworm-slim 不保证带 xz，gzip 是必备组件。
+# npmmirror 优先、nodejs.org 兜底：国内直连 nodejs.org 常常慢到超时；npmmirror 是
+# nodejs.org/dist 的同步镜像，同名文件字节一致，所以两个源共用下面这一个哈希。
+# 每个源下完都校验 SHA256：镜像同步不全、下载被截断、被中间人替换，都只会表现成
+# 「这个源不可用，换下一个」，绝不会把一个坏包解压进 /usr/local。
+#
+# 解压到 /usr/local：service.sh 与容器 bashrc 的 PATH 里 /usr/local/bin 都排在 /usr/bin 之前，
+# NODE_PATH=/usr/local/lib/node_modules 也正好是官方包的目录布局，运行期脚本不用跟着改。
+# --no-same-owner：官方包里的文件属主是构建机的 uid，root 解压默认会原样保留下来。
+NODE_VERSION=24.21.0
+NODE_TARBALL="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+# 取自 https://nodejs.org/dist/v24.21.0/SHASUMS256.txt 里 linux-arm64.tar.gz 那一行。
+# 升级 Node 时版本号与哈希必须一起换，只换版本号会让两个源都校验失败、装不上。
+NODE_SHA256=724282c3b43aec998aa9527380465b45d229e021b58035f5f4f63095eabfe5d5
+_node_ok=0
+for _node_url in \
+  "https://registry.npmmirror.com/-/binary/node/v${NODE_VERSION}/${NODE_TARBALL}" \
+  "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}"; do
+  echo "[daidai] 正在下载 Node.js v${NODE_VERSION}: $_node_url"
+  rm -f "/tmp/${NODE_TARBALL}"
+  # -L 不能省：npmmirror 会 302 到 cdn.npmmirror.com，不跟跳转落盘的只是那个跳转响应。
+  # --speed-limit / --speed-time 也不能省：--connect-timeout 只管建连，连上之后对端停发却不断开
+  # （代理 / CDN 半挂）时 curl 永远不会自己结束，安装界面就一直停在「正在下载」，
+  # 既换不到下一个源，也走不到下面的 NODE=FAIL 分流。连续 60 秒低于 1 KB/s 即判超时（退出码 28），
+  # --retry 把 28 当瞬时错误先重试，仍不行再换源。不加 --max-time：它按单次尝试计时，
+  # 慢但一直在走的 55 MB 下载会被它误杀。
+  if ! curl -fL --retry 3 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "/tmp/${NODE_TARBALL}" "$_node_url"; then
+    echo "[daidai] 下载失败，换下一个源: $_node_url"
+    continue
+  fi
+  if ! echo "${NODE_SHA256}  /tmp/${NODE_TARBALL}" | sha256sum -c - >/dev/null 2>&1; then
+    echo "[daidai] SHA256 校验不通过（下载被截断或镜像内容不一致），换下一个源: $_node_url"
+    continue
+  fi
+  if tar -xzf "/tmp/${NODE_TARBALL}" -C /usr/local --strip-components=1 --no-same-owner; then
+    _node_ok=1
+    echo "[daidai] Node.js v${NODE_VERSION} 已解压到 /usr/local"
+    break
+  fi
+  echo "[daidai] 解压失败（多半是存储空间不足），换下一个源: $_node_url"
+done
+rm -f "/tmp/${NODE_TARBALL}"
+
+# 状态文件里的 MIRROR= 是上面用 > 首写的，Node 这一行【必须】用 >> 追加：
+# 写成 > 会把镜像源结论覆盖掉，宿主侧的失败提示就分不清是 apt 挂了还是 Node 没下下来。
+if [ "$_node_ok" = "1" ]; then
+  echo "NODE=OK" >> /tmp/daidai-deps-status
+else
+  echo "NODE=FAIL" >> /tmp/daidai-deps-status
+  echo "[daidai] Node.js 官方二进制在 npmmirror 与 nodejs.org 上都没装成"
+fi
 DEPS_PKG_DEBIAN_EOF
 else
   cat > "$DEPS_SCRIPT" << 'DEPS_PKG_ALPINE_EOF'
@@ -746,13 +808,14 @@ export HOME=/root
 export LANG=C.UTF-8
 export DAIDAI_DIR=/app/Dumb-Panel
 
-# 切到 NJU Alpine 镜像源
+# 切到 NJU Alpine 镜像源（minirootfs 自带的 repositories 已经指向 v3.23，只换域名）
 sed -i 's|dl-cdn.alpinelinux.org|mirrors.nju.edu.cn|g' /etc/apk/repositories
 
-# 先装离线包（linux-pam / shadow），再联网装剩下的。
-# 这一句本来就允许失败（后面有联网兜底），所以整个脚本不能加 set -e。
-apk add --allow-untrusted --no-network /tmp/apk/*.apk 2>/dev/null && rm -rf /tmp/apk
-
+# 所有包都联网装，不再随 ZIP 带离线 apk。原来那两个离线包（linux-pam / shadow）是
+# Alpine 3.18 专用的：在 3.23 上用 --no-network 一旦装得进去，联网这批会认为 shadow
+# 已满足而不再升级，留下新旧混装；联网安装本来就是必需步骤，离线包没有任何兜底价值。
+# 3.23 上 nodejs 是 24.x、python3 是 3.12，下面的包名都已对照 APKINDEX 确认存在
+# （procps 在 3.23 上由 procps-ng 提供，apk add procps 照样可用）。
 apk add --no-cache \
   bash bash-completion coreutils build-base \
   curl wget git jq openssh openssl libtool \
@@ -763,8 +826,8 @@ DEPS_PKG_ALPINE_EOF
 fi
 
 # ---- 以下与包管理器无关，两个 flavor 共用同一份 ----
-# 同样不能加 set -e：上面 Alpine 的离线包安装允许失败，Debian 的 apt-get 也可能
-# 局部失败但仍需要走完后面的配置；真正的判据是下面那段"依赖装完验证"。
+# 同样不能加 set -e：上面的 apk add / apt-get install 都可能局部失败，但仍需要走完
+# 后面的配置；真正的判据是下面那段"依赖装完验证"。
 cat >> "$DEPS_SCRIPT" << 'DEPS_COMMON_EOF'
 
 # Android AID 组兼容
@@ -972,11 +1035,17 @@ fi
 # 网络中途断开、镜像源同步不完整），退出码却未必反映出来。真正可靠的判据是装完之后
 # 关键运行时到底能不能执行、能不能报出版本。
 #
-# 也不要在上面那个装依赖脚本里加 set -e：Alpine 那句离线包 `apk add --no-network`
-# 本来就允许失败（后面有联网兜底），加了会直接中断整个安装。验证统一放在这里做。
+# 也不要在上面那个装依赖脚本里加 set -e：apt-get 局部失败之后还要走完 Node 下载与
+# 账号 / SSH 配置，加了会从第一个失败点直接中断整个安装。验证统一放在这里做。
 #
 # 验证清单两个 flavor 完全一致（python3 / node / npm / git / bash），
 # 但进容器的 shell 必须跟着 flavor 走 —— 和上面的能力探测是同一个坑。
+#
+# 「能执行」之外还要校验 node 的大版本：两个 flavor 都要求是 REQUIRED_NODE_MAJOR。
+# 光看能执行挡不住装错版本 —— 例如 Alpine 的 repositories 被指到了别的分支、
+# 或 Debian 的官方包没装上而 apt 的依赖链又带进来一个 Node 18，面板照样起得来，
+# 但脚本和依赖跑在一个不受支持的 Node 上，问题要到运行期才冒出来。
+REQUIRED_NODE_MAJOR=24
 ui_print "- 正在验证容器运行时..."
 
 DEPS_REPORT="$TMPDIR/deps-verify.txt"
@@ -989,6 +1058,9 @@ DEPS_REPORT="$TMPDIR/deps-verify.txt"
       echo "MISSING $c"
     fi
   done
+  if command -v node >/dev/null 2>&1; then
+    echo "NODE_VERSION_LINE=$(node --version 2>/dev/null)"
+  fi
 ' > "$DEPS_REPORT" 2>/dev/null
 
 missing_runtimes=""
@@ -998,18 +1070,38 @@ for c in python3 node npm git bash; do
   fi
 done
 
+# node 能执行时再比大版本。版本号在容器里只原样输出（上面那段是单引号包起来的内联脚本，
+# 里面写不了 node -p 需要的单引号），主版本在宿主侧解析。
+# 这段跑在宿主侧，解释它的是管理器自带的 busybox：只用 grep / head / cut 和 sed 的基础正则，
+# 不用 sed -E、\d 这类扩展。输出形如 NODE_VERSION_LINE=v24.21.0；
+# 取不出主版本（没输出 / 格式不对）一律按不符处理，宁可误拦也不放过。
+node_version_line=$(grep '^NODE_VERSION_LINE=' "$DEPS_REPORT" 2>/dev/null | head -n 1 | cut -d= -f2-)
+node_major=$(printf '%s\n' "$node_version_line" | sed -n 's/^v\([0-9][0-9]*\)\..*$/\1/p')
+node_version_mismatch=0
+if grep -q '^OK node$' "$DEPS_REPORT" 2>/dev/null && [ "$node_major" != "$REQUIRED_NODE_MAJOR" ]; then
+  node_version_mismatch=1
+  missing_runtimes="$missing_runtimes node"
+fi
+
 if [ -n "$missing_runtimes" ]; then
   ui_print "! 以下运行时未能安装成功:$missing_runtimes"
+  if [ "$node_version_mismatch" = "1" ]; then
+    ui_print "! 其中 node 能执行但版本不符：要求 Node.js ${REQUIRED_NODE_MAJOR}.x，实际 ${node_version_line:-取不到版本号}"
+  fi
   ui_print "!"
   ui_print "! 这一步强依赖网络：${CTR_PKG_TOOL} 需要从 ${CTR_PKG_SOURCE} 下载${CTR_DEPS_SIZE}。"
 
-  # Debian 版分流：DNS 不通 / 镜像源全挂 / 单纯下载中断，用户看到的现象完全不同，
-  # 原来三种都只给同一句「检查网络」，等于把最关键的线索抹掉了。
+  # Debian 版分流：DNS 不通 / 镜像源全挂 / Node 官方包没下下来 / 单纯下载中断，
+  # 用户看到的现象完全不同，原来都只给同一句「检查网络」，等于把最关键的线索抹掉了。
   # Alpine 分支的文案与改动前逐字一致，不受这段影响。
+  #
+  # 状态文件是多行的 KEY=VALUE（MIRROR= 首写、NODE= 追加），一律按行首前缀取，不依赖行序。
   if [ "$FLAVOR" = "debian" ]; then
     deps_status=""
+    node_status=""
     if [ -f "$rootfs/tmp/daidai-deps-status" ]; then
       deps_status=$(grep '^MIRROR=' "$rootfs/tmp/daidai-deps-status" 2>/dev/null | cut -d= -f2-)
+      node_status=$(grep '^NODE=' "$rootfs/tmp/daidai-deps-status" 2>/dev/null | cut -d= -f2-)
     fi
     case "$DNS_PROBE_VERDICT" in
       dns_down)
@@ -1030,11 +1122,21 @@ if [ -n "$missing_runtimes" ]; then
         ui_print "! 请把上面这段判别输出反馈给开发者。"
         ;;
       *)
+        # 顺序有讲究：镜像源全挂时 curl / 根证书根本装不上，Node 必然跟着失败，
+        # 所以先报 MIRROR=FAIL；镜像源通了才轮到 NODE=FAIL，否则会把根因报成「Node 下载失败」。
         if [ "$deps_status" = "FAIL" ]; then
           ui_print "!"
           ui_print "! 判定：四个候选镜像源（NJU / TUNA / 阿里云 / Debian 官方）"
           ui_print "! 的 apt-get update 全部失败 —— 多半是镜像源被网络策略拦截，或需要代理。"
           ui_print "! 请换网络或配置代理后重装。"
+        elif [ "$node_status" = "FAIL" ]; then
+          ui_print "!"
+          ui_print "! 判定：apt 镜像源是通的，但 Node.js 官方二进制没装上 ——"
+          ui_print "! npmmirror 与 nodejs.org 两个源的下载 / SHA256 校验 / 解压都没有成功。"
+          ui_print "! 常见于这两个域名被网络策略拦截、下载中途断网、存储空间不足。"
+          ui_print "! 若上面同时缺了 python3 / git 等 apt 装的运行时，根因多半是前面的 apt 下载中断"
+          ui_print "! （Node 下载要用那一批里的 curl 与根证书），Node 只是被连带失败。"
+          ui_print "! 请确认剩余空间充足、网络能访问 registry.npmmirror.com 或 nodejs.org 后重装。"
         elif [ -n "$deps_status" ]; then
           ui_print "!"
           ui_print "! 判定：镜像源 $deps_status 是通的，软件包索引也拉下来了，"
@@ -1059,7 +1161,7 @@ if [ -n "$missing_runtimes" ]; then
 fi
 
 INSTALL_DEPS_OK=1
-ui_print "- 容器运行时验证通过 (python3 / node / npm / git / bash)"
+ui_print "- 容器运行时验证通过 (python3 / node / npm / git / bash，Node.js ${node_version_line})"
 
 # ---- SSH 自检 --------------------------------------------------------------
 # 上面那份清单只有 python3/node/npm/git/bash，openssh-server 装没装成完全没人管 ——

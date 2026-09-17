@@ -122,7 +122,7 @@ func TestDockerEntrypointCreatesHomeForRunUser(t *testing.T) {
 }
 
 // 建组 / 建用户在 UID/GID 撞车时必须能兜住。
-// Debian 镜像基于 node:20-bookworm-slim，自带 uid/gid 1000 的 node 用户，
+// Debian 镜像基于 node:24-bookworm-slim，自带 uid/gid 1000 的 node 用户，
 // 而 compose 注释里给的示例恰好就是最常见的 PUID=1000 / PGID=1000 ——
 // 原来那几行末尾没有兜底，set -e 会把整个容器带崩，用户只看到「容器起不来」。
 func TestDockerEntrypointSurvivesUidGidCollision(t *testing.T) {

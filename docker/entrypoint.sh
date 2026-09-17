@@ -94,7 +94,7 @@ fi
 #      装依赖必然 EACCES: mkdir '/home/daidai'。这就是用户报障的原始现象。
 #   2. UID/GID 撞车会把容器直接带崩。原来的 addgroup/groupadd、adduser/useradd
 #      在 GID/UID 已被占用时全都失败，末尾又没有兜底，set -e 下整个脚本退出。
-#      Debian 镜像基于 node:20-bookworm-slim，自带 uid/gid 1000 的 node 用户，
+#      Debian 镜像基于 node:24-bookworm-slim，自带 uid/gid 1000 的 node 用户，
 #      而 compose 注释里给的示例恰好就是最常见的 PUID=1000 / PGID=1000。
 #   3. 只设 PGID 不设 PUID 时 TARGET_UID 取到 0，造出一个 uid=0 的假 daidai：
 #      看起来降了权，实际仍是 root，chown 出来的属主也还是 root。

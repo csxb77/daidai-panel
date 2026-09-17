@@ -15,9 +15,11 @@
 #   debian        : dist/daidai-panel-magisk-debian-v<版本>.zip
 #
 # 模块内部不再内置 Python/Node；改为在 customize.sh 里用 rurima + rootfs 构建一个
-# 容器，再用 apk / apt-get 装出 python3 / nodejs / npm / git 等：
-#   alpine —— Alpine 3.18 minirootfs（musl，体积小）
-#   debian —— CI 自建的 Debian bookworm 精简 rootfs（glibc，能跑官方预编译产物）
+# 容器，再用 apk / apt-get 装出 python3 / nodejs / npm / git 等（全部安装时联网下载，
+# ZIP 里不带任何离线包）：
+#   alpine —— Alpine 3.23 minirootfs（musl，体积小）
+#   debian —— CI 自建的 Debian bookworm 精简 rootfs（glibc，能跑官方预编译产物；
+#             Node.js 装的是 nodejs.org 官方 v24 二进制，不走 apt）
 ##########################################################################
 
 set -euo pipefail
@@ -225,14 +227,6 @@ if [ -f "$MODDIR/system/bin/rurima" ]; then
 else
   error "缺少 $MODDIR/system/bin/rurima（容器运行时），请先放置静态 rurima 二进制"
   exit 1
-fi
-
-# 离线 apk（linux-pam / shadow）—— 只有 alpine flavor 需要。
-# 这两个包是 aarch64 Alpine 专用，Debian 侧同等能力由 apt 的 passwd / libpam 提供，
-# 塞进 Debian ZIP 只会白白撑大体积、并让 customize.sh 里多一条永远走不到的分支。
-if [ "$FLAVOR" = "alpine" ] && [ -d "$MODDIR/apk" ]; then
-  mkdir -p "$STAGING/apk"
-  cp -f "$MODDIR/apk/"*.apk "$STAGING/apk/" 2>/dev/null || true
 fi
 
 # scripts/

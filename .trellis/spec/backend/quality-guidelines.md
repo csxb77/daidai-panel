@@ -3680,3 +3680,80 @@ go test ./service -run "^TestSchedulerV2AddJobSkipsTasksPendingDisable$" -count=
 
 > **突变验证**：把判据还原成 `markedAt.After(...)`，「相等时必须认这笔标记」那条必须变红，而防复用那条仍绿。
 > 这条偶发在修复前是 3~7/100，单跑 `-count=25` 复现不出来 —— 概率性用例必须跑够轮数才能下结论。
+
+---
+
+## 场景：换 Node / Python 运行时后的依赖自愈（模块版与 Docker）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/node_abi_rebuild.go`、`server/service/python_runtime.go` 的模块版迁移、`Magisk/service.sh` 的 deps 快照回填、`Magisk/customize.sh` 的运行时版本，或调整启动钩子顺序时必须看本节。
+- 原因：模块刷新版 / Docker 换镜像会换掉容器里的 Python 与 Node，但 `deps/` 原样保留。旧记录指向已不存在的解释器、旧 ABI 的原生扩展加载失败，用户看到的都是「定时任务突然报 ModuleNotFoundError / NODE_MODULE_VERSION 不匹配」。
+
+### 2. Signatures
+
+- `service.ApplyMagiskPythonRuntimeMigrationOnStartup()`：`appboot.go` 中挂在 `ApplySinglePythonRuntimePolicyOnStartup()` 之后、`MergeDuplicatePythonDependencies()` 之前。
+- `service.RebuildNodeDependenciesIfABIChanged()`：`main.go` 中挂在 `verifyInstalledDeps()` 之后。
+- 标记文件：`<Data.Dir>/deps/nodejs/.daidai-node-abi`，内容为 `process.versions.modules`（常量 `nodeABIMarkerFileName`）。
+
+### 3. Contracts
+
+- **Python 迁移只收敛「旧且不存在」的版本**：以 `DAIDAI_PYTHON_VERSION` 为当前版本 C（必须确有解释器），只把**比 C 旧、且解释器确实不存在**的小版本 V 的 `dependencies.python_version` / `tasks.python_version` / `python_default_version` 改成 C。比 C 新的一律不动 —— Debian flavor 的系统 python3 是 3.11，用户显式选的 3.12 要靠一键安装补回，不能被降级。V 仍可用时也不动。
+- 迁移用 raw SQL 只改 `python_version`，不动 `updated_at`（否则会打乱 `MergeDuplicatePythonDependencies` 挑选保留行）和 `status`；重装交给随后的启动校验。
+- 条件驱动、每次启动都跑，不用一次性标记：前端仍可能提交旧版本的依赖，一次性标记会被这条写入路径打穿。
+- **Node 侧只重建「现在确实加载失败」的包**：逐包起独立 node 进程 require 一次，只有报 `NODE_MODULE_VERSION` 不匹配 / `No native build was found` / `Could not locate the bindings file` 才算坏。原因是 `npm rebuild` 走 node-gyp 时第一步就删 build 目录，对本来能用的包（N-API 模块、自带新 ABI 预编译产物的包）重建失败会把它弄坏。只碰已经坏掉的包，就不需要备份 / 恢复、遗留进程回收这类防御层。
+- 收集包时不跟随软链接（`file:` 本地目录包、workspace 指向仓库外的真实目录，不归面板管），递归 `@scope` 与嵌套 `node_modules`。
+- 只在 Linux 执行：换 Node 大版本只发生在 Magisk 模块与 Docker 镜像；Windows / 二进制版用户自己管理 Node。
+- **标记必须与它描述的二进制同源**：`Magisk/service.sh` 开机用 `cp -rf` 回填宿主 deps 快照（不删多余文件，快照每 10 分钟才刷新），回填后若快照里没有该标记，就要删掉容器里的标记。否则「重建完写了新标记 → 10 分钟内重启 → 旧二进制被盖回、新标记还在」会让面板再也不重建。`magisk_assets_test.go` 有静态断言锁这段位置与写法。
+- 状态一律不改：无论重建成败都不碰依赖记录的 `status`。
+
+### 4. Validation & Error Matrix
+
+- node 不可用 / `process.versions.modules` 不是纯数字 → 不做事、**不写标记**，下次启动再判。
+- 标记与当前 ABI 相同 → 不做事。
+- `node_modules` 里没有非点开头的真实子目录 → 直接写标记。
+- 没有加载失败的包 → 写标记（本次无需重建）。
+- 找不到 npm → warn 日志、**不写标记**（根本没尝试过重建）。
+- 重建失败 / 重建后仍加载失败 → 写标记 + warn 日志提示到依赖管理里重装（同一 ABI 不再自动重试，避免没有编译链的精简镜像每次开机重跑）。
+- 迁移侧：非模块运行态、`DAIDAI_PYTHON_VERSION` 为空或不在 3.10–3.12、当前版本探测不到解释器 → 一律不动任何记录。
+
+### 5. Good/Base/Bad Cases
+
+- Good：Alpine 模块从 3.18（Python 3.11）刷到 3.23（Python 3.12），3.11 的依赖与任务被迁到 3.12 并由启动校验重装；带原生扩展的包里只有加载失败的那个被 `npm rebuild`。
+- Base：Docker 换镜像后 ABI 变了，但所有原生扩展都是 N-API、照常加载 → 只写标记，不动任何包。
+- Bad：把「比当前新的版本」也迁走（Debian flavor 上把用户选的 3.12 降成 3.11）；对全部包无差别 `npm rebuild`；重建失败后仍宣称已修复；标记写在 `deps/` 下却不处理快照回填。
+
+### 6. Tests Required
+
+- 迁移：3.11 缺失 → 依赖 / 任务 / 默认值迁到 3.12 并与既有同名依赖合并；3.11 仍可用 → 不动；比当前新的版本 → 不动；非模块态 → 不动；连续执行两次结果一致且 `updated_at` 不变。
+- Node：ABI 一致不做事；无包 / 无原生扩展 → 写标记且不探测；都能加载 → 不重建；部分失败 → 只把失败包的 name 传给 rebuild（覆盖 `@scope`、嵌套 `node_modules`、同名去重）；找不到 npm → 不写标记；重建失败 → 写标记且依赖表逐字段不变；软链接包不被收集；`nodeABIRebuildSupported` 的平台判定。测试注入探测与命令构造，不真跑 node / npm。
+- 静态门禁：`magisk_assets_test.go` 断言 `service.sh` 的标记删除位于快照回填之后，且文件名与 Go 常量一致。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "MagiskPython|NodeABI|NodeDependencies|NpmRebuild|StartupWiring" -count=1
+go test ./handler -run "Magisk|NodeVersion" -count=1
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：无差别重建，再用备份/恢复去兜 node-gyp 删掉的产物。
+cmd := exec.Command("npm", "rebuild", "--prefix", nodeDir)
+backup, _ := snapshotNativeAddons(nodeDir) // 备份→恢复→怕被快照带走→怕孤儿进程……防御层越叠越厚
+```
+
+#### Correct
+
+```go
+// 正确：先探测，只重建加载失败的包；已经坏掉的包重建失败也不会更糟，于是不需要备份。
+broken := filterBrokenNodeAddons(nodeDir, collectNodeNativeAddonPackages(modulesDir))
+if len(broken) == 0 {
+    writeNodeABIMarker(nodeDir, markerPath, abi)
+    return
+}
+cmd, err := newNpmRebuildCommandFunc(nodeDir, nodePackageNames(broken))
+```

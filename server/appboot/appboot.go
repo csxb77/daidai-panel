@@ -72,6 +72,8 @@ func InitWithConfig(cfg *config.Config) error {
 	}
 	service.NormalizeLegacyPythonVersionColumnsAfterVenvMigration(legacyPythonVenvMigration)
 	service.ApplySinglePythonRuntimePolicyOnStartup()
+	// 必须排在合并重复依赖之前：迁移会让旧版本的依赖与当前版本的同名依赖撞到一起，交给下一行合并。
+	service.ApplyMagiskPythonRuntimeMigrationOnStartup()
 	service.MergeDuplicatePythonDependencies()
 	if err := middleware.ConfigureTrustedProxyCIDRs(model.GetRegisteredConfig("trusted_proxy_cidrs")); err != nil {
 		return fmt.Errorf("failed to configure trusted proxies: %w", err)

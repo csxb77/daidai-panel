@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
 
       - uses: actions/setup-go@v6
         with:
@@ -260,7 +260,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
@@ -328,11 +328,12 @@ jobs:
           VERSION="${{ steps.version.outputs.VERSION }}"
 
           # 直接复用 Magisk/build.sh —— 保证本地打包与 CI 产物结构一致
-          # 该脚本会编译后端、拷贝 system/bin/rurima、apk/、写 flavor 标记文件、
+          # 该脚本会编译后端、拷贝 system/bin/rurima、写 flavor 标记文件、
           # 同步 version 与 versionCode、打包 ZIP 到 dist/ 目录。
+          # ZIP 里不带任何离线 apk / deb：容器依赖一律在刷入时联网安装。
           #
           # 只打 arm64：容器运行时 Magisk/system/bin/rurima 是 AArch64 静态二进制，
-          # 随包的离线 apk 也都是 aarch64，x86_64 设备根本跑不起来（customize.sh
+          # 两个 flavor 的 rootfs 也都是 aarch64，x86_64 设备根本跑不起来（customize.sh
           # 已经明确拦截 x64）。再塞一个永远用不上的 amd64 后端只是让手机端多下
           # 几十 MB。build.sh 的 amd64 / all 能力保留着，将来真有了 x86_64 的
           # rurima，把这里改回 all 即可。
@@ -553,7 +554,7 @@ jobs:
             version_suffix: '-debian'
             legacy_version_suffix: ''
             full_tools: false
-            platforms: linux/amd64,linux/arm64,linux/arm/v7
+            platforms: linux/amd64,linux/arm64
           - tag_channel: debian-full
             legacy_tag_channel: ''
             python_mode: single
@@ -561,7 +562,7 @@ jobs:
             version_suffix: '-debian-full'
             legacy_version_suffix: ''
             full_tools: true
-            platforms: linux/amd64,linux/arm64,linux/arm/v7
+            platforms: linux/amd64,linux/arm64
           - tag_channel: debian-3.10
             legacy_tag_channel: debian3.10
             python_mode: single
@@ -569,7 +570,7 @@ jobs:
             version_suffix: '-debian-3.10'
             legacy_version_suffix: '-debian3.10'
             full_tools: false
-            platforms: linux/amd64,linux/arm64,linux/arm/v7
+            platforms: linux/amd64,linux/arm64
           - tag_channel: debian-3.11
             legacy_tag_channel: debian3.11
             python_mode: single
@@ -577,7 +578,7 @@ jobs:
             version_suffix: '-debian-3.11'
             legacy_version_suffix: '-debian3.11'
             full_tools: false
-            platforms: linux/amd64,linux/arm64,linux/arm/v7
+            platforms: linux/amd64,linux/arm64
           - tag_channel: debian-all
             legacy_tag_channel: debianall
             python_mode: all
@@ -585,7 +586,7 @@ jobs:
             version_suffix: '-debian-all'
             legacy_version_suffix: '-debianall'
             full_tools: false
-            platforms: linux/amd64,linux/arm64,linux/arm/v7
+            platforms: linux/amd64,linux/arm64
     steps:
       - uses: actions/checkout@v5
 
@@ -655,7 +656,8 @@ jobs:
         with:
           context: .
           file: Dockerfile.debian
-          # Debian runtime uses node:20.19.0-bookworm-slim, which has no linux/386 manifest.
+          # Debian 运行时基于 node:24.21.0-bookworm-slim，这个基础镜像既没有 linux/386 也没有 linux/arm/v7 manifest，
+          # 所以 Debian 矩阵只发布 amd64 / arm64；32 位设备改用 Alpine 的 latest / latest-full。
           platforms: ${{ matrix.platforms }}
           push: true
           build-args: |

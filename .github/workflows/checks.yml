@@ -26,12 +26,12 @@ jobs:
           cache: true
           cache-dependency-path: server/go.sum
 
-      # Node 版本与 Dockerfile 的 node:20.19.0-bookworm-slim 对齐，
+      # Node 版本与 Dockerfile 的 node:24.21.0-bookworm-slim 对齐，
       # 让 CI 的前端构建环境与发布镜像里的构建环境保持一致。
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20.19.0'
+          node-version: '24.21.0'
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 

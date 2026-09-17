@@ -289,7 +289,7 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 | `linux/amd64` | x86_64 服务器、PC、绝大多数 NAS |
 | `linux/arm64` | 树莓派 4 / 5、Oracle ARM 云、Apple Silicon |
 | `linux/386` | 32 位 x86 老 PC、瘦客户端（仅 `latest` / `latest-full`，Debian 镜像不支持） |
-| `linux/arm/v7` | **v2.0.9 新增**：树莓派 2 / 3 / Zero 2W、老 ARMv7 盒子 / 路由器 / NAS |
+| `linux/arm/v7` | **v2.0.9 新增**：树莓派 2 / 3 / Zero 2W、老 ARMv7 盒子 / 路由器 / NAS（仅 `latest` / `latest-full`，Debian 镜像不支持） |
 
 ### Alpine 与 Debian 运行时和镜像标签
 
@@ -330,11 +330,11 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 | `latest-3.10` | `3.2.9-3.10` | Alpine | 3.10 | 精简 | amd64 / arm64 |
 | `latest-3.11` | `3.2.9-3.11` | Alpine | 3.11 | 精简 | amd64 / arm64 |
 | `latest-all` | `3.2.9-all` | Alpine | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
-| `debian` | `3.2.9-debian` | Debian | 3.12 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-full` | `3.2.9-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 / arm/v7 |
-| `debian-3.10` | `3.2.9-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-3.11` | `3.2.9-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 / arm/v7 |
-| `debian-all` | `3.2.9-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 / arm/v7 |
+| `debian` | `3.2.9-debian` | Debian | 3.12 | 精简 | amd64 / arm64 |
+| `debian-full` | `3.2.9-debian-full` | Debian | 3.12 | 完整 | amd64 / arm64 |
+| `debian-3.10` | `3.2.9-debian-3.10` | Debian | 3.10 | 精简 | amd64 / arm64 |
+| `debian-3.11` | `3.2.9-debian-3.11` | Debian | 3.11 | 精简 | amd64 / arm64 |
+| `debian-all` | `3.2.9-debian-all` | Debian | 3.10 / 3.11 / 3.12 | 精简 | amd64 / arm64 |
 
 后续版本只替换固定版本标签里的版本号，后缀保持不变。
 
@@ -432,6 +432,8 @@ docker build -f Dockerfile.debian \
   -t daidai-panel:debian-all-local .
 ```
 
+**源码构建请在 amd64 / arm64 主机上进行**：前端构建阶段基于 Node 24 官方镜像，没有 `linux/arm/v7`、`linux/386` 版本。32 位设备请直接使用 `latest` / `latest-full` 镜像。
+
 </details>
 
 <details>
@@ -486,7 +488,7 @@ daidai-panel-windows-amd64/
 
 | ZIP | 容器 | 什么时候选 |
 |-----|------|-----------|
-| `daidai-panel-magisk-vX.Y.Z.zip` | Alpine 3.18（musl） | **默认选它**。体积小、装得快，磁盘 ≥1.5 GB |
+| `daidai-panel-magisk-vX.Y.Z.zip` | Alpine 3.23（musl） | **默认选它**。体积小、装得快，磁盘 ≥1.5 GB |
 | `daidai-panel-magisk-debian-vX.Y.Z.zip` | Debian 12（glibc） | 需要跑 glibc 预编译产物时。最典型的是面板「依赖管理」里的**一键安装 Python / Node 运行时**——它下发的是 `*-unknown-linux-gnu` 与 nodejs.org 官方构建，**在 Alpine(musl) 容器里根本无法执行**（实测 0/2）。磁盘 ≥2.5 GB |
 
 > 自 `v3.0.3` 起两个 flavor 各有各的 `updateJson`，Debian 版在管理器里点「更新」不会再被静默换成 Alpine 版。从 `v3.0.2` 或更早升上来的 Debian 用户需要先手动刷一次 v3.0.3 的 Debian ZIP，之后管理器才会走对地址。Debian 版**仍未经过真机验证**。详见 `Magisk/README.md`。
@@ -688,7 +690,7 @@ docker compose -f docker-compose.debian.yml up -d daidai-panel
 
 也可以把 `.env` 中的 `DAIDAI_PANEL_IMAGE` 改成对应正式标签，例如 `latest-full`、`latest-3.10`、`latest-3.11`、`latest-all`、`debian-full`、`debian-3.10`、`debian-3.11` 或 `debian-all`。
 
-本地基于源码自己构建的镜像，重新 build 即可：
+本地基于源码自己构建的镜像，重新 build 即可（构建主机须为 amd64 / arm64，见上文「切换标签与本地构建」）：
 
 ```bash
 docker build --build-arg VERSION=dev -f Dockerfile.debian -t daidai-panel:debian-local .
@@ -837,7 +839,7 @@ Dumb-Panel/
 **关于 `PUID` / `PGID`（NAS 用户看这里）**
 
 - **两个都要设**：只设 `PGID` 时 `PUID` 会取到 0，等于没降权，容器会打印说明并继续以 root 跑。宿主机执行 `id` 查看自己的真实取值。
-- **取值与镜像里已有账号撞车不要紧**：Debian 版镜像基于 `node:20-bookworm-slim`，自带一个 uid/gid 都是 1000 的 `node` 用户，而 `PUID=1000` 恰好是最常见的取值 —— 容器会直接复用那个账号（`v3.0.7` 起；更早的版本在这里会直接起不来）。
+- **取值与镜像里已有账号撞车不要紧**：Debian 版镜像基于 `node:24-bookworm-slim`，自带一个 uid/gid 都是 1000 的 `node` 用户，而 `PUID=1000` 恰好是最常见的取值 —— 容器会直接复用那个账号（`v3.0.7` 起；更早的版本在这里会直接起不来）。
 - **改完 `PUID` 要重建容器**（`docker compose up -d --force-recreate`）比只 `docker restart` 更保险。
 - **已知限制**：降权之后，面板里的「Linux 系统依赖」（`apt-get` / `apk`）装不了 —— 系统包管理器需要 root。面板会给出明确说明而不是报一串 `Permission denied`。**Node.js / Python 依赖不受影响**，降权下照常安装。
 

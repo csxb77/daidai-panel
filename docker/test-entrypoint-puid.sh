@@ -232,7 +232,7 @@ expect_owner /ql/shell/env.sh "5000:5000"
 userdel daidai 2>/dev/null; groupdel daidai 2>/dev/null
 
 # ---- 2. UID/GID 撞车 -------------------------------------------------------
-# Debian 镜像基于 node:20-bookworm-slim，自带 uid/gid 1000 的 node 用户，
+# Debian 镜像基于 node:24-bookworm-slim，自带 uid/gid 1000 的 node 用户，
 # 而 compose 注释里给的示例恰好就是最常见的 PUID=1000 —— 原来会直接把容器带崩。
 #
 # 这里刻意用一个自建的 uid/gid 7000 账号而不是「机器上碰巧存在的 uid 1000」：

@@ -185,6 +185,19 @@ DEPS_PERSIST="$PERSIST_DIR/deps-snapshot"
 if [ -d "$DEPS_PERSIST" ]; then
   mkdir -p $rootfs/app/Dumb-Panel/deps
   cp -rf "$DEPS_PERSIST/." $rootfs/app/Dumb-Panel/deps/ 2>/dev/null
+  # Node 原生扩展 ABI 标记（面板侧 server/service/node_abi_rebuild.go 的 nodeABIMarkerFileName）
+  # 必须和它描述的 node_modules 二进制出自同一份拷贝。
+  #
+  # 快照每 10 分钟才刷新一次，而上面的 cp -rf 只覆盖、不删除多余文件。于是有这样一个窗口：
+  # 升级 Node 后首次开机，面板按新 ABI 跑完 npm rebuild 并写下新标记；10 分钟内再重启，
+  # 快照里还是旧 ABI 编出来的 .node、且没有标记文件 —— cp 把重建结果覆盖回旧二进制，
+  # 容器里的新标记却留了下来，面板读到「ABI 未变」就再也不会重建，原生扩展一直加载失败。
+  #
+  # 所以快照里没有标记时，删掉容器里的标记，让面板按「没有记录」重判一次（代价最多是多跑一次 rebuild）。
+  # 快照里有标记时不用动：cp 已经把与快照二进制同源的那份标记一起带了过来。
+  if [ ! -f "$DEPS_PERSIST/nodejs/.daidai-node-abi" ]; then
+    rm -f "$rootfs/app/Dumb-Panel/deps/nodejs/.daidai-node-abi" 2>/dev/null
+  fi
   log "已从持久化快照恢复 deps 目录"
 fi
 
@@ -264,7 +277,19 @@ export DAIDAI_MAGISK_MODULE=1
 #   sshd_config 改成先删净再统一追加并同步写 drop-in、Debian 的 pam_loginuid 降为
 #   optional、chpasswd 回读校验、sshd 改用 -D -e 把日志落到 sshd.log，
 #   并每次开机写一份 SSH 状态快照。同样只影响外壳自身，requiredMagiskShellVersion 保持 1。
-export DAIDAI_MAGISK_SHELL_VERSION=4
+# v5（本次，Node 24）改动 customize.sh：Alpine rootfs 3.18.9 → 3.23.5（apk 仓库里是 Node 24、
+#   Python 3.12、openssh 10.2，默认 sshd_config 带 Include，SSH drop-in 那段在 Alpine 上也会执行）、
+#   删除只适用于 3.18 的离线 apk（linux-pam / shadow，build.sh 也不再往 ZIP 里拷）、
+#   Debian 不再用 apt 装 Node 18，改装 nodejs.org 官方 v24.21.0（npmmirror → nodejs.org，
+#   SHA256 校验，解压到 /usr/local），装完验证要求 node 大版本必须是 24；
+#   service.sh 在 deps 快照回填后，快照里没有 Node ABI 标记就删掉容器里的那份，
+#   防止旧 ABI 的 .node 被拷回来而新标记留下、面板从此不再 npm rebuild。
+#   requiredMagiskShellVersion 仍保持 1：新面板不依赖本次外壳改动，在旧外壳上照常运行 ——
+#   面板侧的 Python 小版本迁移只看容器里实际存在的解释器；Node ABI 重建在旧外壳上
+#   代价只是没有标记时补跑 npm rebuild（旧外壳不换 Node，快照回填不会让标记与二进制错位）。
+#   但 Node 24 / Alpine 3.23 / Python 3.12 都属于外壳（rootfs），在线升级覆盖不到，
+#   想拿到它们的用户必须重刷一次模块 ZIP。
+export DAIDAI_MAGISK_SHELL_VERSION=5
 export DAIDAI_ANDROID_RUNTIME_BIN_DIR=/data/adb/daidai-panel/bin
 export PATH=/data/adb/daidai-panel/bin/python/bin:/data/adb/daidai-panel/bin/node/bin:/data/adb/daidai-panel/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/app
 export NODE_PATH=/usr/local/lib/node_modules
@@ -415,11 +440,15 @@ else
   ' /etc/ssh/sshd_config > /etc/ssh/sshd_config.daidai-tmp &&
     mv -f /etc/ssh/sshd_config.daidai-tmp /etc/ssh/sshd_config
 
-  # Debian 的 sshd_config 顶部有一行未注释的 Include /etc/ssh/sshd_config.d/*.conf，
-  # Include 进来的内容先被解析，按「第一次胜出」会压过主文件里的一切。
-  # 该目录默认是空的，所以上面那段目前有效；但只要以后有任何 .conf 落进去，
-  # 我们写的就会被静默覆盖，且完全没有报错。同一份指令再写一份 drop-in，两条路结论一致。
-  # Alpine 3.18 的 sshd_config 没有 Include 行，这段在 Alpine 上不会执行。
+  # Debian 与 Alpine 3.23（openssh 10.2）的默认 sshd_config 顶部都有一行未注释的
+  # Include /etc/ssh/sshd_config.d/*.conf，所以这段在两个 flavor 上都会执行
+  # （Alpine 3.18 的 sshd_config 没有 Include 行，那时只有 Debian 走到这里）。
+  # Include 进来的内容先被解析，PermitRootLogin / PasswordAuthentication 按「第一次胜出」
+  # 会压过主文件里的值。该目录默认是空的（两个 flavor 都是），所以上面那段目前有效；
+  # 但只要以后有任何 .conf 落进去，我们写的就会被静默覆盖，且完全没有报错。
+  # 同一份指令再写一份 drop-in，两条路结论一致；00- 前缀让它排在目录里其它 .conf 之前。
+  # Port 不一样，它是累加的（每条都监听）：主文件与 drop-in 各有一条同值的 Port，
+  # sshd.log 每次启动会多出 "Bind to port N on ... failed: Address in use."，端口照常监听，无需处理。
   if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
     mkdir -p /etc/ssh/sshd_config.d
     {

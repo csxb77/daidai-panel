@@ -261,7 +261,7 @@ function taskBodySpecs(runner: DemoRunner, task: DemoTask | undefined): StepSpec
 
   if (runner === 'node') {
     return [
-      [240, (at) => `[${at}] [INFO] node v20.19.0\n`],
+      [240, (at) => `[${at}] [INFO] node v24.21.0\n`],
       [220, (at) => `[${at}] [INFO] 环境变量已注入（19 项）\n`],
       [280, (at) => `[${at}] [INFO] 开始下载 GeoLite2-City.mmdb\n`],
       [300, (at) => `[${at}] [INFO] GET https://cdn.example.com/GeoLite2-City.mmdb 200\n`],

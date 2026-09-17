@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:20.19.0-bookworm-slim AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:24.21.0-bookworm-slim AS frontend-builder
 
 WORKDIR /build
 COPY web/package.json web/package-lock.json ./
@@ -27,7 +27,7 @@ RUN GOARM=$(case "${TARGETVARIANT}" in v7) echo 7;; v6) echo 6;; v5) echo 5;; *)
     go build -ldflags="-s -w -X daidai-panel/handler.Version=${VERSION}" -o ddp ./cmd/ddp
 
 
-FROM alpine:3.22
+FROM alpine:3.23
 
 ARG TARGETARCH
 ARG TARGETVARIANT
