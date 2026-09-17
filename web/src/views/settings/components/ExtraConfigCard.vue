@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { Document, Setting } from '@element-plus/icons-vue'
 import {
+  formatConfigRangeHint,
   resolveConfigOptions,
-  type ParsedSystemConfigGroup,
-  type ParsedSystemConfigItem
+  type ParsedSystemConfigGroup
 } from '../systemConfigSchema'
 
 // 兜底区：渲染服务端注册了、但本页没有专属表单的配置项。
@@ -16,15 +16,6 @@ defineProps<{
   draft: Record<string, string>
   onSave: () => void
 }>()
-
-// 整数项的取值区间提示，服务端给了 min/max 才显示
-function rangeHint(item: ParsedSystemConfigItem) {
-  if (item.valueType !== 'int') return ''
-  if (item.min !== undefined && item.max !== undefined) return `取值范围 ${item.min} - ${item.max}`
-  if (item.min !== undefined) return `不能小于 ${item.min}`
-  if (item.max !== undefined) return `不能大于 ${item.max}`
-  return ''
-}
 </script>
 
 <template>
@@ -91,7 +82,7 @@ function rangeHint(item: ParsedSystemConfigItem) {
         />
 
         <span v-if="item.description" class="form-hint">{{ item.description }}</span>
-        <span v-if="rangeHint(item)" class="form-hint">{{ rangeHint(item) }}</span>
+        <span v-if="formatConfigRangeHint(item)" class="form-hint">{{ formatConfigRangeHint(item) }}</span>
         <span v-if="item.readOnlyReason" class="form-hint form-hint--warning">
           只读：{{ item.readOnlyReason }}
         </span>

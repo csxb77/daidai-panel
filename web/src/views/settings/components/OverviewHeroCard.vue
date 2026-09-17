@@ -15,8 +15,6 @@ const props = defineProps<{
   checkingUpdate: boolean
   updatingPanel: boolean
   stoppingPanel: boolean
-  autoUpdateEnabled: boolean
-  savingAutoUpdate: boolean
   releaseNotesVisible: boolean
   updateProgressVisible: boolean
   updateProgressStatus: 'idle' | 'running' | 'restarting' | 'completed' | 'failed' | 'timeout'
@@ -25,7 +23,6 @@ const props = defineProps<{
   onStartUpdate: () => void | Promise<void>
   onRestartPanel: () => void | Promise<void>
   onStopPanel: () => void | Promise<void>
-  onToggleAutoUpdate: (value: boolean) => void | Promise<void>
   onOpenReleaseNotes: () => void | Promise<void>
   onCloseReleaseNotes: () => void | Promise<void>
   onOpenGitHub: () => void

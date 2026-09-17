@@ -29,6 +29,7 @@ const {
   treeLoading,
   isEditing,
   editorAutoFocusTicket,
+  treeRevealTicket,
   showCreateFileDialog,
   showCreateDirDialog,
   showRenameDialog,
@@ -164,9 +165,14 @@ async function handleCancelEdit() {
         'sidebar-collapsed': isSidebarCollapsed
       }"
     >
+      <!-- current-file / reveal-ticket / sidebar-collapsed 三个给目录树定位用（issue #136）：
+           侧栏据此展开祖先、高亮当前文件、滚到可见；侧栏看不见时只高亮，等它重新可见再滚 -->
       <ScriptsSidebar
         :is-mobile="isCompactLayout"
         :mobile-show-editor="mobileShowEditor"
+        :sidebar-collapsed="isSidebarCollapsed"
+        :current-file="selectedFile"
+        :reveal-ticket="treeRevealTicket"
         :on-toggle-collapse="toggleSidebarCollapsed"
         :tree-loading="treeLoading"
         :file-tree="fileTree"

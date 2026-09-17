@@ -1,7 +1,8 @@
 import { computed, ref } from 'vue'
 import { configApi, type SystemConfigMap } from '@/api/system'
 import { ElMessage } from 'element-plus'
-import { applyPanelAppearance, applyPanelShapeStyle } from '@/utils/panelAppearance'
+import { applyPanelAppearance, type PanelAppearanceSettings } from '@/utils/panelAppearance'
+import type { PanelShapeStyle } from '@/utils/panelSettings'
 import type { SettingsConfigForm } from './types'
 import {
   buildConfigDraftWrites,
@@ -9,7 +10,8 @@ import {
   groupSystemConfigItems,
   parseConfigBool,
   parseSystemConfigItems,
-  validateConfigDraft
+  validateConfigDraft,
+  type ParsedSystemConfigItem
 } from './systemConfigSchema'
 
 const logBackgroundImageMaxBytes = 10 * 1024 * 1024
@@ -104,6 +106,10 @@ export function useSettingsConfig() {
   const captchaFeatureImplemented = true
   const configsLoading = ref(false)
   const configsSaving = ref(false)
+  // 是否至少成功加载过一次配置。没加载成功时 rawConfigs 是空的、表单里全是本地默认值，
+  // 这时保存会把每个键都当成改动写回去，连卡片上因为缺 schema 没显示的项也会被默认值盖掉，所以 submitConfigs 直接拦下。
+  // 加载成功过之后再刷新失败不清零：rawConfigs 和表单都还是上一次成功加载的那份，彼此对得上
+  const configsLoaded = ref(false)
 
   const configForm = ref<SettingsConfigFormState>({
     max_concurrent_tasks: 5,
@@ -113,6 +119,8 @@ export function useSettingsConfig() {
     random_delay_extensions: '',
     auto_install_deps: true,
     console_timeout_minutes: 30,
+    dependency_install_timeout_minutes: 20,
+    detect_silent_exit: true,
     auto_add_cron: true,
     auto_del_cron: true,
     default_cron_rule: '',
@@ -138,6 +146,7 @@ export function useSettingsConfig() {
     editor_background_color: '',
     log_background_color: '',
     log_background_image: '',
+    panel_shape_style: 'square',
     backup_schedule_enabled: false,
     backup_schedule_frequency: 'daily',
     backup_schedule_time: '03:00',
@@ -177,6 +186,24 @@ export function useSettingsConfig() {
 
   const extraConfigGroups = computed(() => groupSystemConfigItems(extraConfigItems.value))
 
+  // 全部注册项的 schema，按 key 索引。
+  // 专属表单里有几项是从兜底区挪进来的（依赖安装超时、检测脚本半路静默结束、界面圆角），
+  // 它们的标题、说明、下拉选项、取值范围照旧只认服务端下发的这一份，卡片从这里取，不在 Web 另抄一遍。
+  const configSchema = computed(() => {
+    const index: Record<string, ParsedSystemConfigItem> = {}
+    for (const item of parseSystemConfigItems(rawConfigs.value, new Set())) {
+      index[item.key] = item
+    }
+    return index
+  })
+
+  // 「代理设置」页静默更新开关下方只读展示的「上次检查更新时间」。
+  // 它由巡检与手动检查更新写入，不是用户偏好，所以不进 configForm、也永不回写，直接读服务端下发的值；
+  // 切到「代理设置」标签时 handleTabChange 会重跑 loadSystemConfigs，这里跟着刷新
+  const autoUpdateLastCheckedAt = computed(() =>
+    String(rawConfigs.value.auto_update_last_checked_at?.value ?? '').trim()
+  )
+
   function readConfigString(cfgs: Record<string, any>, key: string, fallback = ''): string {
     const entry = cfgs[key]
     const raw = entry?.value ?? entry?.default_value ?? fallback
@@ -186,6 +213,8 @@ export function useSettingsConfig() {
 
   function readConfigNumber(cfgs: Record<string, any>, key: string, fallback: number): number {
     const raw = readConfigString(cfgs, key, String(fallback))
+    // Number('') 是 0 而不是 NaN：空串不先拦下就读成 0，低于数字项的下限，整张卡保存时会被范围校验拦住
+    if (!raw.trim()) return fallback
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : fallback
   }
@@ -195,6 +224,19 @@ export function useSettingsConfig() {
     if (['true', '1', 'yes', 'on'].includes(raw)) return true
     if (['false', '0', 'no', 'off'].includes(raw)) return false
     return fallback
+  }
+
+  // 本页交给 applyPanelAppearance 的外观设置，两点讲究：
+  // 1) 界面圆角只取已保存的值（rawConfigs；保存成功后 submitConfigs 已把新值记进去），不取下拉里还没保存的选择。
+  //    圆角刻意不做选中即预览，可取色、上传/移除背景图会即时预览，带上表单值的话没保存的圆角会被顺手应用并写进本机缓存；
+  // 2) 传快照而不是 configForm 本身：applyPanelAppearance 会把它留给切主题时复用，
+  //    留的若是响应式表单，在下拉里改了圆角还没保存，一切主题就生效了。
+  // 取空串时 applyPanelShapeStyle 认不出、沿用上一次的圆角，不会被拍回直角
+  function appearanceSnapshot(): PanelAppearanceSettings {
+    return {
+      ...configForm.value,
+      panel_shape_style: readConfigString(rawConfigs.value, 'panel_shape_style', '') as PanelShapeStyle
+    }
   }
 
   async function loadSystemConfigs() {
@@ -212,6 +254,8 @@ export function useSettingsConfig() {
         random_delay_extensions: readConfigString(cfgs, 'random_delay_extensions', ''),
         auto_install_deps: readConfigBool(cfgs, 'auto_install_deps', true),
         console_timeout_minutes: readConfigNumber(cfgs, 'console_timeout_minutes', 30),
+        dependency_install_timeout_minutes: readConfigNumber(cfgs, 'dependency_install_timeout_minutes', 20),
+        detect_silent_exit: readConfigBool(cfgs, 'detect_silent_exit', true),
         auto_add_cron: readConfigBool(cfgs, 'auto_add_cron', true),
         auto_del_cron: readConfigBool(cfgs, 'auto_del_cron', true),
         default_cron_rule: readConfigString(cfgs, 'default_cron_rule', ''),
@@ -237,6 +281,9 @@ export function useSettingsConfig() {
         editor_background_color: readConfigString(cfgs, 'editor_background_color', ''),
         log_background_color: readConfigString(cfgs, 'log_background_color', ''),
         log_background_image: readConfigString(cfgs, 'log_background_image', ''),
+        // 按字符串原样读：认不出的历史值要留在下拉里给用户看到（见 resolveConfigOptions），
+        // 应用到页面时由 normalizePanelShape 忽略，不会被拍回直角
+        panel_shape_style: readConfigString(cfgs, 'panel_shape_style', 'square') as PanelShapeStyle,
         backup_schedule_enabled: readConfigBool(cfgs, 'backup_schedule_enabled', false),
         backup_schedule_frequency: readConfigString(cfgs, 'backup_schedule_frequency', 'daily'),
         backup_schedule_time: readConfigString(cfgs, 'backup_schedule_time', '03:00'),
@@ -263,8 +310,9 @@ export function useSettingsConfig() {
           : item.value
       }
       extraConfigDraft.value = draft
+      configsLoaded.value = true
 
-      applyPanelAppearance(configForm.value)
+      applyPanelAppearance(appearanceSnapshot())
     } catch (err: any) {
       ElMessage.error(err?.response?.data?.error || '加载配置失败')
     } finally {
@@ -278,6 +326,11 @@ export function useSettingsConfig() {
   // 全量回写会把「这一组里有一项填错」放大成「一半保存了一半没保存」。
   // 只发改动项能把出错范围缩到用户真正动过的那几个键上。
   async function submitConfigs(next: Record<string, string>): Promise<boolean> {
+    if (!configsLoaded.value) {
+      ElMessage.warning(configsLoading.value ? '配置还在加载，请稍后再保存' : '配置还没加载成功，请点刷新后再保存')
+      return false
+    }
+
     const changed: Record<string, string> = {}
     for (const [key, value] of Object.entries(next)) {
       if (rawConfigs.value[key]?.value === value) continue
@@ -320,13 +373,16 @@ export function useSettingsConfig() {
       next[key] = typeof val === 'boolean' ? (val ? 'true' : 'false') : String(val ?? '')
     }
     if (await submitConfigs(next)) {
-      applyPanelAppearance(configForm.value)
+      applyPanelAppearance(appearanceSnapshot())
     }
   }
 
+  // 界面圆角随本卡保存：保存成功后 submitConfigs 已把新值记进 rawConfigs，
+  // saveConfigKeys 重跑 applyPanelAppearance 时快照里就是刚保存的圆角，当场生效、不用刷新
   function handleSaveSystemConfig() {
     void saveConfigKeys([
-      'panel_title', 'timezone', 'panel_icon', 'editor_background_color', 'log_background_color', 'log_background_image'
+      'panel_title', 'timezone', 'panel_icon', 'editor_background_color', 'log_background_color', 'log_background_image',
+      'panel_shape_style'
     ])
   }
 
@@ -367,7 +423,7 @@ export function useSettingsConfig() {
       try {
         const result = await compressLogBackgroundImage(file)
         configForm.value.log_background_image = result.dataUrl
-        applyPanelAppearance(configForm.value)
+        applyPanelAppearance(appearanceSnapshot())
         if (result.compressed) {
           ElMessage.success('背景图片已自动压缩，请保存配置后生效')
         }
@@ -379,14 +435,25 @@ export function useSettingsConfig() {
   }
 
   function previewPanelAppearance() {
-    applyPanelAppearance(configForm.value)
+    applyPanelAppearance(appearanceSnapshot())
   }
 
   function handleSaveTaskConfig() {
+    // 依赖安装超时是从兜底区挪过来的，兜底区保存前本来会按 schema 的 min/max 拦一道；
+    // 挪了位置不能把这道校验丢掉 —— 越界时服务端 400 的原文带的是英文键名，用户看不懂
+    const installTimeoutItem = configSchema.value.dependency_install_timeout_minutes
+    if (installTimeoutItem) {
+      // v-model.number 在输入框清空或填了非数字时会留下字符串，统一转成字符串交给 schema 校验
+      const message = validateConfigDraft(installTimeoutItem, String(configForm.value.dependency_install_timeout_minutes))
+      if (message) {
+        ElMessage.warning(message)
+        return
+      }
+    }
     void saveConfigKeys([
       'max_concurrent_tasks', 'log_retention_days',
       'max_log_content_size', 'random_delay', 'random_delay_extensions', 'auto_install_deps',
-      'console_timeout_minutes'
+      'console_timeout_minutes', 'dependency_install_timeout_minutes', 'detect_silent_exit'
     ])
   }
 
@@ -421,7 +488,9 @@ export function useSettingsConfig() {
     ])
   }
 
-  // 兜底区保存：先做前端能确定的整数校验，再把草稿交给统一出口做差集回写
+  // 兜底区保存：先做前端能确定的整数校验，再把草稿交给统一出口做差集回写。
+  // 保存后不用补 applyPanelAppearance / applyPanelShapeStyle：界面圆角 v3.2.9 已挪进「面板外观」卡、
+  // 随 saveConfigKeys 生效，兜底区里没有要当场应用到页面上的项
   async function handleSaveExtraConfigs() {
     for (const item of extraConfigItems.value) {
       const message = validateConfigDraft(item, extraConfigDraft.value[item.key] ?? '')
@@ -430,14 +499,7 @@ export function useSettingsConfig() {
         return
       }
     }
-    if (await submitConfigs(buildConfigDraftWrites(extraConfigItems.value, extraConfigDraft.value))) {
-      // 单独补一次圆角刻度：panel_shape_style 走的是兜底区、不在 configForm 里，
-      // 本文件另外四个 applyPanelAppearance(configForm.value) 的调用点
-      //（loadSystemConfigs / saveConfigKeys / handleLogBackgroundUpload / previewPanelAppearance）
-      // 都覆盖不到这条保存路径，不补的话用户在这里切了圆角要刷新页面才看得到效果。
-      // 认不出的值会被 applyPanelShapeStyle 忽略，草稿里没有这一项时也能安全传 undefined。
-      applyPanelShapeStyle(extraConfigDraft.value['panel_shape_style'])
-    }
+    await submitConfigs(buildConfigDraftWrites(extraConfigItems.value, extraConfigDraft.value))
   }
 
   return {
@@ -445,6 +507,8 @@ export function useSettingsConfig() {
     configsLoading,
     configsSaving,
     configForm,
+    configSchema,
+    autoUpdateLastCheckedAt,
     extraConfigGroups,
     extraConfigDraft,
     handleSaveExtraConfigs,

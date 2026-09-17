@@ -29,6 +29,8 @@ import (
 var (
 	wecomAppTokenURL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
 	wecomAppSendURL  = "https://qyapi.weixin.qq.com/cgi-bin/message/send"
+	// 写成变量只是为了让测试能把它指向 httptest，线上始终是官方地址。
+	pushplusSendURL = "https://www.pushplus.plus/send"
 
 	smtpSendMail                = smtp.SendMail
 	smtpSendMailWithImplicitTLS = sendSMTPMailWithImplicitTLS
@@ -36,7 +38,13 @@ var (
 
 type NotificationDispatchOptions struct {
 	ChannelIDs []uint
-	Context    map[string]string
+	// ChannelTypes 在筛选结果上再按渠道类型过滤（issue #135）：点名了 ID 时取交集，
+	// 没点名时在广播集合上过滤，同样只命中「默认推送」渠道。零值不过滤，老调用方行为不变。
+	ChannelTypes []string
+	Context      map[string]string
+	// ContentType 是调用方声明的正文格式（text / markdown / html，见 notify_content_format.go）。
+	// 空串表示没声明，各渠道按自己的配置发，报文与加这个字段之前逐字节一致。
+	ContentType string
 }
 
 type NotificationDispatchResult struct {
@@ -51,51 +59,64 @@ func SendNotification(title, content string) {
 }
 
 func SendNotificationWithOptions(title, content string, options NotificationDispatchOptions) {
-	channels, err := loadEnabledNotificationChannels(options.ChannelIDs)
+	channels, err := loadEnabledNotificationChannels(options.ChannelIDs, options.ChannelTypes...)
 	if err != nil {
 		log.Printf("load notification channels failed: %v", err)
 		return
 	}
 
 	if len(channels) == 0 {
+		typeHint := ""
+		if len(options.ChannelTypes) > 0 {
+			typeHint = fmt.Sprintf(" types=%v", options.ChannelTypes)
+		}
 		if len(options.ChannelIDs) > 0 {
-			log.Printf("notification skipped: no enabled channels matched ids=%v", options.ChannelIDs)
+			log.Printf("notification skipped: no enabled channels matched ids=%v%s", options.ChannelIDs, typeHint)
 		} else {
 			// 广播 0 命中在这之前是完全静默的：这条分支上的调用方（资源告警、登录通知、
 			// 静默更新结果、未绑定渠道的任务通知）全都不看返回值，也没有任何日志。
 			// 加了 bound 语义后，用户只要把所有渠道都设成「绑定推送」，系统通知就会全部人间蒸发
 			// 且零线索，所以这里必须留一行 warn 作为唯一可查的痕迹。
-			log.Printf("warn: notification broadcast skipped: no channel with push_scope=default is enabled (title=%q)", title)
+			log.Printf("warn: notification broadcast skipped: no channel with push_scope=default is enabled (title=%q)%s", title, typeHint)
 		}
 		return
 	}
 
 	for _, ch := range channels {
-		go dispatchNotificationToChannel(ch, title, content, options.Context)
+		go dispatchNotificationToChannel(ch, title, content, options.Context, options.ContentType)
 	}
 }
 
 func SendNotificationToChannel(channel *model.NotifyChannel, title, content string) error {
-	return sendToChannel(*channel, title, content, nil)
+	return sendToChannel(*channel, title, content, nil, "")
 }
 
 func SendNotificationSyncWithOptions(title, content string, options NotificationDispatchOptions) (NotificationDispatchResult, error) {
 	result := NotificationDispatchResult{}
 
-	channels, err := loadEnabledNotificationChannels(options.ChannelIDs)
+	channels, err := loadEnabledNotificationChannels(options.ChannelIDs, options.ChannelTypes...)
 	if err != nil {
 		return result, err
 	}
 	if len(channels) == 0 {
+		typeHint := ""
+		if types := uniqueNotificationChannelTypes(options.ChannelTypes); len(types) > 0 {
+			typeHint = "（类型：" + strings.Join(types, "、") + "）"
+		}
 		if len(options.ChannelIDs) > 0 {
-			// 这句被 handler 的回归测试逐字断言，改文案会挂，也会让老客户端的错误匹配失效。
-			return result, fmt.Errorf("未找到已启用的通知渠道")
+			// 「未找到已启用的通知渠道」这句被 handler 的回归测试逐字断言，改文案会挂，也会让老客户端的错误匹配失效。
+			// 按类型过滤时只在后面追加类型说明，前半句不动。
+			return result, fmt.Errorf("未找到已启用的通知渠道%s", typeHint)
+		}
+		if typeHint != "" {
+			// 按类型过滤的广播同样不碰「绑定推送」渠道，这是最容易踩的坑，报错里直接给出路。
+			return result, fmt.Errorf("暂无参与广播的默认推送渠道%s；设为「绑定推送」的渠道需要用 channel_name 或 channel_id 点名", typeHint)
 		}
 		return result, fmt.Errorf("暂无参与广播的默认推送渠道")
 	}
 
 	for _, ch := range channels {
-		if err := sendToChannel(ch, title, content, options.Context); err != nil {
+		if err := sendToChannel(ch, title, content, options.Context, options.ContentType); err != nil {
 			result.FailedCount++
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", ch.Name, err))
 			continue
@@ -107,8 +128,8 @@ func SendNotificationSyncWithOptions(title, content string, options Notification
 	return result, nil
 }
 
-func dispatchNotificationToChannel(ch model.NotifyChannel, title, content string, context map[string]string) {
-	if err := sendToChannel(ch, title, content, context); err != nil {
+func dispatchNotificationToChannel(ch model.NotifyChannel, title, content string, context map[string]string, contentType string) {
+	if err := sendToChannel(ch, title, content, context, contentType); err != nil {
 		log.Printf("send notification via channel %d(%s) failed: %v", ch.ID, ch.Name, err)
 	}
 }
@@ -119,9 +140,17 @@ func dispatchNotificationToChannel(ch model.NotifyChannel, title, content string
 //     「绑定推送」渠道存在的意义就是只在被显式指定时才推，这里再叠一层 push_scope 过滤
 //     会让它永远发不出去，等于把功能做废。
 //   - 广播（channelIDs 为空）：只命中「默认推送」渠道。
-func loadEnabledNotificationChannels(channelIDs []uint) ([]model.NotifyChannel, error) {
+//
+// channelTypes（issue #135，可省略）只是叠加在上面两种集合上的过滤，不改变 push_scope 语义：
+// 按类型选渠道**不算点名**。否则脚本里一句 notify.wxpusher_bot() 就能打到别的脚本专用的「绑定推送」渠道，
+// 「一个脚本对应一个通知」的隔离就失效了；要发绑定推送渠道，用名称或 ID 点名。
+// 写成可变参数是为了让既有调用 loadEnabledNotificationChannels(ids) 原样可用。
+func loadEnabledNotificationChannels(channelIDs []uint, channelTypes ...string) ([]model.NotifyChannel, error) {
 	var channels []model.NotifyChannel
 	query := database.DB.Where("enabled = ?", true)
+	if types := uniqueNotificationChannelTypes(channelTypes); len(types) > 0 {
+		query = query.Where("type IN ?", types)
+	}
 	if ids := uniqueNotificationChannelIDs(channelIDs); len(ids) > 0 {
 		query = query.Where("id IN ?", ids)
 	} else {
@@ -160,6 +189,28 @@ func uniqueNotificationChannelIDs(ids []uint) []uint {
 	return result
 }
 
+// uniqueNotificationChannelTypes 去空白、去空串、去重，保持传入顺序。
+func uniqueNotificationChannelTypes(types []string) []string {
+	if len(types) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(types))
+	result := make([]string, 0, len(types))
+	for _, channelType := range types {
+		channelType = strings.TrimSpace(channelType)
+		if channelType == "" {
+			continue
+		}
+		if _, exists := seen[channelType]; exists {
+			continue
+		}
+		seen[channelType] = struct{}{}
+		result = append(result, channelType)
+	}
+	return result
+}
+
 func recordNotificationSend(channelID uint, sentAt time.Time) {
 	if channelID == 0 || database.DB == nil {
 		return
@@ -187,7 +238,12 @@ func recordNotificationSend(channelID uint, sentAt time.Time) {
 	}
 }
 
-func sendToChannel(ch model.NotifyChannel, title, content string, context map[string]string) error {
+// sendToChannel 按渠道类型分发。contentType 是调用方声明的正文格式，空串即老行为。
+//
+// 这个 switch 里**只许出现渠道类型的字符串 case**：notifier_schema_binding_test.go 会把这里所有字符串 case
+// 当成渠道类型去和注册表比对，写一句 case "html" 就会被当成「注册表没声明的渠道」报红。
+// 按格式分支的逻辑放在 adaptNotifyContent（notify_content_format.go）和各 sendXxxWithFormat 里。
+func sendToChannel(ch model.NotifyChannel, title, content string, context map[string]string, contentType string) error {
 	var cfg map[string]string
 	if err := json.Unmarshal([]byte(ch.Config), &cfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
@@ -198,24 +254,27 @@ func sendToChannel(ch model.NotifyChannel, title, content string, context map[st
 		title = "【" + label + "】" + title
 	}
 
+	// 渠道不认 HTML 时先去标签转纯文本；contentType 为空时原样返回，报文不受影响。
+	content, contentType = adaptNotifyContent(ch.Type, contentType, content)
+
 	var err error
 	switch ch.Type {
 	case "webhook":
-		err = sendWebhook(cfg, title, content)
+		err = sendWebhookWithFormat(cfg, title, content, contentType)
 	case "email":
-		err = sendEmail(cfg, title, content)
+		err = sendEmailWithFormat(cfg, title, content, contentType)
 	case "telegram":
 		err = sendTelegram(cfg, title, content)
 	case "dingtalk":
-		err = sendDingtalk(cfg, title, content)
+		err = sendDingtalkWithFormat(cfg, title, content, contentType)
 	case "wecom":
-		err = sendWecomWithContext(cfg, title, content, context)
+		err = sendWecomWithFormat(cfg, title, content, context, contentType)
 	case "wecom_app":
-		err = sendWecomAppWithContext(cfg, title, content, context)
+		err = sendWecomAppWithFormat(cfg, title, content, context, contentType)
 	case "bark":
 		err = sendBarkWithContext(cfg, title, content, context)
 	case "pushplus":
-		err = sendPushplus(cfg, title, content)
+		err = sendPushplusWithFormat(cfg, title, content, contentType)
 	case "serverchan":
 		err = sendServerchan(cfg, title, content)
 	case "feishu":
@@ -241,7 +300,7 @@ func sendToChannel(ch model.NotifyChannel, title, content string, context map[st
 	case "ntfy":
 		err = sendNtfy(cfg, title, content)
 	case "wxpusher":
-		err = sendWxPusher(cfg, title, content)
+		err = sendWxPusherWithFormat(cfg, title, content, contentType)
 	case "custom":
 		err = sendCustomWebhook(cfg, title, content)
 	default:
@@ -422,15 +481,27 @@ var (
 )
 
 func sendWebhook(cfg map[string]string, title, content string) error {
+	return sendWebhookWithFormat(cfg, title, content, "")
+}
+
+func sendWebhookWithFormat(cfg map[string]string, title, content, format string) error {
 	webhookURL := cfg["url"]
 	if webhookURL == "" {
 		return fmt.Errorf("Webhook URL 为空")
 	}
 	body := map[string]string{"title": title, "content": content}
+	// 正文原样透传，只把调用方声明的格式告诉接收方。没声明时不加这个键，请求体的键集合与以前一致。
+	if format != "" {
+		body["content_type"] = format
+	}
 	return httpPost(webhookURL, body, nil)
 }
 
 func sendEmail(cfg map[string]string, title, content string) error {
+	return sendEmailWithFormat(cfg, title, content, "")
+}
+
+func sendEmailWithFormat(cfg map[string]string, title, content, format string) error {
 	host := strings.TrimSpace(cfg["smtp_host"])
 	port := strings.TrimSpace(cfg["smtp_port"])
 	user := strings.TrimSpace(cfg["smtp_user"])
@@ -459,6 +530,13 @@ func sendEmail(cfg map[string]string, title, content string) error {
 
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		from, to, title, content)
+	if format == NotifyContentHTML {
+		// 只有调用方声明了 html 才发 text/html；text / markdown / 未声明都保持上面的纯文本报文，逐字节不变。
+		// 必须带 MIME-Version，否则部分客户端不认 Content-Type、照样显示源码；
+		// 正文用 quoted-printable，避免压缩成一行的 HTML 超过 SMTP 单行 998 字节被拒收。
+		msg = fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n%s",
+			from, to, title, encodeNotifyQuotedPrintable(content))
+	}
 
 	if smtpImplicitSSLEnabled(cfg, port) {
 		return smtpSendMailWithImplicitTLS(addr, host, auth, from, recipients, []byte(msg))
@@ -596,6 +674,10 @@ func sendTelegram(cfg map[string]string, title, content string) error {
 }
 
 func sendDingtalk(cfg map[string]string, title, content string) error {
+	return sendDingtalkWithFormat(cfg, title, content, "")
+}
+
+func sendDingtalkWithFormat(cfg map[string]string, title, content, format string) error {
 	webhook := cfg["webhook"]
 	if webhook == "" {
 		return fmt.Errorf("钉钉 Webhook URL 为空")
@@ -613,8 +695,18 @@ func sendDingtalk(cfg map[string]string, title, content string) error {
 		webhook = webhook + sep + "timestamp=" + timestamp + "&sign=" + sign
 	}
 
+	useText := strings.ToLower(strings.TrimSpace(cfg["msg_type"])) == "text"
+	// 调用方声明了 text / markdown 时（issue #135）覆盖渠道配置的消息类型；html 在进来之前已经去成纯文本、
+	// 格式为空，按渠道配置发。
+	switch format {
+	case NotifyContentText:
+		useText = true
+	case NotifyContentMarkdown:
+		useText = false
+	}
+
 	var body map[string]interface{}
-	if strings.ToLower(strings.TrimSpace(cfg["msg_type"])) == "text" {
+	if useText {
 		body = map[string]interface{}{
 			"msgtype": "text",
 			"text": map[string]string{
@@ -639,6 +731,10 @@ func sendWecom(cfg map[string]string, title, content string) error {
 }
 
 func sendWecomWithContext(cfg map[string]string, title, content string, context map[string]string) error {
+	return sendWecomWithFormat(cfg, title, content, context, "")
+}
+
+func sendWecomWithFormat(cfg map[string]string, title, content string, context map[string]string, format string) error {
 	webhook := cfg["webhook"]
 	if webhook == "" {
 		return fmt.Errorf("企业微信机器人 Webhook URL 为空")
@@ -648,23 +744,45 @@ func sendWecomWithContext(cfg map[string]string, title, content string, context 
 	if msgType == "" {
 		msgType = "text"
 	}
+	configuredMsgType := msgType
+	mentioned := splitNotificationTargets(cfg["mentioned_list"])
+	mobiles := splitNotificationTargets(cfg["mentioned_mobile_list"])
+	// 调用方声明了 text / markdown 时（issue #135）只在文本类消息之间切换，原本是 markdown_v2 的保持 v2。
+	// 配了 @ 成员的文本消息不切成 markdown：markdown 消息没有 mentioned_list，@ 会被脚本一个参数静默丢掉。
+	// 图片、图文、模版卡片的正文不是 content 本身，不受影响。
+	if msgType == "text" || msgType == "markdown" || msgType == "markdown_v2" {
+		switch format {
+		case NotifyContentText:
+			msgType = "text"
+		case NotifyContentMarkdown:
+			if msgType == "text" && len(mentioned) == 0 && len(mobiles) == 0 {
+				msgType = "markdown"
+			}
+		}
+	}
+	// content_template 是按渠道配置的消息类型写的；调用方的格式改了消息类型时改用该类型的默认模板，
+	// 否则 markdown 模板里的 ** 会原样出现在文本消息里。
+	contentTemplate := cfg["content_template"]
+	if msgType != configuredMsgType {
+		contentTemplate = ""
+	}
 
 	body := map[string]interface{}{"msgtype": msgType}
 	switch msgType {
 	case "text":
 		textBody := map[string]interface{}{
-			"content": renderNotificationTemplateWithContext(cfg["content_template"], title, content, "{{title}}\n{{content}}", context),
+			"content": renderNotificationTemplateWithContext(contentTemplate, title, content, "{{title}}\n{{content}}", context),
 		}
-		if mentioned := splitNotificationTargets(cfg["mentioned_list"]); len(mentioned) > 0 {
+		if len(mentioned) > 0 {
 			textBody["mentioned_list"] = mentioned
 		}
-		if mobiles := splitNotificationTargets(cfg["mentioned_mobile_list"]); len(mobiles) > 0 {
+		if len(mobiles) > 0 {
 			textBody["mentioned_mobile_list"] = mobiles
 		}
 		body["text"] = textBody
 	case "markdown", "markdown_v2":
 		body[msgType] = map[string]string{
-			"content": renderNotificationTemplateWithContext(cfg["content_template"], title, content, "**{{title}}**\n{{content}}", context),
+			"content": renderNotificationTemplateWithContext(contentTemplate, title, content, "**{{title}}**\n{{content}}", context),
 		}
 	case "image":
 		base64Data := strings.TrimSpace(cfg["image_base64"])
@@ -710,6 +828,10 @@ func sendWecomApp(cfg map[string]string, title, content string) error {
 }
 
 func sendWecomAppWithContext(cfg map[string]string, title, content string, context map[string]string) error {
+	return sendWecomAppWithFormat(cfg, title, content, context, "")
+}
+
+func sendWecomAppWithFormat(cfg map[string]string, title, content string, context map[string]string, format string) error {
 	corpID := strings.TrimSpace(cfg["corp_id"])
 	secret := strings.TrimSpace(cfg["secret"])
 	agentID := strings.TrimSpace(cfg["agent_id"])
@@ -792,6 +914,19 @@ func sendWecomAppWithContext(cfg map[string]string, title, content string, conte
 	if msgType == "" {
 		msgType = "text"
 	}
+	configuredMsgType := msgType
+	// 调用方声明 text 时（issue #135）把渠道配置的 markdown 切回文本；声明 markdown 时**不**把文本消息切成 markdown：
+	// 企业微信应用的 markdown 消息在微信插件（微工作台）里不显示，也没有 safe / enable_id_trans，
+	// 管理员设的保密消息会被脚本一个参数变成普通消息。markdown 原文按文本发也读得懂。
+	// 图片、文件、视频、图文、mpnews、模版卡片不受影响。
+	if msgType == "markdown" && format == NotifyContentText {
+		msgType = "text"
+	}
+	// content_template 是按渠道配置的消息类型写的；切了消息类型时改用该类型的默认模板，markdown 模板里的 ** 不进文本消息。
+	contentTemplate := cfg["content_template"]
+	if msgType != configuredMsgType {
+		contentTemplate = ""
+	}
 
 	receivers := map[string]string{
 		"touser":  strings.TrimSpace(cfg["to_user"]),
@@ -826,11 +961,11 @@ func sendWecomAppWithContext(cfg map[string]string, title, content string, conte
 		body["safe"] = notificationConfigInt(cfg["safe"], 0)
 		body["enable_id_trans"] = notificationConfigInt(cfg["enable_id_trans"], 0)
 		body["text"] = map[string]string{
-			"content": renderNotificationTemplateWithContext(cfg["content_template"], title, content, "{{title}}\n{{content}}", context),
+			"content": renderNotificationTemplateWithContext(contentTemplate, title, content, "{{title}}\n{{content}}", context),
 		}
 	case "markdown":
 		body["markdown"] = map[string]string{
-			"content": renderNotificationTemplateWithContext(cfg["content_template"], title, content, "**{{title}}**\n{{content}}", context),
+			"content": renderNotificationTemplateWithContext(contentTemplate, title, content, "**{{title}}**\n{{content}}", context),
 		}
 	case "image", "file", "video":
 		body["safe"] = notificationConfigInt(cfg["safe"], 0)
@@ -1198,6 +1333,10 @@ func sendBarkWithContext(cfg map[string]string, title, content string, context m
 }
 
 func sendPushplus(cfg map[string]string, title, content string) error {
+	return sendPushplusWithFormat(cfg, title, content, "")
+}
+
+func sendPushplusWithFormat(cfg map[string]string, title, content, format string) error {
 	token := cfg["token"]
 	if token == "" {
 		return fmt.Errorf("PushPlus Token 为空")
@@ -1205,7 +1344,7 @@ func sendPushplus(cfg map[string]string, title, content string) error {
 	// 走 https：同一个请求分别打 https 和 http 实测过，两边都是 HTTP 200 且响应体逐字节相同
 	// （{"code":903,...}），说明 https 通道可用。而 http 会让用户的 PushPlus token 明文过网，
 	// 没有任何理由继续用。
-	apiURL := "https://www.pushplus.plus/send"
+	apiURL := pushplusSendURL
 	body := map[string]string{
 		"token":   token,
 		"title":   title,
@@ -1214,8 +1353,20 @@ func sendPushplus(cfg map[string]string, title, content string) error {
 	if v := cfg["topic"]; v != "" {
 		body["topic"] = v
 	}
-	if v := cfg["template"]; v != "" {
-		body["template"] = v
+	template := cfg["template"]
+	// 调用方声明了正文格式时（issue #135）按格式选模板。json 模板是用户特意配的结构化排版，不覆盖。
+	if !strings.EqualFold(strings.TrimSpace(template), "json") {
+		switch format {
+		case NotifyContentHTML:
+			template = "html"
+		case NotifyContentMarkdown:
+			template = "markdown"
+		case NotifyContentText:
+			template = "txt"
+		}
+	}
+	if template != "" {
+		body["template"] = template
 	}
 	// channel 留空时不发这个参数，由 PushPlus 按账号默认渠道（微信公众号）处理，
 	// 保证老渠道配置的行为与新增该字段之前完全一致。
@@ -1489,6 +1640,10 @@ func sendNtfy(cfg map[string]string, title, content string) error {
 }
 
 func sendWxPusher(cfg map[string]string, title, content string) error {
+	return sendWxPusherWithFormat(cfg, title, content, "")
+}
+
+func sendWxPusherWithFormat(cfg map[string]string, title, content, format string) error {
 	appToken := strings.TrimSpace(cfg["app_token"])
 	if appToken == "" {
 		return fmt.Errorf("WxPusher appToken 为空")
@@ -1509,10 +1664,28 @@ func sendWxPusher(cfg map[string]string, title, content string) error {
 			contentType = parsed
 		}
 	}
+	// 调用方声明了正文格式时（issue #135）覆盖渠道配置的 content_type（1 文本 / 2 HTML / 3 Markdown）。
+	// 注意这里的 format 和渠道配置里的 content_type 不是一回事：前者是「这段正文是什么」，后者是渠道默认怎么发。
+	switch format {
+	case NotifyContentText:
+		contentType = 1
+	case NotifyContentHTML:
+		contentType = 2
+	case NotifyContentMarkdown:
+		contentType = 3
+	}
 
 	messageContent := fmt.Sprintf("%s\n%s", title, content)
 	switch contentType {
 	case 2:
+		if format == NotifyContentHTML {
+			// 调用方明确说正文就是 HTML：正文原样交给 WxPusher 渲染（表格等才显示得出来），标题仍转义。
+			// 不套 pre-wrap 的 div：那是给纯文本保留换行用的，套在 HTML 外面会把源码里的缩进和换行也渲染出来。
+			messageContent = fmt.Sprintf("<h1>%s</h1><br/>%s", html.EscapeString(title), content)
+			break
+		}
+		// 没声明格式、只是渠道配成了 HTML 时必须继续转义：任务执行通知里嵌着脚本日志，
+		// 放开会让日志里的 < 被当成真标签渲染（排版被破坏，WxPusher 详情页还多一个注入面）。
 		messageContent = fmt.Sprintf(
 			"<h1>%s</h1><br/><div style='white-space: pre-wrap;'>%s</div>",
 			html.EscapeString(title),

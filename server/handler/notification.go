@@ -267,10 +267,59 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 		ChannelID  *uint                  `json:"channel_id"`
 		ChannelIDs []uint                 `json:"channel_ids"`
 		Context    map[string]interface{} `json:"context"`
+		// 下面几项是 issue #135 加的，全部可选、只做加法：不传时请求处理与各渠道报文和以前逐字节一致。
+		// 这里的 content_type 是「正文是什么格式」，和渠道配置里 wxpusher / custom 的同名配置项不是一回事。
+		ContentType  string   `json:"content_type"`
+		ChannelType  *string  `json:"channel_type"`
+		ChannelTypes []string `json:"channel_types"`
+		ChannelName  *string  `json:"channel_name"`
+		ChannelNames []string `json:"channel_names"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")
 		return
+	}
+
+	// 空串 = 没声明格式，走老逻辑；空串不能当成 text，否则钉钉默认的 markdown 会被改成文本消息。
+	// text/html 这类 MIME 写法也认（NormalizeNotifyContentType 里处理）。
+	contentType, ok := service.NormalizeNotifyContentType(req.ContentType)
+	if !ok {
+		response.BadRequest(c, "content_type 只能是 text / markdown / html（不传则按渠道配置发送）")
+		return
+	}
+
+	// 按渠道类型过滤。脚本令牌是 operator，列不了渠道（那个接口要 admin，而且渠道配置里有密钥），
+	// 所以「只发邮件」「只发 WxPusher」只能交给服务端按类型筛。
+	// 与 channel_id 同样的收紧口径：显式传了却是空白，直接 400，不静默放宽成「不过滤」。
+	// 类型名与 content_type 一样大小写不敏感，归一成注册表里的写法再过滤（库里存的是注册表写法）。
+	channelTypes := make([]string, 0, len(req.ChannelTypes)+1)
+	rawTypes := req.ChannelTypes
+	if req.ChannelType != nil {
+		rawTypes = append([]string{*req.ChannelType}, rawTypes...)
+	}
+	if len(rawTypes) > 0 {
+		definitions := model.NotifyChannelDefinitions()
+		registeredTypes := make(map[string]string, len(definitions))
+		validTypes := make([]string, 0, len(definitions))
+		for _, definition := range definitions {
+			registeredTypes[strings.ToLower(definition.Type)] = definition.Type
+			validTypes = append(validTypes, definition.Type)
+		}
+		for _, raw := range rawTypes {
+			trimmed := strings.TrimSpace(raw)
+			if trimmed == "" {
+				response.BadRequest(c, "通知渠道类型无效：channel_type / channel_types 不能为空")
+				return
+			}
+			channelType, known := registeredTypes[strings.ToLower(trimmed)]
+			if !known {
+				// 直接列出可选类型：GET /notifications/types 要管理员令牌，脚本令牌（operator）调不了，
+				// 报错里只指向那个接口，脚本作者在任务日志里看到了也查不到。
+				response.BadRequest(c, fmt.Sprintf("未知的通知渠道类型：%s（可选：%s）", trimmed, strings.Join(validTypes, "、")))
+				return
+			}
+			channelTypes = append(channelTypes, channelType)
+		}
 	}
 
 	// 调用方点名了渠道、但归一化后一个有效 ID 都不剩时直接 400，不再退化成广播。
@@ -300,14 +349,53 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 		return
 	}
 
+	// 按名称点名（渠道名称有唯一索引）。和 ID 同级：属于显式点名，忽略 push_scope，「绑定推送」渠道也能收到。
+	// 有名称查不到时 400 并列出来，绝不退化成广播；这里不看 enabled，禁用的渠道交给下游报「未找到已启用的通知渠道」。
+	rawNames := req.ChannelNames
+	if req.ChannelName != nil {
+		rawNames = append([]string{*req.ChannelName}, rawNames...)
+	}
+	if len(rawNames) > 0 {
+		for _, name := range rawNames {
+			if strings.TrimSpace(name) == "" {
+				response.BadRequest(c, "通知渠道名称无效：channel_name / channel_names 不能为空")
+				return
+			}
+		}
+		var named []model.NotifyChannel
+		if err := database.DB.Select("id", "name").Where("name IN ?", rawNames).Find(&named).Error; err != nil {
+			response.InternalError(c, "查询通知渠道失败")
+			return
+		}
+		idByName := make(map[string]uint, len(named))
+		for _, ch := range named {
+			idByName[ch.Name] = ch.ID
+		}
+		var missing []string
+		for _, name := range rawNames {
+			id, found := idByName[name]
+			if !found {
+				missing = append(missing, "「"+name+"」")
+				continue
+			}
+			channelIDs = append(channelIDs, id)
+		}
+		if len(missing) > 0 {
+			response.BadRequest(c, "未找到名称为"+strings.Join(missing, "")+"的通知渠道")
+			return
+		}
+	}
+
 	context := make(map[string]string, len(req.Context))
 	for key, value := range req.Context {
 		context[key] = fmt.Sprint(value)
 	}
 
 	result, err := service.SendNotificationSyncWithOptions(req.Title, req.Content, service.NotificationDispatchOptions{
-		ChannelIDs: channelIDs,
-		Context:    context,
+		ChannelIDs:   channelIDs,
+		ChannelTypes: channelTypes,
+		Context:      context,
+		ContentType:  contentType,
 	})
 	if err != nil {
 		response.BadRequest(c, "发送失败: "+err.Error())
@@ -326,7 +414,8 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 
 	// used_all 的语义随「默认推送 / 绑定推送」一起变了：从「发给全部已启用渠道」变成
 	// 「走广播，即发给全部已启用且 push_scope=default 的渠道」。设成「绑定推送」的渠道
-	// 不会出现在广播里，只有被显式点名（channel_id / channel_ids）时才会收到。
+	// 不会出现在广播里，只有被显式点名（channel_id / channel_ids / channel_name / channel_names）时才会收到。
+	// 按名称点名解析出的 ID 也计入 requested_ids；channel_types 只是过滤，used_all 仍按「有没有点名」算。
 	response.Success(c, gin.H{
 		"message": message,
 		"data": gin.H{
@@ -337,6 +426,8 @@ func (h *NotificationHandler) Send(c *gin.Context) {
 			"requested_ids":  channelIDs,
 			"used_all":       len(channelIDs) == 0,
 			"content_length": len([]rune(req.Content)),
+			"content_type":   contentType,
+			"channel_types":  channelTypes,
 		},
 	})
 }

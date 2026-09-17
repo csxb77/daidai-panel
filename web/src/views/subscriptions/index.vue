@@ -18,6 +18,7 @@ import { formatDuration } from "@/utils/duration";
 import { formatDateTime } from "@/utils/datetime";
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
+import DdFieldHelp from "@/components/ui/DdFieldHelp.vue";
 
 const subList = ref<any[]>([]);
 const loading = ref(false);
@@ -144,6 +145,61 @@ const editForm = ref({
   // 同样要在四处同步（这里的初值、openCreate、openEdit 回填、handleSave 提交）。
   full_checkout: false,
 });
+
+// 新建 / 编辑订阅弹窗里的「高级设置」是否展开（v3.2.9 精简弹窗）。默认折叠。
+// 弹窗没有 destroy-on-close，openCreate / openEdit 里都要复位成 false，否则会沿用上一次关弹窗时的展开状态。
+const showAdvanced = ref(false);
+
+// 「高级设置」折叠行右侧的摘要。一键识别会往折叠区里写分支、拉取后钩子、自动建任务=强制开启，
+// 编辑存量订阅时也常带着鉴权、钩子；没有这行摘要的话，这些值藏在折叠区里用户根本看不见。
+// 只列「和新建时的默认值不一样」的项：字符串去掉首尾空白后非空、三态不是 inherit、完整检出为开。
+// 保存目录不算：一键识别总会填它，算进去摘要就几乎永远不为空，失去提示意义。
+// 只对 git 仓库显示的字段（分支 / 指定子目录 / 鉴权 / 完整检出 / 覆盖拉取）在单文件订阅下不列——
+// 表单里看不到它们，列出来用户展开也找不到。顺序与高级区里的字段顺序一致。
+const advancedSummary = computed(() => {
+  const form = editForm.value;
+  const isGit = form.type === "git-repo";
+  const items: string[] = [];
+  if (isGit && form.branch.trim()) items.push("分支");
+  if (isGit && form.sub_path.trim()) items.push("指定子目录");
+  if (form.alias.trim()) items.push("别名");
+  if (isGit && form.auth_type) items.push("鉴权");
+  if (isGit && form.full_checkout) items.push("完整检出");
+  if (isGit && form.overwrite_mode !== "inherit") items.push("覆盖拉取");
+  if (form.auto_add_task_mode !== "inherit") items.push("自动建任务");
+  if (form.auto_del_task_mode !== "inherit") items.push("自动删任务");
+  if (form.pre_script.trim()) items.push("拉取前指令");
+  if (form.hook_script.trim()) items.push("拉取后钩子");
+  if (items.length > 0) return `已设置：${items.join("、")}`;
+  // 都是默认值时只概述折叠区里有什么，按类型给，别对单文件订阅提分支和鉴权
+  return isGit
+    ? "分支、目录、鉴权、任务同步、钩子"
+    : "目录、别名、任务同步、钩子";
+});
+
+// 保存失败时，如果后端 400 点名的是折叠区里的字段，自动展开「高级设置」，让用户看得见该改哪一项。
+// 前端自己只校验名称和 URL（都在基本区）。后端会点名折叠区字段的文案（server/handler/subscription.go）：
+//   - 仓库鉴权：「已选择 SSH 鉴权，请指定 SSH 密钥」「已选择 Token 鉴权，请填写访问令牌」「无效的仓库鉴权方式」「无效的仓库访问令牌」；
+//   - 创建判重：「相同地址、分支、子目录、保存目录和别名的订阅已存在」——能改来区分的字段除 URL 外全在折叠区。
+// 白名单 / 黑名单 / 依赖规则的正则报错以字段名开头，并且会原样带出用户写的片段，
+// 片段里可能恰好含下面的关键字，所以先按开头排除，免得正则写错反而展开了高级设置。
+const ADVANCED_FIELD_ERROR_KEYWORDS = [
+  "鉴权",
+  "访问令牌",
+  "SSH 密钥",
+  "分支",
+  "子目录",
+  "保存目录",
+  "别名",
+];
+function revealAdvancedForError(message: string) {
+  if (!message || /^(白名单|黑名单|依赖规则)/.test(message)) return;
+  if (
+    ADVANCED_FIELD_ERROR_KEYWORDS.some((keyword) => message.includes(keyword))
+  ) {
+    showAdvanced.value = true;
+  }
+}
 
 const sshKeys = ref<any[]>([]);
 const showSSHKeyManageDialog = ref(false);
@@ -356,6 +412,8 @@ function openCreate() {
     overwrite_mode: "inherit",
     full_checkout: false,
   };
+  // 高级设置每次打开都从折叠开始（弹窗不销毁，不复位会沿用上次的展开状态）
+  showAdvanced.value = false;
   showEditDialog.value = true;
 }
 
@@ -628,6 +686,8 @@ function openEdit(row: any) {
     // 用 !! 归一成 false（稀疏检出），保持存量订阅的既有行为。
     full_checkout: !!row.full_checkout,
   };
+  // 同 openCreate：从折叠开始，已设置的高级项靠折叠行的 advancedSummary 提示
+  showAdvanced.value = false;
   showEditDialog.value = true;
   // 「（当前：X）」展示的是全局开关：别的管理员在别处改过之后，本页那个值一旦读到就不会自己回落，
   // 会一直陈旧到用户手动打开一次「订阅设置」。这里顺手静默刷新一次
@@ -705,9 +765,10 @@ async function handleSave() {
     showEditDialog.value = false;
     loadData();
   } catch (err: any) {
-    ElMessage.error(
-      err?.response?.data?.error || (isCreate.value ? "创建失败" : "更新失败"),
-    );
+    const serverError = err?.response?.data?.error;
+    // 后端点名的是折叠区字段（鉴权、判重里的分支 / 目录 / 别名）时先展开高级设置，再弹原文
+    if (typeof serverError === "string") revealAdvancedForError(serverError);
+    ElMessage.error(serverError || (isCreate.value ? "创建失败" : "更新失败"));
   } finally {
     editSaving.value = false;
   }
@@ -1637,17 +1698,35 @@ function viewLogDetail(log: any) {
       width="800px"
       :fullscreen="dialogFullscreen"
     >
+      <!--
+        新建与编辑共用这一个弹窗，只有「一键识别」随 isCreate 出现（v3.2.9 精简）。
+        结构：
+          - 基本区：名称 / 类型 / URL / 定时拉取，加上与 ql repo 第 2~4 个参数一一对应的白名单 / 黑名单 / 依赖规则
+            （粘贴命令识别后要一眼看得到；后端 400 点名这三项时也不用先去展开什么）；
+          - 默认折叠的「高级设置」：分支、目录、鉴权、完整检出、覆盖拉取、自动建 / 删任务、钩子这些不常改的项。
+            折叠行右侧的 advancedSummary 列出高级区里已经有值的项，免得一键识别 / 存量订阅的值藏着看不见。
+        ⚠️ 说明文字的口径：弹窗里不放常驻说明段落。完整匹配规则见 README 订阅管理一节与接口文档（views/api-docs/apiData.ts），
+        弹窗只放一两句气泡（DdFieldHelp，点标签旁的「?」弹出），拉取日志的 [提示] 负责当场解释。
+        v3.2.9 前这里常驻约 1500 字说明，用户反馈「文字说明太多」才删掉的；以后字段需要解释，
+        也只在标签旁加气泡、讲清用途与最容易踩的坑，别把「写全条件」的长段落加回表单里。
+      -->
       <el-form
         class="subscription-form"
         :model="editForm"
-        :label-width="dialogFullscreen ? 'auto' : '88px'"
+        :label-width="dialogFullscreen ? 'auto' : '104px'"
         :label-position="dialogFullscreen ? 'top' : 'right'"
       >
-        <el-form-item v-if="isCreate" label="一键识别" class="form-item--full">
+        <el-form-item v-if="isCreate" class="form-item--full">
+          <template #label>
+            <DdFieldHelp label="一键识别">
+              粘贴 ql repo / ql raw
+              命令，自动填好名称、URL、白名单、黑名单、依赖规则、分支等，并把「自动建任务」设为强制开启。识别后可在「高级设置」里核对。
+            </DdFieldHelp>
+          </template>
           <div style="display: flex; gap: 8px; width: 100%">
             <el-input
               v-model="qlCommand"
-              placeholder="粘贴 ql repo/raw 命令或仓库链接"
+              placeholder="粘贴 ql repo / ql raw 命令或仓库链接"
               clearable
               @keyup.enter="parseQLCommand"
             />
@@ -1666,374 +1745,328 @@ function viewLogDetail(log: any) {
         <el-form-item label="URL" class="form-item--full">
           <el-input
             v-model="editForm.url"
-            placeholder="仓库地址或文件下载链接"
+            :placeholder="
+              editForm.type === 'git-repo'
+                ? '如 https://github.com/owner/repo.git'
+                : '脚本文件的下载链接'
+            "
           />
         </el-form-item>
-        <el-form-item v-if="editForm.type === 'git-repo'" label="分支">
+        <!--
+          白名单 / 黑名单 / 依赖规则：对应 ql repo 的第 2/3/4 个参数，一键识别后要一眼看得到，所以留在基本区。
+          三个字段共用同一套匹配口径（#129，与后端 subscription_patterns.go 同源）：
+            - 只在顶层的 , 或 | 处拆成片段，括号 / 方括号里的 , 与 | 属于正则本身、不拆；
+            - 普通片段按「子串包含」匹配（行为与改动前逐字节一致），片段命中目录名时目录下全部文件一并命中；
+            - 含 ^ $ ( ) [ ] { } ? \ 任一字符，或含 .* / .+ 的片段按正则（Go RE2，与青龙 grep -E 同口径）
+              匹配仓库相对路径，不锚定；单独一个 + 不算触发字符，所以 jd_*.js、.github 这类写法仍按子串包含；
+            - 「全部」类写法（* / ** / *.* / .* / all / 全部）与「含空格或中文 = 文字备注」的判定照旧先跑；
+            - git 的 sparse-checkout 表达不了正则：依赖规则、（没填「指定子目录」时的）白名单出现正则片段会改为整仓检出，
+              黑名单的正则片段只能保证不建任务、做不到不落盘。
+          完整匹配规则见 README 订阅管理一节与接口文档，弹窗只放一两句气泡，拉取日志的 [提示] 负责当场解释
+          （整仓检出、依赖规则被当作备注跳过、黑名单正则片段只挡建任务、零命中的常见原因，都在拉取日志里打）。
+          别把上面这些条件写回表单的常驻说明——那正是 v3.2.9 前「说明太多」的来源。
+          非法正则由后端在保存时回 400（点名字段、第几段与 RE2 报错并提示用 \ 转义），handleSave 原样展示后端文案，前端不重复校验。
+
+          气泡口径对齐后端 isSubscriptionDependencyOnlyFile（白名单优先）：同时命中白名单的文件照常建任务，
+          白名单留空时依赖规则不影响建任务——别把依赖规则气泡再压成「命中即不建任务」。
+          白名单气泡也别写「命中即建任务」：建不建还要看「自动建任务」与脚本有没有声明 cron（#134）。
+
+          桌面双列：白名单 | 黑名单、依赖规则 | 定时拉取。三个规则字段挨着放，手机单列时也保持 ql repo 的参数顺序。
+        -->
+        <el-form-item>
+          <template #label>
+            <DdFieldHelp label="白名单">
+              命中的文件会拉取，并按「自动建任务」设置建任务，留空为全部。多个用 , 或 |
+              分隔，按「包含」匹配；含 ^ $ ( ) [ ] { } ? \ 或 .* .+
+              时按正则匹配，要按字面匹配请用 \ 转义。
+            </DdFieldHelp>
+          </template>
           <el-input
-            v-model="editForm.branch"
-            placeholder="默认分支 (留空使用默认)"
+            v-model="editForm.whitelist"
+            placeholder="如 jd_|jx_，留空为全部"
+          />
+        </el-form-item>
+        <el-form-item>
+          <template #label>
+            <DdFieldHelp label="黑名单">
+              命中的文件不拉取、不建任务（正则片段只保证不建任务）。写法同白名单。
+            </DdFieldHelp>
+          </template>
+          <el-input v-model="editForm.blacklist" placeholder="如 backUp" />
+        </el-form-item>
+        <el-form-item>
+          <template #label>
+            <DdFieldHelp label="依赖规则">
+              对应 ql repo 的第 4
+              个参数：命中的文件拉取给脚本调用，没命中白名单的不建任务；白名单留空时不影响建任务。写法同白名单。
+            </DdFieldHelp>
+          </template>
+          <el-input
+            v-model="editForm.depend_on"
+            placeholder="辅助库，如 sendNotify|utils"
           />
         </el-form-item>
         <el-form-item label="定时拉取">
           <el-input
             v-model="editForm.schedule"
-            placeholder="cron 表达式 (留空不自动拉取)"
+            placeholder="如 0 */6 * * *，留空不自动拉取"
           />
         </el-form-item>
-        <el-form-item label="保存目录">
-          <el-input
-            v-model="editForm.save_dir"
-            placeholder="保存到 scripts 下的子目录"
-          />
-        </el-form-item>
-        <el-form-item v-if="editForm.type === 'git-repo'" label="指定子目录">
-          <el-input
-            v-model="editForm.sub_path"
-            placeholder="仅拉取仓库中的指定子目录 (逗号分隔多个)"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
+
+        <!--
+          「高级设置」切换行。项目里没有 el-collapse 先例，这里用 link 按钮 + v-show 做轻量折叠；
+          高级区用 v-show 而不是 v-if，折叠时字段照样挂着、v-model 与保存逻辑与展开时完全一样。
+          showAdvanced 在 openCreate / openEdit 里复位成折叠；保存时后端点名折叠区字段会自动展开（revealAdvancedForError）。
+          右侧摘要（advancedSummary）折叠与展开时都显示，展开收起时这一行的高度不跳。
+        -->
+        <div class="subscription-form__advanced-toggle">
+          <el-button
+            link
+            type="primary"
+            :aria-expanded="String(showAdvanced)"
+            aria-controls="subscription-advanced-fields"
+            @click="showAdvanced = !showAdvanced"
           >
-            留空拉取全部内容，填写后仅检出指定子目录（如 scripts/daily,
-            utils）；依赖规则里有正则片段时会改为检出完整仓库，但仍只给子目录里的脚本建定时任务
-          </div>
-        </el-form-item>
-        <el-form-item
-          v-if="editForm.type === 'git-repo'"
-          label="仓库鉴权"
-          class="form-item--full"
+            <template #icon>
+              <ArrowRight
+                class="subscription-form__advanced-arrow"
+                :class="{ 'is-expanded': showAdvanced }"
+              />
+            </template>
+            高级设置
+          </el-button>
+          <span class="subscription-form__advanced-summary">{{
+            advancedSummary
+          }}</span>
+        </div>
+        <div
+          v-show="showAdvanced"
+          id="subscription-advanced-fields"
+          class="subscription-form__advanced"
         >
-          <el-radio-group v-model="editForm.auth_type">
-            <el-radio value="">无鉴权</el-radio>
-            <el-radio value="ssh">SSH 密钥</el-radio>
-            <el-radio value="token">Access Token</el-radio>
-          </el-radio-group>
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            私有仓库推荐使用权限更可控的 Token；公开仓库可留空。
-          </div>
-        </el-form-item>
-        <el-form-item label="别名">
-          <el-input v-model="editForm.alias" placeholder="目录/文件别名" />
-        </el-form-item>
-        <el-form-item
-          v-if="editForm.type === 'git-repo' && editForm.auth_type === 'ssh'"
-          label="SSH 密钥"
-        >
-          <el-select
-            v-model="editForm.ssh_key_id"
-            placeholder="选择 SSH 密钥 (可选)"
-            clearable
-            style="width: 100%"
-          >
-            <el-option
-              v-for="key in sshKeys"
-              :key="key.id"
-              :label="key.name"
-              :value="key.id"
+          <el-form-item v-if="editForm.type === 'git-repo'" label="分支">
+            <el-input v-model="editForm.branch" placeholder="留空使用默认分支" />
+          </el-form-item>
+          <el-form-item v-if="editForm.type === 'git-repo'">
+            <template #label>
+              <DdFieldHelp label="指定子目录">
+                只检出这些子目录（依赖规则命中的文件另算），也只给其中的脚本建任务。逗号分隔多个，按路径匹配，不支持正则。
+              </DdFieldHelp>
+            </template>
+            <el-input
+              v-model="editForm.sub_path"
+              placeholder="如 scripts,utils，留空为全部"
             />
-          </el-select>
-        </el-form-item>
-        <el-form-item
-          v-if="editForm.type === 'git-repo' && editForm.auth_type === 'token'"
-          label="鉴权用户名"
-          class="form-item--full"
-        >
-          <el-input
-            v-model="editForm.auth_username"
-            placeholder="留空默认 x-access-token（GitHub 适用）"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
+          </el-form-item>
+          <!-- 保存目录与别名挨着放：Git 仓库的目录名依次取 保存目录 → 别名 → 仓库名，
+               单文件订阅的目录取保存目录（空则 downloads）、文件名取别名（空则 URL 末段）。
+               以前别名夹在「仓库鉴权」和「SSH 密钥」之间，把鉴权那一组拆开了。 -->
+          <el-form-item>
+            <template #label>
+              <DdFieldHelp label="保存目录">
+                scripts 下的子目录。留空时：Git 仓库用别名或仓库名，单文件用 downloads。
+              </DdFieldHelp>
+            </template>
+            <el-input
+              v-model="editForm.save_dir"
+              placeholder="如 owner_repo，留空自动取名"
+            />
+          </el-form-item>
+          <el-form-item>
+            <template #label>
+              <DdFieldHelp label="别名">
+                单文件：保存的文件名。Git 仓库：保存目录留空时作为目录名。
+              </DdFieldHelp>
+            </template>
+            <el-input v-model="editForm.alias" placeholder="可选" />
+          </el-form-item>
+          <el-form-item
+            v-if="editForm.type === 'git-repo'"
+            class="form-item--full"
           >
-            GitHub 留空即可；Gitee 填用户名；GitLab 可填 oauth2 或
-            private-token。
-          </div>
-        </el-form-item>
-        <el-form-item
-          v-if="editForm.type === 'git-repo' && editForm.auth_type === 'token'"
-          label="Access Token"
-          class="form-item--full"
-        >
-          <el-input
-            v-model="editForm.auth_token"
-            type="password"
-            show-password
-            :placeholder="
-              editForm.has_auth_token
-                ? '留空则保持当前已保存 Token'
-                : '粘贴 Git 平台访问令牌'
-            "
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
+            <template #label>
+              <DdFieldHelp label="仓库鉴权">
+                私有仓库才需要，推荐用只读权限的 Token。
+              </DdFieldHelp>
+            </template>
+            <el-radio-group v-model="editForm.auth_type">
+              <el-radio value="">无鉴权</el-radio>
+              <el-radio value="ssh">SSH 密钥</el-radio>
+              <el-radio value="token">Access Token</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item
+            v-if="editForm.type === 'git-repo' && editForm.auth_type === 'ssh'"
+            label="SSH 密钥"
           >
-            {{
-              editForm.has_auth_token
-                ? "当前已保存 Token。若不需要更新，保持留空即可。"
-                : "建议使用仅仓库读取权限的 Token。"
-            }}
-          </div>
-        </el-form-item>
-        <!--
-          白名单 / 黑名单 / 依赖规则三个字段共用同一套匹配口径（#129，与后端 S2 同源，改文案前先对一遍后端）：
-            - 只在顶层的 , 或 | 处拆成片段，括号 / 方括号里的 , 与 | 属于正则本身、不拆；
-            - 普通片段按「子串包含」匹配（行为与改动前逐字节一致），片段命中目录名时目录下全部文件一并命中；
-            - 含 ^ $ ( ) [ ] { } ? \ 任一字符，或含 .* / .+ 的片段按正则（Go RE2，与青龙 grep -E 同口径）
-              匹配仓库相对路径，不锚定；单独一个 + 不算触发字符，所以 jd_*.js、.github 这类写法仍按子串包含；
-            - 「全部」类写法（* / ** / *.* / .* / all / 全部）与「含空格或中文 = 文字备注」的判定照旧先跑。
-          检出侧的代价要在文案里如实写：git 的 sparse-checkout 规则表达不了正则，所以
-            - 依赖规则里一出现正则片段就改为检出完整仓库；填了「指定子目录」也一样，但建任务仍限在子目录里；
-            - 白名单的正则片段只在【没填「指定子目录」】时才改为整仓：子目录优先，填了子目录时白名单本来就不参与检出
-              （后端 resolveSubscriptionIncludePlan 的判定顺序是 子目录 → 白名单正则 → 白名单普通片段），
-              所以白名单与「指定子目录」「完整检出」三处说明都要带上这个条件，别写成「只要有正则就整仓」；
-            - 黑名单的正则片段同理下发不了排除规则，只能保证不建任务、做不到不落盘。
-          整仓之后由面板按规则挑依赖文件与要建任务的脚本。
-          非法正则由后端在保存时回 400（点名字段、第几段与 RE2 报错），handleSave 原样展示后端文案，前端不重复校验。
-        -->
-        <el-form-item label="白名单" class="form-item--full">
-          <el-input
-            v-model="editForm.whitelist"
-            placeholder="文件名/路径片段或正则（`,` 或 `|` 分隔，如 jd_|jx_）"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            多个片段用 , 或 |
-            分隔；普通片段按「子串包含」匹配（不是
-            glob），片段命中目录名时，该目录下的全部文件（含多级子目录）都算命中；含
-            ^ $ ( ) [ ] { } ? \ 或 .* .+ 的片段按正则（与青龙一致）匹配仓库相对路径，例如
-            ^jd[^_]，要按字面匹配这些字符时用 \ 转义（路径分隔请写
-            /）。命中白名单的文件会被检出落盘，并建成定时任务；没填「指定子目录」时，白名单里只要有正则片段，拉取就会改为检出完整仓库（检出规则表达不了正则），建任务仍按白名单判断。主脚本
-            require 的辅助库文件请填到下面的「依赖规则」，不必再塞进白名单。
-          </div>
-        </el-form-item>
-        <el-form-item label="黑名单">
-          <el-input
-            v-model="editForm.blacklist"
-            placeholder="文件名/路径片段或正则（`,` 或 `|` 分隔，如 backUp）"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            匹配方式同白名单：多个片段用 , 或 | 分隔；普通片段按「子串包含」匹配；含
-            ^ $ ( ) [ ] { } ? \ 或 .* .+ 的片段按正则（与青龙一致）匹配仓库相对路径，例如
-            ^jd[^_]。黑名单对白名单与依赖规则都生效：普通片段命中目录名时，该目录下的全部文件都会被排除，既不落盘也不建任务；正则片段只保证不建任务——检出规则表达不了正则，命中的文件仍可能落盘。
-          </div>
-        </el-form-item>
-        <el-form-item label="依赖规则" class="form-item--full">
-          <el-input
-            v-model="editForm.depend_on"
-            placeholder="辅助库文件名/路径片段或正则（`,` 或 `|` 分隔，如 ^jd[^_]|sendNotify|utils）"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            对应青龙 ql repo 的第 4
-            个参数。命中的文件会被拉取到脚本目录供主脚本调用，但<strong>不会</strong>建成定时任务——只有命中白名单的文件才建任务；黑名单对两者都生效。匹配方式同白名单：多个片段用
-            , 或 | 分隔；普通片段按「子串包含」匹配，片段命中目录名时目录下的全部文件一并检出，所以填
-            utils 就能把 utils/date.js 带下来；含 ^ $ ( ) [ ] { } ? \ 或 .* .+
-            的片段按正则（与青龙一致）匹配仓库相对路径，例如 ^jd[^_]
-            能把仓库根目录下的 jdCookie.js
-            带下来，有正则片段时拉取会改为检出完整仓库。含空格或中文的内容会被当作文字备注跳过，不参与检出。
-          </div>
-        </el-form-item>
-        <!--
-          完整检出。紧挨着白名单/黑名单/依赖规则，因为它们是同一类「检出什么」的设置——
-          前三个是做减法（只捞命中的文件），这个是一键取消减法（整仓拉下来）。
-
-          只对 git 仓库出现，理由同下面的「覆盖拉取」：单文件订阅压根没有
-          clone / sparse-checkout 这一步，显示出来只会让人以为它有用。
-
-          说明文字里那句「三项都留空时开关没有区别」不是废话，是对齐后端实现：
-          buildSubscriptionSparseCheckoutPatterns 在子目录/白名单/黑名单都为空时返回空规则
-          （见 server/service/subscription.go，依赖规则此时也只会打一条「本次检出完整仓库」的提示），
-          也就是这类订阅本来就是整仓落盘。不写清楚的话，按第一句理解的用户开了开关后
-          会发现磁盘占用和拉取行为纹丝不动，只会怀疑功能没生效。
-          #129 起依赖规则里出现正则片段、或没填「指定子目录」而白名单里出现正则片段时（子目录优先于白名单，
-          见白名单上方那段注释），后端同样放弃 sparse 限制、改为整仓检出（git 的检出规则表达不了正则），
-          但仍下发「*」加黑名单普通片段的排除规则、那些文件不落盘；打开开关则直接返回空规则、它们也会落盘，
-          所以说明文字写明这点差别，别写成「开不开没有区别」；填了子目录时白名单的正则片段不影响检出范围，开关照常有区别。
-        -->
-        <el-form-item
-          v-if="editForm.type === 'git-repo'"
-          label="完整检出"
-          class="form-item--full"
-        >
-          <el-switch
-            v-model="editForm.full_checkout"
-            inline-prompt
-            active-text="开"
-            inactive-text="关"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            默认关闭，只把命中「指定子目录 / 白名单 / 依赖规则」的文件检出到本地；如果「指定子目录」「白名单」「黑名单」<strong>都留空</strong>，这条订阅本来就不产生任何检出过滤规则、拉的就是整个仓库，此时开不开这个开关都没有区别；依赖规则里有正则片段、或没填「指定子目录」而白名单里有正则片段时，默认就会检出完整仓库（检出规则表达不了正则），但黑名单普通片段命中的文件仍不落盘，打开开关后它们也会落盘。开启后会<strong>拉取整个仓库</strong>——源码、资源、文档全都落盘，<strong>体积可能很大</strong>，仅在脚本运行时需要读取仓库里脚本之外的其它文件（如
-            src 源码、配置、模板）时才开启。开启<strong>不改变建任务的规则</strong>：仍然只有命中「指定子目录 +
-            白名单」的脚本会被建成定时任务，落盘的其它文件只是给脚本自己读。
-          </div>
-        </el-form-item>
-        <!--
-          覆盖拉取策略（订阅级三态）。只对 git 仓库出现——单文件订阅没有工作区，
-          后端在拉取分支里也压根不看这个值，显示出来只会让人以为它有用。
-          用单选而不是开关：开关只有两态，表达不了「跟随全局」这个默认档。
-        -->
-        <el-form-item
-          v-if="editForm.type === 'git-repo'"
-          label="覆盖拉取"
-          class="form-item--full"
-        >
-          <el-radio-group v-model="editForm.overwrite_mode">
-            <!--
-              这里必须读 globalOverwriteDefault（只读展示值）而不是
-              settingsForm.subscription_force_overwrite：后者是「订阅设置」弹窗里 el-switch 的
-              编辑态，而那个弹窗的「取消」不重置表单，读它会把用户已经撤销的值当成服务端现状展示。
-            -->
-            <el-radio value="inherit"
-              >跟随全局设置<template v-if="globalDefaultsLoaded"
-                >（当前：{{
-                  globalOverwriteDefault ? "强制覆盖" : "保留本地修改"
-                }}）</template
-              ></el-radio
+            <el-select
+              v-model="editForm.ssh_key_id"
+              placeholder="选择 SSH 密钥"
+              clearable
+              style="width: 100%"
             >
-            <el-radio value="force">强制覆盖</el-radio>
-            <el-radio value="preserve">保留本地修改</el-radio>
-          </el-radio-group>
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
+              <el-option
+                v-for="key in sshKeys"
+                :key="key.id"
+                :label="key.name"
+                :value="key.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item
+            v-if="editForm.type === 'git-repo' && editForm.auth_type === 'token'"
           >
-            只作用于脚本文件：强制覆盖会在拉取前丢弃本地改动，保留本地会先暂存再恢复。<strong>不影响任务配置</strong>——订阅拉取从不修改已有任务的名称和定时。首次拉取（本地还没有仓库时）不适用，一律按远端内容检出。
-          </div>
-        </el-form-item>
-        <!--
-          同步定时任务的两组订阅级三态（#119）。挨着「覆盖拉取」放，因为它们是同一类
-          「这条订阅要不要跟随全局设置」的开关，用单选也是同一个理由：开关只有两态，
-          表达不了「跟随全局」这个默认档。
+            <template #label>
+              <DdFieldHelp label="鉴权用户名">
+                GitHub 留空；Gitee 填用户名；GitLab 填 oauth2 或 private-token。
+              </DdFieldHelp>
+            </template>
+            <el-input
+              v-model="editForm.auth_username"
+              placeholder="留空默认 x-access-token"
+            />
+          </el-form-item>
+          <el-form-item
+            v-if="editForm.type === 'git-repo' && editForm.auth_type === 'token'"
+            label="Access Token"
+          >
+            <el-input
+              v-model="editForm.auth_token"
+              type="password"
+              show-password
+              :placeholder="
+                editForm.has_auth_token
+                  ? '已保存，留空不修改'
+                  : '粘贴访问令牌（建议只读权限）'
+              "
+            />
+          </el-form-item>
+          <!--
+            完整检出：开启后跳过 sparse-checkout、整仓拉取。只对 git 仓库出现，理由同下面的「覆盖拉取」：
+            单文件订阅压根没有 clone / sparse-checkout 这一步，显示出来只会让人以为它有用。
+            开不开什么时候没区别（子目录 / 白名单 / 黑名单都空时本来就整仓；正则片段已触发整仓时，
+            差别只在黑名单普通片段命中的文件落不落盘）属于完整规则，见 README 订阅管理一节与接口文档；
+            气泡只讲用途与代价，别把这些条件写回表单。
+          -->
+          <el-form-item v-if="editForm.type === 'git-repo'">
+            <template #label>
+              <DdFieldHelp label="完整检出">
+                拉取整个仓库（可能很大），供脚本读取源码、配置等其它文件；不改变建任务的范围。
+              </DdFieldHelp>
+            </template>
+            <el-switch
+              v-model="editForm.full_checkout"
+              inline-prompt
+              active-text="开"
+              inactive-text="关"
+            />
+          </el-form-item>
+          <!--
+            覆盖拉取策略（订阅级三态）。只对 git 仓库出现——单文件订阅没有工作区，
+            后端在拉取分支里也压根不看这个值，显示出来只会让人以为它有用。
+            用单选而不是开关：开关只有两态，表达不了「跟随全局」这个默认档。
+          -->
+          <el-form-item
+            v-if="editForm.type === 'git-repo'"
+            class="form-item--full"
+          >
+            <template #label>
+              <DdFieldHelp label="覆盖拉取">
+                只影响脚本文件：强制覆盖会丢弃本地改动，保留则先暂存再恢复。不改任务配置，首次拉取不适用。
+              </DdFieldHelp>
+            </template>
+            <el-radio-group v-model="editForm.overwrite_mode">
+              <!--
+                这里必须读 globalOverwriteDefault（只读展示值）而不是
+                settingsForm.subscription_force_overwrite：后者是「订阅设置」弹窗里 el-switch 的
+                编辑态，而那个弹窗的「取消」不重置表单，读它会把用户已经撤销的值当成服务端现状展示。
+              -->
+              <el-radio value="inherit"
+                >跟随全局设置<template v-if="globalDefaultsLoaded"
+                  >（当前：{{
+                    globalOverwriteDefault ? "强制覆盖" : "保留本地修改"
+                  }}）</template
+                ></el-radio
+              >
+              <el-radio value="force">强制覆盖</el-radio>
+              <el-radio value="preserve">保留本地修改</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <!--
+            同步定时任务的两组订阅级三态（#119）。挨着「覆盖拉取」放，因为它们是同一类
+            「这条订阅要不要跟随全局设置」的开关，用单选也是同一个理由：开关只有两态，
+            表达不了「跟随全局」这个默认档。
 
-          ⚠️ 刻意**不加** v-if="editForm.type === 'git-repo'"：上面的完整检出与覆盖拉取
-          只在 clone / sparse-checkout 这一步生效，单文件订阅走不到；而拉取后同步定时任务
-          这一步对单文件订阅一样跑。加了 v-if 的表现是「单文件订阅界面上看不到开关」，
-          用户完全没有办法为它单独关掉自动建任务。handleSave 里也同理不能跟着复位。
-        -->
-        <el-form-item label="自动建任务" class="form-item--full">
-          <el-radio-group v-model="editForm.auto_add_task_mode">
-            <!-- 「（当前：X）」同样只读 globalAutoAddDefault，理由见上面覆盖拉取那段注释 -->
-            <el-radio value="inherit"
-              >跟随全局设置<template v-if="globalDefaultsLoaded"
-                >（当前：{{ globalAutoAddDefault ? "开" : "关" }}）</template
-              ></el-radio
-            >
-            <el-radio value="enabled">强制开启</el-radio>
-            <el-radio value="disabled">强制关闭</el-radio>
-          </el-radio-group>
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            拉取后是否按脚本内容自动创建定时任务。选「跟随全局设置」时用订阅设置里的<strong>自动添加定时任务</strong>；只想让这一条订阅单独例外时才选强制开启/关闭。<strong>只管新建</strong>——已经建好的任务不会因为改成强制关闭而被删掉。
-          </div>
-        </el-form-item>
-        <el-form-item label="自动删任务" class="form-item--full">
-          <el-radio-group v-model="editForm.auto_del_task_mode">
-            <el-radio value="inherit"
-              >跟随全局设置<template v-if="globalDefaultsLoaded"
-                >（当前：{{ globalAutoDelDefault ? "开" : "关" }}）</template
-              ></el-radio
-            >
-            <el-radio value="enabled">强制开启</el-radio>
-            <el-radio value="disabled">强制关闭</el-radio>
-          </el-radio-group>
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            订阅源里的脚本被删除后，是否自动删除面板上对应的定时任务。选「跟随全局设置」时用订阅设置里的<strong>自动删除失效任务</strong>；<strong>怕误删自己手动建的任务就选强制关闭</strong>，失效任务改为手动清理。
-          </div>
-        </el-form-item>
-        <el-form-item label="拉取前指令" class="form-item--full">
-          <el-input
-            v-model="editForm.pre_script"
-            type="textarea"
-            :rows="3"
-            placeholder="拉取开始前执行的 Shell 命令。支持使用 $SUB_DIR、$SCRIPTS_DIR、$QL_DIR 等变量。"
-          />
-          <div
-            style="
-              color: var(--el-text-color-secondary);
-              font-size: 12px;
-              margin-top: 4px;
-              line-height: 1.4;
-            "
-          >
-            在 git 拉取之前执行，适合做「准备环境 / 挂载目录 / 换源 / 生成凭据」这类前置动作。<strong>执行失败（非
-            0 退出）会中断本次拉取并记为失败</strong>，不会带着半成品环境继续拉。首次拉取时订阅目录还不存在，$SUB_DIR
-            会退回脚本根目录。
-          </div>
-        </el-form-item>
-        <el-form-item label="拉取后钩子" class="form-item--full">
-          <el-input
-            v-model="editForm.hook_script"
-            type="textarea"
-            :rows="4"
-            placeholder="拉取成功后执行的 Shell 命令。支持使用 $SUB_DIR、$SCRIPTS_DIR、$QL_DIR 等变量。"
-          />
-        </el-form-item>
+            ⚠️ 刻意**不加** v-if="editForm.type === 'git-repo'"：上面的完整检出与覆盖拉取
+            只在 clone / sparse-checkout 这一步生效，单文件订阅走不到；而拉取后同步定时任务
+            这一步对单文件订阅一样跑。加了 v-if 的表现是「单文件订阅界面上看不到开关」，
+            用户完全没有办法为它单独关掉自动建任务。handleSave 里也同理不能跟着复位。
+
+            气泡里不写全局开关的当前值：operator 读不到 /configs，「（当前：X）」对他们本来就不显示。
+            「自动建任务」那句「未声明 cron 用默认 Cron 规则、留空不建」对齐 #134 起的后端口径
+            （订阅设置「默认 Cron 规则」留空时，未声明 cron 的脚本不建任务），改后端口径时这里要跟着改。
+          -->
+          <el-form-item class="form-item--full">
+            <template #label>
+              <DdFieldHelp label="自动建任务">
+                拉取后为新脚本建定时任务；脚本未声明 cron 时用订阅设置里的「默认 Cron
+                规则」，留空则不建；已有任务不受影响。
+              </DdFieldHelp>
+            </template>
+            <el-radio-group v-model="editForm.auto_add_task_mode">
+              <!-- 「（当前：X）」同样只读 globalAutoAddDefault，理由见上面覆盖拉取那段注释 -->
+              <el-radio value="inherit"
+                >跟随全局设置<template v-if="globalDefaultsLoaded"
+                  >（当前：{{ globalAutoAddDefault ? "开" : "关" }}）</template
+                ></el-radio
+              >
+              <el-radio value="enabled">强制开启</el-radio>
+              <el-radio value="disabled">强制关闭</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item class="form-item--full">
+            <template #label>
+              <DdFieldHelp label="自动删任务">
+                订阅源删掉脚本后，删除对应的定时任务。怕误删手动建的任务就选强制关闭。
+              </DdFieldHelp>
+            </template>
+            <el-radio-group v-model="editForm.auto_del_task_mode">
+              <el-radio value="inherit"
+                >跟随全局设置<template v-if="globalDefaultsLoaded"
+                  >（当前：{{ globalAutoDelDefault ? "开" : "关" }}）</template
+                ></el-radio
+              >
+              <el-radio value="enabled">强制开启</el-radio>
+              <el-radio value="disabled">强制关闭</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item class="form-item--full">
+            <template #label>
+              <DdFieldHelp label="拉取前指令">
+                非 0 退出会中断本次拉取并记为失败。首次拉取时 $SUB_DIR 为脚本根目录。
+              </DdFieldHelp>
+            </template>
+            <el-input
+              v-model="editForm.pre_script"
+              type="textarea"
+              :rows="3"
+              placeholder="拉取前执行的 Shell，可用 $SUB_DIR、$SCRIPTS_DIR 等变量"
+            />
+          </el-form-item>
+          <el-form-item class="form-item--full">
+            <template #label>
+              <DdFieldHelp label="拉取后钩子">
+                非 0 退出会让本次拉取记为失败，并跳过任务同步。
+              </DdFieldHelp>
+            </template>
+            <el-input
+              v-model="editForm.hook_script"
+              type="textarea"
+              :rows="4"
+              placeholder="拉取成功后执行的 Shell，可用 $SUB_DIR、$SCRIPTS_DIR 等变量"
+            />
+          </el-form-item>
+        </div>
       </el-form>
       <template #footer>
         <el-button @click="showEditDialog = false">取消</el-button>
@@ -2197,7 +2230,8 @@ function viewLogDetail(log: any) {
             inactive-text="关"
           />
           <div class="settings-hint">
-            拉取后按脚本内容为新脚本自动创建定时任务（已有任务的名称和定时不改）。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑弹窗里选「强制开启 / 强制关闭」
+            拉取后按脚本内容为新脚本自动创建定时任务（已有任务的名称和定时不改），未声明
+            cron 的脚本只在填了下方「默认 Cron 规则」时才建。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑订阅的高级设置里选「强制开启 / 强制关闭」
           </div>
         </el-form-item>
         <el-form-item label="自动删除失效任务">
@@ -2208,7 +2242,7 @@ function viewLogDetail(log: any) {
             inactive-text="关"
           />
           <div class="settings-hint">
-            订阅源删除脚本后，自动删除对应定时任务。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑弹窗里选「强制开启 / 强制关闭」
+            订阅源删除脚本后，自动删除对应定时任务。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑订阅的高级设置里选「强制开启 / 强制关闭」
           </div>
         </el-form-item>
         <el-form-item label="覆盖拉取（默认）">
@@ -2219,15 +2253,22 @@ function viewLogDetail(log: any) {
             inactive-text="关"
           />
           <div class="settings-hint">
-            只作用于脚本文件：开启后拉取前丢弃本地改动，关闭则先暂存再恢复。<b>不影响任务配置</b>——订阅拉取从不修改已有任务的名称和定时。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑弹窗里选「强制覆盖 / 保留本地修改」
+            只作用于脚本文件：开启后拉取前丢弃本地改动，关闭则先暂存再恢复。<b>不影响任务配置</b>——订阅拉取从不修改已有任务的名称和定时。<b>未单独设置的订阅使用此默认值</b>，单个订阅可在编辑订阅的高级设置里选「强制覆盖 / 保留本地修改」
           </div>
         </el-form-item>
+        <!--
+          #134 起的口径：留空（出厂默认）时，未声明 cron 的脚本不建任务；填了合法规则才按它建启用任务。
+          placeholder 刻意不写具体 cron：以前写着「0 9 * * *」，看起来像是留空时的默认值，实际留空既不是 9 点、
+          也不再是后端旧兜底的每天 0 点。
+        -->
         <el-form-item label="默认 Cron 规则">
           <el-input
             v-model="settingsForm.default_cron_rule"
-            placeholder="0 9 * * *"
+            placeholder="cron 表达式，留空不建任务"
           />
-          <div class="settings-hint">匹配不到定时规则时使用，如 0 9 * * *</div>
+          <div class="settings-hint">
+            脚本未声明 cron 时使用；留空则不为这类脚本建任务
+          </div>
         </el-form-item>
         <el-form-item label="拉取文件后缀">
           <el-input
@@ -2750,43 +2791,93 @@ function viewLogDetail(log: any) {
   opacity: 0;
 }
 
+// ===== 新建 / 编辑订阅弹窗：「高级设置」切换行（桌面与手机共用） =====
+// 上边一条 1px 分隔线把基本区与高级区隔开（层次只靠边框表达，不加底色块、不加阴影）。
+// 按钮是 EP 的 link 按钮：font-size 14px、line-height 1、上下 padding 2px + 1px 透明边框 ≈ 20px 高，
+// 摘要的 line-height 取同一个 20px 并顶对齐：摘要只有一行时与按钮文字齐平，
+// 窄屏折成多行时第一行仍与按钮对齐，而不是让按钮垂直居中到几行字的中间。
+.subscription-form__advanced-toggle {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  row-gap: 2px;
+  margin-bottom: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.subscription-form__advanced-summary {
+  flex: 1 1 200px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--el-text-color-secondary);
+}
+
+// 展开 / 折叠的箭头：ArrowRight 转 90° 成朝下。这是状态切换的指示，不是 hover 形变，
+// 不违反「hover/active 不做 transform」那条规则；时长走令牌，减少动效档下自动压成 1ms。
+.subscription-form__advanced-arrow {
+  transition: transform var(--dd-motion-fast) var(--dd-ease-standard);
+
+  &.is-expanded {
+    transform: rotate(90deg);
+  }
+}
+
 // ===== 新建 / 编辑订阅弹窗：桌面端双列 =====
 // 只在 ≥769px 生效；≤768px 不套任何 grid，表单退回默认块级流（天然单列），
 // 且此时 dialogFullscreen 为 true（useResponsive 的断点同为 768），label 走 top 布局，
 // .form-item--full 的 grid-column 在块级流下不生效，对移动端零副作用。
 //
 // 用 Grid 而不是 el-row/el-col：表单里「分支 / 指定子目录 / 仓库鉴权 / SSH 密钥 /
-// 鉴权用户名 / Access Token」都是条件字段，固定栅格在字段隐藏时会留下死格，
+// 鉴权用户名 / Access Token / 完整检出 / 覆盖拉取」都是条件字段，固定栅格在字段隐藏时会留下死格，
 // 而 Grid 的自动流会让后面的字段自动补位。
+//
+// 高级区（.subscription-form__advanced）是外层网格里占满整行的一项，内部再按同一套两列网格排；
+// 它的 el-form-item 仍是 .subscription-form 的后代，下面那几条 :deep 规则照样命中，不用再写一遍。
+// v-show 折叠时写的是内联 display:none，压得过这里的 display:grid；展开时内联样式清掉，网格恢复。
 @media (min-width: 769px) {
-  .subscription-form {
+  .subscription-form,
+  .subscription-form__advanced {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     column-gap: 20px;
-    // 行高不拉伸：同一行里矮的那个（如「保存目录」）不跟着带说明文字的那个一起变高，
+    // 行高不拉伸：同一行里矮的那个（如单选组）不跟着另一边的多行控件一起变高，
     // 两列的 label 才能对齐在同一条基线上
     align-items: start;
+  }
 
+  .subscription-form__advanced-toggle,
+  .subscription-form__advanced {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+
+  .subscription-form {
     // 行间距沿用 el-form-item 自带的 margin-bottom，不再叠 row-gap，避免双倍间距
     :deep(.el-form-item) {
       min-width: 0;
       margin-bottom: 18px;
     }
 
-    // 跨满两列的字段。判定口径：内容天然放不进半列（一键识别的输入框+按钮、URL、
-    // 钩子 textarea、仓库鉴权的三个 radio），或说明文字在半列宽下会超过 2 行
-    // （白名单、依赖规则、鉴权用户名、完整检出）。「指定子目录」能在半列内放下，故不跨列。
-    // 注意「完整检出」的控件本身只有一个 switch、明明放得进半列，跨列是为了那段说明文字：
-    // 它要讲清「拉整个仓库」的代价，半列宽下会挤成四五行。
+    // 跨满两列的字段。判定口径只看控件本身放不放得进半列（每列输入框宽 246px，见下方宽度账）：
+    // 一键识别的输入框 + 按钮、URL、仓库鉴权 / 覆盖拉取 / 自动建任务 / 自动删任务 这几组单选、两个钩子 textarea。
+    // v3.2.9 删掉常驻说明后，白名单 / 黑名单 / 依赖规则 / 鉴权用户名 / Access Token / 完整检出 都回到了半列——
+    // 以前它们跨列只是为了容纳说明文字。说明改成标签旁的「?」气泡，不再占表单宽度，
+    // 所以以后也别再按「说明有多长」来决定跨不跨列。
     :deep(.form-item--full) {
       grid-column: 1 / -1;
     }
 
     // 800px 弹窗的可用宽度：800 − .el-dialog 自带 16px×2 − .el-dialog__body 24px×2 = 720px，
-    // 两列减去 20px 列间距后每列 350px，减 88px 标签宽后输入框还有 262px。
-    // 88px 标签宽可容下 5 个中文字（70px + 12px 右内边距 = 82px）不折行；
-    // 但「Access Token」这类拉丁文标签更宽，而 EP 给 .el-form-item__label 写死了
-    // height:32px / line-height:32px，一旦折行第二行会溢出压到下一行。
+    // 两列减去 20px 列间距后每列 350px，减 104px 标签宽后输入框还有 246px。
+    // 104px 标签宽 = 5 个中文字 70px + 「?」按钮 18px（14px 图标 + 4px 间距，见 DdFieldHelp 的热区写法）
+    // + 12px 右内边距 = 100px，留 4px 余量，「指定子目录 / 鉴权用户名 / 自动建任务 / 拉取前指令」这类
+    // 5 字带气泡的标签不折行；「Access Token」估算约 88px + 12px = 100px，同样放得下（88px 标签宽时它会折行）。
+    // 以后标签更长、或 DdFieldHelp 的按钮尺寸变了，要回来重算这笔账。
+    // 另外 EP 给 .el-form-item__label 写死了 height:32px / line-height:32px，一旦折行第二行会溢出压到下一行，
+    // 所以下面仍然放开标签高度兜底。
     //
     // 放开高度必须同时写下面三条，缺一不可：
     // 1) height:auto + min-height:32px —— 折行时由标签内容自然撑高，不再溢出。
@@ -2794,11 +2885,10 @@ function viewLogDetail(log: any) {
     //    没有声明 align-items，因此 flex 子元素默认 align-self:stretch。EP 原本那个显式的
     //    height:32px 恰好压住了 stretch（stretch 只在 cross-size 为 auto 时才生效）；
     //    一旦改成 height:auto，stretch 立即恢复，label 盒子会被拉伸到整个表单项的高度
-    //    （输入框 + 下方 12px 说明文字），第 3 条的 align-items:center 就会把标签文字居中到
-    //    这个大盒子的正中，导致「仓库鉴权 / 白名单 / 鉴权用户名 / Access Token」等带说明
-    //    文字的项标签明显下沉，两列并排时同一行左右两个标签还会错开。锚在顶部后，
+    //    （例如「拉取前指令 / 拉取后钩子」的多行 textarea），第 3 条的 align-items:center 就会把标签文字
+    //    居中到这个大盒子的正中，标签明显下沉，两列并排时同一行左右两个标签还会错开。锚在顶部后，
     //    label 盒子高度 = max(内容高, 32px)，才能对齐输入框/radio 那一行；
-    //    「拉取后钩子」的多行 textarea 同理，标签对齐 textarea 顶行而不是垂直居中。
+    //    多行 textarea 的标签对齐 textarea 顶行而不是垂直居中。
     // 3) align-items:center —— label 自身是 inline-flex，且 EP 给它设了 align-items:flex-start，
     //    而这里把 line-height 从 32px 收成 1.4（≈19.6px），不居中的话单行标签会贴着盒子顶端。
     //

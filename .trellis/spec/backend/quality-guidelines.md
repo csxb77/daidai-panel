@@ -1179,35 +1179,47 @@ Watchtower -> /v1/update?async=true&container=^daidai-panel$
 
 ### 1. Scope / Trigger
 
-- 触发：修改系统设置概览、更新检查时间展示、`configApi.get('auto_update_last_checked_at')` 相关逻辑时必须看本节。
-- 原因：前端会读取 `auto_update_last_checked_at`。如果后端未把它注册成正式配置键，`/api/configs/auto_update_last_checked_at` 会返回 404，页面虽然能兜底，但运行态会持续报错。
+- 触发：修改静默更新巡检 `server/handler/system_update_auto.go`、系统设置概览的手动「检查更新」（`useSettingsOverview.ts` 的 `handleCheckUpdate`）、「代理设置」页静默更新一组（`ProxyConfigCard.vue`），或 `systemConfigSchema.ts` 的 `CONFIG_KEYS_RENDERED_ELSEWHERE` / `READ_ONLY_CONFIG_KEYS` 时必须看本节。
+- 原因：这个键是「运行状态」而不是用户偏好，却同时被后端巡检（判断是否满 24 小时）、手动检查（写入）、Web 展示（只读）三处使用。v3.2.9 删掉了概览页的「系统更新设置」卡，展示位置挪走了，但写入一处都不能跟着删；它必须保持注册，否则 `/api/configs/auto_update_last_checked_at` 会 404。
 
 ### 2. Signatures
 
-- 前端读取：`configApi.get('auto_update_last_checked_at')`
-- 后端注册：`newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "...", "network")`
+- 后端注册：`newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "上次自动检查更新时间", "network")`
   （参数顺序：`key, label, defaultValue, description, group`）
+- 后端读写：`runPanelAutoUpdateCheck()`（`autoUpdateLastCheckedAtKey`，未满 24 小时直接返回，否则先写 `time.Now().Format(time.RFC3339)` 再查新版本）
+- Web 写入：`handleCheckUpdate()` 拿到检查结果后 `configApi.set({ key: 'auto_update_last_checked_at', value: new Date().toISOString() })`（失败静默）
+- Web 读取：`useSettingsConfig.ts` 的 `autoUpdateLastCheckedAt = computed(() => String(rawConfigs.value.auto_update_last_checked_at?.value ?? '').trim())` → `index.vue` 传给 `ProxyConfigCard` 的 prop `autoUpdateLastCheckedAt` → 静默更新开关下方 `上次检查更新时间：{{ formatDateTime(..., '从未检查') }}`
+- 备份：`shouldSkipRestoredSystemConfigKey` / `protectedRuntimeSystemConfigKeys` 把它与 `auto_update_pending_*` 一起排除在还原之外
 
 ### 3. Contracts
 
-- 只要前端直接读取某个系统配置键，这个键就必须在 `registeredSystemConfigSpecs` 中注册。
-- 该键允许为空字符串，表示“从未检查”。
+- 只要前端或后端读取某个系统配置键，这个键就必须在 `registeredSystemConfigSpecs` 中注册。
+- 该键允许为空字符串，表示「从未检查」。
+- **不是用户偏好**：不进 `configForm`、任何保存按钮都不回写它；Web 只从 `rawConfigs`（`GET /api/configs` 原样下发的值）只读展示，切到「代理设置」标签时 `handleTabChange` 重跑 `loadSystemConfigs` 顺带刷新。
+- 唯一展示位置是「代理设置」页静默更新开关下方。`CONFIG_KEYS_RENDERED_ELSEWHERE.auto_update_last_checked_at` 指向 `web/src/views/settings/components/ProxyConfigCard.vue`，兜底区因此不再渲染它；`READ_ONLY_CONFIG_KEYS` 里的只读说明保留。
+- 概览页不再有「系统更新设置」卡（`UpdateSettingsCard.vue` 已删），但**手动检查更新仍必须写入该键**：后端巡检按它判断距上次检查是否满 24 小时，删掉这次写入会让用户刚手动查过、巡检又立刻再查一遍。
+- 备份还原不得覆盖它：还原旧备份会把「上次检查时间」倒回去，触发一次多余的检查（`TestRestoreBackupManifestSkipsAutoUpdateRuntimeStateConfigs`）。
 
 ### 4. Validation & Error Matrix
 
-- 配置未写入数据库但已注册 → `GET /configs/:key` 返回默认值结构，不能再 404
-- 配置已写入 → 返回实际保存值
+- 配置未写入数据库但已注册 → `GET /configs/:key` 返回默认值结构（空串），不能 404；代理设置页显示「从未检查」
+- 配置已写入 → 返回实际保存值；代理设置页按本地时间格式化显示
+- 手动检查更新失败（接口报错）→ 不写入；写入这一步自己失败 → 静默忽略，不打断检查结果提示
+- 还原备份 → 该键保持还原前的当前值
 
 ### 5. Good/Base/Bad Cases
 
-- Good：系统设置概览首次进入时显示“从未检查”，控制台和网络都不报错。
-- Base：用户点过检查更新后，页面能显示最后检查时间。
+- Good：首次进入「代理设置」显示「上次检查更新时间：从未检查」，控制台和网络都不报错；点概览页「检查更新」后回到「代理设置」能看到新时间。
+- Base：开着静默更新，巡检每 24 小时写一次，代理设置页随之更新。
 - Bad：前端直接请求一个未注册配置键，导致 404。
+- Bad：删概览页卡片时把 `handleCheckUpdate` 里的写入一起删掉，巡检的 24 小时判断失去手动检查这条输入。
+- Bad：把它放进 `configForm` 随「保存配置」回写，页面上的旧值会覆盖巡检刚写入的新值。
 
 ### 6. Tests Required
 
-- 后端测试：`cd server && go test ./...`
-- 浏览器验收：系统设置概览不再触发 `/api/configs/auto_update_last_checked_at` 404
+- 后端测试：`cd server && go test ./...`（`TestRestoreBackupManifestSkipsAutoUpdateRuntimeStateConfigs` 锁住还原不覆盖）
+- Web：`cd web && npx vue-tsc --noEmit -p tsconfig.app.json`
+- 浏览器验收：「代理设置」页静默更新开关下方显示「上次检查更新时间」；概览页点「检查更新」后网络面板有一次 `POST /api/configs`（body 的 `key` 为 `auto_update_last_checked_at`），切回「代理设置」时间已更新；全程不触发该键的 404
 
 ### 7. Wrong vs Correct
 
@@ -1218,11 +1230,25 @@ newBoolConfig("auto_update_enabled", "静默更新", "false", "...", "network")
 // 忘记注册 auto_update_last_checked_at
 ```
 
+```ts
+// 错误：删概览页卡片时连这次写入一起删了。巡检按这个键判断是否满 24 小时，手动检查从此不算数。
+async function handleCheckUpdate() {
+  const res = await systemApi.checkUpdate()
+  updateInfo.value = res.data
+}
+```
+
 #### Correct
 
 ```go
 newBoolConfig("auto_update_enabled", "静默更新", "false", "...", "network")
 newTrimmedStringConfig("auto_update_last_checked_at", "上次检查更新时间", "", "上次自动检查更新时间", "network")
+```
+
+```ts
+// 正确：概览页不再展示，但手动检查照样记一笔；展示改由「代理设置」页从 rawConfigs 只读取值。
+const now = new Date().toISOString()
+void configApi.set({ key: 'auto_update_last_checked_at', value: now }).catch(() => {})
 ```
 
 ---
@@ -1795,6 +1821,7 @@ for key, value := range final {
 - 默认值本身必须是合法且已归一化的值：`NormalizeSystemConfigValue(key, def.DefaultValue)` 必须无错且原样返回。
 - `Label` 是输入框标题用的短词，必须非空；`Description` 是长句说明，只能当 hint，不得当标题。
 - 新增分组 slug 必须同步在 `systemConfigGroupLabels` 补中文名，`GroupLabel` 不允许退化成英文 slug。
+- 分组中文名是 Web 标签页、服务端提示文案、APP（按 `group_label` 渲染）共用的叫法，三处必须同名。当前 `tasks` =「任务运行」（v3.2.9 由「任务执行」改名，对齐 Web「任务运行」标签页与 `deps.go` / `runtime_exec.go` 里「系统设置 - 任务运行 - …」的指路文案）。改分组名、改任一项的 `Description` 都要重新生成演示站 fixtures（`go run ./cmd/gen-demo-fixtures`，保持 CRLF），否则 `TestCommittedDemoFixturesMatchRegistry` 红。
 - `Order` 由 `finalizeSystemConfigSpecs` 按注册下标写入，必须在 `registeredSystemConfigSpecs` 的初始化表达式里调用，**不能挪到 `init()`**：`registeredSystemConfigMap` 按值拷贝存 spec，`init()` 里再改切片会让 map 拿到旧数据。
 - 整数配置必须下发 `Min` / `Max`，且与 normalize 闭包里的校验边界一致；`Min` / `Max` 用局部拷贝取地址，不要直接 `&minValue`，避免调用方改 `*def.Min` 反过来改掉校验行为。
 - 凭据类配置必须标 `Secret`，并同步更新 `TestRegisteredSecretConfigsAreMarked` 的名单。
@@ -1903,6 +1930,7 @@ def: SystemConfigDefinition{
 - **`notifier.go` 是权威，注册表向它对齐，不是反过来。** 要加字段先在 `notifier.go` 里真的读它，再回注册表声明。
 - 注册表声明的键集合与 `notifier.go` 实际读取的 `cfg["..."]` 键集合**双向相等**，白名单只允许放行「服务端确实读了、但不是通过字面量读的」这一种情况（目前只有 `smtp_ssl` 一族的 SSL 别名）。
 - 注册表声明的渠道类型集合与 `sendToChannel` 的 switch 分支**双向相等**。`/notifications/types` 不得再手写渠道列表。
+- `sendToChannel` 的 switch 里只许出现渠道类型字符串 case。按正文格式分支的逻辑（#135）放在 `notify_content_format.go` 的 `adaptNotifyContent` 与 `notifier.go` 的各 `sendXxxWithFormat`（内部 switch 用 `NotifyContent*` 常量）；`notify_content_format.go` 这类新文件不读 `cfg["..."]`、不定义 `send` 开头的函数——两个扫描器都只看 `notifier.go`。详见「脚本通知的正文格式与按渠道发送」场景。
 - `ShowWhen` 的语义固定为「单键等值命中」，**不要扩成表达式引擎**。同一渠道内同键多次声明是允许的，但各条的 `ShowWhen` 必须互斥。
 - **不支持条件 options**。像 wecom_app 的 `safe` 那种「选项集合随另一个字段变」的情况，一律把选项常驻，并在就近注释里写清为什么可以常驻（服务端是否透传、错值由谁报错）。
 - `Required` 的口径必须严格：**当且仅当 `notifier.go` 对该字段单独判空并直接返回错误**。二选一约束（email 的 `smtp_user`/`from`、wxpusher 的 `uids`/`topic_ids`）和 `notifier.go` 不校验的 8 个渠道（serverchan / pushdeer / chanify / igot / pushover / discord / slack / custom）一律不标。要让它们必填，先去 `notifier.go` 补判空。
@@ -2028,7 +2056,7 @@ decoder.UseNumber()
 
 - 表列：`model.NotifyChannel.PushScope string`（**一等表列，不是 config JSON 里的键**）
 - 枚举与归一：`model.NotifyPushScopeDefault` / `model.NotifyPushScopeBound`、`model.NormalizeNotifyPushScope(raw string) (string, bool)`、`(*NotifyChannel).EffectivePushScope()`
-- 唯一筛选点：`func loadEnabledNotificationChannels(channelIDs []uint) ([]model.NotifyChannel, error)`
+- 唯一筛选点：`func loadEnabledNotificationChannels(channelIDs []uint, channelTypes ...string) ([]model.NotifyChannel, error)`（`channelTypes` 是 #135 加的变参过滤，老调用 `loadEnabledNotificationChannels(ids)` 原样可用）
 - 写入口：`POST /api/notifications`、`PUT /api/notifications/:id`、`service.restoreNotifyChannels`
 - 备份结构：`service.BackupNotifyChannel.PushScope`
 
@@ -2036,11 +2064,12 @@ decoder.UseNumber()
 
 - **`push_scope` 是一等表列，不进 `notify_channel_registry.go`。** 那张注册表是 config JSON 的 schema 真源，被 `TestNotifySchemaCoversAllConfigKeysReadByNotifier` 用 go/ast 与 `notifier.go` 实际读的 `cfg["..."]` 键**双向绑死**；往里塞一个 `notifier.go` 根本不从 config 读的键，会直接把那条用例弄红。
 - **取值必须是字符串枚举，不能改成 `IsDefault bool`。** 同一张表的 `Enabled bool gorm:"default:true"` 已经有一个踩过的活体坑：GORM 的 `ConvertToCreateValues` 把 `false` 当零值从 INSERT 里省掉，DB 侧的 `DEFAULT true` 反而生效（`DefaultValueInterface`），于是 `restoreNotifyChannels` 的 `tx.Create` 会把一条禁用渠道静默写回启用 —— 回归测试为此被迫写成 `Select("*").Create` + 单独 `Update`。bool 版的 push_scope 会以同样的方式把用户设的 bound 悄悄翻成 default，也就是把隔离意图反着执行。字符串的 Go 零值 `""` 归一后正好是 default，漏填只会退回升级前的老行为，方向安全。
-- **定向发送完全忽略 `push_scope`。** `channelIDs` 非空时只按 ID 精确命中 —— 「绑定推送」存在的意义就是只在被显式指定时才推，再叠一层过滤等于把功能做废。
+- **定向发送完全忽略 `push_scope`。** `channelIDs` 非空时只按 ID 精确命中 —— 「绑定推送」存在的意义就是只在被显式指定时才推，再叠一层过滤等于把功能做废。`/notifications/send` 的 `channel_name(s)` 在 handler 里解析成 ID 并入 `channelIDs`，与 ID 同级，同样算定向。
+- **`channelTypes` 只是过滤，不算定向**（#135）：定向时与 ID 取交集，广播时在「不等于 bound」的集合上再按类型筛。按类型选渠道若算点名，脚本一句 `notify.wxpusher_bot()` 就能打到别的脚本专用的绑定推送渠道。
 - **广播过滤条件必须写 `COALESCE(push_scope, '') <> 'bound'`，禁止写 `= 'default'`。** 这一列的语义是「空即默认」：老库补列、手工改库、以及未来任何忘了填这一列的写入路径都会留下空串或 `NULL`，等值比较会让这些历史行静默退出广播。`COALESCE` 那一层是为了兜 `NULL` —— SQL 里 `NULL <> 'bound'` 求值为 `NULL`（不成立），不兜同样会漏。
 - **广播 0 命中严格不兜底，但必须留一行 warn 日志。** 不允许「广播没命中就退回全部已启用渠道」——那等于取消隔离。改动前这条路径是完全静默的，用户只要把所有渠道都设成 bound，系统通知（资源告警、登录通知、静默更新结果）就会全部人间蒸发且零线索，所以 `log.Printf("warn: notification broadcast skipped: ...")` 是这条路径唯一可查的痕迹，不得删。
 - **`PUT /notifications/:id` 是按键更新，请求里没出现的键一概不动已有值。** 独立发版的 Flutter APP 编辑渠道时不带 `push_scope`，改成「缺省即 default」会让用户在 Web 上设的 bound 被 APP 的一次保存悄悄清掉。**显式传 `null` 同样视为「未提供」**：APP 很可能把未填字段序列化成 null，按类型错误 400 会让它一升级就全线保存失败，代价远大于收益。其余非字符串类型仍然 400，拼错的字符串值也仍然 400。
-- **`notifier.go` 里定向分支那句 `未找到已启用的通知渠道` 被 `notification_send_regression_test.go` 逐字断言，不得改动**（改文案会挂用例，也会让老客户端的错误匹配失效）。只有广播分支那句可以改。
+- **`notifier.go` 里定向分支那句 `未找到已启用的通知渠道` 被 `notification_send_regression_test.go` 逐字断言，不得改动**（改文案会挂用例，也会让老客户端的错误匹配失效）。按类型过滤时只允许在后面追加 `（类型：…）`，前半句不动；广播分支带类型时是 `暂无参与广播的默认推送渠道（类型：…）；设为「绑定推送」的渠道需要用 channel_name 或 channel_id 点名`。托管 notify.py 的青龙同名函数靠这两句**开头**判断「没有匹配渠道、跳过」，改前半句会让它们改成抛错。
 - **备份四处手抄一个都不能漏**：`backup_types.go` 的结构体字段、`backup_runtime.go` 的采集、旧版备份转换、恢复落库。漏一处的表现是「还原之后所有渠道全退回默认推送」，用户的隔离配置一次备份往返就没了。恢复口对非法值一律按 default 落库，**不得让整批恢复失败**。
 
 ### 4. Validation & Error Matrix
@@ -2115,6 +2144,177 @@ if !ok {
     response.BadRequest(c, "推送范围必须是字符串")
     return
 }
+```
+
+---
+
+## 场景：脚本通知的正文格式与按渠道发送（issue #135）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/notification.go` 的 `Send`、`server/service/notify_content_format.go`、`notifier.go` 的 `sendToChannel` / `SendNotificationSyncWithOptions` / `loadEnabledNotificationChannels` / 任意 `sendXxxWithFormat`、`script_notify_helpers.go` 生成的 notify.py / sendNotify.js，或 `docs/script-api.md`、`web/src/views/api-docs/apiData.ts` 里 `/notifications/send` 的说明时必须看本节。
+- 原因：脚本令牌是 operator，列不了渠道（`GET /notifications`、`GET /notifications/types` 都要 admin），「只发邮件」「HTML 正文」只能交给服务端按类型筛、按渠道映射。新能力叠在「不传就与 v3.2.8 逐字节一致」的承诺上：任务通知、系统通知、老脚本都不传这些字段，任何 `format == ""` 分支写偏都表现为全体用户的报文静默变化。
+
+### 2. Signatures
+
+- 接口：`POST /api/v1/notifications/send`（`JWTAuth` + `OpenAPIAccess("notifications")` + `RequireRole("operator")`）
+- 归一：`service.NormalizeNotifyContentType(raw string) (string, bool)`；常量 `NotifyContentText` / `NotifyContentMarkdown` / `NotifyContentHTML`
+- 分发：`service.NotificationDispatchOptions{ChannelIDs []uint; ChannelTypes []string; Context map[string]string; ContentType string}`、`SendNotificationSyncWithOptions(title, content string, options NotificationDispatchOptions) (NotificationDispatchResult, error)`
+- 筛选：`func loadEnabledNotificationChannels(channelIDs []uint, channelTypes ...string) ([]model.NotifyChannel, error)`
+- 渠道分发：`func sendToChannel(ch model.NotifyChannel, title, content string, context map[string]string, contentType string) error`（测试按钮 `SendNotificationToChannel` 传 `nil, ""`）
+- 格式适配（`notify_content_format.go`）：`adaptNotifyContent(channelType, contentType, content string) (string, string)`、`notifyChannelAcceptsHTML map[string]bool`、`notifyHTMLToText(raw string) string`、`encodeNotifyQuotedPrintable(content string) string`
+- 发送函数（`notifier.go`）：`sendWebhookWithFormat` / `sendEmailWithFormat` / `sendDingtalkWithFormat` / `sendPushplusWithFormat` / `sendWxPusherWithFormat`（`cfg, title, content, format`）；`sendWecomWithFormat` / `sendWecomAppWithFormat`（`cfg, title, content, context, format`）。旧签名 `sendEmail(cfg, title, content)`、`sendWecomWithContext(...)` 等保留为 `format=""` 的包装（测试在直接调）。
+- 托管 helper：`managedNotifyHelperToken = "DAIDAI_PANEL_MANAGED_NOTIFY_HELPER v1"`；notify.py `def send(title, content, ignore_default_config=False, **kwargs):`、`def send_to(channel_type, title, content, content_type=None, **kwargs):`、`_channel_sender(name, channel_type)` 生成的 17 个青龙同名函数、`_no_channel_reason(err)`；sendNotify.js `async function sendTo(channelType, text, desp, params = {})`，`RESERVED_PARAM_KEYS` 增加 `content_type` / `channel_type` / `channel_types` / `channel_name` / `channel_names`
+
+### 3. Contracts
+
+请求字段（全部可选、只做加法）：
+
+| 字段 | 类型 | 规则 |
+|---|---|---|
+| `content_type` | string | 小写、去首尾空白、丢掉 `;` 之后的参数后：`text` / `plain` / `txt` / `text/plain` → `text`；`markdown` / `md` / `text/markdown` → `markdown`；`html` / `text/html` → `html`。**空串 = 调用方没声明，不等于 text** |
+| `channel_type` / `channel_types` | string / []string | 单值排在数组前面合并；大小写不敏感，归一成注册表 `Type` 的写法再过滤；是**过滤**，不是点名 |
+| `channel_name` / `channel_names` | string / []string | 单值排在数组前面合并；按名称精确匹配（区分大小写、不 trim，名称列有唯一索引）；解析出的 ID 并入 `channelIDs`，与 `channel_id(s)` 同级 = 点名 |
+
+- **选择语义**：有点名（ID 或名称）→ 按 ID 精确命中、忽略 `push_scope`；没点名 → 广播集合（`COALESCE(push_scope, '') <> 'bound'`）。`channel_types` 在两者之上取交集，**广播时照样遵守 push_scope**。名称解析不看 `enabled`：禁用渠道交给下游报「未找到已启用的通知渠道」。
+- **响应 `data` 只增不改**：新增 `content_type`（归一后的值，没传为 `""`）与 `channel_types`（归一后的类型名，没传为 `[]`）；`requested_ids` 含按名称解析出的 ID；`used_all` 仍是「没有任何点名」，`channel_types` 不影响它。
+- **`content_type` 为空 = 各渠道报文与 v3.2.8 逐字节一致。** `adaptNotifyContent` 与每个 `sendXxxWithFormat` 在 `format == ""` 时必须原样走改动前的分支。由 `notifier_legacy_payload_test.go` 的 golden 守护：golden 是在 v3.2.8 的 `notifier.go` 上用同一套用例真跑抓下来的请求（方法、路径、关键请求头、请求体），不是新代码和自己的包装函数比。有意改变某渠道默认报文时，必须同时改 golden 并在提交说明写清为什么老行为可以变。serverchan / igot / qmsg / pushover 地址写死、这次没改，golden 覆盖不到；pushplus 在 `notifier_content_format_test.go` 单独守。
+- **渠道映射（只在 `content_type` 非空时生效）**：
+  - 进渠道前先 `adaptNotifyContent`：渠道不在「能收 HTML」名单且调用方声明 html → `notifyHTMLToText` 去标签，格式交还成 `""`，按渠道配置的文本类消息发（不强制改成 text 消息）。能收 HTML 的只有 `webhook` / `email` / `pushplus` / `wxpusher` / `custom`。`notifyChannelAcceptsHTML` 必须覆盖注册表全部类型；ntfy 的 Markdown 头、gotify extras、Bark markdown 字段依赖服务端版本、老版本静默忽略，**不因「新版本支持」标 true**。
+  - email：html → `MIME-Version: 1.0` + `Content-Type: text/html; charset=UTF-8` + `Content-Transfer-Encoding: quoted-printable`（压缩成一行的 HTML 超过 998 字节会被部分 SMTP 拒收；不带 MIME-Version 部分客户端照样显示源码）；text / markdown 仍是原 `text/plain` 报文，逐字节不变。
+  - wxpusher：text → 1、html → 2、markdown → 3，覆盖渠道配置的 `content_type`（那是「渠道默认怎么发」，与请求字段不是一回事）。调用方声明 html 时正文**不转义**、不套 pre-wrap 的 div，标题仍 `html.EscapeString`；**没声明格式、只是渠道配成 2 时继续转义**——任务通知里嵌着脚本日志，放开会把日志里的 `<` 当标签渲染。
+  - pushplus：html / markdown / text → `template` 为 `html` / `markdown` / `txt`；渠道配置的 template 是 `json`（不分大小写）时不覆盖。
+  - dingtalk：text → text 消息，markdown → markdown 消息。
+  - wecom（机器人）：只在 text / markdown / markdown_v2 之间切。text → text；markdown → 仅当配置是 text **且 `mentioned_list`、`mentioned_mobile_list` 都为空**才切 markdown（markdown 消息没有 @ 列表，@ 会被脚本一个参数静默丢掉）；原本 markdown_v2 的保持 v2；image / news / template_card 不受影响。
+  - wecom_app：**永不因调用方格式从 text 切到 markdown**。企业微信 markdown 应用消息在微信插件（微工作台）里不显示，也没有 `safe` / `enable_id_trans`，管理员设的保密消息会被脚本一个参数变成普通消息；markdown 原文按文本发照样读得懂。只允许「配置 markdown + 调用方 text」切回 text；image / file / video / news / mpnews / template_card 不受影响。
+  - 调用方格式**改变了消息类型**时（wecom / wecom_app），不套渠道配置的 `content_template`，改用该分支默认模板（text `{{title}}\n{{content}}`、markdown `**{{title}}**\n{{content}}`），否则 markdown 模板里的 `**` 原样出现在文本消息里；类型没变照常套。
+  - webhook：format 非空时 JSON 多带 `content_type` 键；为空时键集合仍只有 `title` / `content`。
+  - custom 原样透传（不提供 `{{content_type}}` 占位）；telegram 不设 `parse_mode`；serverchan、discord 等其余渠道 markdown 原样发、html 已在前面去标签。
+- **去标签必须保持线性**：`notifyHTMLToText` 用 `golang.org/x/net/html` 的 tokenizer，外加只记 SVG / MathML 元素的 `notifyForeignStack`（按名字计数，结束标签在栈里没有同名元素时不扫栈）。**不许换成 `html.Parse` 建树**：它的开放元素栈在深层嵌套下是平方复杂度，x/net v0.33 实测 10 万层 `<pre>` 71 秒，另一输入直接顶到 5 分钟测试超时；通知正文来自脚本，不能被一段畸形 HTML 卡住发送。行为口径：块级标签与 br 断行、同一行 td / th 用「 | 」分隔、丢弃 script / style / title / noscript / iframe / noembed / noframes / template、隐藏 SVG 的 title / desc / style / script 与 MathML 的 annotation(-xml)、外来内容里自闭合真闭合（`<svg><title/></svg>` 之后的正文不能丢）、breakout 表里的开始标签和 `</p>` `</br>` 跳出外来内容、`</template>` 连同模板里打开的 SVG / MathML 一起关、实体反转义、合并多余空行。已知残余：HTML 父元素的结束标签（`</div>` 等）不会关闭没闭合的 svg style / script。
+- **护栏约束**：
+  - `sendToChannel` 的 switch 里**不许出现任何新的字符串 case**：`TestNotifySchemaCoversAllChannelTypesHandledByNotifier` 把函数里全部字符串 case 当渠道类型比对注册表，写一句 `case "html"` 就被当成「注册表没声明的渠道」。格式分支放在 `adaptNotifyContent` 与各 `sendXxxWithFormat`，内部 switch 用 `NotifyContent*` 常量。
+  - 被 `sendToChannel` 调用的 `sendXxx` / `sendXxxWithFormat` **必须定义在 `notifier.go`**（`TestNotifierSourceHoldsEverySenderCalledBySendToChannel`）；新文件**不读 `cfg["..."]`、不定义 `send` 开头的函数**——schema 绑定扫描器只解析 `notifier.go`，挪出去的配置读取会静默逃出双向绑定。配置读取保持 `cfg["content_template"]`、`cfg["mentioned_list"]` 这种字面量写法。
+- **托管 helper**：
+  - 托管标记保持 ` v1`（改了之后磁盘上的老 v1 文件会被当成用户自定义、永久停止更新），`def send(title, content, ignore_default_config=False, **kwargs):` 这一行逐字不变（测试逐字断言）。
+  - `send` 从 kwargs 取出 `content_type`、`channel_type(s)`、`channel_name(s)` 放进请求体，**不再进 context**；`content_type` 不是 str 时（老脚本拿它当模板变量，如 `2`）留在 context、不发给面板被 400。sendNotify.js 同口径（`typeof value === 'string'` 才进请求体）。
+  - 有类型或名称选择器、又没显式传 `channel_id(s)` 时不回落 `DAIDAI_NOTIFY_CHANNEL_ID`；显式传了空的类型 / 名称原样发出去由面板 400，不能按真假判断丢掉、悄悄变成广播。
+  - 17 个青龙同名函数：`wxpusher_bot`→wxpusher、`smtp`→email、`pushplus_bot`→pushplus、`dingding_bot`→dingtalk、`feishu_bot`→feishu、`telegram_bot`→telegram、`wecom_bot`→wecom、`wecom_app`→wecom_app、`bark`、`gotify`、`iGot`→igot、`serverJ`→serverchan、`pushdeer`、`qmsg_bot`→qmsg、`pushme`、`ntfy`、`custom_notify`→custom。类型名必须在注册表里；不加 email / telegram / discord / slack 这类裸名（和常见包重名，`from notify import *` 会互相覆盖），不加 `__all__`，面板独有类型用 `send_to`。
+  - **没有匹配渠道时青龙同名函数跳过、`send` / `send_to` 抛错**：同名函数捕获 `RuntimeError`，只有 HTTP 400、且去掉「发送失败: 」前缀后**以**「暂无参与广播的默认推送渠道」或「未找到已启用的通知渠道」**开头**时，打印 `<函数名> 跳过推送：<面板原文>` 并返回 None（与青龙一样，脚本里下一句推送照常执行）；其余错误照抛。只比开头：渠道自己发送失败时报错是「渠道名: 下游正文」，下游正文里碰巧含这两句不能当成没有渠道。
+  - notify.py 保持 Python 3.6 语法（不用海象运算符、仅位置参数等），`ast.parse(..., feature_version=(3, 6))` 兜底。
+
+### 4. Validation & Error Matrix
+
+| 请求 | 结果 |
+|---|---|
+| 不带任何新字段；显式 `null`；`channel_types: []` / `channel_names: []` | 200，筛选与各渠道报文与 v3.2.8 逐字节一致；响应 `data` 只多出 `content_type: ""`、`channel_types: []` |
+| `content_type: "Text/HTML; charset=UTF-8"` / `"text/plain"` / `"MD"` | 200，响应回显 `html` / `text` / `markdown` |
+| `content_type: "json"` / `"application/json"` / `"; charset=utf-8"` | 400 `content_type 只能是 text / markdown / html（不传则按渠道配置发送）`，不发送 |
+| `content_type: 2`、`channel_types: "webhook"`（类型不对） | 400 `请求参数错误`（绑定失败，不点名字段；现状如此） |
+| `channel_type: "WebHook"`、`channel_types: ["CUSTOM", " Webhook "]` | 200，回显 `["webhook"]` / `["custom", "webhook"]` |
+| `channel_type: "weixin"` | 400 `未知的通知渠道类型：weixin（可选：webhook、email、telegram、…）`，列出注册表全部类型（脚本令牌调不了 `/notifications/types`） |
+| `channel_type: "  "`、`channel_types: [""]` | 400 `通知渠道类型无效：channel_type / channel_types 不能为空`，不退化成「不过滤」 |
+| `channel_name: ""`、`channel_names: [" "]` | 400 `通知渠道名称无效：channel_name / channel_names 不能为空` |
+| `channel_names: ["广播渠道", "不存在的渠道"]`；名称带尾随空格（`"广播渠道 "`） | 400 `未找到名称为「不存在的渠道」的通知渠道`（逐个列出查不到的名称），绝不退化成广播、也不发给查得到的那几个 |
+| 按名称点名绑定推送渠道 | 200，只发这一个；`requested_ids` 含它的 ID，`used_all=false` |
+| 点名 + 类型交集为空 | 400 `发送失败: 未找到已启用的通知渠道（类型：webhook）` |
+| 广播 + 类型无命中（含该类型只有 bound 渠道） | 400 `发送失败: 暂无参与广播的默认推送渠道（类型：email）；设为「绑定推送」的渠道需要用 channel_name 或 channel_id 点名` |
+| wecom_app（text、safe=1、enable_id_trans=1）+ `markdown` | 仍发 text 消息，带 `safe` 与 `enable_id_trans` |
+| wecom 机器人 text + `mentioned_list` + `markdown` | 仍发 text，保留 @ 列表；@ 列表为空时切 markdown |
+| 渠道配 markdown + 自定义 `content_template`，调用方 `text` | 发 text 消息，用 `{{title}}\n{{content}}` 默认模板 |
+| notify.py 同名函数，面板没有该类型的默认推送渠道 / 只有 bound / 点名的渠道已禁用 | 打印跳过、返回 None，后续调用照常发 |
+| notify.py 同名函数，渠道真的发送失败（下游 400 正文里恰好含「暂无参与广播的默认推送渠道」）；`channel_name` 写了不存在的名称 | 抛 `RuntimeError` |
+| `send` / `send_to`，没有匹配渠道 | 抛 `RuntimeError`（保持严格） |
+
+### 5. Good/Base/Bad Cases
+
+- Good：`notify.send("日报", html, content_type="html")` → 邮件收到渲染好的表格、WxPusher 显示表格、Telegram / 钉钉收到去标签的纯文本；没配 WxPusher 时 `notify.wxpusher_bot(...)` 打印跳过，下一句 `notify.smtp(...)` 照常发。
+- Base：任务通知、系统通知、老脚本都不传 `content_type`，23 个渠道配置的报文与 v3.2.8 逐字节一致。
+- Bad：空串归一成 text——钉钉默认 markdown、WxPusher 配成 2 的渠道，老脚本一升级报文就变了。
+- Bad：按类型选渠道算点名——`notify.wxpusher_bot()` 打到别的脚本专用的绑定推送渠道。
+- Bad：wecom_app 跟着 markdown 切消息类型——保密消息变普通消息，微信插件里还看不到（Wave 2 复查 major）。
+- Bad：WxPusher 渠道配成 2 时一律不转义——任务日志里的 `<` 被当成真标签渲染，详情页多一个注入面。
+- Bad：在 `sendToChannel` 里写 `case "html"`，或把 `sendXxxWithFormat` 拆到新文件——前者 schema 绑定红，后者读到的 `cfg` 键静默逃出绑定。
+- Bad：用 `html.Parse` 去标签——一段深嵌套的畸形 HTML 让一次发送卡几十秒到几分钟。
+- Bad：同名函数用子串匹配「没有渠道」——渠道真失败、下游正文恰好含这句时被静默吞掉。
+- Bad：把 `text/html`、`text/plain` 这类 MIME 写法当非法值 400——#135 用户最可能先试的就是它们。
+
+### 6. Tests Required
+
+见 `server/service/notifier_legacy_payload_test.go`、`server/service/notifier_content_format_test.go`、`server/service/script_notify_helpers_test.go`、`server/handler/notification_send_format_test.go`：
+
+- `TestSendToChannelEmptyContentTypeKeepsLegacyPayloads`（**最重要的一条**：23 个渠道配置的 v3.2.8 真实报文 golden，另加邮件 text / markdown 仍等于原 `text/plain` 报文；不许为了让它变绿去改 golden）
+- 归一与去标签：`TestNormalizeNotifyContentType` / `TestNotifyChannelHTMLCapabilityCoversRegistry`（加渠道漏登记能力表直接红）/ `TestNotifyHTMLToText`（SVG / MathML 自闭合、`</p>` `</br>` 跳出、template、iframe 等）
+- 渠道映射：`TestSendEmailHTMLContentTypeUsesTextHTML` / `TestSendWxPusherContentTypeOverridesChannelFormat` / `TestSendPushplusContentTypeMapsTemplate` / `TestSendDingtalkAndWecomContentTypeSwitchesTextMessages` / `TestSendWecomBotContentTypeKeepsMentionsAndSwitchedTemplate` / `TestSendWecomAppContentTypeSwitchesTextMessages`（safe=1、enable_id_trans=1 + markdown 仍是 text）/ `TestSendToChannelStripsHTMLForTextOnlyChannels` / `TestSendWebhookForwardsDeclaredContentType` / `TestSendNotificationSyncFiltersByChannelType`
+- 接口：`TestNotificationSendRejectsInvalidContentType` / `TestNotificationSendAcceptsMIMEContentTypeAndAnyCaseChannelType` / `TestNotificationSendRejectsUnknownOrBlankChannelType` / `TestNotificationSendChannelTypeRespectsPushScope` / `TestNotificationSendByChannelNameTargetsBoundChannel` / `TestNotificationSendForwardsContentTypeToWebhook`
+- 文档：`TestNotifySendDocsListEveryChannelType`（`docs/script-api.md` 与 `apiData.ts` 的渠道类型说明必须列全注册表类型、不得再指向 `/notifications/types`；只拷了 server 目录时 skip）
+- helper（真跑 Python / Node，找不到解释器会 skip，改 helper 后用 `-v` 确认没被 skip）：`TestManagedNotifyPyForwardsContentTypeAndSelectors`（含 3.6 语法解析、`content_type=2` 留在 context）/ `TestManagedSendNotifyJSForwardsContentTypeAndSelectors` / `TestManagedNotifyPyQingLongSendersSkipWhenNoChannelMatches`（用服务端真实报错文本；渠道真失败必须抛）/ `TestManagedNotifyPyChannelSendersUseRegisteredTypes`（恰好 17 个、类型都在注册表）/ `TestManagedNotifyHelperTokenStaysV1` / `TestManagedHelperContentIncludesUsageDocs`
+- 护栏仍须全绿：`TestNotifySchemaCoversAllConfigKeysReadByNotifier` / `TestNotifySchemaCoversAllChannelTypesHandledByNotifier` / `TestNotifierSourceHoldsEverySenderCalledBySendToChannel`
+- 性能：仓库里**没有**常驻的去标签性能用例。改 `notifyHTMLToText` 时要自己拿超大 / 畸形输入测一遍（10 万层 `<pre>`、20 万层 `<div>`、几十万个不同的 SVG 标签名、MB 级 CDATA 与实体），每个都应在百毫秒量级。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "TestSendToChannelEmptyContentTypeKeepsLegacyPayloads|TestNormalizeNotifyContentType|TestNotifyHTMLToText|TestNotifyChannelHTMLCapability|TestSendEmailHTML|TestSendWxPusherContentType|TestSendPushplusContentType|TestSendDingtalkAndWecom|TestSendWecomBotContentType|TestSendWecomAppContentType|TestSendToChannelStripsHTML|TestSendWebhookForwards|TestSendNotificationSyncFilters|TestManagedNotify|TestManagedSendNotifyJS|TestManagedHelperContent|TestNotifySchema|TestNotifierSource" -count=1 -v
+go test ./handler -run "TestNotificationSend|TestNotifySendDocs" -count=1
+go test ./...
+```
+
+> **突变验证**：把 `sendWecomAppWithFormat` 改回「调用方 markdown 时 text → markdown」，`TestSendWecomAppContentTypeSwitchesTextMessages` 必须变红；把 `_no_channel_reason` 的 `startswith` 改成子串包含，`TestManagedNotifyPyQingLongSendersSkipWhenNoChannelMatches` 必须变红；把 WxPusher「没声明格式时转义」那一支删掉，golden 的 `wxpusher_2` 必须变红。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：空串当 text。老脚本、任务通知一个字段没传，钉钉默认的 markdown 就被改成文本消息。
+if value == "" {
+    return NotifyContentText, true
+}
+```
+
+```go
+// 错误：wecom_app 跟着调用方切 markdown。markdown 应用消息没有 safe / enable_id_trans，
+// 微信插件里也不显示；类型变了还照套渠道的 markdown content_template。
+if msgType == "text" && format == NotifyContentMarkdown {
+    msgType = "markdown"
+}
+contentTemplate := cfg["content_template"]
+```
+
+```python
+# 错误：子串匹配。渠道真发送失败、下游正文里恰好有这句时，也被当成「没有渠道」静默跳过。
+if "暂无参与广播的默认推送渠道" in str(err):
+    return None
+```
+
+#### Correct
+
+```go
+// 正确：空串原样返回空串（没声明），各渠道走改动前的分支。
+if value == "" {
+    return "", true
+}
+```
+
+```go
+// 正确：只允许 markdown → text；切了类型就不用渠道配置的模板。
+if msgType == "markdown" && format == NotifyContentText {
+    msgType = "text"
+}
+contentTemplate := cfg["content_template"]
+if msgType != configuredMsgType {
+    contentTemplate = ""
+}
+```
+
+```python
+# 正确：去掉「发送失败: 」前缀后只比开头。
+if detail.startswith("发送失败: "):
+    detail = detail[len("发送失败: "):]
+for no_channel in _NO_CHANNEL_MARKERS:
+    if detail.startswith(no_channel):
+        return detail
+return None
 ```
 
 ---
@@ -2264,7 +2464,8 @@ fi
 
 - 触发：修改 `server/service/subscription.go` 的 `syncSubscriptionTasks` / `scanSubscriptionTaskCandidates`、
   `server/service/subscription_task_script_match.go`、执行器 `script_runner.go` 的 `classifyCommandRunner` /
-  `splitCommandTokens`，或者改任务命令的格式时，必须看本节。
+  `splitCommandTokens`，或者改任务命令的格式时，必须看本节。cron 从哪来、没识别到 cron 声明的脚本怎么处理见下一节（#134），
+  两节共用同一套「认任务 / 接管 / 删除判定」。
 - 背景：v3.0.5 起用「订阅锁」`subscription_locked` 挡住同步覆盖用户手改的名称/定时，但匹配仍按命令原文：
   命令一加参数（`task x.js now`、`task x.js desi JD_COOKIE`）就对不上 → 新建一条重复任务；
   开着自动删除时，还会把改过命令的那条连历史日志删掉（#125）。
@@ -2273,15 +2474,21 @@ fi
 ### 2. Signatures
 
 - 同步入口：`syncSubscriptionTasks(sub *model.Subscription, emit PullCallback)`
-- 扫描：`scanSubscriptionTaskCandidates(sub, options) subscriptionCandidateScan`，比旧版多给 `seenFiles`（本次读到的全部文件）。
+- 扫描：`scanSubscriptionTaskCandidates(sub, options) subscriptionCandidateScan`，比旧版多给 `seenFiles`（本次读到的全部文件）
+  与 `undeclaredCron`（过了全部过滤规则、不是辅助脚本、没识别到 cron 声明、默认规则又没有可用值，因而不建任务的文件，#134）。
   `collectSubscriptionTaskCandidates(sub, options) (map[string]subscriptionTaskCandidate, []string)` 签名不变，是它的包装（有测试直接调）。
 - 字典与求键（`subscription_task_script_match.go`）：`newSubscriptionScriptIndex(scriptsDir, candidates)`、
-  `normalize(ref)`、`candidateKey(command)`、`scriptKeyOf(command)`、`taskCommandScriptRefs(command)`。
-- 删除判定：`newSubscriptionStaleTaskJudge(index, candidates, saveDir, seen).judge(command) (verdict, script, statErr)` →
-  `staleTaskKeep` / `staleTaskKeepUnscanned` / `staleTaskKeepStatError` / `staleTaskDelete`（`script`、`statErr` 只给日志用）。
+  `normalize(ref)`、`candidateKey(command)`、`scriptKeyOf(command)`、`scriptKeyIn(command, known func(key string) bool)`、`taskCommandScriptRefs(command)`。
+- 未建任务的受管脚本：`newSubscriptionUndeclaredScripts(index, scriptsRoot string, files []string) *subscriptionUndeclaredScripts`，
+  每项带 `command`（`task <相对 ScriptsDir 的路径>`，与候选命令同口径）、`key`（归一不了为空）、`claimable`（键有歧义时 false）；
+  `hasKey(key)` / `hasCommand(command)` 对 nil 安全（nil 即空集合）。
+- 删除判定：`newSubscriptionStaleTaskJudge(index, candidates, saveDir, seen, undeclared *subscriptionUndeclaredScripts).judge(command) (verdict, script, statErr)` →
+  `staleTaskKeep` / `staleTaskKeepUnscanned` / `staleTaskKeepStatError` / `staleTaskDelete`（`script`、`statErr` 只给日志用；`undeclared` 传 nil 就是 #134 之前的判定）。
   判定里的 Stat 是包级变量 `subscriptionScriptStat = os.Stat`（只为单测能构造 EACCES、网络盘错误码）；「这个前缀不是脚本」由
   `subscriptionScriptNotAScript(err)` 判，只收「不存在」类 `subscriptionScriptMissing(err)` 与名字类 `subscriptionScriptBadName(err)`
   （平台相关部分 `subscriptionScriptBadNamePlatform`，build tag 分文件）；其余 Stat 错误都让删除退成保留，**不设白名单**。
+- 接管池：`loadSubscriptionAdoptPool(index, managed []model.Task, undeclared *subscriptionUndeclaredScripts) (*subscriptionAdoptPool, error)`，
+  `(*subscriptionAdoptPool).take(command, key string, keyOK bool) []*model.Task`（按 id 升序去重；`command` 为空时不取 `byCommand[""]` 里的空命令任务；nil 池返回 nil）。
 - 条件删除：`deleteSubscriptionTaskIfUnchanged(task *model.Task) (removed bool, err error)`。
 - 条件解除关联：`detachSubscriptionTaskIfUnchanged(task *model.Task, label string) (detached bool, err error)`（新旧标签相同 → 直接 `(false, nil)`）；
   配套 `otherLiveSubscriptionLabels(selfID uint) ([]string, error)`、`usedByOtherSubscription(task, otherLabels) bool`、
@@ -2306,10 +2513,18 @@ fi
   `task x.js now extra` 这类跑不起来的命令也算已存在（有意的取舍）：不替用户改命令，失败会在任务日志里暴露。
 - **接管**：非本订阅托管、但命令与候选相同或键相同的任务（无标签、删订阅再重建留下的悬空旧标签、别的订阅）
   只加本订阅标签，其余字段不动，不再加锁；有几条接管几条，每条一行 `[关联已有任务]`；本订阅已有同脚本任务时不接管。
-  候选池全表加载后在 Go 里过滤，**不写 `NOT IN`**。
+  **没识别到 cron 声明、本次不建任务的脚本（undeclared）同样接管**（#134，与 v3.2.8 它们还是兜底候选时一致）：认法与候选相同
+  （精确命令，或 `claimable` 时按键），本订阅已有任务在跑它（命令相同或 `scriptKeyIn(command, undeclared.hasKey)` 命中）就不接管。
+  不接管的话，青龙导入、手建、删订阅再重建留下的同脚本任务不归订阅管，上游删了脚本也不会被自动删除。
+  接管只在自动添加开着时做。候选池只在「有待新建的候选」或「有还没任务的 undeclared 脚本」时全表加载一次，在 Go 里过滤，**不写 `NOT IN`**；
+  池里一个任务至多一个键（一个文件只会落在候选与 undeclared 之一）。读任务列表失败 → `failed++` +
+  `[关联已有任务失败] 读取任务列表出错，本次不新建任务，以免与已有任务重复: …`，本轮不建、不接管，也不打 #134 的「未建定时任务」提示。
 - **自动删除**（开关语义不变，只看 `task ` 开头的命令）：
-  1. 本次候选为空 → 熔断，整段跳过；有托管任务时打 `[跳过自动删除] 本次没有识别到任何候选脚本…`。
-  2. 命令与候选完全相同或键命中 → 保留。
+  1. 本次候选**与** undeclared **都**为空 → 熔断，整段跳过；有托管任务时打 `[跳过自动删除] 本次没有识别到任何候选脚本，为防误删，未删除任何任务`。
+     只有 undeclared、没有候选（整个仓库都没写 cron 头）时不熔断：改动前这些文件按兜底 cron 都是候选、不会熔断，只看候选的话这类订阅从此再也删不掉上游已删脚本的任务。
+  2. 命令与候选完全相同或键命中 → 保留。命令与 undeclared 的精确命令相同，或 `scriptKeyIn(command, undeclared.hasKey)` 命中 → 同样保留
+     （#134：升级前兜底建出来的 0 点任务、用户改过定时和参数的都算）。精确命令不能省：文件名带引号（`it's.js`）或被空格隔开的 `--`（`a -- b.js`）时
+     命令切不开、求不出键，升级前原样建出的命令只能靠它认出。
   3. 否则取命令引用的脚本（`taskCommandScriptRefs`：带受支持扩展名、在脚本目录内的前缀，从长到短取第一个真实存在的，与执行器同口径）：
      在当前 SaveDir 内、文件存在、但 `seenFiles` 里没有 → 保留，并打 `[保留任务] <名>：脚本 <路径> 还在订阅目录里，但本次扫描没有读到…`；
      其余（文件已不存在、被白/黑名单或依赖/辅助脚本规则排除、在当前 SaveDir 外）→ 删。
@@ -2367,7 +2582,10 @@ fi
 | 未托管的同脚本任务（无标签 / 悬空旧标签） | 只加标签 | `[关联已有任务]` |
 | 上游删了脚本（规范命令、改过参数的都算） | 按开关删，连日志 | `[自动删除任务]` |
 | 黑名单排除、改 SaveDir（文件还在盘上） | 按开关删 | `[自动删除任务]` |
-| 候选为空（检出为空、单文件订阅 SaveDir 为空） | 一条不删 | `[跳过自动删除]` |
+| 候选与没识别到 cron 声明的脚本都为空（检出为空、单文件订阅 SaveDir 为空、只剩辅助脚本） | 一条不删 | `[跳过自动删除]` |
+| 只有没识别到 cron 声明的脚本、没有候选（整个仓库都没写 cron 头） | 不熔断：这些脚本的已有任务保留，上游删掉的照删 | `[自动删除任务]`（仅被删的） |
+| 没识别到 cron 声明的脚本的已有任务（原样命令、改过参数 / 定时、文件名切不开的原样命令） | 不动、不新建、不删 | — |
+| 没识别到 cron 声明的脚本 + 无本订阅标签 / 悬空旧标签的同脚本任务（青龙导入、手建） | 自动添加开着时只加标签；关着时不动 | `[关联已有任务]` |
 | 脚本在当前 SaveDir 内、文件在、扫描没读到（目录联接、NAS / Magisk） | 保留 | `[保留任务] …本次扫描没有读到…` |
 | `node X` 的脚本从订阅里消失 | 保留（不在删除范围） | — |
 | 快照之后命令被改 / 删任务出错 | 不删；日志不动 | `[保留任务] …同步期间…` / `[自动删除任务失败]` |
@@ -2403,12 +2621,20 @@ fi
 - Bad：标签比较一边用 LIKE（不分大小写）、一边精确比较——大小写不同的订阅标签会误删别的订阅在用的任务，或每次同步空转一次 `[解除关联]`（review-r2 R2-2）。
 - Bad：解除关联后没有 `continue`，落进条件删除——条件删除只比对 id+command、不看 labels，会把还被别的订阅使用的任务连日志删掉（review-r2 R2-3）。
 - Bad：再给「认出的任务」加任何回灌（名称、定时、状态）——用户改过的东西又会被悄悄改回去，锁的老问题原样回来。
+- Bad：把没声明 cron 的脚本移出候选（#134），却只改扫描不改认任务——删除判定不认 undeclared，存量 0 点任务连日志被删（实测判 `staleTaskDelete`）；
+  熔断只看候选，整仓无 cron 头的订阅永久跳过自动删除；接管池只按候选求键，青龙导入的同脚本任务从此不归订阅管（Wave 2 复查）。
 
 ### 6. Tests Required
 
 - `subscription_task_script_match_test.go`：`scriptKeyOf` / `normalize` 表驱动（task、desi、解释器、托管命令、`-m`、`-l`、`--`、引号、
   带空格路径、目录内外绝对路径、`.bak`、引号未闭合、空串、Windows 反斜杠与大小写、Linux 上反斜杠不算分隔符）；
-  Windows 候选大小写冲突；删除判定的「扫描漏读」（人为缺项的 `seen` 集合）；Docker 别名（Linux，Windows 上 `t.Skip`）。
+  Windows 候选大小写冲突；删除判定的「扫描漏读」（人为缺项的 `seen` 集合）；Docker 别名（Linux，Windows 上 `t.Skip`）；
+  undeclared 的保留判定 `TestSubscriptionStaleTaskJudgeKeepsUndeclaredCronScripts`（改过参数、`desi`、`-m`、`./`、带空格路径、`it's.js` / `a -- b.js` 原样命令 → 保留；
+  原样命令加了参数又切不开、被规则排除、SaveDir 外 → 删；传 nil 时回到改动前的「删」）。
+- 未识别 cron 的脚本的接管、熔断与保留（`subscription_undeclared_cron_test.go`，清单见下一节）：`TestSyncSubscriptionTasksKeepsExistingTasksOfUndeclaredCronScripts`
+  （含 `only_undeclared_scripts`：只有 undeclared 时不熔断）、`TestSyncSubscriptionTasksAdoptsUnmanagedTaskOfUndeclaredCronScript`、
+  `TestSyncSubscriptionTasksUndeclaredSkipsAdoptionWhenAlreadyManaged`、`TestSyncSubscriptionTasksUndeclaredNeverAdoptsEmptyCommandTask`、
+  `TestSyncSubscriptionTasksKeepsUndeclaredCronTasksWithOddFileNames`；熔断本身仍由 `TestSyncSubscriptionTasksEmptyCandidatesSkipsAutoDelete` 锁住。
 - `subscription_task_sync_existing_test.go`：各种改过的命令 × 自动删除开 / 关 × 两轮；上游改名称 / cron；复制任务；同脚本多条；
   改指向别的脚本；上游删脚本（开 / 关）；黑名单、改 SaveDir；候选为空与单文件订阅；Windows 目录联接做 SaveDir；Docker 别名（Linux）；
   大小写与分隔符；接管（无标签、悬空旧标签、按原文、多条、托管优先）；`node X` 不被删；条件删除（快照过期、删任务失败时日志不动）。
@@ -2457,9 +2683,13 @@ if managedCommands[command] {
 if key, ok := scriptIndex.candidateKey(command); ok && managedKeys[key] {
     continue
 }
-// ... 自动删除：候选为空先熔断；删除要有正面证据（Stat 只有「不存在」类与名字类算不是脚本，
+// ... 自动删除：候选与没识别到 cron 声明的脚本都为空才熔断；删除要有正面证据（Stat 只有「不存在」类与名字类算不是脚本，
 // 其余 Stat 错误都保留，见 subscriptionScriptNotAScript）；
 // 还被别的、仍存在的订阅使用 → 只解除关联；否则按快照条件删，删不到就回滚（日志随之恢复）。
+if len(candidates) == 0 && len(scan.undeclaredCron) == 0 {
+    // [跳过自动删除] …
+}
+judge := newSubscriptionStaleTaskJudge(scriptIndex, candidates, saveDir, seenKeys, undeclared) // undeclared 的精确命令与键都判保留（#134）
 verdict, scriptPath, statErr := judge.judge(task.Command) // 后两个只在保留判定时用于日志
 if verdict == staleTaskDelete {
     if usedByOtherSubscription(task, otherLabels) { // hasLabelFold：与 queryTasksByLabel 的 LIKE 同口径，忽略大小写
@@ -2470,6 +2700,172 @@ if verdict == staleTaskDelete {
     // 事务：先删 task_logs，再 DELETE … WHERE id=? AND command=?；RowsAffected≠1 或出错就回滚
     removed, err := deleteSubscriptionTaskIfUnchanged(task)
     // ...
+}
+```
+
+---
+
+## 场景：订阅脚本的 cron 来源与「没识别到 cron 声明」的脚本（issue #134）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/subscription.go` 的 `scanSubscriptionTaskCandidates`（cron 来源分支）、`getSubscriptionTaskSyncOptions` / `subscriptionDefaultCronRule`、
+  `syncSubscriptionTasks` 里的扫描日志与「未建定时任务」提示、头部解析 `eachSubscriptionScriptHeadLine` / `resolveSubscriptionScriptCron` /
+  `extractSubscriptionCronExpression*`、`subscriptionHelperScriptNames`，注册表 `default_cron_rule`，`task_script_cleanup.go` 的 `subscriptionReaddSuffix`，
+  或演示站 `web/src/demo/db.ts` 的 `demoSubscriptionReaddsTask` 时必须看本节。认任务、接管、删除判定见上一节（#125）。
+- 背景：v2.2.10 ～ v3.2.8 在 `default_cron_rule` 留空（出厂默认）时硬兜底 `FallbackSubscriptionCron = "0 0 * * *"`：头部认不出 cron、又不在辅助脚本名单里的文件
+  一律建成**启用**的每天 0 点任务，而且关不掉（非法值拒写、空值被换成 0 点）。`config.py`、`mysend.py` 这类库文件和拉取后钩子半夜跑，删了下次拉取又回来。
+  #134 起留空 = 不建，兜底常量已删除。
+
+### 2. Signatures
+
+- 选项：`getSubscriptionTaskSyncOptions(sub) subscriptionTaskSyncOptions`，`defaultCron`（只存合法的用户规则，否则 `""`）、`ignoredDefaultCron`（库里存着但 `cron.Parse` 不认的原值，只给日志用）
+- 读规则：`subscriptionDefaultCronRule() (rule, ignored string)`（扫描与删任务预览共用）
+- 注册表：`newValidatedStringConfig("default_cron_rule", "默认 Cron 规则", "", "订阅脚本未声明 cron 时使用；留空则不为这类脚本建定时任务", "subscription", normalizeDefaultCronRule)`（保存时非法值拒写）
+- 候选：`subscriptionTaskCandidate.DefaultRule bool`（cron 来自默认规则，只用于日志分开计数与标注）；扫描结果 `subscriptionCandidateScan.undeclaredCron []string`
+- 解析：`resolveSubscriptionScriptCron(path string) string`（只认脚本自己的声明，认不出返回 `""`）；`resolveCronForSubscriptionTask(path, defaultCron string) string` 只剩测试在用
+- 头部读取：`eachSubscriptionScriptHeadLine(path string, fn func(line string) bool)`，常量 `subscriptionScriptHeadLines = 120`、`subscriptionScriptHeadLineMax = bufio.MaxScanTokenSize`（与任务名 `resolveSubscriptionTaskName` 共用）
+- 提示文件名：`formatSubscriptionUndeclaredCronFiles(files []string) string`（最多列 5 个）
+- 删任务预览：`subscriptionReaddSuffix(sub *model.Subscription, scriptPath string) string` → `taskScriptDetailSubReaddSuffix = "，并自动重新创建对应的任务"`（拼进 `taskScriptDetailSubGitForceFmt` / `taskScriptDetailSubSingleFileFmt`）
+- 已删除：`FallbackSubscriptionCron`
+
+### 3. Contracts
+
+- **cron 来源优先级**（对过了扩展名、子目录、白 / 黑名单与依赖规则的每个文件）：
+  1. 脚本头部声明了 cron → 候选，按声明建启用任务；
+  2. 没认出 + `isSubscriptionHelperScript`（`subscriptionHelperScriptNames`：sendNotify / notify / utils / common / sign 等）→ 跳过：不建、不进 `undeclaredCron`、不提示；
+  3. 没认出 + `defaultCron` 非空（合法）→ 候选，按默认规则建**启用**任务，`DefaultRule=true`；
+  4. 其余 → **不建**，记进 `undeclaredCron`。
+- 默认规则非法（只有直接改库、恢复旧备份能绕过 `normalizeDefaultCronRule`）→ 当作没配，走第 4 条；原值放进 `ignoredDefaultCron` 供日志警告。
+- **不做存量迁移**：升级前兜底建出来的 0 点任务一律不动，自动删除也不能判它们失效；没有本订阅标签的同脚本任务照旧只加标签接管（规则见上一节）。
+  想让这类脚本也建任务，就在订阅设置填默认 Cron 规则。
+- **头部解析规则**：
+  - 只看前 120 行，cron 与任务名同一个上限（以前 cron 只看 50 行：名字认得出、cron 却认不出）。
+  - 只剥**第 1 行开头**的 UTF-8 BOM（U+FEFF）：正则里的 `\s` 不匹配它，Windows 编辑器保存的脚本第 1 行声明以前认不出。第 2 行起的 U+FEFF 不是 BOM，不剥。
+  - 行尾 `\n` / `\r\n` 去掉；没有换行结尾的最后一行照常读。
+  - **超长行不中止扫描**：不再用 `bufio.Scanner`（遇到 >64KB 的行报 `ErrTooLong` 后静默停止，后面的声明一行都读不到）。超长行只取前 64KB 参与匹配、余下丢弃，
+    照常计作一行、继续往下读。读缓冲用默认大小、只有长行才另攒：每个文件开 64KB 缓冲时一次同步几千个文件的分配量是 Scanner 的十来倍，小内存 NAS / Magisk 上 GC 明显变频繁。
+  - 标签行（`cronLabelPrefixRe`：`cron:`、`cron`、`* cron`、`@cron:`、`# cron`、`// cron`）：值整体是合法表达式就用；否则**只在前缀为空（顶格，Python docstring 常见）
+    或含 `# * @ /`（注释行）时**剥掉「成对包住整个值」的 `"` / `'` 再校验——缩进的裸 `cron: '0 0 * * *'` 是 JS / TS 对象字面量的属性，不剥；最后再取前 6 / 5 个字段。
+    **表达式后面的文字（文件名、说明）不参与判断。**
+  - 青龙指令行 `cron "EXPR" file, tag:…` 与文件名行 `EXPR file`：仍要求文件名与本脚本相同（不分大小写）。
+- **撤回项，不要再加回来**：「标签行表达式后面跟着别的脚本文件名，就不采用这一行」在 Wave 3 实现过、又撤回。它把真实样本 QLScriptPublic 的 `jlld.js`
+  （照抄了 `leidacar.js` 的头部：`* cron 27 17 * * *  leidacar.js`）和说明文字（`// cron: 0 8 * * * 需要 Node.js 18 以上`、`# cron: 5 8 * * * 依赖 sendNotify.js`）
+  都判成无效；#134 之后认不出就是不建任务，代价大于它要挡的低频误判。
+- **已接受的取舍**（不要顺手「修」）：缩进 + 引号的 `    cron: "10 8 * * *"` 仍认不出（会列进提示，所以提示说「没有识别到 cron 声明」，不说「未声明 cron」）；
+  顶格引号写法出现在 heredoc、模板字符串、docstring 代码块里会被当成声明；标签行上写着别的脚本名的声明在 51 ～ 120 行也会被采用。v3.2.8 认得出的声明现在都认得出。
+- **拉取日志**（文案逐字）：
+  - `[扫描脚本] 目录 %s 共扫描 %d 个候选文件（按白/黑名单过滤后），识别出 %d 个声明 cron 的脚本`：只计脚本自己声明的。
+  - `[默认 Cron 规则] %d 个脚本没有识别到 cron 声明，使用订阅设置里的默认规则 %s`；这类新建任务打 `[自动添加任务] <名> (cron: <表达式>，默认规则)`。
+  - `[警告] 订阅设置里的默认 Cron 规则「%s」无效，已忽略`：只在自动添加开着且 `ignoredDefaultCron` 非空时打（默认规则只在新建时用得上）。
+  - `[提示] %d 个脚本没有识别到 cron 声明，未建定时任务（%s）。需要的话在订阅设置%s「默认 Cron 规则」，或手动为脚本建任务`：文件名相对订阅目录、正斜杠，
+    最多列 5 个（超出写成「如 a、b、c、d、e 等」）；动作词默认「填写」，库里存着非法规则时为「修正」。只在自动添加开着、且读任务列表没失败时打；
+    **在接管之后计算**，已经有任何任务（本订阅的、刚接管的，不论原来带什么标签）的脚本不列——叫人给已有任务的脚本再建一条只会建出重复任务。
+- **删任务预览的「并自动重新创建对应的任务」**：`subscriptionReaddSuffix` 只在 `resolveSubscriptionAutoAddTask(sub)` 为真**且**
+  （`resolveSubscriptionScriptCron(path) != ""`，**或**不是 `isSubscriptionHelperScript` 且 `subscriptionDefaultCronRule()` 返回合法非空规则）时返回后缀——
+  「下次拉取真的会给它建任务」才许诺。白 / 黑名单、依赖规则不在这里判断（与改动前的文案口径一致）。演示站 `db.ts` 的 `demoScriptDeclaresCron` /
+  `demoSubscriptionReaddsTask` 照抄这条口径（近似解析：只认标签行、前 120 行），服务端改判定要同步。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 | 日志 |
+|---|---|---|
+| 脚本声明了 cron（含首行 BOM、`cron: "0 8 * * *"` / `'…'` 引号值、声明在 51 ～ 120 行、前面有 >64KB 长行） | 按声明建启用任务 | `[自动添加任务] <名> (cron: …)` |
+| 没认出 + 辅助脚本名（sendNotify.js、notify.py 等） | 不建、不提示；填了默认规则也不建 | — |
+| 没认出 + 默认规则合法 | 按规则建启用任务 | `[默认 Cron 规则] …` + `[自动添加任务] <名> (cron: …，默认规则)` |
+| 没认出 + 默认规则留空 | 不建 | `[提示] N 个脚本没有识别到 cron 声明，未建定时任务（…）。…填写「默认 Cron 规则」…` |
+| 没认出 + 库里默认规则非法 + 自动添加开 | 不建 | `[警告] 订阅设置里的默认 Cron 规则「…」无效，已忽略` + 提示里是「修正」 |
+| 同上但自动添加关 | 不建、不接管 | 无警告、无提示 |
+| 没认出的脚本已有本订阅任务，或本轮刚被接管 | 不动 | 不列进提示 |
+| 读任务列表失败 | 不建、不接管 | `[关联已有任务失败] …`，不打提示 |
+| 缩进的对象属性 `  cron: '0 0 * * *'`（带不带逗号） | 不认 | — |
+| 缩进 + 引号 `    cron: "10 8 * * *"`（已接受） | 不认，默认规则留空时不建 | 列进提示 |
+| `jlld.js` 里的 `* cron 27 17 * * *  leidacar.js`；`// cron: 0 8 * * * 需要 Node.js 18 以上` | 认（撤回项） | — |
+| 第 121 行起的声明；第 2 行起行首带 U+FEFF | 不认 | — |
+| 删任务预览：自动建任务开 + 没识别到 cron + 默认规则留空 / 非法，或文件是辅助脚本 | 文案不带后缀（「…下次拉取会把它还原。」） | — |
+| 删任务预览：自动建任务开 + 脚本声明了 cron，或默认规则合法且不是辅助脚本 | 带「，并自动重新创建对应的任务」 | — |
+
+### 5. Good/Base/Bad Cases
+
+- Good：拉一个带 `config.py` / `mysend.py` 的仓库，库文件不再建 0 点任务，日志一行说清几个、哪些、想建怎么办。
+- Base：订阅设置填了默认 Cron 规则 → 与 v3.2.8 相同，按规则建启用任务；升级前已有的 0 点任务原样保留、不被删。
+- Bad：留空硬兜底成每天 0 点——#134 本身。
+- Bad：库里的默认规则被忽略时不吭声，提示还叫用户去「填写」设置页里明明填着的值。
+- Bad：提示在接管之前算、只看本订阅的任务——照提示手建任务后每次拉取仍提示，青龙导入的任务被叫去再建一条（Wave 2 复查 major）。
+- Bad：标签行尾是别的脚本名就不采用（撤回项）——照抄头部的真实脚本、写着「需要 Node.js」的说明都建不出任务。
+- Bad：删任务预览只看「自动建任务开着」就许诺「并自动重新创建对应的任务」——没 cron 声明、默认规则留空时拉取根本不会建。
+
+### 6. Tests Required
+
+- 解析（`server/service/subscription_cron_test.go`）：
+  - `TestResolveCronForSubscriptionTaskStripsBOMOnFirstLine`（标签 / CRLF / 文件名行 / 指令行；文件中间的 U+FEFF 不剥）
+  - `TestResolveCronForSubscriptionTaskAcceptsQuotedLabelValue`（`//` `#` `*` `@`、无冒号、顶格 docstring、首尾内侧空格、6 字段）
+  - `TestResolveCronForSubscriptionTaskIgnoresQuotedValueInCode`（对象字面量带 / 不带逗号、tab 缩进、`const cron = …`、引号不成对、空引号）
+  - `TestResolveCronForSubscriptionTaskScansFirst120Lines`（51 / 120 认、121 不认，任务名同一上限）
+  - `TestResolveCronForSubscriptionTaskSurvivesVeryLongLine`（长行之后的 cron 与任务名、声明在长行开头、长行只算一行、无换行结尾）
+  - `TestResolveCronForSubscriptionTaskJSDocCronAcceptsMismatchedFilenameHint` / `TestResolveCronForSubscriptionTaskLabelAcceptsDescriptionMentioningFiles`（锁住撤回项）
+- 同步（`server/service/subscription_undeclared_cron_test.go`）：`TestGetSubscriptionTaskSyncOptionsHasNoMidnightFallback`（留空为空、合法值 trim 后原样、脏值为空且进 `ignoredDefaultCron`）、
+  `TestSyncSubscriptionTasksUndeclaredCronHint`（最多 5 个的逐字文案；自动添加关时不提示）、`TestSyncSubscriptionTasksKeepsExistingTasksOfUndeclaredCronScripts`、
+  `TestSyncSubscriptionTasksAdoptsUnmanagedTaskOfUndeclaredCronScript`、`TestSyncSubscriptionTasksUndeclaredHintClearsAfterHandMadeTask`、
+  `TestSyncSubscriptionTasksUndeclaredNoAdoptionWhenAutoAddOff`、`TestSyncSubscriptionTasksUndeclaredNeverAdoptsEmptyCommandTask`、
+  `TestSyncSubscriptionTasksUndeclaredSkipsAdoptionWhenAlreadyManaged`、`TestSyncSubscriptionTasksKeepsUndeclaredCronTasksWithOddFileNames`、
+  `TestSyncSubscriptionTasksWarnsAboutInvalidDefaultRule`（逐字警告、「修正」、自动添加关不警告、留空不警告）
+- 主流程（`server/service/subscription_sync_integration_test.go`）：`TestSyncSubscriptionTasksUndeclaredCronFollowsDefaultRule`（留空不建 / 填了按规则建）、
+  `TestSyncSubscriptionTasksScriptCronTakesPriorityOverDefault`；原先钉住 0 点兜底的 `subscription_chinese_dir_test.go`、`subscription_ql_filter_test.go`、
+  `subscription_depend_on_test.go`、`subscription_pattern_pin_test.go` 已改成新口径。
+- 删除判定：`TestSubscriptionStaleTaskJudgeKeepsUndeclaredCronScripts`（见上一节）。
+- 删任务预览（`server/service/task_script_cleanup_test.go`）：`TestTaskScriptPreviewGitSubscription`（没 cron + 规则留空 / 规则合法 / 库里规则非法 / 辅助脚本 + 规则合法）、
+  `TestTaskScriptPreviewSingleFileSubscriptionWithoutCronDeclaration`。
+- 注册表描述改了要跑 `go test ./cmd/gen-demo-fixtures`（演示站 `configs.json` 逐字比对）。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "Subscription|Undeclared|ResolveCron|ResolveSubscription|TaskScriptPreview" -count=1
+go test ./model ./cmd/gen-demo-fixtures -count=1
+go test ./...
+```
+
+> **突变验证**：把 `newSubscriptionStaleTaskJudge` 的最后一个参数改传 nil，`TestSyncSubscriptionTasksKeepsExistingTasksOfUndeclaredCronScripts` 必须变红（存量任务连日志被删）；
+> 把熔断条件改回 `len(candidates) == 0`，它的 `only_undeclared_scripts` 子用例必须变红；删掉 undeclared 的接管循环，`TestSyncSubscriptionTasksAdoptsUnmanagedTaskOfUndeclaredCronScript`
+> 与 `TestSyncSubscriptionTasksUndeclaredHintClearsAfterHandMadeTask` 必须变红；删掉 `subscriptionReaddSuffix` 的辅助脚本判断，`TestTaskScriptPreviewGitSubscription` 的 helper 子用例必须变红。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：留空硬兜底成每天 0 点，而且关不掉；库文件、钩子脚本全被建成启用任务，删了下次拉取又回来。
+defaultCron := strings.TrimSpace(model.GetRegisteredConfig("default_cron_rule"))
+if defaultCron != "" && !cron.Parse(defaultCron).Valid {
+    defaultCron = "" // 非法值还被静默吞掉，日志一个字都不提
+}
+if defaultCron == "" {
+    defaultCron = FallbackSubscriptionCron // "0 0 * * *"
+}
+```
+
+```go
+// 错误：把没声明 cron 的脚本从候选里拿掉，却不交给删除判定——「文件在、扫描读到、不在候选里」判删，存量任务连日志没了。
+if cronExpr == "" {
+    continue
+}
+```
+
+#### Correct
+
+```go
+// 正确：辅助脚本跳过；有合法默认规则才建；否则不建，但记进 undeclaredCron，
+// 删除判定、接管、「未建定时任务」提示都靠它认出这些仍归订阅管的脚本。
+if cronExpr == "" {
+    if isSubscriptionHelperScript(info.Name()) {
+        continue
+    }
+    if options.defaultCron == "" {
+        undeclaredCron = append(undeclaredCron, path)
+        continue
+    }
+    cronExpr, defaultRule = options.defaultCron, true
 }
 ```
 
@@ -2962,6 +3358,7 @@ bash scripts/check-shell-syntax.sh
 - 只对**普通文件** `os.Remove`；删除前 Lstat + 身份复核（`SameFile` + size + modtime，Linux 另比 ctime，Windows 在 Collect 时固化文件身份）；**绝不 `RemoveAll`、不删父目录、不动 `script_versions`**。
 - 路径逐段 `Lstat`（只在字面路径与真实路径一致时才查）：任一段 `Mode()&(ModeSymlink|ModeIrregular)!=0`，或 Windows 中间目录段带 `FILE_ATTRIBUTE_REPARSE_POINT`，即判 `symlink` 保留。Go 1.23+ 起 Windows 目录联接报 `ModeIrregular` 而不是 `ModeSymlink`；末级文件不查 reparse 属性（Data Deduplication 文件是普通文件）。脚本目录本身或其上级挂在联接下时，`resolveScriptsBase` 退回 `Real=Abs`，与执行解析器口径一致。
 - 脚本目录根下的 `notify.py` / `sendNotify.js` / `task_before.sh` / `task_after.sh` / `extra.sh` 按 `managed_helper` 一律保留（面板隐式引用它们：删了会被静默替换，或全局钩子静默失效）。
+- `subscription_managed` 的说明里「，并自动重新创建对应的任务」（`taskScriptDetailSubReaddSuffix`）只在下次拉取真的会给这个文件建任务时才带，由 `subscriptionReaddSuffix` 判定（自动建任务开着，且脚本声明了 cron 或「不是辅助脚本 + 默认 Cron 规则合法非空」），口径见 #134 场景；演示站 `db.ts` 同步照抄。
 - 应用令牌带开关或调预览，必须 `AppTokenHasScope(c,"scripts")`，否则 `403` 且任务和文件都不动。以后在别的 handler 里给新开关动其它资源时照此仿写。
 - 留痕：每删一个文件写一行「`[任务删除] <用户>(<IP>) 删除任务 [ids] 时一并删除了脚本 <path>`」判 INFO；删除失败与逐段检查失败写含「失败，已保留」的行判 ERROR。`detectPanelLogLevel` **先判失败行再判成功行**，文件名、用户名里出现这些字眼时误判只会朝 ERROR 走。
 
@@ -2993,7 +3390,7 @@ bash scripts/check-shell-syntax.sh
 - 接口：`TestTaskDeleteWithScriptSwitchDeletesScript` / `TestTaskBatchDeleteScriptsMergesAndKeepsShared` / `TestTaskDeleteScriptsConfirmNarrowing` / `TestTaskDeleteScriptsNestedArraysNeverNull` / `TestTaskDeleteScriptsAppScopeMatrix` / `TestTaskDeletePreviewValidation` / `TestTaskDeletePreviewMatchesExecution` / `TestTaskBatchDeleteScriptsRejectsNonBoolSwitch`
 - 共用判定：`TestCollectOtherTasksNeverUsesNotIn`（行为 + AST 双层，**最重要的一条**）/ `TestTaskScriptPreviewSharedDetection` / `TestTaskScriptPreviewSharedDetailText` / `TestTaskScriptPreviewModuleSharedDetection` / `TestTaskScriptPreviewBrokenCommandSharedDetection` / `TestTaskScriptPreviewHookReferences`
 - 结构性保护：`TestTaskScriptPreviewStructuralProtections` / `TestTaskScriptPreviewSymlinkKept` / `TestTaskScriptCleanupSymlinkedScriptsDirStillDeletable` / `TestPathHasLinkSegment` / `TestTaskScriptReparsePointSegmentsViaInjectedCheck` / `TestTaskScriptLinkCheckFailureIsLogged`；linux：`TestTaskScriptAliasAbsolutePathKeptAsSymlink` / `TestTaskScriptHintPathUnderSymlinkedScriptsDir`；windows（`mklink /J` 与 `FSCTL_SET_REPARSE_POINT`，不许 skip）：`TestTaskScriptJunctionKept` / `TestTaskScriptJunctionAboveScriptsDir` / `TestTaskScriptDedupReparseFileDeletable`
-- 订阅与 helper：`TestTaskScriptPreviewGitSubscription` / `TestTaskScriptPreviewGitSubscriptionAtScriptsRoot` / `TestTaskScriptPreviewSingleFileSubscriptionAndLabels` / `TestSingleFileSubscriptionDestPathMatchesPull` / `TestTaskScriptPreviewManagedHelpersAndWarnings` / `TestTaskScriptPreviewGlobalHooksKept`
+- 订阅与 helper：`TestTaskScriptPreviewGitSubscription`（含 #134 的「重新创建」后缀子用例）/ `TestTaskScriptPreviewGitSubscriptionAtScriptsRoot` / `TestTaskScriptPreviewSingleFileSubscriptionAndLabels` / `TestTaskScriptPreviewSingleFileSubscriptionWithoutCronDeclaration` / `TestSingleFileSubscriptionDestPathMatchesPull` / `TestTaskScriptPreviewManagedHelpersAndWarnings` / `TestTaskScriptPreviewGlobalHooksKept`
 - 状态、文案与日志：`TestTaskScriptPreviewRunningStates` / `TestTaskExecutorHasRunningProcess` / `TestTaskScriptPreviewSnapshotError` / `TestTaskScriptPreviewReasonPriority` / `TestTaskScriptPreviewTaskStatusesAndNotes` / `TestDetectPanelLogLevelForScriptDeletion`
 - 执行阶段：`TestTaskScriptExecuteDeletesOnlyTheFile` / `TestTaskScriptExecuteConfirmNarrowing` / `TestTaskScriptExecuteDetectsChangesAfterCollect` / `TestTaskScriptExecuteSameSizeReplacementChanged` / `TestTaskScriptExecuteSymlinkReplacementChanged` / `TestTaskScriptExecuteRechecksReferencesAfterCollect` / `TestTaskScriptExecuteConcurrentOnlyOneRemoves`
 - 解析：`TestParseCommandExecutionPlanRecordsScriptToken` / `TestResolveTaskScriptTargetClassifiesCommands`（顺带钉住解析器的错误文案）/ `TestResolveTaskScriptTargetTextCandidatesForNonScriptKinds` / `TestResolveTaskScriptTargetSymlink*`

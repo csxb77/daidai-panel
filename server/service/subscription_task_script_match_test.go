@@ -247,7 +247,7 @@ func TestSubscriptionStaleTaskJudgeKeepsUnscannedFile(t *testing.T) {
 	candidates := map[string]subscriptionTaskCandidate{"task " + filepath.Join("repo", "keep.js"): {}}
 	// 故意缺 repo/sub/b.js：模拟扫描没读到那个子目录。
 	seen := subscriptionScannedFileKeys(idx, scriptsDir, []string{keep, excluded})
-	judge := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seen)
+	judge := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seen, nil)
 
 	type jc struct {
 		command  string
@@ -275,8 +275,67 @@ func TestSubscriptionStaleTaskJudgeKeepsUnscannedFile(t *testing.T) {
 
 	// 同一个文件出现在「读到的文件」里就不再算漏读：它不是候选，只能是被规则排除了。
 	seenAll := subscriptionScannedFileKeys(idx, scriptsDir, []string{keep, excluded, filepath.Join(scriptsDir, "repo", "sub", "b.js")})
-	if got, _, _ := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seenAll).judge("task repo/sub/b.js"); got != staleTaskDelete {
+	if got, _, _ := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seenAll, nil).judge("task repo/sub/b.js"); got != staleTaskDelete {
 		t.Fatalf("a scanned non-candidate must be deleted, got %d", got)
+	}
+}
+
+// #134：未声明 cron、本次不建任务的脚本仍是订阅在管的脚本。已有任务跑的是它们（原样命令、改过参数、desi 开头、
+// 引号、多空格）时必须保留——否则开着自动删除，升级前兜底建出来的任务（含用户改过定时的）会连日志被删。
+// 文件已不存在、被规则排除（扫描读到但不在集合里）、在订阅目录外的，照旧删。
+func TestSubscriptionStaleTaskJudgeKeepsUndeclaredCronScripts(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	scriptsDir := config.C.Data.ScriptsDir
+	keep := stmWriteFile(t, "repo/keep.js")
+	lib := stmWriteFile(t, "repo/lib/config.py")
+	spaced := stmWriteFile(t, "repo/my tool.js")
+	// 命令切不开、求不出键的文件名（引号没闭合、被空格隔开的 --）：只能靠精确命令认（Wave 2 复查）。
+	quoted := stmWriteFile(t, "repo/it's.js")
+	dashed := stmWriteFile(t, "repo/a -- b.js")
+	excluded := stmWriteFile(t, "repo/excluded.js")
+	stmWriteFile(t, "other/config.py")
+
+	idx := stmIndex(t, "repo/keep.js")
+	candidates := map[string]subscriptionTaskCandidate{"task " + filepath.Join("repo", "keep.js"): {}}
+	seen := subscriptionScannedFileKeys(idx, scriptsDir, []string{keep, lib, spaced, quoted, dashed, excluded})
+	undeclared := newSubscriptionUndeclaredScripts(idx, scriptsDir, []string{lib, spaced, quoted, dashed})
+
+	type jc struct {
+		command string
+		want    subscriptionStaleTaskVerdict
+	}
+	cases := []jc{
+		{"task " + filepath.Join("repo", "lib", "config.py"), staleTaskKeep},
+		{"task repo/lib/config.py now", staleTaskKeep},
+		{"task repo/lib/config.py desi JD_COOKIE 1-3", staleTaskKeep},
+		{"task -m 30m repo/lib/config.py -- --flag", staleTaskKeep},
+		{"desi repo/lib/config.py JD_COOKIE", staleTaskKeep},
+		{"task ./repo/lib/config.py", staleTaskKeep},
+		{`task "repo/my tool.js" now`, staleTaskKeep},
+		{"task repo/my tool.js conc JD_COOKIE", staleTaskKeep},
+		{"task repo/keep.js now", staleTaskKeep},
+		{"task " + filepath.Join("repo", "it's.js"), staleTaskKeep},
+		{"  task " + filepath.Join("repo", "a -- b.js") + "  ", staleTaskKeep},
+		// 精确命令只认原样：改过参数、切不开的命令认不出，按原来的规则判（这里判删）。
+		{"task " + filepath.Join("repo", "it's.js") + " now", staleTaskDelete},
+		// 扫描读到了、但被规则排除（不在未声明集合里）：照删。
+		{"task repo/excluded.js", staleTaskDelete},
+		{"task repo/gone.py", staleTaskDelete},
+		{"task other/config.py", staleTaskDelete},
+	}
+	if runtime.GOOS == "windows" {
+		cases = append(cases, jc{`task REPO\LIB\Config.py now`, staleTaskKeep})
+	}
+	judge := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seen, undeclared)
+	for _, tc := range cases {
+		if got, _, _ := judge.judge(tc.command); got != tc.want {
+			t.Errorf("%q: want %d, got %d", tc.command, tc.want, got)
+		}
+	}
+
+	// 不传未声明集合就是改动前的判定：文件在、扫描读到、不在候选里 → 删。这正是要堵住的误删。
+	if got, _, _ := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seen, nil).judge("task repo/lib/config.py now"); got != staleTaskDelete {
+		t.Fatalf("without the undeclared set the old verdict is delete, got %d", got)
 	}
 }
 
@@ -310,7 +369,7 @@ func TestSubscriptionStaleTaskJudgeStatErrorIsNotAbsence(t *testing.T) {
 	candidates := map[string]subscriptionTaskCandidate{"task " + filepath.Join("repo", "keep.js"): {}}
 	// 子目录读不了，扫描也就没读到 repo/sub 下的文件。
 	seen := subscriptionScannedFileKeys(idx, scriptsDir, []string{keep, excluded})
-	judge := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seen)
+	judge := newSubscriptionStaleTaskJudge(idx, candidates, "repo", seen, nil)
 
 	type jc struct {
 		command    string

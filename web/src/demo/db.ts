@@ -1992,9 +1992,52 @@ function resolveDemoSubscriptionAutoAddTask(sub: DemoSubscription): boolean {
   return demoConfigBool('auto_add_cron', true)
 }
 
-/** subscription_managed 的三种文案（逐字抄服务端）；「自动添加任务」生效时 {readd} 换成后半句 */
-function subscriptionManagedDetail(sub: DemoSubscription): string {
-  const readd = resolveDemoSubscriptionAutoAddTask(sub) ? '，并自动重新创建对应的任务' : ''
+/** 标签行的 cron 声明：`// cron: 0 8 * * *`、`# cron 0 8 * * *`、`* @cron '0 8 * * *'`（\s 在 JS 里也匹配行首的 BOM） */
+const DEMO_CRON_LABEL_RE = /^[\s#*@/]*@?cron\b\s*[:：]?\s*(\S.*)$/i
+/** cron 单个字段的形状：只由数字与 * ? , - / 组成 */
+const DEMO_CRON_FIELD_RE = /^[\d*?,/-]+$/
+
+/**
+ * 脚本头部（前 120 行）有没有 cron 声明，近似服务端的 resolveSubscriptionScriptCron。
+ *
+ * 与服务端的差异（演示站没有 pkg/cron，也不值得整套抄 subscription.go 的解析）：
+ * - 只认标签行，不认服务端也认的 `<cron> 文件名` 行与青龙 `cron "…" 文件名` 指令行；
+ * - 值两端成对的引号一律剥掉（服务端只在注释行或顶格行上剥）；
+ * - 字段只查形状（5～6 段、每段见 DEMO_CRON_FIELD_RE），不认 MON / JAN 这类名字，也不校验取值范围。
+ * 找不到文件时按「没有声明」处理。
+ */
+function demoScriptDeclaresCron(path: string): boolean {
+  const content = findScriptFile(path)?.content ?? ''
+  for (const line of content.split(/\r?\n/, 120)) {
+    const match = DEMO_CRON_LABEL_RE.exec(line)
+    if (!match) continue
+    let rest = (match[1] ?? '').trim()
+    const quote = rest[0]
+    if (rest.length >= 2 && (quote === '"' || quote === "'") && rest.endsWith(quote)) {
+      rest = rest.slice(1, -1).trim()
+    }
+    const fields = rest.split(/\s+/)
+    if (fields.length >= 5 && fields.slice(0, 5).every((field) => DEMO_CRON_FIELD_RE.test(field))) return true
+  }
+  return false
+}
+
+/**
+ * 抄 task_script_cleanup.go 的 subscriptionReaddSuffix：下次拉取会不会给这个文件重新建任务，会才带「并自动重新创建对应的任务」。
+ * 自动建任务开着之外还要有 cron 来源（#134）：脚本自己声明了 cron；或者不是通知辅助脚本、订阅设置里的默认 Cron 规则非空。
+ * 与服务端的差异：cron 声明按 demoScriptDeclaresCron 近似判断；默认 Cron 规则只看非空、不校验合法性（服务端把库里的非法值当作没配）。
+ */
+function demoSubscriptionReaddsTask(sub: DemoSubscription, path: string): boolean {
+  if (!resolveDemoSubscriptionAutoAddTask(sub)) return false
+  if (demoScriptDeclaresCron(path)) return true
+  if (helperScriptWarnings(path).length > 0) return false
+  const rule = db().configs['default_cron_rule']
+  return (rule?.value || rule?.default_value || '').trim() !== ''
+}
+
+/** subscription_managed 的三种文案（逐字抄服务端）；下次拉取会重新建任务时 {readd} 换成后半句 */
+function subscriptionManagedDetail(sub: DemoSubscription, path: string): string {
+  const readd = demoSubscriptionReaddsTask(sub, path) ? '，并自动重新创建对应的任务' : ''
   if (sub.type === 'single-file') {
     return `这是订阅「${sub.name}」下载的文件，每次拉取都会重新下载${readd}。如果不再需要，请停用或删除这个订阅。`
   }
@@ -2123,7 +2166,7 @@ function classifyDemoTaskScripts(
     const running = members.find((snapshot) => isTaskActiveStatus(snapshot.status))
     if (subscription) {
       item.reason = 'subscription_managed'
-      item.detail = subscriptionManagedDetail(subscription)
+      item.detail = subscriptionManagedDetail(subscription, path)
     } else if (leftover) {
       item.reason = 'task_not_deleted'
       item.detail = `任务「${leftover.name}」没有删除成功，脚本先保留。`

@@ -72,6 +72,8 @@ Vue 单文件组件通常按下面顺序组织：
 - 表单、弹窗、抽屉、表格操作应保持用户路径清晰。
 - 错误提示、确认弹窗、空状态文案要直接明确，不要写得太“技术化”。
 - 当交互状态较多时，建议用清晰的状态变量名，不要混成一个难懂的大对象。
+- 表单字段说明**不写常驻灰字段落**：易错字段在标签旁放 `DdFieldHelp` 气泡（一两句），不常用字段收进默认折叠的「高级设置」，
+  完整规则放 README 与接口文档。约定见下方「Scenario: 表单字段说明」。
 
 ---
 
@@ -808,7 +810,7 @@ indentCompartment.reconfigure([indentUnit.of(' '.repeat(width)), EditorState.tab
 - `GET /api/notifications/types` -> `[{type, name, fields: NotifyFieldDefinition[]}]`
   真源：`server/model/notify_channel_registry.go`（22 渠道 / 93 字段槽 / 56 唯一键）
 - `GET /api/configs` -> `{data: {key: {...}}}`
-  真源：`server/model/system_config_registry.go`（47 项）
+  真源：`server/model/system_config_registry.go`（53 项）
 
 ### 3. Contracts
 
@@ -829,6 +831,11 @@ indentCompartment.reconfigure([indentUnit.of(' '.repeat(width)), EditorState.tab
   对象/数组返回 400 并点名键
 - `notifier.go` 读了但 registry 没声明 -> `go test ./service` 红
 - registry 声明了但 `notifier.go` 不读 -> 同上，**反方向也红**
+- 系统配置：首个 `GET /configs` 失败或还没返回时点任一保存 -> `submitConfigs` 拦下、不发 `PUT /configs/batch`，
+  提示「配置还没加载成功，请点刷新后再保存」/「配置还在加载，请稍后再保存」。
+  去掉这道闸 = 「面板外观」保存把已存的 `rounded` 写回 `square`、「任务运行」保存把没显示的两项重置成默认值，不报错
+- 系统配置：专属卡里给从兜底区挪来的项（依赖安装超时 / 检测脚本半路静默结束 / 界面圆角）写死标签、选项或 min/max ->
+  服务端改了注册表后 Web 与 APP 显示分叉，无任何报错；一律读 `configSchema`
 
 ### 5. Good/Base/Bad Cases
 
@@ -842,6 +849,12 @@ indentCompartment.reconfigure([indentUnit.of(' '.repeat(width)), EditorState.tab
 `server/service/notifier_schema_binding_test.go` 用 `go/ast` 扫
 `notifier.go` 的 `cfg["..."]`，与 registry **双向**断言相等。
 已做双向突变验证：两个方向各改一处，测试都会红。**不要绕过它。**
+
+系统配置侧没有前端自动化测试，改 `useSettingsConfig.ts` / 设置页卡片后浏览器实测：
+- DevTools 拦掉 `GET /configs` 进「通用设置」：「面板外观」「其它配置项」「任务运行」「代理设置」的保存都只出「配置还没加载成功，请点刷新后再保存」，Network 里没有 `PUT /configs/batch`，页面圆角不变；放行后刷新、改一项再保存，请求体只有那一个键
+- 「任务运行」：「依赖安装超时(分钟)」标题 / 说明 /「取值范围 5 - 720」/ 占位 20 都来自 schema；填 3 保存提示「「依赖安装超时(分钟)」需在 5-720 之间」且不发请求
+- 「其它配置项」只剩运行时日志输出、守护方式（只读）、systemd 服务名（只读）三项
+- 演示站：清空「依赖安装超时」保存、切走再切回，输入框显示 20，改别的项能正常保存
 
 ### 7. Wrong vs Correct
 
@@ -864,16 +877,126 @@ const currentChannelFields = computed(() =>
 > `mpnews`，而另外两处都有。
 
 > **系统配置侧走的是「专属表单 + schema 兜底」两层**：
-> `useSettingsConfig.ts` 的 `configForm` 保留 44 个键的硬编码，因为它们绑着
-> SVG 上传、取色器实时预览、图片压缩、镜像源弹窗、备份内容 CSV ↔ 复选框等定制控件；
+> `useSettingsConfig.ts` 的 `configForm` 保留 47 个键的硬编码，因为它们绑着
+> SVG 上传、取色器实时预览、图片压缩、镜像源弹窗、备份内容 CSV ↔ 复选框等定制控件
+> （v3.2.9 又从兜底区挪进 3 项：依赖安装超时、检测脚本半路静默结束进「任务运行」卡，界面圆角进「面板外观」卡）；
 > 其余项由 `settings/systemConfigSchema.ts` + `components/ExtraConfigCard.vue`
-> 按服务端 schema 兜底渲染。**谁进兜底区是拿 `configForm` 的键去减算出来的**，
-> 所以服务端加配置项时 Web 不用改，它会自己冒出来。
+> 按服务端 schema 兜底渲染（挂在「通用设置」标签右栏，当前只剩「面板与运行时」组 3 项）。
+> **谁进兜底区是拿 `configForm` 的键去减算出来的**，所以服务端加配置项时 Web 不用改，它会自己冒出来。
+> 挪进专属卡的项**仍只认服务端 schema**：标签、说明、选项、min/max 读 `configSchema`，卡片里不抄值表。
 >
 > 三项只读见 `READ_ONLY_CONFIG_KEYS`（巡检写入的机器状态 + `ddp service install`
-> 写入的安装事实）：渲染成只读行，不隐藏、不回写。
+> 写入的安装事实）：不隐藏、不回写（上次检查更新时间在代理设置页只读展示，另两项在兜底区渲染成只读行）。
 > 保存统一走 `submitConfigs`，**只提交改动过的键** —— 服务端 `BatchSet` 逐键写入、
-> 中途 400 时前面的键已经落库，全量回写会造成半保存状态。
+> 中途 400 时前面的键已经落库，全量回写会造成半保存状态；**配置没成功加载过时直接拒绝提交**
+> （空基准下差集会把整张卡连同没渲染的项一起按本地默认值写回）。细节见 `index.md` 第 2 节。
+
+---
+
+## Scenario: 表单字段说明——`DdFieldHelp` 气泡与「高级设置」折叠
+
+> v3.2.9 精简新建 / 编辑订阅弹窗时定的口径：此前弹窗常驻 10 段约 1500 字说明，用户反馈「文字说明太多」。
+
+### 1. Scope / Trigger
+
+- 触发：给表单字段加说明文字、改 `web/src/components/ui/DdFieldHelp.vue`、调整新建 / 编辑类弹窗的字段分区时必须看本节。
+  当前唯一调用方是 `web/src/views/subscriptions/index.vue` 的新建 / 编辑订阅弹窗（共 15 个气泡）。
+
+### 2. Signatures
+
+- `DdFieldHelp`：props `label: string`（必填，既是标签文字，也拼出按钮读屏名「<label>说明」）、
+  `width?: number | string`（默认 `260`）；**默认插槽 = 气泡正文**；无 emit。
+- 用法：`<el-form-item><template #label><DdFieldHelp label="白名单">一两句</DdFieldHelp></template>…</el-form-item>`
+- 订阅弹窗：`showAdvanced`（ref，默认 `false`）、`advancedSummary`（computed 字符串）、
+  `revealAdvancedForError(message: string)` + `ADVANCED_FIELD_ERROR_KEYWORDS`。
+
+### 3. Contracts
+
+**文案口径**
+- 新建 / 编辑类弹窗**不再加常驻说明段落**。易错字段在标签旁放气泡，正文 1～2 句：用途 + 最容易踩的坑；
+  placeholder 一行「例子 / 留空含义」。
+- 完整规则写在 README（订阅管理一节）与接口文档 `views/api-docs/apiData.ts`，拉取日志的 `[提示]` 负责当场解释；
+  别把「写全条件」的长段落加回表单，也别整段塞进气泡。
+- 压成一两句时**限定语不能丢**，说法以后端代码为准：v3.2.9 复查抓到「依赖规则」气泡写成「命中即不建任务」，
+  丢了「白名单留空时不影响建任务」，与 `isSubscriptionDependencyOnlyFile`（白名单优先）相反。
+- 说明改成气泡后不再占表单宽度：**别再按「说明有多长」决定字段跨不跨两列**，只看控件本身放不放得进半列。
+
+**`DdFieldHelp` 的交互（每条去掉都是静默失效）**
+- 触发器是 14px 图标的 `<button type="button">`，放在 EP 渲染的 `<label for=控件id>` 里：
+  按 HTML 规范，点 label 内的交互元素不会把点击转发给控件（不聚焦输入框、手机不弹键盘、不拨动开关）；
+  不写 `type` 时在 `el-form` 渲染的 `<form>` 里默认是 submit。
+- `el-popover trigger="click"`，**不用 hover，也不要 `['hover','click']`**：触屏 hover 靠模拟 mouseenter，开关不稳；
+  两者并存时移入打开、点击又关掉；EP 的「点外面关闭」只在 trigger 不含 hover / focus 时才真的关。
+- `:trigger-keys="[]"`：键盘交给原生 button 的 Enter / Space，留默认值时个别浏览器按一下 Space 开了又关。
+- **Esc 只关气泡**：只在气泡打开期间（`@before-enter` 挂、`@before-leave` 拆、`onBeforeUnmount` 兜底）
+  在 `document` 的**捕获阶段**监听 `keydown`，`key === 'Escape'` 且不在输入法组字中时 `stopPropagation()` + `popoverRef.hide()`。
+  原因：click 型 popover 自己不响应 Esc（气泡里没有可聚焦元素，焦点陷阱不生效），
+  而 `el-dialog` 的 Esc 挂在 document 冒泡阶段、与焦点无关。
+- `QuestionFilled` 在组件里局部 import（全局注册的图标里没有）。视觉约定见 `design-system.md` §6.5。
+
+**「高级设置」折叠**
+- 基本区只留高频字段（订阅弹窗：一键识别〔仅新建〕、名称、类型、URL、白名单、黑名单、依赖规则、定时拉取），其余进默认折叠的高级区。
+- 折叠用 link 按钮 + **`v-show`（不是 `v-if`）**：折叠时字段仍挂载，`v-model` 与保存逻辑和展开时完全一样；按钮带 `aria-expanded` / `aria-controls`。
+- `showAdvanced` 在 `openCreate` 与 `openEdit` 里**都**复位成 `false`：弹窗没有 `destroy-on-close`，不复位会沿用上次的展开状态。
+- 折叠行右侧**常驻**摘要 `advancedSummary`（折叠、展开都显示，行高不跳）：
+  有值时「已设置：分支、鉴权、拉取后钩子…」，顺序同高级区字段顺序，只列与新建默认值不同的项
+  （字符串 trim 后非空、三态不是 `inherit`、完整检出为开；**保存目录不算**——一键识别总会填它，算进去摘要就几乎永不为空）；
+  只对 git 仓库显示的字段在单文件订阅下不列；都没设置时按类型概述可设项。
+  一键识别写进折叠区的值（分支、拉取后钩子、自动建任务=强制开启）必须能从摘要里看到。
+- 保存失败时若后端 400 点名折叠区字段，先 `showAdvanced = true` 再弹原文（`revealAdvancedForError`）：
+  按关键字「鉴权 / 访问令牌 / SSH 密钥 / 分支 / 子目录 / 保存目录 / 别名」匹配，
+  但**以「白名单 / 黑名单 / 依赖规则」开头的正则报错先排除**——它们原样带出用户写的片段，片段里可能恰好含「分支」「子目录」。
+  前端自己只校验名称和 URL，两者都在基本区。
+
+### 4. Validation & Error Matrix
+
+- 「?」写成 label 里的 `<span>` / 裸 `el-icon` -> 点它焦点跳进输入框（手机弹键盘）、开关被拨动
+- `<button>` 漏写 `type="button"` -> 点「?」直接提交表单
+- `trigger` 含 hover -> 触屏点不开；桌面移入即开、点击反而关
+- 删掉 Esc 捕获监听 -> 按 Esc 把整个弹窗连同没保存的输入一起关掉，teleport 到 body 的气泡飘在列表页上直到下次点击
+- 高级区用 `v-if` / `showAdvanced` 没复位 -> 折叠时字段卸载 / 打开新建弹窗沿用上次的展开状态
+- 摘要漏列某个字段或只在展开时显示 -> 一键识别写进去的值藏在折叠区里看不见
+- `revealAdvancedForError` 不先排除正则报错 -> 白名单正则写错，高级区反而被展开
+
+### 5. Good/Base/Bad Cases
+
+- Good：新字段有坑要解释 -> 标签换成 `<DdFieldHelp label="…">一两句</DdFieldHelp>`，完整口径补进 README / `apiData.ts`
+- Base：字段不需要解释 -> 普通 `label="…"`，不硬加气泡
+- Bad：控件下方加 `form-hint` 长段落；把长段落整段塞进气泡；为了容纳说明把字段改成跨两列
+
+### 6. Tests Required（仓库无前端测试，浏览器实测）
+
+- 桌面 1280 与手机 375：点「?」开、点外面关、再点一次也关；焦点落在按钮上、不进输入框；点「完整检出」的「?」开关不被拨动；表单不提交
+- 键盘 Tab 到「?」：Enter、Space 各按一次只切换一次（Chrome 与 Firefox）
+- 气泡开着按 Esc：只关气泡、弹窗还在；再按 Esc 关弹窗，列表页上不残留气泡
+- 新建与编辑每次打开高级区都是折叠；一键识别 `ql repo https://github.com/a/b.git "jd_" "" "utils" "main"` 加第二行 `cp a b` 后摘要为「已设置：分支、自动建任务、拉取后钩子」
+- SSH 鉴权不选密钥、高级区折叠时保存 -> 自动展开并弹原文；白名单写 `(abc` 保存 -> 高级区保持折叠
+- 明暗 × 直角 / 圆角四种组合下看一遍气泡；375px 下气泡不出界、正文不从词中间断开
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```vue
+<el-form-item label="白名单">
+  <el-input v-model="editForm.whitelist" />
+  <div class="form-hint">只有命中白名单的文件才会建任务；多个用 , 或 | 分隔……（再写三行条件）</div>
+</el-form-item>
+```
+
+```vue
+<!-- span 在 <label for> 里：点它焦点跳进输入框；hover 在触屏上开关不稳 -->
+<el-popover trigger="hover"><template #reference><span class="help">?</span></template>…</el-popover>
+```
+
+#### Correct
+```vue
+<el-form-item>
+  <template #label>
+    <DdFieldHelp label="白名单">命中的文件会拉取，并按「自动建任务」设置建任务，留空为全部。</DdFieldHelp>
+  </template>
+  <el-input v-model="editForm.whitelist" placeholder="如 jd_|jx_，留空为全部" />
+</el-form-item>
+```
 
 ---
 
@@ -938,6 +1061,123 @@ const currentChannelFields = computed(() =>
 - 口径：`updateListener` 判等时把 `props.modelValue` 的 `\r\n?` 规范成 `\n` 再比；`replaceDoc` 的判等**故意不规范化**——外部值是 CRLF 时一定整篇替换，切文件、放弃改动都不会被漏掉。
 - Monaco 保留 CRLF，没有这个问题；两个引擎的「保存后文件行尾」本来就不同，不要为了统一去改保存行为。
 - 凡是按行尾切分文本的地方一律用 `split(/\r\n|\n|\r/)`（脚本页行数、配置文件页行数），`split('\n')` 会让纯 CR 文件恒显示 1 行。
+
+---
+
+## Scenario: 脚本目录树定位（`ScriptsSidebar` reveal，issue #136）
+
+> v3.2.9 定的口径。下面的约束来自 EP 2.13.5 `el-tree` 源码核对、Node 探针与浏览器实测（Vue 3.5.30），
+> 标 🔴 的几条是实现后在浏览器里真的复现过、再修掉的。
+
+### 1. Scope / Trigger
+
+- 触发：修改 `web/src/views/scripts/components/ScriptsSidebar.vue` 的定位逻辑（`setHighlight` / `revealInTree` / 三条侦听 /
+  `handleTreeNodeClick` / 滚动）、`useScriptWorkspaceBrowser.ts` 的 `openFile` / `treeRevealTicket` / `normalizeScriptPath`，
+  或在别处写「让 el-tree 定位到某个节点」时必须看本节。
+
+### 2. Signatures
+
+- `ScriptsSidebar` 新 props：`currentFile: string`（与树节点 key 同口径）、`revealTicket: number`、
+  `sidebarCollapsed?: boolean`（`scripts/index.vue` 传按布局修正过的值，≤1024 恒为 `false`）。
+- `useScriptWorkspaceBrowser()` 新导出 `treeRevealTicket: Ref<number>`；`openFile(path)` 入口先 `normalizeScriptPath(path)`。
+- 侧栏内部：`setHighlight(key, expandParents)`、`revealInTree(path)`、`scrollRowIntoView(path, smooth)`、`findScrollContainer(from)`。
+- 平滑与否只问 `utils/panelAppearance.ts` 的 `shouldReduceMotion()`（v3.2.9 从登录页抽出来的公共函数）。
+
+### 3. Contracts
+
+**触发信号**
+- `treeRevealTicket` 在 `openFile` 成功时 +1，**包括「同一文件再次进入」的早返回**。
+  刻意不侦听 `selectedFile`：同一文件从任务页再点一次它不变，却要重新定位；
+  而 `openFile` 是「先改 `selectedFile`、加载失败再回滚」，侦听它会先按打不开的路径展开一遍祖先。
+- 加载失败回滚时，**只有加载期间树重建过**（`fileTree.value !== treeBeforeLoad`）才 +1：
+  树没重建时补定位会把用户刚收起的目录重新展开、把正在浏览的滚动位置拽走（高亮已由下面的 `expandParents=false` 路径拉回）；
+  树重建过时不补，原文件高亮了却藏在全收起的新树里。
+  🔴 这个判断依赖 `loadTree` 每次**整体赋新数组**，改成原地更新会让它静默失效。
+- `?file=` 的值可能是 `./jd/x.py`、`jd\x.py`：`openFile` 按后端 `normalizeScriptRelativePath`（`server/handler/script.go`）口径规范化——
+  `\` 转 `/`、每段 trim、去空段与 `.` 段；以 `/` 开头或含 `..` 的原样交给后端拒绝。
+  不规范化时 `selectedFile` 与树 key 对不上，定位、以及删除 / 重命名里「是不是当前文件」的比较一起静默判错。
+
+**EP `el-tree` 的四条行为**
+- `setCurrentKey(key)` 找不到 key 时**不清旧高亮** ⇒ `setHighlight` 一律先 `getNode(key)`，找不到就显式 `setCurrentKey(null)`。
+- `setCurrentKey(key, true)` 会展开全部祖先，**包括用户刚手动收起的那一层** ⇒ 只有「打开文件 / 树刷新」传 `true`；
+  把高亮拉回当前文件（点目录、点文件后的 `finally`、`currentFile` 变化）**必须传 `false`**，否则当前文件所在目录永远收不起来。
+- 每次 `setData`（即每次 `loadTree`）都丢掉展开与过滤状态 ⇒ 树刷新后若搜索框有词，先补 `filter(keyword)` 再定位。
+- EP 在 emit `node-click` 之前就已把高亮挪到点中的节点 ⇒ 点目录、「未保存修改」选取消、加载失败后都要把高亮拉回当前文件。
+
+**🔴 `fileTree` 侦听里必须先 `await nextTick()` 再展开**
+- 侦听已是 `flush: 'post'`，仍要先 `await nextTick()`。机制：`setData` 换了新节点，按 key 复用的 tree-node 组件看到
+  `node.expanded` 由 true 变 false，登记一个 `nextTick(expanded=false)`，挂在本轮 flush 的 promise 上；
+  Vue 3.5 的 `flushJobs` 在递归那一轮之前把 `currentFlushPromise` 置空，此时同步展开登记的 `nextTick(expanded=true)`
+  挂在已就绪的 `resolvedPromise` 上**反而先跑** ⇒ `Node.expanded=true`、组件 `expanded=false`：
+  目录看着收起、点它也展不开（EP 按组件的值判断，只会重复 expand），一直卡到下次树刷新。
+  重命名当前文件、把它拖进已展开的目录时最容易撞上。升级 Vue 后要回归这一条。
+
+**滚动**
+- 只在**最近的可滚动祖先**里算位置 `scrollTo`（nearest 语义：完整可见不动，上沿出界对齐顶部，下沿出界对齐底部），
+  **不用 `scrollIntoView`**：它会连带滚动所有能滚的祖先，缩进很深时还可能横向滚。
+- 可滚动祖先由 `findScrollContainer` 从行往上找第一个 `overflow-y: auto|scroll` 且 `scrollHeight > clientHeight` 的元素，
+  找到一个就停：≥769 是 `.sidebar-tree`；**≤768 是外层 `.layout-main`**（`.dd-fixed-page` 只在 ≥769 定高，
+  手机上侧栏随内容撑高、`.sidebar-tree` 根本不滚）。可见区取容器与 `window.innerHeight` 的交集
+  （演示站顶部横幅把 `.layout-main` 底边推出了窗口）。
+- `behavior: smooth && !shouldReduceMotion() ? 'smooth' : 'auto'`：`global.scss` 的减少动效只压得住 CSS `scroll-behavior`，
+  管不到 JS 显式传的 `smooth`。侧栏「重新可见」那次固定瞬时滚动（卡片刚播完动画，再接平滑滚动显得拖沓）。
+- 量位置前等布局落定：`nextTick` + 一个宏任务；再每 16ms 查树里还有没有 `.el-collapse-transition-enter-active / -leave-active`
+  （上限 400ms）。不用 `transitionend`：EP 这条过渡声明了 max-height 与上下 padding 三个属性、实际只变 max-height，Vue 等不齐。
+  侧栏从看不见变可见时，再等侧栏卡自身 `getAnimations()` 跑完（宽度过渡 / 入场关键帧，同样上限 400ms）。
+- 不滚、只高亮的情况：侧栏看不见（≤1024 切到了编辑器、桌面端收起目录树），交给「重新可见」侦听补滚；
+  `offsetParent === null`（v-show 藏起或 keep-alive 缓存、DOM 脱离文档）；
+  **搜索过滤把目标或它的祖先藏掉时只高亮不滚动，也不替用户清搜索词**。
+- 每次定位 / 补滚动占一个序号（`revealSeq`），任何 `await` 回来发现号被后来者占了、或 `currentFile` 已变，就放弃。
+- 表头「定位当前文件」按钮 v3.2.9 实测放不下（300px 侧栏的工具条只剩约 10px 余量，加上后「脚本文件」折成两行、
+  新建按钮的 caret 掉到第二行），已按「放不下就不加」撤掉，模板里留了注释；别直接加回去。
+
+### 4. Validation & Error Matrix
+
+- 直接 `setCurrentKey(key)` 不先 `getNode` -> 当前文件被删 / 改名后，旧高亮留在不相干的节点上
+- 把高亮拉回当前文件时传 `expandParents=true` -> 当前文件所在目录一收起就被弹开
+- `fileTree` 侦听去掉 `await nextTick()` -> 重命名 / 拖拽后目录「看着收起、点不开」，直到下次刷新，构建与 vue-tsc 全绿
+- 用 `scrollIntoView` -> 整页 / 布局容器跟着跳
+- 只滚 `.sidebar-tree` -> ≤768 永远滚不到，从编辑器返回列表时当前行停在窗口外
+- 加载失败回滚时无条件 +1 ticket -> 点开一个磁盘上已删的文件失败，用户刚收起的目录被重新展开、滚动位置被拽走
+- 回滚时从不 +1 -> 缓存页从任务页打开脚本已删的任务（恰逢 `loadTree`），原文件高亮了却藏在收起的目录里
+- 写死 `behavior: 'smooth'` -> 「减少动效」档下仍在平滑滚动
+
+### 5. Good/Base/Bad Cases
+
+- Good：任务页点脚本名进入（首次与 keep-alive 缓存后两种）-> 祖先展开、高亮、滚到可见；同一文件再点一次也重新定位
+- Base：搜索过滤中进入 -> 只高亮，不滚动、不清词；侧栏看不见时只高亮，重新可见后瞬时补滚
+- Bad：侦听 `currentFile` 就展开 + 滚动 -> 按打不开的路径展开祖先；每次都清搜索词替用户「定位」
+
+### 6. Tests Required（仓库无前端测试，浏览器实测；演示站只有一层目录，要先手动建多层目录与足够多的文件）
+
+- 1920 宽：任务页点深层脚本名（首次进入、离开再回来两种）-> 各级祖先展开、高亮、行在可见区
+- 打开 `a/b/c/x.py` 后重命名它（或拖进一个已展开的目录）-> `a/b/c` 显示为展开、行可见；点 `a/b/c` 能收起、再点能展开
+- 点目录后高亮仍在当前文件；手动收起当前文件的父目录不会被强行展开
+- 收起当前文件的目录、往下滚并展开别的目录，点一个磁盘上已删、树没刷新的文件 -> 报「脚本不存在」，收起的目录保持收起、滚动位置不变、高亮回到原文件
+- 缓存页从任务页打开「脚本已删」的任务 -> 回到脚本页原文件仍展开、高亮、可见
+- 375×812：打开深层文件 -> 返回列表，当前行在窗口内（滚的是 `.layout-main`）；900 宽滚的是 `.sidebar-tree`、页面本身不动
+- 桌面端收起目录树 -> 从任务页打开深层文件 -> 展开目录树，宽度动画结束后瞬时滚到当前文件
+- 个人设置「界面动效」切「始终开启」时平滑滚动；「减少动效」或「跟随系统」且系统开着减少动态效果时瞬时跳（量之前先确认本机的系统设置）
+
+### 7. Wrong vs Correct
+
+#### Wrong
+```ts
+watch(() => props.fileTree, () => {
+  treeRef.value?.setCurrentKey(props.currentFile, true)   // 同一轮 flush 里展开：组件 expanded 与 Node.expanded 失步
+  document.querySelector('.is-current')?.scrollIntoView({ behavior: 'smooth' })   // 连带滚整页，且无视减少动效
+}, { flush: 'post' })
+```
+
+#### Correct
+```ts
+watch(() => props.fileTree, async () => {
+  await nextTick()   // 先让本轮 flush 整个跑完
+  if (searchKeyword.value) treeRef.value?.filter(searchKeyword.value)
+  // getNode 判存在 -> setCurrentKey(path, true) -> 等动画落定 -> 在最近的可滚动祖先里 scrollTo
+  void revealInTree(props.currentFile)
+}, { flush: 'post' })
+```
 
 ---
 

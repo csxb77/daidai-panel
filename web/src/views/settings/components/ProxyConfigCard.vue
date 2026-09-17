@@ -1,13 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { Connection, Document, InfoFilled } from '@element-plus/icons-vue'
+import { formatDateTime } from '@/utils/datetime'
 import type { SettingsConfigForm } from '../types'
 
-defineProps<{
+const props = defineProps<{
+  configsLoading: boolean
   configsSaving: boolean
   form: SettingsConfigForm
+  /** 服务端的 auto_update_last_checked_at 原值（ISO 时间或空串），只读展示、不回写 */
+  autoUpdateLastCheckedAt: string
   onSave: () => void
 }>()
+
+// 空值文案用「从未检查」而不是 "-"：说明是一次都没查过，而不是查了没记下来
+const lastCheckedDisplay = computed(() => formatDateTime(props.autoUpdateLastCheckedAt, '从未检查'))
 
 const dockerMirrorDialogVisible = ref(false)
 const binaryProxyDialogVisible = ref(false)
@@ -31,7 +38,7 @@ const binaryProxyOptions = [
 </script>
 
 <template>
-  <el-card shadow="never">
+  <el-card shadow="never" v-loading="configsLoading">
     <template #header>
       <div class="card-header">
         <span class="card-title"><el-icon><Connection /></el-icon> 网络代理</span>
@@ -108,6 +115,8 @@ const binaryProxyOptions = [
       </div>
     </div>
     <span class="form-hint">开启后每 24 小时自动检查一次新版本；若检测到更新，将按当前镜像渠道自动尝试更新并通过通知渠道反馈结果。</span>
+    <!-- 巡检与概览页「检查系统更新」都会写这个时间，巡检按它判断是否满 24 小时；排查「为什么没自动更新」时有用 -->
+    <span class="form-hint last-checked-hint">上次检查更新时间：{{ lastCheckedDisplay }}</span>
 
     <div class="form-field">
       <label>可信代理 CIDR</label>
@@ -204,6 +213,11 @@ const binaryProxyOptions = [
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+// 静默更新这一组（开关 + 说明 + 上次检查时间）不在 .form-field 里，自己补上与下一项之间的间距
+.last-checked-hint {
+  margin-bottom: 20px;
 }
 
 .field-label-row {

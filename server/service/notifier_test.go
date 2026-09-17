@@ -260,7 +260,7 @@ func TestSendToChannelPrefixesPanelLabel(t *testing.T) {
 		Type:   "webhook",
 		Config: fmt.Sprintf(`{"url":%q}`, server.URL),
 	}
-	if err := sendToChannel(ch, "原始标题", "正文", nil); err != nil {
+	if err := sendToChannel(ch, "原始标题", "正文", nil, ""); err != nil {
 		t.Fatalf("send to channel: %v", err)
 	}
 
@@ -288,7 +288,7 @@ func TestSendToChannelKeepsTitleWhenPanelLabelEmpty(t *testing.T) {
 		Type:   "webhook",
 		Config: fmt.Sprintf(`{"url":%q}`, server.URL),
 	}
-	if err := sendToChannel(ch, "原始标题", "正文", nil); err != nil {
+	if err := sendToChannel(ch, "原始标题", "正文", nil, ""); err != nil {
 		t.Fatalf("send to channel: %v", err)
 	}
 

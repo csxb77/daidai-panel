@@ -291,6 +291,11 @@ func TestCheckBlacklistSupportsPipeSeparator(t *testing.T) {
 // 断言能扫描出候选并建出定时任务。
 func TestSyncSubscriptionTasksHandlesQLPipeSeparatedFilters(t *testing.T) {
 	testutil.SetupTestEnv(t)
+	// jx_sign.js / jddj_bean.js 没有 cron 头：默认规则留空时不建任务（#134），这里填上规则，
+	// 让白名单命中的三个文件都能落成任务，断言的仍是竖线分隔的过滤结果。
+	if err := model.SetConfig("default_cron_rule", "20 6 * * *"); err != nil {
+		t.Fatalf("set default_cron_rule: %v", err)
+	}
 
 	saveDir := "6dylan6_jdpro"
 	scriptsRoot := filepath.Join(config.C.Data.ScriptsDir, saveDir)
@@ -368,8 +373,8 @@ func TestSyncSubscriptionTasksHandlesQLPipeSeparatedFilters(t *testing.T) {
 	if got := byBase["jd_bean_change.js"].CronExpression; got != "1 0 * * *" {
 		t.Errorf("脚本头 cron 应被保留, got %q", got)
 	}
-	if got := byBase["jx_sign.js"].CronExpression; got != FallbackSubscriptionCron {
-		t.Errorf("无 cron 头的脚本应用兜底 cron, got %q", got)
+	if got := byBase["jx_sign.js"].CronExpression; got != "20 6 * * *" {
+		t.Errorf("无 cron 头的脚本应用订阅设置里的默认 Cron 规则, got %q", got)
 	}
 }
 

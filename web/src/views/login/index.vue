@@ -20,7 +20,7 @@ import {
   type GeeTestInstance,
   type GeeTestValidateResult,
 } from "@/utils/geetest";
-import { readMotionPreference } from "@/utils/panelAppearance";
+import { shouldReduceMotion } from "@/utils/panelAppearance";
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -143,22 +143,8 @@ onMounted(async () => {
  * 插画仍然会跟着鼠标跳；对明确要求减少动效的用户来说，这比平滑跟随更难受。
  * 真正要关掉的是位移本身，只能在 JS 层判断。
  *
- * 「需要减少动效」要综合个人设置页的「界面动效」三档（C8），与 global.scss 里
- * dd-motion-force / dd-motion-off 两个 class 同一口径：
- *   始终开启 → 照常跟随（系统开着「减少动态效果」也一样，否则全站动画都回来了、只有插画不动）；
- *   减少动效 → 不跟随（不看系统）；
- *   跟随系统 → 看 prefers-reduced-motion。
- *
- * 每次移动都现读而不是缓存：用户可能在页面开着的时候改系统设置，
- * 两个判断都很便宜（localStorage 与 matchMedia 浏览器内部都有缓存），不值得为它挂 change 监听。
+ * 「需要减少动效」要综合个人设置页的「界面动效」三档（C8），口径见 utils/panelAppearance.ts 的 shouldReduceMotion()。
  */
-function shouldReduceMotion() {
-  const preference = readMotionPreference();
-  if (preference === "always") return false;
-  if (preference === "reduce") return true;
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-}
-
 function handleMouseMove(e: MouseEvent) {
   if (!containerRef.value) return;
   if (shouldReduceMotion()) return;

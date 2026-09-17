@@ -19,9 +19,6 @@ export function useSettingsOverview() {
   const checkingUpdate = ref(false)
   const updatingPanel = ref(false)
   const stoppingPanel = ref(false)
-  const autoUpdateEnabled = ref(false)
-  const savingAutoUpdate = ref(false)
-  const lastCheckTime = ref('')
   const releaseNotesVisible = ref(false)
   const updateProgressVisible = ref(false)
   const updateProgressStatus = ref<UpdateVisualStatus>('idle')
@@ -65,21 +62,6 @@ export function useSettingsOverview() {
     }
   }
 
-  async function loadUpdatePreferences() {
-    try {
-      const res = await configApi.get('auto_update_enabled')
-      const value = String(res.data?.value ?? res.data?.config?.value ?? 'false').trim().toLowerCase()
-      autoUpdateEnabled.value = ['1', 'true', 'yes', 'on'].includes(value)
-    } catch {
-      autoUpdateEnabled.value = false
-    }
-    try {
-      const res = await configApi.get('auto_update_last_checked_at')
-      const raw = String(res.data?.value ?? res.data?.config?.value ?? '').trim()
-      if (raw) lastCheckTime.value = raw
-    } catch { /* ignore */ }
-  }
-
   async function loadVersion() {
     try {
       const res = await systemApi.version()
@@ -97,8 +79,9 @@ export function useSettingsOverview() {
       // 回填侧栏角标。放在拿到结果之后、任何分支之前，
       // 「已是最新」也要回填（false），否则更新完角标会一直亮着。
       badgesStore.noteUpdateAvailable(Boolean(res.data?.has_update))
+      // 手动检查也记一笔「上次检查更新时间」：后端静默更新巡检按它判断是否满 24 小时，
+      // 「代理设置」页静默更新开关下方也只读展示它。概览页不再展示，但这次写入不能跟着删
       const now = new Date().toISOString()
-      lastCheckTime.value = now
       void configApi.set({ key: 'auto_update_last_checked_at', value: now }).catch(() => {})
       if (res.data.has_update) {
         releaseNotesVisible.value = true
@@ -121,24 +104,6 @@ export function useSettingsOverview() {
       ElMessage.error(msg)
     } finally {
       checkingUpdate.value = false
-    }
-  }
-
-  async function handleToggleAutoUpdate(value: boolean) {
-    const previous = autoUpdateEnabled.value
-    autoUpdateEnabled.value = value
-    savingAutoUpdate.value = true
-    try {
-      await configApi.set({ key: 'auto_update_enabled', value: value ? 'true' : 'false' })
-      ElMessage.success(value ? '静默更新已开启' : '静默更新已关闭')
-      if (value) {
-        void handleCheckUpdate()
-      }
-    } catch {
-      autoUpdateEnabled.value = previous
-      ElMessage.error('保存静默更新设置失败')
-    } finally {
-      savingAutoUpdate.value = false
     }
   }
 
@@ -560,9 +525,6 @@ export function useSettingsOverview() {
     checkingUpdate,
     updatingPanel,
     stoppingPanel,
-    autoUpdateEnabled,
-    savingAutoUpdate,
-    lastCheckTime,
     releaseNotesVisible,
     updateProgressVisible,
     updateProgressStatus,
@@ -572,12 +534,10 @@ export function useSettingsOverview() {
     loadSystemInfo,
     loadSystemStats,
     loadVersion,
-    loadUpdatePreferences,
     handleCheckUpdate,
     handleUpdatePanel,
     handleRestartPanel,
     handleStopPanel,
-    handleToggleAutoUpdate,
     openReleaseNotes,
     closeReleaseNotes,
     openGitHub,

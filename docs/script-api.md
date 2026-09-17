@@ -82,7 +82,7 @@ new Promise((resolve, reject) => {
 });
 ```
 
-面板默认会检测这种情况（系统设置 → 任务 → **检测脚本半路静默结束**）。命中时日志里出现 `[任务疑似半路结束]`，退出码被置为 `75`，任务判失败并正常发通知。
+面板默认会检测这种情况（系统设置 → 任务运行 → **检测脚本半路静默结束**）。命中时日志里出现 `[任务疑似半路结束]`，退出码被置为 `75`，任务判失败并正常发通知。
 
 **这个检测有无法消除的误报**：「被抛弃的 Promise」和「被卡住的 Promise」在结构上完全一样，探针分不出来，只有脚本自己知道工作做没做完。所以下面这类写法会被误判——它们的共同点是留下了一个**背后没有定时器/socket 等句柄**的未完成 Promise：
 
@@ -183,6 +183,37 @@ await sendNotify('任务标题', '正文第一行\n正文第二行');
 ```
 
 两个 helper 由面板自动放进脚本根目录并加进 `PYTHONPATH` / `NODE_PATH`，`import` / `require` 直接能找到，签名与青龙保持兼容。它们内部读的就是 `DAIDAI_NOTIFY_URL` 和 `DAIDAI_NOTIFY_TOKEN`。
+
+**正文格式与按渠道发送**（v3.2.9 起）：
+
+```python
+import notify
+
+# 正文是 HTML：邮件发 text/html、WxPusher 按 HTML 渲染，不支持 HTML 的渠道自动去掉标签转成纯文本
+notify.send("日报", html_report, content_type="html")
+
+# 不同渠道发不同内容：与青龙同名的分渠道函数
+notify.wxpusher_bot("日报", html_report, content_type="html")
+notify.smtp("日报", text_report)
+
+# 其它渠道类型用 send_to；按渠道名称点名用 channel_name
+notify.send_to("discord", "日报", text_report)
+notify.send("日报", text_report, channel_name="我的邮箱")
+```
+
+```js
+const { sendNotify, sendTo } = require('sendNotify');
+await sendTo('wxpusher', '日报', htmlReport, { content_type: 'html' });
+await sendNotify('日报', textReport, { channel_types: ['email', 'telegram'] });
+```
+
+- `content_type` 取 `text` / `markdown` / `html`（也认 `text/html` 这类写法，大小写不限），**不传就按各渠道自己的配置发，和以前完全一样**。它和渠道配置里 WxPusher / 自定义渠道的同名配置项不是一回事。
+- `markdown` 不会把企业微信应用的文本消息改成 markdown 消息（微信插件里看不到 markdown，也带不上保密消息设置）；企业微信机器人配了 @ 成员时同样保持文本。
+- 青龙同名函数：`wxpusher_bot` `smtp` `pushplus_bot` `dingding_bot` `feishu_bot` `telegram_bot` `wecom_bot` `wecom_app` `bark` `gotify` `iGot` `serverJ` `pushdeer` `qmsg_bot` `pushme` `ntfy` `custom_notify`；其余渠道用 `send_to("渠道类型", ...)`。
+- 渠道类型名（`send_to`、`channel_type` 用，大小写不限）：`webhook` `email` `telegram` `dingtalk` `wecom`（企业微信机器人） `wecom_app`（企业微信应用） `bark` `pushplus` `serverchan`（Server酱） `feishu` `gotify` `pushdeer` `pushme` `chanify` `igot` `qmsg` `pushover` `discord` `slack` `ntfy` `wxpusher` `custom`（自定义）。写错时接口返回 400，报错里会列出全部可选类型。
+- 按类型发（分渠道函数、`send_to`、`channel_type`）**只发「默认推送」渠道**；设成「绑定推送」的渠道要用 `channel_name` 或 `channel_id` 点名。带了类型或名称时不再使用任务默认渠道 `DAIDAI_NOTIFY_CHANNEL_ID`。
+- 找不到匹配的渠道时接口返回 400：`send` / `send_to` 会抛异常；青龙同名函数和青龙一样打印一行跳过、返回 `None`，不影响后面的调用。
+- 脚本同目录下有订阅仓库自带的 `notify.py` 时，Python 会优先导入那一份，上面这些能力就用不上。
 
 ---
 
@@ -401,7 +432,7 @@ echo
 | `GET /scripts/content?path=<相对路径>` | 读脚本文件 |
 | `PUT /scripts/content` | 写脚本文件，body `{"path": "...", "content": "..."}` |
 | `PUT /subscriptions/<id>/pull` | 立即拉取一次订阅 |
-| `POST /notifications/send` | 发通知，body `{"title": "...", "content": "...", "channel_id": 1}`。`channel_id` / `channel_ids` 都可省略，省略即广播到全部「默认推送」渠道（`push_scope=default`）；显式指定 ID 时按 ID 精确投递，「绑定推送」渠道同样能收到。传了 `channel_id` / 非空 `channel_ids` 但里面没有大于 0 的 ID 会直接返回 400，不会退化成广播 |
+| `POST /notifications/send` | 发通知，body `{"title": "...", "content": "...", "channel_id": 1}`。`channel_id` / `channel_ids` 都可省略，省略即广播到全部「默认推送」渠道（`push_scope=default`）；显式指定 ID 时按 ID 精确投递，「绑定推送」渠道同样能收到。传了 `channel_id` / 非空 `channel_ids` 但里面没有大于 0 的 ID 会直接返回 400，不会退化成广播。以下字段均可选：`content_type`（`text` / `markdown` / `html`，也认 `text/html` 这类写法，不传按渠道配置发）；`channel_name` / `channel_names` 按名称点名，与 ID 同级，名称不存在返回 400；`channel_type` / `channel_types` 按渠道类型过滤（类型名见上文「正文格式与按渠道发送」，大小写不限），点名时取交集，未点名时只在「默认推送」渠道里过滤，类型未知返回 400 并列出可选类型 |
 
 > 注：面板同时保留了不带版本号的 `/api/...` 路径（等价于 `/api/v1/...`），脚本里用 `$DAIDAI_API_BASE` 即可，不必关心。
 >
@@ -771,7 +802,7 @@ repo_dir=$(find "$dir_repo" -type d -name "owner_repo" | head -1)   # ← 第二
 2. 兼容层只补齐**目录与环境变量**。脚本自身的运行时依赖不在面板职责内 ——
    例如 BiliBiliToolPro 需要 dotnet 才能编译运行，那一步得你自己在容器里备好。
 3. 很多青龙脚本要读仓库里 `.sh` 之外的文件（源码、配置模板）。订阅默认是 **sparse 检出**，
-   只落盘命中白名单的文件。这类脚本要在订阅设置里打开 **「完整检出」**（v3.2.0 新增）。
+   只落盘命中白名单的文件。这类脚本要在编辑订阅的「高级设置」里打开 **「完整检出」**（v3.2.0 新增）。
    注意完整检出会拉取整个仓库，体积可能很大。
    它**只放宽落盘范围，不放宽建任务的范围** —— 仍然只有命中「指定子目录 + 白名单」的脚本
    会被建成定时任务，多落下来的文件只是给脚本自己读。

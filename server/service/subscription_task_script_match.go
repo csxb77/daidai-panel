@@ -148,13 +148,22 @@ func (idx subscriptionScriptIndex) candidateKey(command string) (string, bool) {
 //
 // 不校验命令能否执行（now 后面多带参数、危险字符等）——这里只回答「它指的是哪个脚本」。
 func (idx subscriptionScriptIndex) scriptKeyOf(command string) (string, bool) {
+	return idx.scriptKeyIn(command, func(key string) bool {
+		_, hit := idx.commandByKey[key]
+		return hit
+	})
+}
+
+// scriptKeyIn 与 scriptKeyOf 同一套切词与取前缀口径，只是「命中」换成 known：
+// 拿它去查「没识别到 cron 声明、本次没建任务」的那批脚本（#134），不必把它们塞进字典、影响候选的认领。
+func (idx subscriptionScriptIndex) scriptKeyIn(command string, known func(key string) bool) (string, bool) {
 	tokens, err := splitCommandTokens(strings.TrimSpace(command))
 	if err != nil || len(tokens) < 2 {
 		return "", false
 	}
 	switch kind := classifyCommandRunner(tokens[0]); kind {
 	case commandRunnerTask, commandRunnerDesi:
-		return idx.longestKnownPrefix(taskCommandPathTokens(tokens[1:]))
+		return idx.longestKnownPrefix(taskCommandPathTokens(tokens[1:]), known)
 	case commandRunnerInterpreter, commandRunnerManaged:
 		args := tokens[1:]
 		if kind == commandRunnerInterpreter && IsPythonInterpreter(tokens[0]) && args[0] == "-m" {
@@ -164,7 +173,7 @@ func (idx subscriptionScriptIndex) scriptKeyOf(command string) (string, bool) {
 			if strings.HasPrefix(args[start], "-") {
 				continue
 			}
-			if key, ok := idx.longestKnownPrefix(args[start:]); ok {
+			if key, ok := idx.longestKnownPrefix(args[start:], known); ok {
 				return key, true
 			}
 		}
@@ -175,8 +184,8 @@ func (idx subscriptionScriptIndex) scriptKeyOf(command string) (string, bool) {
 }
 
 // longestKnownPrefix 从最长到最短试 tokens 的前缀（按空格拼回，路径可含空格），返回第一个带受支持扩展名、
-// 归一后在字典里的键。
-func (idx subscriptionScriptIndex) longestKnownPrefix(tokens []string) (string, bool) {
+// 归一后 known 认得的键。
+func (idx subscriptionScriptIndex) longestKnownPrefix(tokens []string, known func(key string) bool) (string, bool) {
 	for count := len(tokens); count >= 1; count-- {
 		ref := strings.Join(tokens[:count], " ")
 		if !isSupportedScriptExtension(ref) {
@@ -186,7 +195,7 @@ func (idx subscriptionScriptIndex) longestKnownPrefix(tokens []string) (string, 
 		if !ok {
 			continue
 		}
-		if _, hit := idx.commandByKey[key]; hit {
+		if known(key) {
 			return key, true
 		}
 	}
@@ -262,7 +271,7 @@ func (idx subscriptionScriptIndex) saveDirKeyPrefix(saveDir string) (string, boo
 type subscriptionStaleTaskVerdict int
 
 const (
-	// staleTaskKeep：命令与候选完全相同，或按脚本认得出（键在字典里）——保留，不打日志。
+	// staleTaskKeep：命令与候选完全相同，或按脚本认得出（键在字典里），或跑的是没识别到 cron 声明、本次没建任务的受管脚本——保留，不打日志。
 	staleTaskKeep subscriptionStaleTaskVerdict = iota
 	// staleTaskKeepUnscanned：命令引用的脚本在当前订阅目录里、文件还在，但本次扫描没读到
 	// （目录联接、NAS / Magisk 读目录异常）——保留并提示。
@@ -284,11 +293,14 @@ type subscriptionStaleTaskJudge struct {
 	saveDirKey string // saveDirKeyPrefix 的结果
 	saveDirOK  bool
 	seen       map[string]bool // 本次扫描读到的全部文件的键（任意扩展名）
+	// undeclared：没识别到 cron 声明、又没有可用的默认规则、本次不建任务的脚本（可为 nil）。
+	// 它们不在候选里，但仍是订阅在管的脚本（#134）。
+	undeclared *subscriptionUndeclaredScripts
 }
 
-func newSubscriptionStaleTaskJudge(index subscriptionScriptIndex, candidates map[string]subscriptionTaskCandidate, saveDir string, seen map[string]bool) subscriptionStaleTaskJudge {
+func newSubscriptionStaleTaskJudge(index subscriptionScriptIndex, candidates map[string]subscriptionTaskCandidate, saveDir string, seen map[string]bool, undeclared *subscriptionUndeclaredScripts) subscriptionStaleTaskJudge {
 	prefix, ok := index.saveDirKeyPrefix(saveDir)
-	return subscriptionStaleTaskJudge{index: index, candidates: candidates, saveDirKey: prefix, saveDirOK: ok, seen: seen}
+	return subscriptionStaleTaskJudge{index: index, candidates: candidates, saveDirKey: prefix, saveDirOK: ok, seen: seen, undeclared: undeclared}
 }
 
 // subscriptionScriptStat 是删除判定用的 os.Stat。做成包级变量只为单测：Windows 上造不出 EACCES 这类错误。
@@ -298,6 +310,9 @@ var subscriptionScriptStat = os.Stat
 // staleTaskKeepUnscanned 时有 script，staleTaskKeepStatError 时两个都有。
 //
 // 删除必须有正面证据：只有「认不出」且「文件不在 / 被扫描看到却被规则排除 / 在订阅目录外」才删。
+//   - 跑的是「没识别到 cron 声明、本次没建任务」的脚本（undeclared）也算认得出，保留（#134）：它们以前按每天 0 点兜底建成任务，
+//     默认规则留空后不再是候选；不单列的话会落进「文件在、扫描读到、不在候选里」→ 删，存量任务（含用户改过定时的）连日志没了。
+//     与候选一样两种认法：精确命令（文件名切不开、求不出键时只能靠它），或按脚本键。
 //   - 只有「不存在」类与名字类 Stat 错误能证明「这个前缀不是脚本」（subscriptionScriptNotAScript），与文件不存在同路 continue：
 //     ErrNotExist / ENOTDIR，以及 ENAMETOOLONG、ELOOP、EINVAL 和 Windows 的 ERROR_INVALID_NAME 等（命令参数里带 URL / 盘符 /
 //     ? * | < > / 超长段 / 软链接环）——这些前缀根本不可能对应一个文件，与执行器「解析不了就试更短前缀」同口径。
@@ -312,6 +327,12 @@ func (j subscriptionStaleTaskJudge) judge(command string) (verdict subscriptionS
 		return staleTaskKeep, "", ""
 	}
 	if _, ok := j.index.scriptKeyOf(command); ok {
+		return staleTaskKeep, "", ""
+	}
+	if j.undeclared.hasCommand(command) {
+		return staleTaskKeep, "", ""
+	}
+	if _, ok := j.index.scriptKeyIn(command, j.undeclared.hasKey); ok {
 		return staleTaskKeep, "", ""
 	}
 	var unsurePath string
@@ -403,6 +424,63 @@ func subscriptionScannedFileKeys(index subscriptionScriptIndex, scriptsRoot stri
 	return keys
 }
 
+// subscriptionUndeclaredScripts 是本次扫描里没识别到 cron 声明、不是辅助脚本、默认规则又没有可用值，因而不建任务的脚本（#134）。
+// 它们不在候选里，但仍是订阅在管的脚本：自动删除据此保留已有任务，新增分支据此只加标签接管已有任务，拉取日志据此提示「未建任务」。
+//
+// 每个脚本与候选同口径有两种认法：脚本键（任务改过参数、换过写法也认得出），以及精确命令 task <相对脚本目录的路径>——
+// 文件名带引号、被空格隔开的 `--` 时命令切不开、求不出键，升级前兜底建出来的原样命令只能靠它认出（Wave 2 复查）。
+// 方法对 nil 安全：nil 就是空集合。
+type subscriptionUndeclaredScripts struct {
+	items    []subscriptionUndeclaredScript
+	keys     map[string]bool
+	commands map[string]bool
+}
+
+type subscriptionUndeclaredScript struct {
+	path    string // 扫描读到的路径，与 seenFiles 同根
+	command string // task <相对脚本目录的路径>，与候选命令同口径
+	key     string // 脚本键；归一不了时为空
+	// claimable：接管时能不能按键取任务。与候选的 candidateKey 同口径：键有歧义（Windows 下仅大小写不同的两个文件，
+	// 或与某个候选同键）时为 false，只按精确命令接管。删除判定与提示不受影响，照样按键认。
+	claimable bool
+}
+
+// newSubscriptionUndeclaredScripts 求键与 subscriptionScannedFileKeys 同口径，求命令与 scanSubscriptionTaskCandidates 建候选命令同口径。
+func newSubscriptionUndeclaredScripts(index subscriptionScriptIndex, scriptsRoot string, files []string) *subscriptionUndeclaredScripts {
+	u := &subscriptionUndeclaredScripts{keys: make(map[string]bool, len(files)), commands: make(map[string]bool, len(files))}
+	keyCount := make(map[string]int, len(files))
+	for _, file := range files {
+		rel, err := filepath.Rel(scriptsRoot, file)
+		if err != nil {
+			continue
+		}
+		item := subscriptionUndeclaredScript{path: file, command: "task " + rel}
+		if key, ok := index.normalize(rel); ok {
+			item.key = key
+			u.keys[key] = true
+			keyCount[key]++
+		}
+		u.commands[item.command] = true
+		u.items = append(u.items, item)
+	}
+	for i := range u.items {
+		if key := u.items[i].key; key != "" {
+			_, candidateKey := index.commandByKey[key]
+			u.items[i].claimable = keyCount[key] == 1 && !candidateKey
+		}
+	}
+	return u
+}
+
+func (u *subscriptionUndeclaredScripts) hasKey(key string) bool {
+	return u != nil && u.keys[key]
+}
+
+// hasCommand：命令（去掉首尾空白）与其中某个脚本的精确命令相同。
+func (u *subscriptionUndeclaredScripts) hasCommand(command string) bool {
+	return u != nil && u.commands[strings.TrimSpace(command)]
+}
+
 // sortedSubscriptionCandidateCommands 固定候选的处理顺序：map 遍历是随机的，日志顺序不该每次拉取都不一样。
 func sortedSubscriptionCandidateCommands(candidates map[string]subscriptionTaskCandidate) []string {
 	commands := make([]string, 0, len(candidates))
@@ -415,13 +493,15 @@ func sortedSubscriptionCandidateCommands(candidates map[string]subscriptionTaskC
 
 // subscriptionAdoptPool 是「接管」分支的候选池：库里所有不归本订阅管的任务，按命令原文与脚本键各建一张索引。
 // 全表加载后在 Go 里过滤，不写 NOT IN（空集合时 GORM 生成 NOT IN (NULL)，一行都查不出来）。
+// 脚本键覆盖候选脚本与没识别到 cron 声明、本次不建任务的脚本（undeclared，可为 nil）：后者不建任务，但已有的同脚本任务照旧接管。
+// 一个文件只会在两者之一里，所以每条任务仍至多一个键。
 type subscriptionAdoptPool struct {
 	byCommand map[string][]*model.Task
 	byKey     map[string][]*model.Task
 	taken     map[uint]bool
 }
 
-func loadSubscriptionAdoptPool(index subscriptionScriptIndex, managed []model.Task) (*subscriptionAdoptPool, error) {
+func loadSubscriptionAdoptPool(index subscriptionScriptIndex, managed []model.Task, undeclared *subscriptionUndeclaredScripts) (*subscriptionAdoptPool, error) {
 	var all []model.Task
 	if err := database.DB.Order("id").Find(&all).Error; err != nil {
 		return nil, err
@@ -435,6 +515,10 @@ func loadSubscriptionAdoptPool(index subscriptionScriptIndex, managed []model.Ta
 		byKey:     make(map[string][]*model.Task),
 		taken:     make(map[uint]bool),
 	}
+	known := func(key string) bool {
+		_, hit := index.commandByKey[key]
+		return hit || undeclared.hasKey(key)
+	}
 	for i := range all {
 		task := &all[i]
 		if managedIDs[task.ID] {
@@ -442,14 +526,15 @@ func loadSubscriptionAdoptPool(index subscriptionScriptIndex, managed []model.Ta
 		}
 		command := strings.TrimSpace(task.Command)
 		pool.byCommand[command] = append(pool.byCommand[command], task)
-		if key, ok := index.scriptKeyOf(task.Command); ok {
+		if key, ok := index.scriptKeyIn(task.Command, known); ok {
 			pool.byKey[key] = append(pool.byKey[key], task)
 		}
 	}
 	return pool, nil
 }
 
-// take 取出命令原文与候选相同、或脚本键相同的任务（按 id 升序、去重）；取出过的不会再被别的候选取到。
+// take 取出命令原文与 command 相同、或脚本键相同的任务（按 id 升序、去重）；取出过的不会再被别的候选取到。
+// byCommand[""] 里是命令为空的任务，它们不跑任何脚本，command 为空时不取。
 func (p *subscriptionAdoptPool) take(command, key string, keyOK bool) []*model.Task {
 	if p == nil {
 		return nil
@@ -463,7 +548,9 @@ func (p *subscriptionAdoptPool) take(command, key string, keyOK bool) []*model.T
 			}
 		}
 	}
-	pick(p.byCommand[command])
+	if command != "" {
+		pick(p.byCommand[command])
+	}
 	if keyOK {
 		pick(p.byKey[key])
 	}

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
   DocumentAdd,
   Fold,
@@ -12,11 +12,25 @@ import {
 import ScriptTreeNode from './ScriptTreeNode.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
+import { shouldReduceMotion } from '@/utils/panelAppearance'
 import type { TreeNode } from '../types'
+
+/** el-tree 的 getNode() 返回 EP 内部的节点对象，定位只用到这几个字段 */
+interface TreeStoreNode {
+  level: number
+  visible: boolean
+  parent: TreeStoreNode | null
+}
 
 const props = defineProps<{
   isMobile: boolean
   mobileShowEditor: boolean
+  /** 桌面端目录树是否收起。index.vue 传的是按布局修正过的值，≤1024 恒为 false */
+  sidebarCollapsed?: boolean
+  /** 编辑器当前打开的文件，与树节点 key 同一口径（openFile 已按后端规则规范化过） */
+  currentFile: string
+  /** openFile 每成功一次 +1（加载失败回滚时，仅当加载期间树重建过才 +1）。同一文件再次打开时 currentFile 不变，但同样要重新定位 */
+  revealTicket: number
   treeLoading: boolean
   fileTree: TreeNode[]
   allowDrag: (draggingNode: any) => boolean
@@ -35,6 +49,8 @@ const props = defineProps<{
   onToggleCollapse: () => void
 }>()
 
+const sidebarRef = ref<HTMLElement>()
+const treeContainerRef = ref<HTMLElement>()
 const treeRef = ref()
 const searchKeyword = ref('')
 
@@ -63,10 +79,242 @@ function filterNode(value: string, data: TreeNode) {
 watch(searchKeyword, (val) => {
   treeRef.value?.filter(val)
 })
+
+// ===== 目录树定位（issue #136）=====
+// 打开脚本时让左侧树跟上：展开祖先、高亮当前文件、滚到可见（≥769 在 .sidebar-tree 里滚，≤768 滚外层布局容器）。
+// 下面的写法由 EP 2.13.5 el-tree 的几条行为决定（Node 实测过）：
+// 1. setCurrentKey 找不到 key 时【不清】旧高亮 → 一律先 getNode 判断，找不到就显式 setCurrentKey(null)；
+// 2. setCurrentKey(key, true) 会把祖先全部展开，包括用户刚手动收起的那一层 → 只有「打开文件 / 树刷新」传 true，
+//    把高亮拉回当前文件时必须传 false，否则当前文件所在的目录永远收不起来；
+// 3. 每次 setData（即每次 loadTree）都会丢掉展开与过滤状态 → 树刷新后补套一次搜索过滤再定位；
+// 4. 点节点时 EP 先改高亮、再 emit node-click → 点目录、取消切换、加载失败后都要把高亮拉回当前文件。
+
+/** 定位序号：每次定位 / 补滚动开始时占一个号，await 回来发现号被后来者占了就放弃 */
+let revealSeq = 0
+
+const COLLAPSE_MOVING_SELECTOR = '.el-collapse-transition-enter-active, .el-collapse-transition-leave-active'
+/** EP 折叠动画 0.3s，加上 Vue 过渡收尾的一两帧；超过这个数不再等，按当下的位置滚 */
+const TREE_SETTLE_MAX_MS = 400
+
+/** 侧栏此刻看不见：≤1024 切到了编辑器（v-show 藏起），或桌面端收起成 0 宽 */
+const sidebarHidden = computed(() => (props.isMobile && props.mobileShowEditor) || Boolean(props.sidebarCollapsed))
+
+function isRevealStale(seq: number, path: string) {
+  return seq !== revealSeq || path !== props.currentFile
+}
+
+function setHighlight(key: string, expandParents: boolean) {
+  const tree = treeRef.value
+  if (!tree) return
+  if (key && tree.getNode(key)) {
+    tree.setCurrentKey(key, expandParents)
+  } else {
+    tree.setCurrentKey(null)
+  }
+}
+
+/**
+ * 等树这一轮更新真正落到 DOM 上。
+ * 数 nextTick 数不准：tree-node 的 expanded ref 是在 flush 期间另登记的 nextTick 里才翻的，
+ * 展开动画要到再下一轮 flush 才开始；EP 的 filter 也是一串长度不定的 await 链。
+ * 垫一个宏任务，前面排着的微任务（含后续几轮 flush）就都跑完了。
+ */
+async function waitTreeFlushed() {
+  await nextTick()
+  await new Promise<void>(resolve => window.setTimeout(resolve, 0))
+}
+
+/**
+ * 等树里正在跑的展开 / 收起动画结束。动画期间 .el-tree-node__children 的 max-height 还在涨，量出来的位置是截断的。
+ * 不只等目标的祖先：loadTree 之后 EP 会带动画收起用户手动展开过的其它目录，它们在目标上方时同样会把目标往上推。
+ * 判据用 Vue 过渡的 active class，不用 transitionend：EP 这条过渡声明了 max-height 和上下 padding 三个属性，
+ * 实际只有 max-height 在变，Vue 等不齐三次 transitionend，要靠自己的兜底定时器收尾，
+ * 清掉 max-height 的 afterEnter 也在那时才跑 —— class 摘掉的那一刻布局才算真正落定。
+ */
+function waitCollapseTransitions(container: HTMLElement) {
+  return new Promise<void>((resolve) => {
+    const startedAt = Date.now()
+    const check = () => {
+      if (!container.querySelector(COLLAPSE_MOVING_SELECTOR) || Date.now() - startedAt >= TREE_SETTLE_MAX_MS) {
+        resolve()
+        return
+      }
+      window.setTimeout(check, 16)
+    }
+    check()
+  })
+}
+
+/**
+ * 侧栏卡从看不见变为可见时，等卡片自身的动画跑完再量：
+ * - 桌面端展开目录树：卡片宽度从 0 过渡回来，宽度接近 0 的那几帧表头被挤高、树容器偏矮；
+ * - ≤1024 从编辑器返回列表：卡片重播入场关键帧（translateY）。在 .sidebar-tree 里滚时树和行一起平移、不受影响，
+ *   但 ≤768 真正在滚的是外层的 .layout-main（见 findScrollContainer），它不跟着平移，不等会差出一段位移。
+ */
+async function waitSidebarAnimations() {
+  const el = sidebarRef.value
+  if (!el || typeof el.getAnimations !== 'function') return
+  const running = el.getAnimations()
+  if (running.length === 0) return
+  await Promise.race([
+    Promise.allSettled(running.map(animation => animation.finished)),
+    new Promise<void>(resolve => window.setTimeout(resolve, TREE_SETTLE_MAX_MS))
+  ])
+}
+
+/** 节点自身和所有祖先都没被搜索过滤藏掉 */
+function isShownUnderFilter(node: TreeStoreNode) {
+  let cursor: TreeStoreNode | null = node
+  while (cursor && cursor.level > 0) {
+    if (!cursor.visible) return false
+    cursor = cursor.parent
+  }
+  return true
+}
+
+/**
+ * 从目标行往上找第一个真正在纵向滚动的容器。
+ * ≥769 时就是 .sidebar-tree（global.scss 的 .dd-fixed-page 把整页钉在视口高度里）；
+ * ≤768 时 .dd-fixed-page 不再定高，侧栏随内容撑高、.sidebar-tree 根本不滚，滚的是外层的 .layout-main（浏览器实测）。
+ * 只取第一个：树里已经能滚到位时不再去动外层。
+ */
+function findScrollContainer(from: HTMLElement) {
+  for (let el = from.parentElement; el && el !== document.body; el = el.parentElement) {
+    const { overflowY } = window.getComputedStyle(el)
+    if ((overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight) return el
+  }
+  return null
+}
+
+/**
+ * 纵向滚动，让目标行完整可见（nearest 语义：已经完整可见就不动，上沿出界对齐顶部，下沿出界对齐底部）。
+ * 刻意不用 scrollIntoView：它会连带滚动所有能滚的祖先（整页、布局容器），
+ * 缩进很深时还可能横向滚动带 overflow 的容器。
+ */
+function scrollRowIntoView(path: string, smooth: boolean) {
+  const container = treeContainerRef.value
+  // offsetParent 为 null：侧栏被 v-show 藏起，或页面被 keep-alive 缓存、DOM 已脱离文档。量出来全是 0，滚了也白滚
+  if (!container || container.offsetParent === null) return
+  const node = treeRef.value?.getNode(path) as TreeStoreNode | null | undefined
+  // 搜索过滤把它或它的某个祖先藏掉了：只高亮不滚动，也不替用户清搜索词
+  if (!node || !isShownUnderFilter(node)) return
+  const row = container.querySelector<HTMLElement>(`[data-key="${CSS.escape(path)}"] > .el-tree-node__content`)
+  if (!row) return
+  const rowRect = row.getBoundingClientRect()
+  // 祖先还收着（比如动画途中用户又点收了），行是 display:none
+  if (rowRect.height === 0) return
+  const scroller = findScrollContainer(row)
+  if (!scroller) return
+  const scrollerTop = scroller.getBoundingClientRect().top + scroller.clientTop
+  // 可见区取容器与窗口的交集：容器自己也可能被窗口裁掉一截（演示站顶部横幅把整页往下推了 34px，.layout-main 底边落在窗口外）
+  const viewTop = Math.max(scrollerTop, 0)
+  const viewBottom = Math.min(scrollerTop + scroller.clientHeight, window.innerHeight)
+  let delta = 0
+  if (rowRect.top < viewTop) {
+    delta = rowRect.top - viewTop
+  } else if (rowRect.bottom > viewBottom) {
+    delta = rowRect.bottom - viewBottom
+  }
+  if (delta === 0) return
+  scroller.scrollTo({
+    top: scroller.scrollTop + delta,
+    // global.scss 的减少动效只压得住 CSS 的 scroll-behavior，管不到 JS 显式传的 smooth，要在这里判断
+    behavior: smooth && !shouldReduceMotion() ? 'smooth' : 'auto'
+  })
+}
+
+async function scrollAfterTreeSettled(seq: number, path: string, smooth: boolean) {
+  await waitTreeFlushed()
+  const container = treeContainerRef.value
+  if (!container || isRevealStale(seq, path)) return
+  await waitCollapseTransitions(container)
+  // 等待期间侧栏又被藏起（手机上打开了编辑器 / 桌面端点了收起）：交给下面「重新可见」那条侦听
+  if (isRevealStale(seq, path) || sidebarHidden.value) return
+  scrollRowIntoView(path, smooth)
+}
+
+/**
+ * 在树里定位 path：展开祖先、高亮、滚到可见。
+ * 不动搜索框：目标被过滤藏掉时只高亮不滚动（见 scrollRowIntoView），不替用户清搜索词。
+ */
+async function revealInTree(path: string) {
+  const seq = ++revealSeq
+  // 找不到节点（文件已删 / 不在脚本目录 / 树还没加载完）：清掉高亮就走，等下次 fileTree 变化再试
+  if (!path || !treeRef.value?.getNode(path)) {
+    setHighlight('', false)
+    return
+  }
+  setHighlight(path, true)
+  // 侧栏看不见时滚了也白滚，留给「重新可见」那条侦听补做
+  if (sidebarHidden.value) return
+  await scrollAfterTreeSettled(seq, path, true)
+}
+
+/**
+ * 包一层 node-click（EP 在 emit 之前就已经把高亮挪到了点中的节点上）：
+ * - 点目录：只是展开 / 收起，高亮拉回当前文件；传 false，不然刚被点收起的目录会被重新展开；
+ * - 点文件：等打开流程走完再拉回 —— 「未保存修改」选了取消、或加载失败时编辑器还是原来的文件，
+ *   高亮不能停在刚点的那个上。打开成功时 currentFile 已经是它，这一步等于原地不动。
+ */
+async function handleTreeNodeClick(data: TreeNode) {
+  if (!data.isLeaf) {
+    setHighlight(props.currentFile, false)
+    return
+  }
+  try {
+    await props.onNodeClick(data)
+  } finally {
+    setHighlight(props.currentFile, false)
+  }
+}
+
+// 打开文件成功（含同一文件再次打开），或加载失败回滚到原文件、且加载期间树重建过（原文件可能被收起藏住）
+watch(() => props.revealTicket, () => {
+  void revealInTree(props.currentFile)
+})
+
+// 树数据刷新：进入页面、keep-alive 重新激活、刷新按钮、新建 / 重命名 / 移动 / 删除之后。
+// flush: 'post'：等 EP 的 setData 跑完、nodesMap 换成新节点再定位。
+// 页面被 keep-alive 缓存期间，路由侦听照样会打开文件，但那时 DOM 不在文档里、滚不动；
+// 重新激活时 onActivated → loadTree 会走到这里把滚动补上。
+watch(
+  () => props.fileTree,
+  async () => {
+    // 🔴 必须先让这一轮 flush 整个跑完，再去展开节点（浏览器实测过，去掉这一行会复现）：
+    // setData 换了新节点，按 key 复用的 tree-node 组件看到 node.expanded 由 true 变 false，
+    // 登记了一个 nextTick(expanded=false)，它挂在本轮 flush 的 promise 上；
+    // 若这里同步展开，组件那边登记的 nextTick(expanded=true) 挂在已经就绪的 resolvedPromise 上，反而先跑，
+    // 结果 Node.expanded=true、组件 expanded=false：目录看着是收起的，而且点它也展不开（EP 按组件的值判断，只会重复 expand）。
+    // 重命名 / 拖拽当前文件后它所在的目录最容易中招。await 本轮的 nextTick 之后再展开，先后顺序就对了。
+    await nextTick()
+    // setData 把节点全部重置成 visible，搜索框里的词却还在：补套一次过滤，免得「框里有词、树没过滤」
+    if (searchKeyword.value) treeRef.value?.filter(searchKeyword.value)
+    void revealInTree(props.currentFile)
+  },
+  { flush: 'post' }
+)
+
+// 当前文件变了（删除后清空、重命名 / 移动改了路径、加载失败回滚）：高亮先跟上，不展开、不滚动。
+// 展开和滚动只在 revealTicket 变化或「树刷新」时做（上面两条），免得按一个打不开的路径去展开祖先。
+watch(() => props.currentFile, (file) => {
+  setHighlight(file, false)
+})
+
+// 侧栏从看不见变为可见（手机上从编辑器返回列表 / 桌面端展开目录树）：只补一次滚动，不再动高亮与展开。
+// 瞬时滚动：卡片刚播完入场 / 展开动画，再接一段平滑滚动显得拖沓。
+watch(sidebarHidden, async (hidden, wasHidden) => {
+  const path = props.currentFile
+  if (hidden || !wasHidden || !path) return
+  const seq = ++revealSeq
+  await nextTick()
+  await waitSidebarAnimations()
+  if (isRevealStale(seq, path)) return
+  await scrollAfterTreeSettled(seq, path, false)
+})
 </script>
 
 <template>
-  <aside class="scripts-sidebar" :class="{ mobile: isMobile }" v-show="!isMobile || !mobileShowEditor">
+  <aside ref="sidebarRef" class="scripts-sidebar" :class="{ mobile: isMobile }" v-show="!isMobile || !mobileShowEditor">
     <header class="sidebar-top">
       <div class="sidebar-search">
         <el-input
@@ -97,6 +345,9 @@ watch(searchKeyword, (val) => {
             @command="onNewAction"
           />
 
+          <!-- issue #136 曾在这里加过「定位当前文件」图标按钮，实测放不下：桌面端 300px 侧栏的工具条
+               原本只剩约 10px 余量，再加 30px 按钮 + 6px 间距，「脚本文件」被挤成两行、新建按钮的 caret 掉到第二行。
+               按设计「放不下就不加」撤掉；打开文件、树刷新、侧栏重新可见时都会自动定位。 -->
           <el-tooltip content="刷新" placement="bottom">
             <button class="icon-btn" aria-label="刷新" @click="onRefresh">
               <el-icon :size="15"><Refresh /></el-icon>
@@ -115,7 +366,7 @@ watch(searchKeyword, (val) => {
       </div>
     </header>
 
-    <div class="sidebar-tree" v-loading="treeLoading">
+    <div ref="treeContainerRef" class="sidebar-tree" v-loading="treeLoading">
       <el-tree
         ref="treeRef"
         :data="fileTree"
@@ -129,7 +380,7 @@ watch(searchKeyword, (val) => {
         :allow-drop="allowDrop"
         empty-text="暂无脚本文件"
         @node-drop="onNodeDrop"
-        @node-click="onNodeClick"
+        @node-click="handleTreeNodeClick"
       >
         <template #default="{ data }">
           <ScriptTreeNode :data="data" :on-open-rename="onOpenRename" :on-delete="onDelete" :on-move-to-root="onMoveToRoot" />

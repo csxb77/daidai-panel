@@ -1337,14 +1337,14 @@ Transfer-Encoding: chunked
           { name: 'schedule', type: 'string', description: 'Cron 表达式', example: '0 0 * * *' },
           { name: 'whitelist', type: 'string', description: '白名单：多个片段用 , 或 | 分隔（配对的括号里、被 \\ 转义的 , | 不拆）。普通片段按「子串包含」匹配文件名 / 路径（不是 glob），片段命中目录名时该目录下的全部文件（含多级子目录）都算命中；含 ^ $ ( ) [ ] { } ? \\ 或 .* .+ 的片段按正则（Go RE2 语法）匹配仓库内的相对路径（不锚定，路径分隔写 /），例如 ^jd[^_] 只命中仓库根目录下的 jdCookie.js 这类文件，想按字面匹配这些字符请用 \\ 转义。命中的文件才会建成定时任务。检出范围：没填 sub_path 时，只有普通片段就只检出命中的文件，出现正则片段则改为检出完整仓库（建任务仍按白名单筛）；填了 sub_path 时按子目录检出，白名单只决定建不建任务。留空表示全部命中', example: 'jd_|jx_|jddj_' },
           { name: 'blacklist', type: 'string', description: '黑名单：写法与匹配规则同白名单（普通片段命中目录名时整个目录都被排除）。命中的文件不建任务；普通片段命中的文件也不检出，正则片段只影响建任务、文件仍会落盘', example: 'backUp' },
-          { name: 'depend_on', type: 'string', description: '依赖规则：对应青龙 ql repo 的第 4 个参数 dependence，写法与匹配规则同白名单（填 utils 会把 utils/ 目录下的文件一并检出）。命中的文件会被检出落盘供主脚本调用，但不会建成定时任务；含正则片段时改为检出完整仓库，填了 sub_path 也一样，但只给子目录里的脚本建定时任务。没填 sub_path 且白名单为空时本来就检出完整仓库，本字段不起作用', example: 'sendNotify|utils' },
+          { name: 'depend_on', type: 'string', description: '依赖规则：对应青龙 ql repo 的第 4 个参数 dependence，写法与匹配规则同白名单（填 utils 会把 utils/ 目录下的文件一并检出）。命中的文件会被检出落盘供主脚本调用，但不会建成定时任务（同时命中白名单的照常建任务；白名单留空时依赖规则不影响建任务）；含正则片段时改为检出完整仓库，填了 sub_path 也一样，但只给子目录里的脚本建定时任务。没填 sub_path 且白名单为空时本来就检出完整仓库，本字段不起作用', example: 'sendNotify|utils' },
           { name: 'sub_path', type: 'string', description: '只检出仓库内的指定子目录（多个用 , 或 | 分隔），按路径匹配、不认正则。优先级高于白名单：填了它，白名单就不参与检出，只决定建不建任务。依赖规则含正则片段时会改为检出完整仓库，但仍只给子目录里的脚本建定时任务' },
           { name: 'save_dir', type: 'string', description: '脚本存放子目录，留空则按仓库名推导' },
           { name: 'pre_script', type: 'string', description: '拉取前指令：在 git 拉取之前执行的 Shell 命令，可用 $SUB_DIR / $SCRIPTS_DIR / $QL_DIR 等变量。非 0 退出会中断本次拉取并记为失败', example: 'mount -a' },
           { name: 'hook_script', type: 'string', description: '拉取后钩子：拉取成功后、同步定时任务之前执行的 Shell 命令，变量与失败语义同 pre_script', example: 'bash $SUB_DIR/copyfiles.sh' },
           { name: 'overwrite_mode', type: 'string', description: '覆盖拉取策略，仅对 git 仓库订阅生效：inherit=跟随系统设置里的「覆盖拉取（默认）」开关（默认值）、force=强制覆盖本地改动、preserve=拉取前暂存本地改动再恢复。作用域只有脚本文件（git 工作区），不影响任务的名称与定时；首次拉取（本地还没有仓库）不适用。不传或传非法值一律按 inherit 处理', example: 'preserve' },
           { name: 'full_checkout', type: 'boolean', description: '完整检出，仅对 git 仓库订阅生效：true=放弃 sparse-checkout，拉取整个仓库（源码、资源、文档全部落盘，体积可能很大）；不传或 false=按「指定子目录 / 白名单 / 依赖规则」稀疏检出（默认）。不改变建任务的规则：仍然只有命中 sub_path 与白名单的文件会被建成定时任务。依赖规则有正则片段、或没填 sub_path 而白名单有正则片段时，默认就会检出完整仓库，但黑名单普通片段命中的文件仍不落盘；开启后它们也会落盘', example: 'true' },
-          { name: 'auto_add_task_mode', type: 'string', description: '自动添加定时任务策略：inherit=跟随系统设置里的「自动添加定时任务（默认）」开关（默认值）、enabled=这条订阅强制建任务、disabled=这条订阅一律不建任务。作用域是拉取成功后「把命中的脚本同步成定时任务」这一步，不影响脚本文件的检出落盘；与只对 git 仓库订阅生效的 overwrite_mode / full_checkout 不同，本项对单文件订阅同样生效。不传或传非法值一律按 inherit 处理', example: 'disabled' },
+          { name: 'auto_add_task_mode', type: 'string', description: '自动添加定时任务策略：inherit=跟随系统设置里的「自动添加定时任务（默认）」开关（默认值）、enabled=这条订阅强制建任务、disabled=这条订阅一律不建任务。作用域是拉取成功后「把命中的脚本同步成定时任务」这一步，不影响脚本文件的检出落盘；脚本未声明 cron 时按订阅设置里的默认 Cron 规则建，留空不建；与只对 git 仓库订阅生效的 overwrite_mode / full_checkout 不同，本项对单文件订阅同样生效。不传或传非法值一律按 inherit 处理', example: 'disabled' },
           { name: 'auto_del_task_mode', type: 'string', description: '自动删除失效任务策略：inherit=跟随系统设置里的「自动删除失效任务（默认）」开关（默认值）、enabled=这条订阅强制删除源文件已消失的任务、disabled=源文件没了也保留任务。作用域是带本订阅标签、且命令以 task 开头的任务，包括被本订阅关联的自建任务：脚本从订阅里消失（上游删除、被白/黑名单排除、改了保存目录）后会连日志删除；node / python3 / desi 等写法的任务不在自动删除范围；同时被其他订阅使用的任务只移除本订阅的标签、不删除。不想删自己的任务就设为 disabled。与 overwrite_mode / full_checkout 不同，本项对单文件订阅同样生效。不传或传非法值一律按 inherit 处理', example: 'enabled' },
           { name: 'auto_add_task', type: 'boolean', description: '已废弃：仅作老客户端兼容保留，请改用 auto_add_task_mode。**这一列永远不会被写成 true** —— 创建时如果只给了这个布尔、没给三态字段，服务端会把 true 翻译成 auto_add_task_mode=enabled 再落库，本列恒为 false；同时给了合法三态时以三态为准。老库里为 true 的行会在升级时一次性迁移成 enabled 并把本列清零' },
           { name: 'auto_del_task', type: 'boolean', description: '已废弃：仅作老客户端兼容保留，请改用 auto_del_task_mode。语义同 auto_add_task' },
@@ -1452,17 +1452,22 @@ Transfer-Encoding: chunked
         method: 'POST',
         path: '/api/notifications/send',
         title: '脚本发送通知',
-        description: '供脚本或外部程序主动调用系统通知配置进行推送。支持普通用户 JWT，也支持带 notifications scope 的 Open API Bearer Token。未指定 channel_id / channel_ids 时走广播，只会发送到「默认推送」（push_scope=default）且已启用的渠道，设为「绑定推送」的渠道不会收到；显式指定渠道 ID 时按 ID 精确投递，绑定推送渠道同样能收到。一个「默认推送」渠道都没有时不做兜底，直接返回失败。任务自带默认通知渠道时，helper 会优先落到该渠道，传 ignore_default_config=true 可跳过它 —— 注意跳过后就是走广播，也就是只发到「默认推送」渠道，而不是发给所有渠道。面板运行脚本时会统一在脚本根目录提供 notify.py 和 sendNotify.js，不再向每个脚本子目录复制，可直接按青龙风格先收集 notifyStr 再发送。',
+        description: '供脚本或外部程序主动调用系统通知配置进行推送。支持普通用户 JWT，也支持带 notifications scope 的 Open API Bearer Token。未指定 channel_id / channel_ids 时走广播，只会发送到「默认推送」（push_scope=default）且已启用的渠道，设为「绑定推送」的渠道不会收到；显式指定渠道 ID 时按 ID 精确投递，绑定推送渠道同样能收到。一个「默认推送」渠道都没有时不做兜底，直接返回失败。任务自带默认通知渠道时，helper 会优先落到该渠道，传 ignore_default_config=true 可跳过它 —— 注意跳过后就是走广播，也就是只发到「默认推送」渠道，而不是发给所有渠道。面板运行脚本时会统一在脚本根目录提供 notify.py 和 sendNotify.js，不再向每个脚本子目录复制，可直接按青龙风格先收集 notifyStr 再发送。可用 content_type 声明正文是 text / markdown / html（不传则按渠道配置发送，与以前一致）：邮件发 text/html、WxPusher 按 HTML 渲染、不支持 HTML 的渠道自动去掉标签；用 channel_name(s) 按名称点名、channel_type(s) 按渠道类型过滤，notify.py 另有与青龙同名的分渠道函数（wxpusher_bot、smtp 等，没有匹配渠道时打印一行跳过、不抛异常）和 send_to，sendNotify.js 有 sendTo。',
         auth: 'jwt',
         bodyParams: [
           { name: 'title', type: 'string', required: true, description: '通知标题', example: '签到脚本通知' },
           { name: 'content', type: 'string', required: true, description: '通知正文，通常传 notifyStr.join(\'\\n\') 或 "\\n".join(notify_lines)', example: '签到成功\\n账号: user01\\n积分: +20' },
           { name: 'channel_id', type: 'integer', description: '单个通知渠道 ID，可选；传了就必须大于 0，否则返回 400（不再静默退化成广播）', example: '3' },
           { name: 'channel_ids', type: 'array', description: '多个通知渠道 ID，可选；非空数组里必须至少有一个大于 0 的 ID，否则返回 400。空数组等同不传，按广播处理', example: '[3,5]' },
+          { name: 'channel_name', type: 'string', description: '按渠道名称点名，可选；与 channel_id 同级（绑定推送渠道也能收到），名称不存在返回 400', example: '我的邮箱' },
+          { name: 'channel_names', type: 'array', description: '多个渠道名称，可选；任一名称不存在返回 400 并列出，不会退化成广播', example: '["我的邮箱","WxPusher"]' },
+          { name: 'channel_type', type: 'string', description: '按渠道类型过滤，可选，大小写不限。可选值：webhook、email、telegram、dingtalk、wecom（企业微信机器人）、wecom_app（企业微信应用）、bark、pushplus、serverchan（Server酱）、feishu、gotify、pushdeer、pushme、chanify、igot、qmsg、pushover、discord、slack、ntfy、wxpusher、custom（自定义）；写错返回 400 并列出全部可选值。点名了渠道时取交集，未点名时只在「默认推送」渠道里过滤', example: 'wxpusher' },
+          { name: 'channel_types', type: 'array', description: '多个渠道类型，可选；规则同 channel_type', example: '["email","telegram"]' },
+          { name: 'content_type', type: 'string', description: '正文格式，可选：text / markdown / html（也认 text/html、text/plain、text/markdown 这类写法，大小写不限），不传则按各渠道配置发送。html 时邮件发 text/html、WxPusher 不转义、PushPlus 用 html 模板，不支持 HTML 的渠道去标签转纯文本；markdown 不会把企业微信应用的文本消息改成 markdown 消息（微信插件里看不到），企业微信机器人配了 @ 成员时同样保持文本。注意：这与渠道配置里 wxpusher / custom 的同名配置项不是一回事', example: 'html' },
           { name: 'context', type: 'object', description: '额外模板变量，可选；供 content_template 使用', example: '{"task_name":"签到脚本","status":"success"}' },
         ],
         helperExamples: {
-          JavaScript: `const { sendNotify } = require('./sendNotify')
+          JavaScript: `const { sendNotify, sendTo } = require('./sendNotify')
 
 async function main() {
   const name = '京东签到'
@@ -1474,6 +1479,10 @@ async function main() {
 
   // 如需忽略任务默认通知渠道：
   // await sendNotify(name, notifyStr.join('\\n'), { channel_ids: [1, 2], ignore_default_config: true })
+
+  // 正文是 HTML / 按渠道发不同内容：
+  // await sendTo('wxpusher', name, '<table>...</table>', { content_type: 'html' })
+  // await sendNotify(name, notifyStr.join('\\n'), { channel_name: '我的邮箱' })
 }
 
 main().catch(console.error)`,
@@ -1490,6 +1499,12 @@ def main():
     # 如需忽略任务默认通知渠道：
     # send(name, '\\n'.join(notify_lines), ignore_default_config=True, channel_ids=[1, 2])
 
+    # 正文是 HTML / 按渠道发不同内容（与青龙同名的分渠道函数，其它渠道类型用 send_to）：
+    # import notify
+    # notify.wxpusher_bot(name, '<table>...</table>', content_type='html')
+    # notify.smtp(name, '\\n'.join(notify_lines))
+    # notify.send_to('discord', name, '\\n'.join(notify_lines))
+
 if __name__ == '__main__':
     main()`,
         },
@@ -1503,6 +1518,8 @@ if __name__ == '__main__':
             requested_ids: [3],
             used_all: false,
             content_length: 18,
+            content_type: '',
+            channel_types: [],
           },
         }, null, 2),
       },

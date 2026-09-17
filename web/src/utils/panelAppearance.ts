@@ -146,22 +146,22 @@ function readCachedPanelShape(): PanelShapeStyle {
 }
 
 // 最近一次显式取到的圆角风格。刻意与 lastAppliedSettings 分开记：
-// 设置页保存/加载时会调 applyPanelAppearance(configForm.value)，而 panel_shape_style
-// 走的是「其他配置」兜底区、压根不在 configForm 里（见 useSettingsConfig.ts 的差集机制），
-// 跟着整份设置一起被覆盖的话，进一次设置页就会被拍回直角。
+// 不是每次 applyPanelAppearance 都带着合法的 panel_shape_style —— panel-settings 拉取失败时传的是 null，
+// 历史脏值 / 将来新增的枚举值也认不出来。跟着整份设置一起被覆盖的话，这些时候就会被拍回直角。
 // ⇒ 只有本次真的带了合法值才更新，否则沿用上一次的结果。
+// （v3.2.9 起 panel_shape_style 已并进设置页的 configForm、由「通用设置 → 面板外观」卡编辑，
+//   设置页加载/保存时传进 applyPanelAppearance 的快照本身就带着已保存的值，见 useSettingsConfig.ts 的 appearanceSnapshot。）
 let lastAppliedShape: PanelShapeStyle = readCachedPanelShape()
 
 /**
  * 把圆角刻度写进 documentElement 的三条 `--dd-radius-*`。
  *
  * 传了合法值就以它为准并记进本机缓存；不传（或值不认识）就沿用上一次的结果。
- * 三个调用方：
+ * 两个调用方：
  * 1. main.ts 在 createApp 之前不传参同步调一次（用 localStorage 缓存防首屏闪形）；
- * 2. applyPanelAppearance() 拿服务端下发的 panel_shape_style 调；
- * 3. 设置页「其他配置」兜底区保存成功后，由 useSettingsConfig.ts 的 handleSaveExtraConfigs()
- *    直接把草稿值传进来调本函数（panel_shape_style 不在 configForm 里，
- *    那条保存路径不会重跑 applyPanelAppearance，所以要单独补这一次）。切换后即时生效，无需刷新页面。
+ * 2. applyPanelAppearance() 拿 panel_shape_style 调：数据源是免登录的 panel-settings，
+ *    或设置页的外观快照（圆角只取已保存的值）—— 「面板外观」卡保存成功后 useSettingsConfig.ts 的
+ *    saveConfigKeys() 会重跑 applyPanelAppearance，切换后即时生效，无需刷新页面。
  *
  * square 这一档是显式写 `0` 而不是 removeProperty()：同一次会话里可能先写过 rounded
  * （改配置、切主题都会重跑），显式写死才是幂等的；靠移除内联覆盖去露出 :root 的 0，
@@ -261,6 +261,25 @@ export function readMotionPreference(): MotionPreference {
   } catch {
     return 'system'
   }
+}
+
+/**
+ * JS 层判断「此刻要不要减少动效」，给 CSS 令牌管不到的地方用（跟随鼠标的位移、scrollTo 的 smooth 等）。
+ *
+ * 与 global.scss 里 dd-motion-force / dd-motion-off 两个 class 同一口径：
+ *   始终开启 → false（系统开着「减少动态效果」也照常，否则全站动画都回来了、只有这里不动）；
+ *   减少动效 → true（不看系统）；
+ *   跟随系统 → 看 prefers-reduced-motion。
+ *
+ * 每次调用都现读而不是缓存：用户可能在页面开着的时候改系统设置，
+ * 两个判断都很便宜（localStorage 与 matchMedia 浏览器内部都有缓存），不值得为它挂 change 监听。
+ */
+export function shouldReduceMotion(): boolean {
+  const preference = readMotionPreference()
+  if (preference === 'always') return false
+  if (preference === 'reduce') return true
+  if (typeof window === 'undefined') return false
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
 }
 
 /**

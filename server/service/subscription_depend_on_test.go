@@ -294,6 +294,10 @@ func TestSubscriptionDependencyIsNoOpWhenWhitelistEmpty(t *testing.T) {
 // 断言辅助库文件不会被建成定时任务，并且日志里点名了它们。
 func TestSubscriptionDependencyOnlyFilesAreCheckedOutButNotScheduled(t *testing.T) {
 	testutil.SetupTestEnv(t)
+	// jx_sign.js / jddj_bean.js 没有 cron 头：默认规则留空时不建任务（#134），这里填上规则让白名单文件都落成任务。
+	if err := model.SetConfig("default_cron_rule", "20 6 * * *"); err != nil {
+		t.Fatalf("set default_cron_rule: %v", err)
+	}
 
 	saveDir := "jdpro_depend"
 	scriptsRoot := filepath.Join(config.C.Data.ScriptsDir, saveDir)
@@ -461,9 +465,9 @@ func TestSyncSubscriptionTasksDependencyNoOpWhenWhitelistEmpty(t *testing.T) {
 		}
 	}
 
+	// 三个文件都带 cron 头，默认规则留空（出厂口径）不影响候选集合。
 	options := subscriptionTaskSyncOptions{
 		autoAdd:     true,
-		defaultCron: FallbackSubscriptionCron,
 		allowedExts: map[string]bool{".js": true},
 	}
 
@@ -590,6 +594,11 @@ func TestPullGitRepoWithCallbackChecksOutDependencyFiles(t *testing.T) {
 	}
 
 	// 检出之后立刻跑一遍任务同步：辅助文件在盘上，但不能变成定时任务。
+	// 仓库里的脚本都没有 cron 头：填上默认规则（#134 起留空不建任务），主脚本才会建任务；
+	// 辅助文件同样没有 cron 头，默认规则对它们也不能生效，依赖规则优先。
+	if err := model.SetConfig("default_cron_rule", "20 6 * * *"); err != nil {
+		t.Fatalf("set default_cron_rule: %v", err)
+	}
 	sub.AutoAddTask = true
 	if err := database.DB.Create(sub).Error; err != nil {
 		t.Fatalf("create subscription: %v", err)

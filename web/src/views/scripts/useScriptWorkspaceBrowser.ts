@@ -40,6 +40,29 @@ function persistSidebarCollapsed(value: boolean) {
   }
 }
 
+/**
+ * 按后端 normalizeScriptRelativePath（server/handler/script.go）的口径规范化脚本路径：
+ * `\` 转 `/`、每段 trim、去掉空段和 `.` 段。
+ *
+ * 为什么要做：任务页 `?file=` 传来的是任务命令里的原始 token，可能是 `./jd/x.py`、`jd\x.py`。
+ * 后端照样能打开，但 selectedFile 和目录树的 key（`jd/x.py`）对不上，树定位会静默失败，
+ * 删除 / 重命名里的「是不是当前文件」比较也会跟着判错。
+ *
+ * 只做「后端也会做」的那几步：以 `/` 开头的绝对路径、`..` 段后端会直接拒绝，
+ * 这里原样交过去让它报错，不在前端把它「修」成另一个相对路径。
+ */
+function normalizeScriptPath(raw: string) {
+  const slashed = raw.trim().replace(/\\/g, '/')
+  if (!slashed || slashed.startsWith('/')) {
+    return slashed
+  }
+  return slashed
+    .split('/')
+    .map(segment => segment.trim())
+    .filter(segment => segment !== '' && segment !== '.')
+    .join('/')
+}
+
 export function useScriptWorkspaceBrowser() {
   const { isMobile, isTablet } = useResponsive()
   const isCompactLayout = computed(() => isTablet.value)
@@ -66,6 +89,10 @@ export function useScriptWorkspaceBrowser() {
   const treeLoading = ref(false)
   const isEditing = ref(false)
   const editorAutoFocusTicket = ref(0)
+  // 目录树定位的触发信号：openFile 每成功一次 +1（加载失败回滚时，仅当加载期间树重建过才 +1），侧栏侦听它去展开祖先、高亮、滚动。
+  // 不直接侦听 selectedFile：同一文件从任务页再次进入时它不变，却同样要重新定位；
+  // 而 openFile 是「先改 selectedFile、加载失败再回滚」，侦听它会先按失败的路径展开一遍祖先。
+  const treeRevealTicket = ref(0)
 
   const editorLanguage = computed(() => {
     if (!selectedFile.value) return 'javascript'
@@ -234,13 +261,15 @@ export function useScriptWorkspaceBrowser() {
   }
 
   async function openFile(path: string, options: { skipUnsavedCheck?: boolean } = {}) {
-    const normalizedPath = path.trim()
+    const normalizedPath = normalizeScriptPath(path)
     if (!normalizedPath) {
       return false
     }
 
     if (normalizedPath === selectedFile.value) {
       mobileShowEditor.value = true
+      // 同一文件再次进入（比如从任务页又点了一次脚本名）也算打开成功，照样重新定位
+      treeRevealTicket.value += 1
       return true
     }
 
@@ -250,15 +279,26 @@ export function useScriptWorkspaceBrowser() {
     }
 
     const previousState = snapshotState()
+    // 记下加载前的树（loadTree 每次都整体换新数组，引用变了 = 加载期间树重建过），失败回滚时用来判断要不要补定位
+    const treeBeforeLoad = fileTree.value
     selectedFile.value = normalizedPath
     isEditing.value = false
     const loaded = await loadFileContent(normalizedPath)
     if (!loaded) {
       restoreState(previousState)
+      // 只有加载期间树重建过，才给「原来那个文件」补一次定位（这时 selectedFile 已经回滚，不会按打不开的路径展开祖先）：
+      // 加载期间 selectedFile 暂时指着打不开的路径，恰好这时树刷新了（缓存态从任务页进来会 loadTree），
+      // 刷新后的定位找不到它、只清了高亮，新树又是全收起的，回滚后原文件虽然高亮了，却藏在收起的目录里看不见。
+      // 树没重建时不能补：定位会展开祖先并滚过去，用户刚收起的目录会被重新展开，正在浏览的位置也被拽走。
+      // 这时侧栏的 currentFile 侦听和节点点击包装已经用 expandParents=false 把高亮拉回原文件，不展开、不滚动。
+      if (previousState.selectedFile && fileTree.value !== treeBeforeLoad) {
+        treeRevealTicket.value += 1
+      }
       return false
     }
 
     mobileShowEditor.value = true
+    treeRevealTicket.value += 1
     return true
   }
 
@@ -321,6 +361,7 @@ export function useScriptWorkspaceBrowser() {
     treeLoading,
     isEditing,
     editorAutoFocusTicket,
+    treeRevealTicket,
     editorLanguage,
     hasChanges,
     allFolders,

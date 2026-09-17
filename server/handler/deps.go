@@ -819,7 +819,7 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 		logDirty = false
 	}
 
-	appendLine(fmt.Sprintf("[依赖任务已启动，超时阈值：%s，可在「系统设置 - 依赖安装超时(分钟)」调整]", operationTimeout.Truncate(time.Second)), true)
+	appendLine(fmt.Sprintf("[依赖任务已启动，超时阈值：%s，可在「系统设置 - 任务运行 - 依赖安装超时(分钟)」调整]", operationTimeout.Truncate(time.Second)), true)
 
 	scanDone := make(chan struct{})
 	go func() {
@@ -1143,7 +1143,7 @@ func buildMissingToolchainHint(env dependencyToolchainEnv) string {
 				"只能按下面的提权出路装 " + packages
 		}
 		compile := install + "，装完再重装本依赖；现场编译很慢，" +
-			"记得先到「系统设置 - 依赖安装超时(分钟)」把阈值调大，默认 20 分钟往往不够"
+			"记得先到「系统设置 - 任务运行 - 依赖安装超时(分钟)」把阈值调大，默认 20 分钟往往不够"
 		if preferDebianImage {
 			// 两条出路是并列关系，不是二选一：先给成本最低的换镜像，再给兜底的现场编译。
 			body = "出路一：换到 Debian 版镜像（如 linzixuanzz/daidai-panel:debian）后重装 —— " +

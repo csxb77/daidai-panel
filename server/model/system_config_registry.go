@@ -99,7 +99,7 @@ const defaultBackupScheduleSelection = "configs,tasks,subscriptions,env_vars,log
 // systemConfigGroupLabels 是分组 slug -> 中文分组名。
 // 新增分组时必须在这里补一条，TestEveryRegisteredConfigGroupHasLabel 会兜底拦截漏补。
 var systemConfigGroupLabels = map[string]string{
-	"tasks":        "任务执行",
+	"tasks":        "任务运行",
 	"network":      "网络代理",
 	"security":     "安全",
 	"branding":     "面板与运行时",
@@ -166,7 +166,8 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	// 唯一会跑 git clean -fd（连未跟踪文件一起清）的是「目录已存在但不是 git 仓库、原地 init 接管」那条分支，
 	// 它无条件执行、根本不看这个开关，所以说明里不能再写「清理多余文件」。
 	newBoolConfig("subscription_force_overwrite", "覆盖拉取（默认）", "true", "订阅拉取时覆盖本地修改（未单独设置的订阅使用此默认值）", "subscription"),
-	newValidatedStringConfig("default_cron_rule", "默认 Cron 规则", "", "订阅脚本未声明 cron 时使用的默认规则", "subscription", normalizeDefaultCronRule),
+	// 留空不是「每天 0 点」：v3.2.9 起未声明 cron 的脚本在留空时不建任务（#134），描述要把留空的真实行为写出来。
+	newValidatedStringConfig("default_cron_rule", "默认 Cron 规则", "", "订阅脚本未声明 cron 时使用；留空则不为这类脚本建定时任务", "subscription", normalizeDefaultCronRule),
 	// 默认值必须含 mjs：ESM 脚本（.mjs）在青龙生态里很常见，
 	// 旧默认 LegacyRepoFileExtensions 漏了它，表现为「仓库拉取成功、.mjs 却一个任务都不建」。
 	// 存量实例的补齐见 system_config.go 的 InitDefaultConfigs。

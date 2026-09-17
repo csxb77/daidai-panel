@@ -761,16 +761,29 @@ route('DELETE', '/system/console/run/:runId', () => ({ message: '已清除' }))
 // 系统配置（/configs）
 // ===========================================================================
 
+// 读出时与 server/handler/config.go:87-89 同口径：已注册的项值为空串时，value 换成 default_value。
+// 存的时候照旧原样存空串（见 setConfigValue），只在响应里替换，返回新对象、不改库里那份。
+// 不替换的话，清空「依赖安装超时」保存后再读回来是空串，设置页数字框读成 0，整张「任务运行」卡都保存不了
+function configResponseItem(item: ReturnType<typeof db>['configs'][string]) {
+  if (item.registered && !item.value) {
+    return { ...item, value: item.default_value ?? '' }
+  }
+  return item
+}
+
 // configApi.list 的类型是 { data: SystemConfigMap }，是「键 -> 配置项」的对象而不是数组。
 // fixture 是「全新安装、system_configs 表一行都没有」时的响应：每项的 value 等于
 // 注册表里的 default_value（依据 server/handler/config.go:87-89）。
 // 设置页 6 个 tab 的表单、以及按 schema 兜底渲染的 ExtraConfigCard 都读它。
-route('GET', '/configs', () => ({ data: db().configs }))
+route('GET', '/configs', () => ({
+  data: Object.fromEntries(Object.entries(db().configs).map(([key, item]) => [key, configResponseItem(item)])),
+}))
 
 route('GET', '/configs/:key', (ctx) => {
   const key = ctx.vars['key'] ?? ''
-  const item = db().configs[key]
-  if (!item) return notFound('配置不存在')
+  const stored = db().configs[key]
+  if (!stored) return notFound('配置不存在')
+  const item = configResponseItem(stored)
   return { data: { key, value: item.value ?? '', config: item } }
 })
 

@@ -70,8 +70,9 @@ export const CONFIG_KEYS_RENDERED_ELSEWHERE: Record<string, string> = {
   python_default_version: 'web/src/views/deps/index.vue',
   // 订阅页的「订阅设置」弹窗
   subscription_force_overwrite: 'web/src/views/subscriptions/index.vue',
-  // 概览页的「上次检查时间」只读展示；值由静默更新巡检自己写入，不是用户偏好
-  auto_update_last_checked_at: 'web/src/views/settings/useSettingsOverview.ts'
+  // 「代理设置」页静默更新开关下方的「上次检查更新时间」只读展示；
+  // 值由静默更新巡检与概览页手动检查更新写入，不是用户偏好
+  auto_update_last_checked_at: 'web/src/views/settings/components/ProxyConfigCard.vue'
 }
 
 /**
@@ -221,6 +222,19 @@ export function resolveConfigOptions(
     return item.options
   }
   return [{ value, label: `${value}（面板未声明）` }, ...item.options]
+}
+
+/**
+ * 整数项的取值区间提示，服务端给了 min/max 才有，其余返回空串。
+ *
+ * 兜底区与「任务运行」卡里从兜底区挪过去的整数项共用，保证两处说法一致。
+ */
+export function formatConfigRangeHint(item: ParsedSystemConfigItem): string {
+  if (item.valueType !== 'int') return ''
+  if (item.min !== undefined && item.max !== undefined) return `取值范围 ${item.min} - ${item.max}`
+  if (item.min !== undefined) return `不能小于 ${item.min}`
+  if (item.max !== undefined) return `不能大于 ${item.max}`
+  return ''
 }
 
 /**

@@ -654,16 +654,12 @@ func isGlobalHookScriptName(name string) bool {
 func (c *TaskScriptCleanup) subscriptionDetail(group *taskScriptGroup, subs []model.Subscription) string {
 	for i := range subs {
 		sub := &subs[i]
-		readd := ""
-		if resolveSubscriptionAutoAddTask(sub) {
-			readd = taskScriptDetailSubReaddSuffix
-		}
 
 		if sub.Type == model.SubTypeSingleFile {
 			// 单文件订阅只保护精确的下载目标（每次拉取都会无条件重新下载），同目录下的其他文件照常判定。
 			dest := singleFileSubscriptionDestPath(c.base.Abs, sub)
 			if info, err := os.Stat(dest); err == nil && group.info != nil && os.SameFile(info, group.info) {
-				return fmt.Sprintf(taskScriptDetailSubSingleFileFmt, sub.Name, readd)
+				return fmt.Sprintf(taskScriptDetailSubSingleFileFmt, sub.Name, subscriptionReaddSuffix(sub, group.realPath))
 			}
 			continue
 		}
@@ -673,9 +669,29 @@ func (c *TaskScriptCleanup) subscriptionDetail(group *taskScriptGroup, subs []mo
 			continue
 		}
 		if resolveSubscriptionForceOverwrite(sub) {
-			return fmt.Sprintf(taskScriptDetailSubGitForceFmt, sub.Name, readd)
+			return fmt.Sprintf(taskScriptDetailSubGitForceFmt, sub.Name, subscriptionReaddSuffix(sub, group.realPath))
 		}
 		return fmt.Sprintf(taskScriptDetailSubGitPreserveFmt, sub.Name)
+	}
+	return ""
+}
+
+// subscriptionReaddSuffix：下次拉取会不会给这个文件重新建任务，会才带「并自动重新创建对应的任务」。
+// 自动建任务开着之外，还要有 cron 来源（#134）：脚本自己声明了 cron；或者它不是通知辅助脚本、订阅设置里的默认 Cron 规则合法非空。
+// 解析与扫描同一套（resolveSubscriptionScriptCron、isSubscriptionHelperScript、subscriptionDefaultCronRule）。
+// 白 / 黑名单、依赖规则不在这里判断，与改动前的文案口径一致。演示站 web/src/demo/db.ts 的 subscriptionManagedDetail 照抄这条口径。
+func subscriptionReaddSuffix(sub *model.Subscription, scriptPath string) string {
+	if !resolveSubscriptionAutoAddTask(sub) {
+		return ""
+	}
+	if resolveSubscriptionScriptCron(scriptPath) != "" {
+		return taskScriptDetailSubReaddSuffix
+	}
+	if isSubscriptionHelperScript(filepath.Base(scriptPath)) {
+		return ""
+	}
+	if rule, _ := subscriptionDefaultCronRule(); rule != "" {
+		return taskScriptDetailSubReaddSuffix
 	}
 	return ""
 }

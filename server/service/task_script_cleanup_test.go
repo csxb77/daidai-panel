@@ -621,17 +621,23 @@ func TestTaskScriptLinkCheckFailureIsLogged(t *testing.T) {
 // ---------- 预览：订阅 ----------
 
 func TestTaskScriptPreviewGitSubscription(t *testing.T) {
+	const declared = "// cron: 0 8 * * *\nconsole.log('x')\n"
 	cases := []struct {
 		name    string
 		sub     model.Subscription
 		makeGit bool
-		want    string
-		notWant string
+		file    string // 相对脚本目录；空 = repo/x.js
+		content string // 空 = "x"（没有 cron 声明）
+		// defaultRule：库里的 default_cron_rule，按原样写入（可以是非法值）；空 = 不写。
+		defaultRule string
+		want        string
+		notWant     string
 	}{
 		{
 			name:    "force overwrite restores the file",
 			sub:     model.Subscription{Name: "repo-force", Type: model.SubTypeGitRepo, SaveDir: "repo", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncDisabled, Enabled: true},
 			makeGit: true,
+			content: declared,
 			want:    "下次拉取会把它还原。",
 			notWant: "自动重新创建",
 		},
@@ -639,7 +645,41 @@ func TestTaskScriptPreviewGitSubscription(t *testing.T) {
 			name:    "auto add task mentions re-creation",
 			sub:     model.Subscription{Name: "repo-readd", Type: model.SubTypeGitRepo, SaveDir: "repo", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true},
 			makeGit: true,
+			content: declared,
 			want:    "下次拉取会把它还原，并自动重新创建对应的任务。",
+		},
+		// #134：没识别到 cron 声明、默认 Cron 规则又留空的脚本，拉取不会建任务，不能许诺「自动重新创建」。
+		{
+			name:    "auto add without cron declaration and empty default rule",
+			sub:     model.Subscription{Name: "repo-nocron", Type: model.SubTypeGitRepo, SaveDir: "repo", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true},
+			makeGit: true,
+			want:    "下次拉取会把它还原。",
+			notWant: "自动重新创建",
+		},
+		{
+			name:        "default cron rule re-creates scripts without cron declaration",
+			sub:         model.Subscription{Name: "repo-default", Type: model.SubTypeGitRepo, SaveDir: "repo", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true},
+			makeGit:     true,
+			defaultRule: "15 3 * * *",
+			want:        "下次拉取会把它还原，并自动重新创建对应的任务。",
+		},
+		{
+			name:        "invalid stored default rule is ignored",
+			sub:         model.Subscription{Name: "repo-dirty", Type: model.SubTypeGitRepo, SaveDir: "repo", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true},
+			makeGit:     true,
+			defaultRule: "0 0 * * * * *",
+			want:        "下次拉取会把它还原。",
+			notWant:     "自动重新创建",
+		},
+		// 通知辅助脚本没有 cron 声明时，填了默认规则也不建任务（与扫描同口径）。
+		{
+			name:        "helper script is not re-created by the default rule",
+			sub:         model.Subscription{Name: "repo-helper", Type: model.SubTypeGitRepo, SaveDir: "repo", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true},
+			makeGit:     true,
+			file:        "repo/lib/sendNotify.js",
+			defaultRule: "15 3 * * *",
+			want:        "下次拉取会把它还原。",
+			notWant:     "自动重新创建",
 		},
 		{
 			name:    "preserve local changes warns about conflicts",
@@ -669,14 +709,24 @@ func TestTaskScriptPreviewGitSubscription(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := tscSetup(t)
-			full := tscWriteFile(t, "repo/x.js", "x")
+			file, content := tc.file, tc.content
+			if file == "" {
+				file = "repo/x.js"
+			}
+			if content == "" {
+				content = "x"
+			}
+			full := tscWriteFile(t, file, content)
 			if tc.makeGit {
 				tscMkdir(t, "repo/.git")
 			}
+			if tc.defaultRule != "" {
+				ucSetDirtyDefaultRule(t, tc.defaultRule)
+			}
 			tscCreateSubscription(t, tc.sub)
-			task := tscCreateTask(t, "repo-x", "task repo/x.js")
+			task := tscCreateTask(t, "repo-x", "task "+file)
 
-			item := tscItem(t, PreviewTaskScriptDeletion([]uint{task.ID}, env).Scripts, "repo/x.js")
+			item := tscItem(t, PreviewTaskScriptDeletion([]uint{task.ID}, env).Scripts, file)
 			tscAssertKept(t, item, TaskScriptReasonSubscriptionManaged)
 			if !strings.Contains(item.Detail, "订阅「"+tc.sub.Name+"」") || !strings.Contains(item.Detail, tc.want) {
 				t.Fatalf("unexpected detail: %q", item.Detail)
@@ -711,7 +761,7 @@ func TestTaskScriptPreviewGitSubscriptionAtScriptsRoot(t *testing.T) {
 // 单文件订阅只保护精确的下载目标；subscription:N 标签不能作为归属依据（可以伪造），以路径为准。
 func TestTaskScriptPreviewSingleFileSubscriptionAndLabels(t *testing.T) {
 	env := tscSetup(t)
-	tscWriteFile(t, "downloads/x.js", "x")
+	tscWriteFile(t, "downloads/x.js", "// cron: 0 8 * * *\nconsole.log('x')\n")
 	tscWriteFile(t, "downloads/other.js", "x")
 	tscWriteFile(t, "ops/y.py", "x")
 	tscCreateSubscription(t, model.Subscription{Name: "single", Type: model.SubTypeSingleFile, URL: "https://example.com/raw/x.js", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true})
@@ -730,6 +780,20 @@ func TestTaskScriptPreviewSingleFileSubscriptionAndLabels(t *testing.T) {
 	}
 	tscAssertDeletable(t, tscItem(t, preview.Scripts, "downloads/other.js"))
 	tscAssertDeletable(t, tscItem(t, preview.Scripts, "ops/y.py"))
+}
+
+// #134：单文件订阅下载的脚本没识别到 cron 声明、默认 Cron 规则留空时，拉取照样重新下载，但不会建任务，文案不带后半句。
+func TestTaskScriptPreviewSingleFileSubscriptionWithoutCronDeclaration(t *testing.T) {
+	env := tscSetup(t)
+	tscWriteFile(t, "downloads/lib.py", "X = 1\n")
+	tscCreateSubscription(t, model.Subscription{Name: "single-lib", Type: model.SubTypeSingleFile, URL: "https://example.com/raw/lib.py", OverwriteMode: model.SubOverwriteForce, AutoAddTaskMode: model.SubTaskSyncEnabled, Enabled: true})
+	task := tscCreateTask(t, "lib", "task downloads/lib.py")
+
+	item := tscItem(t, PreviewTaskScriptDeletion([]uint{task.ID}, env).Scripts, "downloads/lib.py")
+	tscAssertKept(t, item, TaskScriptReasonSubscriptionManaged)
+	if item.Detail != "这是订阅「single-lib」下载的文件，每次拉取都会重新下载。如果不再需要，请停用或删除这个订阅。" {
+		t.Fatalf("unexpected single-file detail: %q", item.Detail)
+	}
 }
 
 // ---------- 预览：托管 helper 与公共库提示 ----------

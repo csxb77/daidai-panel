@@ -192,9 +192,9 @@ func evaluateSubscriptionPinConfig(sub model.Subscription) subscriptionPinResult
 	}
 
 	sub.SaveDir = subscriptionPinSaveDir
+	// 默认规则留空（出厂口径）：fixture 里每个脚本都带 cron 头，候选集合不受影响。
 	candidates, deps := collectSubscriptionTaskCandidates(&sub, subscriptionTaskSyncOptions{
 		autoAdd:     true,
-		defaultCron: FallbackSubscriptionCron,
 		allowedExts: subscriptionPinExts,
 	})
 	for command := range candidates {

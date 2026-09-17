@@ -540,6 +540,16 @@ func formatSubscriptionPatternList(patterns []string) string {
 	return strings.Join(quoted, " / ")
 }
 
+// formatSubscriptionUndeclaredCronFiles 给「没识别到 cron 声明、未建任务」的提示列文件名：最多 5 个，多了用「如 … 等」带过
+// （总数已经写在提示开头）。
+func formatSubscriptionUndeclaredCronFiles(files []string) string {
+	const limit = 5
+	if len(files) > limit {
+		return "如 " + strings.Join(files[:limit], "、") + " 等"
+	}
+	return strings.Join(files, "、")
+}
+
 // formatSubscriptionFileList 把文件列表压成一行日志；超过 limit 只列前 limit 个并带上总数，
 // 避免大仓库把整个拉取日志刷爆。
 func formatSubscriptionFileList(files []string, limit int) string {
@@ -912,7 +922,8 @@ var (
 	//   * @cron 0 0 * * *
 	//   // cron: 0 0 * * *
 	// 通过 `\b` 词界避免误匹配 `crontab` / `cron-utils` 等关键字。
-	cronLabelPrefixRe      = regexp.MustCompile(`(?im)^[\s#*@/]*@?cron\b\s*[:：]?\s*(\S.*)$`)
+	// 第 1 组是 cron 前面的注释标记与缩进（判断值带引号时能不能剥，见 extractSubscriptionCronExpressionFromLabel），第 2 组是值。
+	cronLabelPrefixRe      = regexp.MustCompile(`(?im)^([\s#*@/]*)@?cron\b\s*[:：]?\s*(\S.*)$`)
 	subscriptionTaskNameRe = regexp.MustCompile(`new\s+Env\s*\(\s*['"` + "`" + `]([^'"` + "`" + `]+)['"` + "`" + `]\s*\)`)
 	// 注释头里的任务名声明，覆盖用户实际在用的几种写法：
 	//   //name: 远程开机        // name: 雀巢会员      （js / mjs / ts）
@@ -929,16 +940,21 @@ var (
 )
 
 type subscriptionTaskSyncOptions struct {
-	autoAdd     bool
-	autoDelete  bool
+	autoAdd    bool
+	autoDelete bool
+	// defaultCron：订阅设置里的默认 Cron 规则，脚本没识别到 cron 声明时使用；空串 = 这类脚本不建任务（#134）。
 	defaultCron string
-	allowedExts map[string]bool
+	// ignoredDefaultCron：库里存着、但 cron.Parse 不认而被忽略的默认规则原值（直接改库、恢复旧备份才会有），只给拉取日志用。
+	ignoredDefaultCron string
+	allowedExts        map[string]bool
 }
 
 type subscriptionTaskCandidate struct {
 	Name           string
 	Command        string
 	CronExpression string
+	// DefaultRule：脚本没声明 cron，CronExpression 来自默认 Cron 规则。只用于日志分开计数与标明来源。
+	DefaultRule bool
 }
 
 func subscriptionTaskLabel(subID uint) string {
@@ -1235,16 +1251,29 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 
 	// 可观测兜底：v2.2.8 之前任何空候选 / DB 创建失败都被静默吞掉，用户只看到
 	// "[完成]" 就以为同步成功了。这里把每一步都打日志出来。
+	// cron 的来源分开数（#134）：以前把默认规则建的也算进「含 cron 的脚本」，看不出哪些是脚本自己声明的。
+	declaredCount, defaultRuleCount := 0, 0
+	for _, candidate := range candidates {
+		if candidate.DefaultRule {
+			defaultRuleCount++
+		} else {
+			declaredCount++
+		}
+	}
 	scannedFileCount := countSubscriptionScriptFiles(scriptsDir, options.allowedExts, sub)
-	emit(fmt.Sprintf("[扫描脚本] 目录 %s 共扫描 %d 个候选文件（按白/黑名单过滤后），识别出 %d 个含 cron 的脚本",
-		scriptsDir, scannedFileCount, len(candidates)))
+	emit(fmt.Sprintf("[扫描脚本] 目录 %s 共扫描 %d 个候选文件（按白/黑名单过滤后），识别出 %d 个声明 cron 的脚本",
+		scriptsDir, scannedFileCount, declaredCount))
+	if defaultRuleCount > 0 {
+		emit(fmt.Sprintf("[默认 Cron 规则] %d 个脚本没有识别到 cron 声明，使用订阅设置里的默认规则 %s", defaultRuleCount, options.defaultCron))
+	}
+	// 默认规则只在新建任务时用得上，自动添加关着就不提。
+	if options.autoAdd && options.ignoredDefaultCron != "" {
+		emit(fmt.Sprintf("[警告] 订阅设置里的默认 Cron 规则「%s」无效，已忽略", options.ignoredDefaultCron))
+	}
 	// 依赖规则是「拉下来但不建任务」，不打出来的话用户会以为这些文件被漏掉了。
 	if len(dependencyFiles) > 0 {
 		emit(fmt.Sprintf("[依赖文件] 依赖规则命中 %d 个文件，已拉取到脚本目录供主脚本调用，不会建成定时任务: %s",
 			len(dependencyFiles), formatSubscriptionFileList(dependencyFiles, 10)))
-	}
-	if len(candidates) == 0 && scannedFileCount > 0 {
-		emit("[提示] 仓库内有脚本但没有识别到 cron 表达式：请检查脚本头部是否含 `cron <表达式>` 注释，或在系统设置 default_cron_rule 里配置默认 cron")
 	}
 	// 扫到 0 个文件是「静默失败」最典型的落点：拉取全绿、日志无错、任务列表空。
 	// 把最可能的三个原因直接摊开，别让用户去猜。
@@ -1269,12 +1298,25 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 	// 想恢复订阅默认就删掉任务重新拉取。以前按命令原文匹配，命令一加参数就对不上：
 	// 新建一条重复任务，开着自动删除时还会把改过命令的那条连同历史日志删掉。
 	scriptIndex := newSubscriptionScriptIndex(config.C.Data.ScriptsDir, candidates)
+	undeclared := newSubscriptionUndeclaredScripts(scriptIndex, config.C.Data.ScriptsDir, scan.undeclaredCron)
 	managedCommands := make(map[string]bool, len(managedTasks))
 	managedKeys := make(map[string]bool, len(managedTasks))
+	managedUndeclaredKeys := make(map[string]bool)
 	for i := range managedTasks {
 		managedCommands[strings.TrimSpace(managedTasks[i].Command)] = true
 		if key, ok := scriptIndex.scriptKeyOf(managedTasks[i].Command); ok {
 			managedKeys[key] = true
+		}
+		if key, ok := scriptIndex.scriptKeyIn(managedTasks[i].Command, undeclared.hasKey); ok {
+			managedUndeclaredKeys[key] = true
+		}
+	}
+	// undeclaredWithTask：没识别到 cron 声明、本次不建任务的脚本里已经有任务的（按精确命令记）。先记本订阅自己的
+	// （升级前按每天 0 点兜底建的、之前接管的），新增分支接管到的再补上。有任务的不再接管同脚本的其他任务，也不进「未建」提示。
+	undeclaredWithTask := make(map[string]bool, len(undeclared.items))
+	for _, item := range undeclared.items {
+		if managedCommands[item.command] || (item.key != "" && managedUndeclaredKeys[item.key]) {
+			undeclaredWithTask[item.command] = true
 		}
 	}
 
@@ -1284,6 +1326,21 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 	detached := 0
 	failed := 0
 
+	// adoptExisting 接管：只加上本订阅的标签，名称、定时、命令一概不动；有几条接管几条。
+	adoptExisting := func(matches []*model.Task) {
+		for _, existing := range matches {
+			existing.SetLabelsFromSlice(withLabel(existing.GetLabels(), label))
+			if err := database.DB.Model(existing).Update("labels", existing.Labels).Error; err != nil {
+				failed++
+				emit(fmt.Sprintf("[关联已有任务失败] %s: %v", existing.Name, err))
+			} else {
+				adopted++
+				emit(fmt.Sprintf("[关联已有任务] %s", existing.Name))
+			}
+		}
+	}
+
+	adoptPoolFailed := false
 	if options.autoAdd {
 		var pending []string
 		for _, command := range sortedSubscriptionCandidateCommands(candidates) {
@@ -1296,14 +1353,21 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 			}
 			pending = append(pending, command)
 		}
+		var unownedUndeclared []subscriptionUndeclaredScript
+		for _, item := range undeclared.items {
+			if !undeclaredWithTask[item.command] {
+				unownedUndeclared = append(unownedUndeclared, item)
+			}
+		}
 
 		var adoptPool *subscriptionAdoptPool
-		if len(pending) > 0 {
+		if len(pending) > 0 || len(unownedUndeclared) > 0 {
 			var err error
-			if adoptPool, err = loadSubscriptionAdoptPool(scriptIndex, managedTasks); err != nil {
+			if adoptPool, err = loadSubscriptionAdoptPool(scriptIndex, managedTasks, undeclared); err != nil {
 				failed++
 				emit(fmt.Sprintf("[关联已有任务失败] 读取任务列表出错，本次不新建任务，以免与已有任务重复: %v", err))
-				pending = nil
+				pending, unownedUndeclared = nil, nil
+				adoptPoolFailed = true
 			}
 		}
 
@@ -1311,19 +1375,10 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 			candidate := candidates[command]
 
 			// 接管：不归本订阅管、但命令与候选完全相同或跑的是同一个脚本的任务（用户自建的、删订阅再重建后
-			// 带着悬空旧标签的、别的订阅的），只加上本订阅的标签，名称、定时、命令一概不动；有几条接管几条。
+			// 带着悬空旧标签的、别的订阅的），只加标签。
 			key, keyOK := scriptIndex.candidateKey(command)
 			if matches := adoptPool.take(command, key, keyOK); len(matches) > 0 {
-				for _, existing := range matches {
-					existing.SetLabelsFromSlice(withLabel(existing.GetLabels(), label))
-					if err := database.DB.Model(existing).Update("labels", existing.Labels).Error; err != nil {
-						failed++
-						emit(fmt.Sprintf("[关联已有任务失败] %s: %v", existing.Name, err))
-					} else {
-						adopted++
-						emit(fmt.Sprintf("[关联已有任务] %s", existing.Name))
-					}
-				}
+				adoptExisting(matches)
 				continue
 			}
 
@@ -1349,15 +1404,58 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 					log.Printf("任务 %d 注册调度失败（它不会自动触发）: %v", task.ID, err)
 				}
 				created++
-				emit(fmt.Sprintf("[自动添加任务] %s (cron: %s)", candidate.Name, candidate.CronExpression))
+				if candidate.DefaultRule {
+					emit(fmt.Sprintf("[自动添加任务] %s (cron: %s，默认规则)", candidate.Name, candidate.CronExpression))
+				} else {
+					emit(fmt.Sprintf("[自动添加任务] %s (cron: %s)", candidate.Name, candidate.CronExpression))
+				}
+			}
+		}
+
+		// 没识别到 cron 声明、本订阅还没有任务的脚本：不建任务，但已有的同脚本任务（青龙导入的、手建的、删订阅再重建后
+		// 带着悬空旧标签的）照旧只加标签接管，与 v3.2.8 它们还是兜底候选时一致——不接管的话它们不归订阅管，
+		// 上游删了脚本也不会被自动删除（Wave 2 复查）。认法与候选相同：精确命令或脚本键（键有歧义时只认精确命令）。
+		for _, item := range unownedUndeclared {
+			if matches := adoptPool.take(item.command, item.key, item.claimable); len(matches) > 0 {
+				adoptExisting(matches)
+				undeclaredWithTask[item.command] = true
 			}
 		}
 	}
 
+	// 没识别到 cron 声明、默认规则又没有可用值的脚本不建任务（#134）：说清有几个、是哪些、想建怎么办。放在接管之后算：
+	// 已经有任务的（本订阅的、刚接管的，不论原来带什么标签）不算「未建」，不列——叫人给已经有任务的脚本再建一条只会建出重复任务。
+	// 自动添加关着时本来就不建，不提示；读任务列表失败时不知道哪些脚本有任务，也不提示。
+	// 不说「未声明 cron」：缩进 + 引号这类写法的声明认不出，脚本作者明明写了。
+	if options.autoAdd && !adoptPoolFailed {
+		var unbuilt []string
+		for _, item := range undeclared.items {
+			if undeclaredWithTask[item.command] {
+				continue
+			}
+			rel, err := filepath.Rel(scriptsDir, item.path)
+			if err != nil {
+				rel = filepath.Base(item.path)
+			}
+			unbuilt = append(unbuilt, filepath.ToSlash(rel))
+		}
+		if len(unbuilt) > 0 {
+			// 库里存着非法规则时（上面已有 [警告]），叫人「修正」而不是「填写」：设置里看着是填了的。
+			action := "填写"
+			if options.ignoredDefaultCron != "" {
+				action = "修正"
+			}
+			emit(fmt.Sprintf("[提示] %d 个脚本没有识别到 cron 声明，未建定时任务（%s）。需要的话在订阅设置%s「默认 Cron 规则」，或手动为脚本建任务",
+				len(unbuilt), formatSubscriptionUndeclaredCronFiles(unbuilt), action))
+		}
+	}
+
 	if options.autoDelete {
-		if len(candidates) == 0 {
+		if len(candidates) == 0 && len(scan.undeclaredCron) == 0 {
 			// 熔断：一个候选都没有，多半是检出为空、子目录/白名单配错，或单文件订阅扫错了目录，
 			// 而不是上游真把脚本全删了。这时照「不在候选里就删」会把整个订阅的任务连同历史日志清空。
+			// 没识别到 cron 声明、没建任务的脚本也算扫到了受管脚本（#134）：改动前它们按兜底 cron 都是候选、不触发熔断，
+			// 这里保持一致，否则整个仓库都没写 cron 头的订阅从此再也删不掉上游已删脚本的任务。
 			if len(managedTasks) > 0 {
 				emit("[跳过自动删除] 本次没有识别到任何候选脚本，为防误删，未删除任何任务")
 			}
@@ -1366,9 +1464,9 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 			emit(fmt.Sprintf("[跳过自动删除] 读取订阅列表失败，无法确认任务是否还被其他订阅使用，为防误删，未删除任何任务: %v", err))
 		} else {
 			// 删除必须有正面证据（判定见 subscriptionStaleTaskJudge.judge）。范围不变：只看 task 开头的命令，
-			// node / python3 这类解释器命令从不自动删除。
+			// node / python3 这类解释器命令从不自动删除。没识别到 cron 声明、没建任务的脚本对应的已有任务一律保留（#134）。
 			judge := newSubscriptionStaleTaskJudge(scriptIndex, candidates, saveDir,
-				subscriptionScannedFileKeys(scriptIndex, config.C.Data.ScriptsDir, scan.seenFiles))
+				subscriptionScannedFileKeys(scriptIndex, config.C.Data.ScriptsDir, scan.seenFiles), undeclared)
 			for i := range managedTasks {
 				task := &managedTasks[i]
 				if !strings.HasPrefix(strings.TrimSpace(task.Command), "task ") {
@@ -1563,37 +1661,31 @@ func countSubscriptionScriptFiles(scriptsDir string, allowedExts map[string]bool
 	return count
 }
 
-// FallbackSubscriptionCron 是订阅脚本未声明 cron 时使用的"硬兜底"。
-// 用户既没在脚本头部写 cron 注释、也没在系统设置 default_cron_rule 里配自定义默认值时，
-// 用这个兜底——每天 0 点跑一次，保证 git 拉到的脚本都会变成定时任务。
-// 用户可以在任务详情里手动改 cron。订阅同步从不回写已有任务（#125）：脚本后来补了 cron 头，
-// 想让任务按它重建，就删掉任务重新拉取。
-const FallbackSubscriptionCron = "0 0 * * *"
-
 func getSubscriptionTaskSyncOptions(sub *model.Subscription) subscriptionTaskSyncOptions {
-	defaultCron := strings.TrimSpace(model.GetRegisteredConfig("default_cron_rule"))
-	if defaultCron != "" && !cron.Parse(defaultCron).Valid {
-		defaultCron = ""
-	}
-	// 系统设置里 default_cron_rule 是空时，落到硬兜底。这是用户"git 拉了但一个任务都没建"
-	// 困惑的根因：原默认是 "" → cron 头没识别就 skip，整个仓库一个任务都建不出来。
-	// v2.2.10 起改为：默认兜底 = 每天 0 点。
-	// 注意：兜底目前**无法关闭**。原注释声称「把 default_cron_rule 设成非法值即可关闭」是错的——
-	// model.normalizeDefaultCronRule 对非法值直接报错拒写，这条逃生口从来就不存在。
-	// 上面那句 cron.Parse 校验只用来兜住直接改库/导入配置绕过注册表写入的脏值。
-	// 想让没有 cron 头的脚本不建任务，请关掉「自动添加定时任务」
-	//（全局默认 auto_add_cron，或把这条订阅的 auto_add_task_mode 设成 disabled）。
-	if defaultCron == "" {
-		defaultCron = FallbackSubscriptionCron
-	}
+	// defaultCron 只保存用户在订阅设置里填的合法规则；留空（出厂默认）就是空，未声明 cron 的脚本不建任务（#134）。
+	// v2.2.10 ～ v3.2.8 在留空时硬兜底成每天 0 点、建成启用任务，而且关不掉：config.py、mysend.py 这类库文件、
+	// 拉取后钩子也被建成任务半夜跑，删掉了下次拉取又回来。现在要给这类脚本建任务，就在订阅设置里填默认规则。
+	defaultCron, ignoredDefaultCron := subscriptionDefaultCronRule()
 
 	return subscriptionTaskSyncOptions{
 		// 三态解析，不再是 `sub.AutoAddTask || 全局`：见 resolveSubscriptionAutoAddTask 的注释。
-		autoAdd:     resolveSubscriptionAutoAddTask(sub),
-		autoDelete:  resolveSubscriptionAutoDelTask(sub),
-		defaultCron: defaultCron,
-		allowedExts: getSubscriptionAllowedExtensions(model.GetRegisteredConfig("repo_file_extensions")),
+		autoAdd:            resolveSubscriptionAutoAddTask(sub),
+		autoDelete:         resolveSubscriptionAutoDelTask(sub),
+		defaultCron:        defaultCron,
+		ignoredDefaultCron: ignoredDefaultCron,
+		allowedExts:        getSubscriptionAllowedExtensions(model.GetRegisteredConfig("repo_file_extensions")),
 	}
+}
+
+// subscriptionDefaultCronRule 读订阅设置里的默认 Cron 规则：合法就返回它，留空返回空串。
+// 库里的值 cron.Parse 不认时（normalizeDefaultCronRule 拒写非法值，只有直接改库 / 恢复旧备份能绕过去）当作没配，
+// 原值放进 ignored——设置页里看着是填了的，拉取日志要说清它被忽略了。
+func subscriptionDefaultCronRule() (rule, ignored string) {
+	value := strings.TrimSpace(model.GetRegisteredConfig("default_cron_rule"))
+	if value != "" && !cron.Parse(value).Valid {
+		return "", value
+	}
+	return value, ""
 }
 
 func isConfigEnabled(key string, defaultValue bool) bool {
@@ -1698,6 +1790,10 @@ type subscriptionCandidateScan struct {
 	// seenFiles：本次扫描读到的全部文件（任意扩展名，未经任何规则过滤），路径与候选命令同根。
 	// 自动删除分支靠它区分「文件在、被规则排除」（照删）与「文件在、扫描没读到」（保留并提示）。
 	seenFiles []string
+	// undeclaredCron：过了扩展名、子目录、白/黑名单与依赖规则，不是辅助脚本，但没声明 cron、默认规则又留空，
+	// 本次不建任务的文件（路径与 seenFiles 同根）。它们仍是订阅在管的脚本：自动删除分支据此保留已有任务，
+	// 拉取日志据此提示「未建任务」（#134）。
+	undeclaredCron []string
 }
 
 func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptionTaskSyncOptions) subscriptionCandidateScan {
@@ -1817,6 +1913,7 @@ func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptio
 		}
 	}
 
+	var undeclaredCron []string
 	for _, f := range allFiles {
 		path := f.path
 		info := f.info
@@ -1826,19 +1923,21 @@ func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptio
 		}
 
 		// 先尝试从脚本头部识别 cron。脚本明确写了 cron 就完全按它来。
-		cronExpr := resolveCronForSubscriptionTask(path, "")
+		cronExpr := resolveSubscriptionScriptCron(path)
+		defaultRule := false
 		if cronExpr == "" {
-			// 脚本头没 cron 注释。两种处理：
-			//   1) 已知是通知/工具辅助脚本（sendNotify.js / notify.py 等）→ 不建任务
-			//   2) 否则用兜底 cron（系统配置 default_cron_rule，或硬兜底每天 0 点）
-			//      —— 保证 git 拉到的业务脚本必定变成任务，不会"明明拉成功但任务列表空"
+			// 脚本头没 cron 注释：
+			//   1) 已知是通知/工具辅助脚本（sendNotify.js / notify.py 等）→ 不建任务，也不算「未建任务」
+			//   2) 订阅设置填了默认 Cron 规则 → 按规则建
+			//   3) 默认规则留空 → 不建（#134），记进 undeclaredCron
 			if isSubscriptionHelperScript(info.Name()) {
 				continue
 			}
-			cronExpr = options.defaultCron
-			if cronExpr == "" {
+			if options.defaultCron == "" {
+				undeclaredCron = append(undeclaredCron, path)
 				continue
 			}
+			cronExpr, defaultRule = options.defaultCron, true
 		}
 
 		relPath, err := filepath.Rel(config.C.Data.ScriptsDir, path)
@@ -1851,10 +1950,11 @@ func scanSubscriptionTaskCandidates(sub *model.Subscription, options subscriptio
 			Name:           taskName,
 			Command:        command,
 			CronExpression: cronExpr,
+			DefaultRule:    defaultRule,
 		}
 	}
 
-	return subscriptionCandidateScan{candidates: candidates, dependencyOnly: dependencyOnly, seenFiles: seenFiles}
+	return subscriptionCandidateScan{candidates: candidates, dependencyOnly: dependencyOnly, seenFiles: seenFiles, undeclaredCron: undeclaredCron}
 }
 
 func queryTasksByLabel(label string) *gorm.DB {
@@ -1867,27 +1967,73 @@ func queryTasksByLabel(label string) *gorm.DB {
 	)
 }
 
-func resolveCronForSubscriptionTask(path string, defaultCron string) string {
+// subscriptionScriptHeadLines 是订阅同步读脚本头部（cron 声明、任务名）的行数上限，两处共用。
+// 以前 cron 只看前 50 行、任务名看 120 行：声明写在 51～120 行的脚本名字认得出、cron 却认不出（#134）。
+const subscriptionScriptHeadLines = 120
+
+// subscriptionScriptHeadLineMax 是单行参与匹配的最大字节数，与 bufio.Scanner 原来能处理的最长行一致。
+const subscriptionScriptHeadLineMax = bufio.MaxScanTokenSize
+
+// eachSubscriptionScriptHeadLine 逐行读脚本的前 subscriptionScriptHeadLines 行，fn 返回 false 时提前结束；文件打不开就什么都不做。
+//
+// 不用 bufio.Scanner：它遇到超过 64KB 的行（压缩、混淆过的单行代码很常见）报 ErrTooLong 后静默停止，
+// 后面的 cron 声明一行都读不到（#134）。这里超长的行只取前 subscriptionScriptHeadLineMax 参与匹配，
+// 余下的丢掉，照常往下读、照常计一行。行尾的 \n、\r\n 与 Scanner 一样去掉。
+// 首行开头的 UTF-8 BOM 也去掉：Windows 编辑器保存的脚本常带 BOM，正则里的 \s 不匹配 U+FEFF，第 1 行的声明会认不出。
+//
+// 读缓冲用默认大小、长行才另攒：每个文件都开一块 64KB 缓冲的话，一次同步要读几千个文件，
+// 分配量是 Scanner 的十来倍（实测 3000 次读 194MB 对 18MB），NAS / Magisk 这类小内存机器上 GC 明显变频繁。
+func eachSubscriptionScriptHeadLine(path string, fn func(line string) bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	lineCount := 0
-	scriptBase := strings.ToLower(filepath.Base(path))
-	for scanner.Scan() {
-		lineCount++
-		if lineCount > 50 {
-			break
+	reader := bufio.NewReader(f)
+	for lineNo := 1; lineNo <= subscriptionScriptHeadLines; lineNo++ {
+		chunk, err := reader.ReadSlice('\n')
+		line := string(chunk) // ReadSlice 的切片下次读取就会被覆盖，先拷出来
+		if err == bufio.ErrBufferFull {
+			// 比读缓冲长的行：接着读到行尾，最多攒到 subscriptionScriptHeadLineMax，其余丢掉。
+			buf := []byte(line)
+			for err == bufio.ErrBufferFull {
+				chunk, err = reader.ReadSlice('\n')
+				if room := subscriptionScriptHeadLineMax - len(buf); room > 0 {
+					buf = append(buf, chunk[:min(len(chunk), room)]...)
+				}
+			}
+			line = string(buf)
 		}
-		line := scanner.Text()
-		if expr := extractSubscriptionCronExpression(line, scriptBase); expr != "" {
-			return expr
+		if line == "" && err != nil {
+			return
+		}
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if lineNo == 1 {
+			line = strings.TrimPrefix(line, "\uFEFF")
+		}
+		if !fn(line) || err != nil {
+			return
 		}
 	}
+}
+
+func resolveCronForSubscriptionTask(path string, defaultCron string) string {
+	if expr := resolveSubscriptionScriptCron(path); expr != "" {
+		return expr
+	}
 	return strings.TrimSpace(defaultCron)
+}
+
+// resolveSubscriptionScriptCron 读脚本头部，返回脚本自己声明的 cron，认不出返回空串。
+func resolveSubscriptionScriptCron(path string) string {
+	scriptBase := strings.ToLower(filepath.Base(path))
+	expr := ""
+	eachSubscriptionScriptHeadLine(path, func(line string) bool {
+		expr = extractSubscriptionCronExpression(line, scriptBase)
+		return expr == ""
+	})
+	return expr
 }
 
 // resolveSubscriptionTaskName 从脚本头部推断任务名，优先级：
@@ -1901,22 +2047,8 @@ func resolveCronForSubscriptionTask(path string, defaultCron string) string {
 func resolveSubscriptionTaskName(path, fallback string) string {
 	fallback = strings.TrimSpace(fallback)
 
-	f, err := os.Open(path)
-	if err != nil {
-		return fallback
-	}
-	defer f.Close()
-
 	var envName, labelName string
-	scanner := bufio.NewScanner(f)
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount > 120 {
-			break
-		}
-		line := scanner.Text()
-
+	eachSubscriptionScriptHeadLine(path, func(line string) bool {
 		if envName == "" {
 			if matches := subscriptionTaskNameRe.FindStringSubmatch(line); len(matches) > 1 {
 				envName = strings.TrimSpace(matches[1])
@@ -1925,10 +2057,8 @@ func resolveSubscriptionTaskName(path, fallback string) string {
 		if labelName == "" {
 			labelName = extractSubscriptionTaskNameFromLabel(line)
 		}
-		if envName != "" && labelName != "" {
-			break
-		}
-	}
+		return envName == "" || labelName == ""
+	})
 
 	if envName != "" {
 		return envName
@@ -1986,16 +2116,27 @@ func extractSubscriptionCronExpression(line, scriptBase string) string {
 // 当行尾跟随文件名提示（例如 `cron 8 10 * * *  qtx.js`）时，只截取前 5 或 6 个字段做 cron。
 func extractSubscriptionCronExpressionFromLabel(line string) string {
 	matches := cronLabelPrefixRe.FindStringSubmatch(line)
-	if len(matches) < 2 {
+	if len(matches) < 3 {
 		return ""
 	}
-	rest := strings.TrimSpace(matches[1])
+	rest := strings.TrimSpace(matches[2])
 	if rest == "" {
 		return ""
 	}
 
 	if cron.Parse(rest).Valid {
 		return rest
+	}
+
+	// `cron: "0 8 * * *"` / `cron: '0 8 * * *'`：青龙用 grep + xargs 取值，引号被 xargs 去掉，能认；面板以前认不出（#134）。
+	// 只剥「成对包住整个值」的引号，不放宽别的写法；而且只在 cron 前面带注释标记（# // * @）或顶格（Python docstring 常见）时剥——
+	// 缩进的裸 `  cron: '0 0 * * *'` 是 JS / TS 对象字面量的属性，不能认成声明（末尾带逗号的本来就认不出，没逗号的最后一个属性靠这条挡）。
+	if prefix := matches[1]; prefix == "" || strings.ContainsAny(prefix, "#*@/") {
+		if n := len(rest); n >= 2 && (rest[0] == '"' || rest[0] == '\'') && rest[n-1] == rest[0] {
+			if unquoted := strings.TrimSpace(rest[1 : n-1]); unquoted != "" && cron.Parse(unquoted).Valid {
+				return unquoted
+			}
+		}
 	}
 
 	fields := strings.Fields(rest)
