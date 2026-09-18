@@ -3757,3 +3757,57 @@ if len(broken) == 0 {
 }
 cmd, err := newNpmRebuildCommandFunc(nodeDir, nodePackageNames(broken))
 ```
+
+---
+
+## 场景：资源采样与 MCP 工具对齐（v3.3.0，#139 #140）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/resource_monitor.go` 的 CPU / 网速采集，或在 `server/mcptools` 新增 / 修改工具时必须看本节。
+
+### 2. Signatures
+
+- `service.GetResourceInfo()`：Linux 上 CPU 与网速取自 `defaultLinuxResourceSampler.current()`（`sync.Once` 懒启动后台循环，每 3 秒一次）；没有缓存时同步采样一次兜底，并发的首次请求只采一次。
+- MCP：`readToolNames` / `writeToolNames`（`server/mcptools/server.go`）是工具的完整名单，测试按名单逐个核对注册与注解。
+
+### 3. Contracts
+
+- **不要在接口请求里现场采样 CPU**：请求并发时面板自己处理这批请求的开销会落进采样窗口，两核机器上读数常年 50% 左右（#140）。口径：忙碌 = 总计 − idle − iowait，总计不累加 `guest` / `guest_nice`（已计入 user / nice）。
+- MCP 工具只做「转发到已有开放接口 + 整理结果」，权限沿用接口本身的 scope 与角色校验；写入 / 执行工具只能经 `addWriteTool` 在 `allowMutations` 时注册。
+- **会覆盖已有数据的也算破坏性**：重命名 / 移动 / 复制（同名静默覆盖）、创建同名备份，与删除、恢复一样标 DestructiveHint。
+- 面板接口对「全部失败」也回 200 时（批量删除脚本、删除不存在的备份），工具要自己判定并返回错误，不能把失败当成功转述给 Agent。
+- `read_script` 按字节分段：`offset` / `limit`（上限 48 KiB），返回 `total_bytes`、`next_offset`、`truncated`；切分点必须落在 UTF-8 字符边界。
+
+### 4. Validation & Error Matrix
+
+- 采样读不到 `/proc/stat` 或两次快照总差为 0 → 使用率按 0 处理，不报错。
+- 只读模式 → 写入工具一个都不注册；新增工具忘记加进名单 → 名单测试变红。
+- `import_envs` 替换模式会先删全部变量：导入前先校验变量名与「看起来是脱敏值」的敏感变量，任一不合规就整体拒绝，避免删光后又导入失败。
+
+### 5. Good/Base/Bad Cases
+
+- Good：APP 首页并发请求资源、统计、仪表盘时，CPU 读数与 `vmstat` 一致。
+- Bad：在资源接口里 `time.Sleep(500ms)` 现场采样；新增一个会覆盖文件的工具却不标 DestructiveHint。
+
+### 6. Tests Required
+
+- `resource_monitor_test.go`：由两份 `/proc/stat` 快照算使用率（普通 / iowait / guest / 计数回绕）、缓存命中不阻塞、并发兜底只采样一次。
+- `mcptools`：每个工具断言路由、方法、参数映射与结果整理；只读模式不注册写工具；破坏性名单与注解一致；`read_script` 多段拼接等于原文。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+idle1, total1 := readCPUStat()
+time.Sleep(500 * time.Millisecond) // 请求并发时把面板自己的开销也量进去
+idle2, total2 := readCPUStat()
+```
+
+#### Correct
+
+```go
+sample := defaultLinuxResourceSampler.current() // 有后台采样缓存直接返回，没有时才同步采样一次
+// 使用率统一由纯函数 cpuUsagePercent(prev, cur procStatCPU) 计算，便于单测覆盖各种口径
+```
