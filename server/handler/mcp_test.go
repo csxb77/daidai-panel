@@ -7,11 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"daidai-panel/config"
 	"daidai-panel/database"
 	"daidai-panel/model"
 	"daidai-panel/router"
@@ -273,6 +276,120 @@ func TestMCPAllowMutationsExposesWriteToolsToAdminToken(t *testing.T) {
 	}
 	if reloaded.Status != model.TaskStatusDisabled {
 		t.Fatalf("任务应当被禁用，实际 status=%v", reloaded.Status)
+	}
+}
+
+// #139 新增的工具经真实路由回放：参数名与请求体必须和 handler 对得上，假 Dispatcher 验证不了这一点。
+func TestMCPIssue139ToolsReachRealRoutes(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	engine := newMCPTestEngine(t)
+	setMCPSwitches(t, true, true)
+	admin := testutil.MustCreateUser(t, "mcp-139-admin", "admin")
+	token := testutil.MustCreateAccessToken(t, admin.Username, admin.Role)
+	session := connectMCPSession(t, engine, "Bearer "+token)
+
+	decode := func(text string) map[string]any {
+		t.Helper()
+		var out map[string]any
+		if err := json.Unmarshal([]byte(text), &out); err != nil {
+			t.Fatalf("工具输出不是合法 JSON: %v\n%s", err, text)
+		}
+		return out
+	}
+
+	// 任务：新建后按脚本改名同步命令。
+	result, text := mcpCallText(t, session, "create_task", map[string]any{
+		"name": "mcp-139-task", "command": "task demo/a.py", "cron_expression": "0 9 * * *", "labels": []string{"分组:巡检"},
+	})
+	if result.IsError {
+		t.Fatalf("create_task 不应失败: %s", text)
+	}
+	var created model.Task
+	if err := database.DB.Where("name = ?", "mcp-139-task").First(&created).Error; err != nil {
+		t.Fatalf("任务应当已落库: %v", err)
+	}
+	if created.Labels != "分组:巡检" || created.CronExpression != "0 9 * * *" {
+		t.Fatalf("新建任务的字段不对: labels=%q cron=%q", created.Labels, created.CronExpression)
+	}
+	result, text = mcpCallText(t, session, "update_task", map[string]any{"id": created.ID, "command": "task demo/b.py", "timeout": 30})
+	if result.IsError {
+		t.Fatalf("update_task 不应失败: %s", text)
+	}
+	var updated model.Task
+	if err := database.DB.First(&updated, created.ID).Error; err != nil {
+		t.Fatalf("reload task: %v", err)
+	}
+	if updated.Command != "task demo/b.py" || updated.Timeout != 30 || updated.Name != "mcp-139-task" {
+		t.Fatalf("修改应当只动传入的字段: command=%q timeout=%d name=%q", updated.Command, updated.Timeout, updated.Name)
+	}
+
+	// 脚本：改名、隔离目录被拒、删除。
+	scriptsDir := config.C.Data.ScriptsDir
+	for rel, content := range map[string]string{
+		"demo/a.py":                          "print('a')\n",
+		"demo/__pycache__/a.cpython-312.pyc": "cache",
+	} {
+		full := filepath.Join(scriptsDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	result, text = mcpCallText(t, session, "rename_script", map[string]any{"path": "demo/a.py", "new_name": "b.py"})
+	if result.IsError || decode(text)["new_path"] != "demo/b.py" {
+		t.Fatalf("rename_script 应当成功并返回新路径，实际 %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(scriptsDir, "demo", "b.py")); err != nil {
+		t.Fatalf("改名后的文件应当存在: %v", err)
+	}
+	result, text = mcpCallText(t, session, "delete_script", map[string]any{"path": "demo/__pycache__", "type": "directory"})
+	if !result.IsError || !strings.Contains(text, "该路径不可访问") {
+		t.Fatalf("__pycache__ 属于隔离目录，脚本接口应当拒绝，实际 isError=%v: %s", result.IsError, text)
+	}
+	if _, err := os.Stat(filepath.Join(scriptsDir, "demo", "__pycache__")); err != nil {
+		t.Fatalf("被拒绝的删除不应动到隔离目录: %v", err)
+	}
+	result, text = mcpCallText(t, session, "delete_script", map[string]any{"path": "demo/b.py"})
+	if result.IsError {
+		t.Fatalf("delete_script 不应失败: %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(scriptsDir, "demo", "b.py")); !os.IsNotExist(err) {
+		t.Fatalf("文件应当已被删除，实际 err=%v", err)
+	}
+
+	// read_script 分段读取真实文件，拼回原文。
+	var builder strings.Builder
+	for i := 0; builder.Len() < 120*1024; i++ {
+		builder.WriteString("console.log(\"呆呆面板 " + strconv.Itoa(i) + "\");\n")
+	}
+	original := builder.String()
+	if err := os.WriteFile(filepath.Join(scriptsDir, "demo", "big.js"), []byte(original), 0o644); err != nil {
+		t.Fatalf("write big.js: %v", err)
+	}
+	var joined strings.Builder
+	offset, segments := 0, 0
+	for {
+		result, text = mcpCallText(t, session, "read_script", map[string]any{"path": "demo/big.js", "offset": offset})
+		if result.IsError {
+			t.Fatalf("read_script 不应失败: %s", text)
+		}
+		out := decode(text)
+		chunk, _ := out["content"].(string)
+		joined.WriteString(chunk)
+		segments++
+		if out["truncated"] != true {
+			break
+		}
+		next, _ := out["next_offset"].(float64)
+		offset = int(next)
+		if segments > 10 {
+			t.Fatal("分段读取没有收敛")
+		}
+	}
+	if joined.String() != original || segments < 3 {
+		t.Fatalf("分段拼接应当等于原文（%d 段），实际长度 %d / %d", segments, joined.Len(), len(original))
 	}
 }
 

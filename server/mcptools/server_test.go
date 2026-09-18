@@ -185,13 +185,21 @@ func TestMutationServerAddsWriteToolsWithAnnotations(t *testing.T) {
 			t.Errorf("写入工具 %s 必须显式给出 destructiveHint（缺省会被客户端当成破坏性操作）", name)
 		}
 	}
-	for _, name := range []string{"delete_env", "batch_task_action"} {
+	for _, name := range []string{
+		"delete_env", "batch_task_action",
+		// #139：删除、覆盖、恢复、批量删除类
+		"update_task", "delete_script", "rename_script", "move_script", "copy_script", "batch_delete_scripts",
+		"run_code", "rollback_script", "update_subscription", "delete_subscription", "batch_env_action",
+		"import_envs", "create_backup", "delete_backup", "restore_backup",
+	} {
 		if hint := tools[name].Annotations.DestructiveHint; hint == nil || !*hint {
 			t.Errorf("删除类工具 %s 必须标注 destructiveHint: true", name)
 		}
 	}
-	if hint := tools["run_task"].Annotations.DestructiveHint; hint == nil || *hint {
-		t.Error("run_task 不是删除类操作，destructiveHint 应为 false")
+	for _, name := range []string{"run_task", "create_task", "create_subscription", "set_subscription_enabled", "send_notification"} {
+		if hint := tools[name].Annotations.DestructiveHint; hint == nil || *hint {
+			t.Errorf("%s 不会删除或覆盖已有数据，destructiveHint 应为 false", name)
+		}
 	}
 }
 

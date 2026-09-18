@@ -54,11 +54,19 @@ var (
 		"list_tasks", "get_task", "get_task_log", "list_logs", "get_log",
 		"list_envs", "list_scripts", "read_script", "list_subscriptions",
 		"get_system_info", "get_dashboard",
+		// #139 对齐开放 API
+		"get_script_tree", "list_script_versions", "export_envs", "list_backups",
 	}
 	writeToolNames = []string{
 		"run_task", "stop_task", "set_task_enabled", "batch_task_action",
 		"create_env", "update_env", "delete_env",
 		"save_script", "run_script", "pull_subscription",
+		// #139 对齐开放 API
+		"create_task", "update_task",
+		"delete_script", "rename_script", "move_script", "copy_script", "batch_delete_scripts", "run_code", "rollback_script",
+		"create_subscription", "update_subscription", "delete_subscription", "set_subscription_enabled",
+		"batch_env_action", "import_envs",
+		"send_notification", "create_backup", "delete_backup", "restore_backup",
 	}
 )
 
@@ -86,7 +94,7 @@ func buildInstructions(allowMutations bool) string {
 		"所有工具都经面板的开放接口执行，能访问哪些模块由当前凭据的权限决定，没有权限时工具会返回错误。" +
 		"环境变量里名称像凭据（TOKEN、COOKIE、PASSWORD、KEY 等）的值会被遮蔽。"
 	if allowMutations {
-		return base + "当前允许写入与执行类工具（运行任务、修改环境变量、保存与运行脚本等），执行前请先向用户确认。"
+		return base + "当前允许写入与执行类工具（运行任务、修改环境变量、保存与运行脚本等），执行前请先向用户确认；删除、覆盖、恢复备份这类操作不可撤销。"
 	}
 	return base + "当前只开放查询类工具；写入与执行类工具需要管理员在面板「系统设置 → MCP 服务」中开启。"
 }

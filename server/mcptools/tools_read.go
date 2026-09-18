@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -36,7 +37,9 @@ func (t *toolset) registerReadTools(s *mcp.Server) {
 		"列出脚本目录里的文件（默认扁平列表，可按路径关键词过滤），或返回目录树。",
 		t.listScripts)
 	addReadTool(s, "read_script", "读取脚本内容",
-		"读取一个脚本文件的内容；过长时只返回开头部分。二进制文件不返回内容。",
+		"按字节分段读取一个脚本文件：offset 是起始字节（默认 0），limit 是本段最多字节数（默认且最多 49152）。"+
+			"返回 total_bytes（文件总字节数）、offset、next_offset 与 truncated；truncated 为 true 表示还没读完，用 next_offset 作为下一次的 offset 继续读，"+
+			"直到 truncated 为 false。分段一定落在 UTF-8 字符边界上，各段按顺序拼起来就是完整文件。二进制文件不返回内容。",
 		t.readScript)
 	addReadTool(s, "list_subscriptions", "查询订阅",
 		"分页查询订阅（Git 仓库 / 单文件），包括白名单、黑名单、依赖规则与最近拉取时间。",
@@ -47,6 +50,11 @@ func (t *toolset) registerReadTools(s *mcp.Server) {
 	addReadTool(s, "get_dashboard", "查看概览统计",
 		"查看面板概览页的统计数据（任务数量、执行成功与失败次数等）。",
 		t.getDashboard)
+
+	// #139 对齐开放 API 补上的查询工具，按领域分在各自的文件里。
+	t.registerScriptReadTools(s)
+	t.registerEnvBatchReadTools(s)
+	t.registerNotifyBackupReadTools(s)
 }
 
 // ---- 任务 ------------------------------------------------------------------
@@ -131,12 +139,7 @@ func (t *toolset) getTask(ctx context.Context, in taskIDInput) (any, error) {
 	}
 	for _, item := range itemsOf(result) {
 		if id, ok := numberValue(item["id"]); ok && int64(id) == in.ID {
-			out := make(map[string]any, len(item)+4)
-			for key, value := range item {
-				out[key] = value
-			}
-			decorateTask(out, item)
-			return out, nil
+			return taskDetail(item), nil
 		}
 	}
 	return nil, fmt.Errorf("任务 %d 不存在", in.ID)
@@ -151,6 +154,16 @@ func (t *toolset) getTaskLog(ctx context.Context, in taskIDInput) (any, error) {
 		return nil, err
 	}
 	return formatLogDetail(result), nil
+}
+
+// taskDetail 返回任务的全部字段外加 decorateTask 的派生字段（get_task、create_task、update_task 共用）。
+func taskDetail(item map[string]any) map[string]any {
+	out := make(map[string]any, len(item)+4)
+	for key, value := range item {
+		out[key] = value
+	}
+	decorateTask(out, item)
+	return out
 }
 
 // decorateTask 给任务补上 AI 读得懂的状态文字、启用开关与分组名。
@@ -424,8 +437,13 @@ type listScriptsInput struct {
 }
 
 type readScriptInput struct {
-	Path string `json:"path" jsonschema:"脚本相对路径（相对脚本目录），例如 demo/test.py，可从 list_scripts 获得"`
+	Path   string `json:"path" jsonschema:"脚本相对路径（相对脚本目录），例如 demo/test.py，可从 list_scripts 获得"`
+	Offset int    `json:"offset,omitempty" jsonschema:"从第几个字节开始读（从 0 开始），续读时填上一次返回的 next_offset"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"本段最多读取的字节数，默认且最多 49152"`
 }
+
+// readScriptMaxLimit 是 read_script 单段的字节上限，与其它大字段共用 contentBudget。
+const readScriptMaxLimit = contentBudget
 
 func (t *toolset) listScripts(ctx context.Context, in listScriptsInput) (any, error) {
 	if in.Tree {
@@ -452,11 +470,21 @@ func (t *toolset) listScripts(ctx context.Context, in listScriptsInput) (any, er
 	return map[string]any{"total": len(files), "files": files}, nil
 }
 
+// readScript 分段读取（#139）：以前超过 48KB 只返回开头、靠一个附加字段提示截断，
+// 调用方只看 content 就会把前三分之一当成整个文件。现在每段都明确给出 truncated 与 next_offset。
 func (t *toolset) readScript(ctx context.Context, in readScriptInput) (any, error) {
 	path := strings.TrimSpace(in.Path)
 	if path == "" {
 		return nil, errors.New("path 不能为空")
 	}
+	if in.Offset < 0 || in.Limit < 0 {
+		return nil, errors.New("offset 与 limit 不能是负数")
+	}
+	limit := in.Limit
+	if limit == 0 || limit > readScriptMaxLimit {
+		limit = readScriptMaxLimit
+	}
+
 	result, err := t.call(ctx, http.MethodGet, "/scripts/content", url.Values{"path": {path}}, nil)
 	if err != nil {
 		return nil, err
@@ -466,12 +494,61 @@ func (t *toolset) readScript(ctx context.Context, in readScriptInput) (any, erro
 		return map[string]any{"path": path, "binary": true, "note": "二进制文件，不返回内容"}, nil
 	}
 	content := stringValue(data["content"])
-	text, cut := headText(content, contentBudget)
-	out := map[string]any{"path": path, "content": text}
-	if cut {
-		out["content_truncated"] = fmt.Sprintf("文件共 %d 字节，只返回了开头 %d 字节", len(content), len(text))
+	if in.Offset > len(content) {
+		return nil, fmt.Errorf("offset %d 超出文件大小（共 %d 字节）", in.Offset, len(content))
+	}
+
+	start, end := scriptChunk(content, in.Offset, limit)
+	out := map[string]any{
+		"path":        path,
+		"content":     content[start:end],
+		"offset":      start,
+		"next_offset": end,
+		"total_bytes": len(content),
+		"truncated":   end < len(content),
+	}
+	if end < len(content) {
+		out["hint"] = fmt.Sprintf("还有 %d 字节未读，用 offset=%d 继续读取", len(content)-end, end)
 	}
 	return out, nil
+}
+
+// scriptChunk 从 offset 起切出一段 [start, end)：两端都落在 UTF-8 字符边界上，原始字节不超过 limit，
+// 且这段序列化成 JSON 后不超过 contentBudget —— 引号、换行、控制字符转义后会变长，只按原始字节切，
+// 整条输出可能撑破 MaxOutputBytes、被 truncateOutput 截成不合法的 JSON，分段也就拼不回原文了。
+// 至少前进一个字符，limit 比一个字符还小时也不会原地打转。
+func scriptChunk(content string, offset, limit int) (int, int) {
+	start := offset
+	// offset 落在多字节字符中间时退回字符开头：宁可多给几个字节，也不能丢字符。
+	for back := 0; back < utf8.UTFMax-1 && start > 0 && start < len(content) && !utf8.RuneStart(content[start]); back++ {
+		start--
+	}
+
+	end, encoded := start, 0
+	for end < len(content) {
+		r, size := utf8.DecodeRuneInString(content[end:])
+		cost := jsonEscapedLen(r, size)
+		if end > start && (end-start+size > limit || encoded+cost > contentBudget) {
+			break
+		}
+		end += size
+		encoded += cost
+	}
+	return start, end
+}
+
+// jsonEscapedLen 估算一个字符在 renderOutput（关闭 HTML 转义）里编码后的字节数，只会多估、不会少估。
+func jsonEscapedLen(r rune, size int) int {
+	switch {
+	case r == utf8.RuneError && size == 1:
+		return 6 // 非法字节编码成 �
+	case r == '"' || r == '\\' || r == '\n' || r == '\r' || r == '\t':
+		return 2
+	case r < 0x20 || r == ' ' || r == ' ':
+		return 6 // \u00XX、  这类
+	default:
+		return size
+	}
 }
 
 // ---- 订阅与系统 ----------------------------------------------------------------

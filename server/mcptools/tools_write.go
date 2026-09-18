@@ -40,11 +40,18 @@ func (t *toolset) registerWriteTools(s *mcp.Server) {
 		"写入脚本文件：不存在则新建，存在则整体覆盖（面板会保留历史版本，可在网页端回滚）。",
 		writeHints{destructive: true, idempotent: true}, t.saveScript)
 	addWriteTool(s, "run_script", "运行脚本",
-		"调试运行一个脚本并等待输出（最多约 50 秒）；到时仍在运行会返回 run_id，用同一个 run_id 再调用可继续取输出，加 stop: true 可停止。",
+		"调试运行一个脚本并等待输出（最多约 50 秒）；到时仍在运行会返回 run_id，用同一个 run_id 再调用可继续取输出，加 stop: true 可停止。run_code 返回的 run_id 也可以在这里续取或停止。",
 		writeHints{destructive: true, openWorld: true}, t.runScript)
 	addWriteTool(s, "pull_subscription", "拉取订阅",
 		"立即拉取一个订阅（按订阅设置同步脚本、增删任务）。拉取在后台进行，结果用 list_subscriptions 查看。",
 		writeHints{destructive: true, openWorld: true}, t.pullSubscription)
+
+	// #139 对齐开放 API 补上的写入工具，按领域分在各自的文件里。
+	t.registerTaskWriteTools(s)
+	t.registerScriptWriteTools(s)
+	t.registerSubscriptionWriteTools(s)
+	t.registerEnvBatchWriteTools(s)
+	t.registerNotifyBackupWriteTools(s)
 }
 
 // ---- 任务 ------------------------------------------------------------------
@@ -283,13 +290,7 @@ func (t *toolset) runScript(ctx context.Context, in runScriptInput) (any, error)
 		return nil, errors.New("stop 需要和 run_id 一起使用")
 	}
 
-	wait := in.WaitSeconds
-	if wait <= 0 {
-		wait = defaultScriptWaitSeconds
-	}
-	if wait > maxScriptWaitSeconds {
-		wait = maxScriptWaitSeconds
-	}
+	wait := normalizeScriptWait(in.WaitSeconds)
 
 	if runID == "" {
 		started, err := t.call(ctx, http.MethodPost, "/scripts/run", nil, map[string]any{"path": path})
@@ -308,7 +309,19 @@ func (t *toolset) runScript(ctx context.Context, in runScriptInput) (any, error)
 			wait = stopScriptWaitSeconds
 		}
 	}
+	return t.waitScriptRun(ctx, runID, wait)
+}
 
+func normalizeScriptWait(seconds int) int {
+	if seconds <= 0 {
+		return defaultScriptWaitSeconds
+	}
+	return min(seconds, maxScriptWaitSeconds)
+}
+
+// waitScriptRun 轮询一次调试运行，直到结束或等满 wait 秒。run_script 与 run_code 共用：
+// 两者的运行记录在面板内存里是同一份（都经 /scripts/run/:run_id 读写），run_id 可以互相续上。
+func (t *toolset) waitScriptRun(ctx context.Context, runID string, wait int) (any, error) {
 	deadline := time.Now().Add(time.Duration(wait) * time.Second)
 	delay := scriptPollInitialDelay
 	for {

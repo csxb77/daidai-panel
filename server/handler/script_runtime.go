@@ -43,7 +43,9 @@ var scriptLanguageExtMap = map[string]string{
 	"mjs":        ".mjs",
 	"typescript": ".ts",
 	"shell":      ".sh",
-	"go":         ".go",
+	// bash 是 shell 的别名（#139）：开放 API / MCP 调用方更习惯写 bash，同样落成 .sh 交给 bash 执行。
+	"bash": ".sh",
+	"go":   ".go",
 }
 
 func newDebugRun() *debugRun {

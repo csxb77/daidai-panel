@@ -65,7 +65,7 @@ func NewSystemHandler() *SystemHandler {
 	return &SystemHandler{}
 }
 
-// systemInfoResponse 在原有资源快照之上追加两项「部署形态」字段。
+// systemInfoResponse 在原有资源快照之上追加两项「部署形态」字段与面板版本号。
 //
 // 必须用匿名嵌入而不是 {"resource": info, ...}：ResourceInfo 的字段会被 encoding/json
 // 平铺到同一层，老字段的位置和名字一个都不变。/system/info 是独立发版的 Flutter APP
@@ -78,9 +78,12 @@ type systemInfoResponse struct {
 	// magisk_shell_version 是 Magisk/service.sh 注入的模块外壳版本；
 	// 非模块版、或旧外壳（v3.0.3 之前根本没 export 过）都是 0。
 	MagiskShellVersion int `json:"magisk_shell_version"`
+	// version 是面板版本号（#139）：开放 API / MCP 的调用方拿一次 /system/info 就能
+	// 判断对端能力，不必再单独请求 /system/version。
+	Version string `json:"version"`
 }
 
-// Info 返回资源快照，外加两项「部署形态」字段。
+// Info 返回资源快照，外加两项「部署形态」字段与面板版本号。
 //
 // 为什么部署形态要挂在这里：前端判断「要不要显示模块版专属功能」原本只能从
 // CheckUpdate 的 update_target.deployment_type 里拿，而那个接口必须联网拉 GitHub
@@ -94,6 +97,7 @@ func (h *SystemHandler) Info(c *gin.Context) {
 		ResourceInfo:       systemHealthGetResourceInfo(),
 		DeploymentType:     detectPanelDeploymentTypeHint(),
 		MagiskShellVersion: resolveMagiskShellVersion(),
+		Version:            Version,
 	}})
 }
 
