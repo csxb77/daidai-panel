@@ -54,8 +54,17 @@ body { padding-top: var(--dd-demo-banner-height); }
   left: 0;
   right: 0;
   height: var(--dd-demo-banner-height);
-  /* z-index 刻意低于 Element Plus 的弹窗层（2000+）：弹窗打开时横幅被遮罩盖住是预期行为 */
-  z-index: 1000;
+  /*
+   * z-index 必须低于手机宽度下 .layout-main 的 21（见 MainLayout.vue 的 F1）：
+   * 那里的 z-index 让 .layout-main 自成层叠上下文，原地渲染的弹窗 / 抽屉（el-dialog、el-drawer
+   * 默认不 teleport）的 2000+ 只在它内部排序，整体只按 21 和横幅比。横幅再高就会盖住它们顶部 34px，
+   * 抽屉右上角的 × 还会落在「重置演示数据」底下，点偏一点整页重载、演示数据清空。
+   * 取 20 而不是 21：只靠数值就压在 .layout-main 下面，不依赖两者在文档里的先后。
+   * 与 sticky 顶栏（同为 20）并列无碍：body 已让出横幅高度，两者不会重叠。
+   * 不要调回 1000 一类的大值。其余浮层不受这个取值影响：消息框、下拉等 teleport 到 body，
+   * 手机侧栏抽屉原地渲染在 .layout-container 下（它不成层叠上下文），都按 2000+ 和横幅比，照样盖得住。
+   */
+  z-index: 20;
   display: flex;
   align-items: center;
   gap: 10px;

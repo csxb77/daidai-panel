@@ -240,6 +240,10 @@ func BuildManagedRuntimeEnvMapWithScriptToken(workDir, scriptsDir string, defaul
 			envMap[key] = value
 		}
 	}
+	// PLAYWRIGHT_BROWSERS_PATH（#142）与上面的青龙兼容变量同一语义：用户没配才补默认值。
+	// 必须落在 envMap 里：任务、调试运行、run-code、ddp python/shell 的子进程都是白名单环境，
+	// 只靠进程环境（entrypoint export / main.go 的 os.Setenv）根本传不进去。
+	applyPlaywrightBrowsersPathDefault(envMap)
 	// 面板时区是全局运行时配置，优先级高于普通环境变量，避免任务脚本继续继承 UTC。
 	envMap["TZ"] = CurrentPanelTimezone()
 

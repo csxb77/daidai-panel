@@ -319,6 +319,7 @@ func snapshotConfigBundle() (BackupConfigBundle, error) {
 		bundle.UserPreferences = append(bundle.UserPreferences, BackupUserPreference{
 			UserID:    item.UserID,
 			Editor:    item.Editor,
+			List:      item.List,
 			CreatedAt: item.CreatedAt,
 			UpdatedAt: item.UpdatedAt,
 		})
@@ -1154,7 +1155,8 @@ func restoreTwoFactorAuths(tx *gorm.DB, items []BackupTwoFactorAuth, userIDMap m
 // ⚠️ 现状：restoreUsers / restoreTwoFactorAuths 目前都**没有调用点** —— 用户、2FA
 // 只导出不恢复（恢复用户会连带换掉当前管理员的凭据，风险太大），
 // 所以这个函数同样先与它们成对放着，等哪天把用户恢复整条链路接上时一起接。
-// 不要以为「编辑器偏好已经能跟着备份恢复了」：现在只做到了随备份导出。
+// 不要以为「编辑器偏好 / 列表页偏好已经能跟着备份恢复了」：现在只做到了随备份导出。
+// List 与导出那边成对补上，是为了哪天接上恢复链路时不会漏掉这一列。
 func restoreUserPreferences(tx *gorm.DB, items []BackupUserPreference, userIDMap map[uint]uint) error {
 	for _, item := range items {
 		userID := userIDMap[item.UserID]
@@ -1164,6 +1166,7 @@ func restoreUserPreferences(tx *gorm.DB, items []BackupUserPreference, userIDMap
 		record := model.UserPreference{
 			UserID:    userID,
 			Editor:    item.Editor,
+			List:      item.List,
 			CreatedAt: item.CreatedAt,
 			UpdatedAt: item.UpdatedAt,
 		}
@@ -1765,6 +1768,12 @@ func reinstallDependency(dep model.Dependency, logPrefix string) {
 		}
 		cmd.Env = append(PipInstallEnv(AppendProxyEnv(os.Environ()), CurrentPipMirror()), "TMPDIR=/tmp")
 	case model.DepTypeLinux:
+		// 与网页端安装 / 卸载共用同一把 Linux 包操作锁：重建后 apt 索引为空，两边都会先跑 apt-get update，
+		// 而 update 的 lists 锁不等待，撞上就是一条 failed 记录。锁必须在构造命令之前拿 ——
+		// 构造时就会判断索引要不要刷新、写镜像源 —— 并由 defer 一直持有到下面 CombinedOutput 结束。
+		unlock := LockLinuxPackageOperation()
+		defer unlock()
+
 		// 重启后的 Linux 依赖恢复必须复用当前主依赖安装路径的包管理器策略，
 		// 避免 Debian 继续走旧的裸 apt-get update/install 分支，导致与
 		// 依赖管理页的真实行为分叉，表现为“等待重启安装”后状态长期不收敛。
@@ -1805,5 +1814,12 @@ func buildLinuxDependencyInstallCommand(packageName string) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	return BuildLinuxPackageCommand(manager, "install", packageName, false, DetectLinuxDistribution(), nil)
+	// 与网页安装共用同一个 ensureMirror（#142）：原来这里传 nil，容器重建后的自动重装一律走
+	// deb.debian.org，国内慢得多，重建后「脚本报缺库」的窗口也就被拉得更长。
+	// 权限检查仍排在换源之前（BuildLinuxPackageCommand 内部保证），非 root 时不会去改 sources。
+	return BuildLinuxPackageCommand(manager, "install", packageName, false, DetectLinuxDistribution(), linuxDependencyEnsureMirrorFunc)
 }
+
+// linuxDependencyEnsureMirrorFunc 抽成变量只为测试能确认「重启重装确实接上了换源」，
+// 而不必真的去改测试机的 /etc/apt。
+var linuxDependencyEnsureMirrorFunc = EnsureDefaultLinuxMirror

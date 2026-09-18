@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { userApi } from '@/api/security'
 import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useResponsive } from '@/composables/useResponsive'
 import { copyText } from '@/utils/clipboard'
 import { toast } from '@/utils/toast'
+import { scrollListToTop } from '@/utils/scrollToTop'
 import DdBadge from '@/components/ui/DdBadge.vue'
 import { formatDateTime } from '@/utils/datetime'
 
@@ -13,6 +14,8 @@ const authStore = useAuthStore()
 const { isMobile, dialogFullscreen } = useResponsive()
 const users = ref<any[]>([])
 const loading = ref(false)
+// 页面根：翻页回顶的锚点（scrollListToTop 从这里往上找移动端的 .layout-main、往里找桌面的 .table-card）
+const pageRootRef = ref<HTMLElement | null>(null)
 
 const keyword = ref('')
 const page = ref(1)
@@ -71,6 +74,23 @@ const pagedUsers = computed(() => {
 const total = computed(() => filteredUsers.value.length)
 
 function handleSearch() { page.value = 1 }
+
+// 翻页 / 改每页条数后回到列表顶部（issue #143 O3，双端都做）。
+// 只挂在分页器的 current-change / size-change 上：它们只在用户翻页（或 total 变小把页码夹回）时触发，
+// 搜索、切角色时直接改 page 不会触发，所以不会在筛选时把人拽回顶部。
+// 本页是前端分页，数据早已在内存里，没有「请求回来」的时机可等；
+// 等 nextTick 让新一页先渲染出来再滚，免得先回顶、后换内容，位置又被新内容的高度顶偏。
+async function handlePageChange() {
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
+}
+
+async function handlePageSizeChange() {
+  // 改每页条数后从第 1 页看起：原页码在新页大小下对应的是另一批数据，停在中间没有意义
+  page.value = 1
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
+}
 
 async function loadUsers() {
   loading.value = true
@@ -239,7 +259,7 @@ function getRoleName(role: string) {
 </script>
 
 <template>
-  <div class="users-page dd-fixed-page dd-page-hide-heading">
+  <div ref="pageRootRef" class="users-page dd-fixed-page dd-page-hide-heading">
     <div class="page-header">
       <div>
         <h2 class="page-title-with-icon"><el-icon><User /></el-icon><span>用户管理</span></h2>
@@ -407,6 +427,8 @@ function getRoleName(role: string) {
         :total="total"
         :page-sizes="[10, 20, 50, 100]"
         layout="sizes, prev, pager, next"
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
       />
     </div>
 

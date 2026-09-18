@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, onActivated, computed } from "vue";
+import {
+  ref,
+  onMounted,
+  onBeforeUnmount,
+  onActivated,
+  computed,
+  watch,
+  nextTick,
+} from "vue";
+// 纯图标按钮走 el-button 的 :icon prop，要的是组件对象而不是全局注册名，所以这几枚在本页局部引入
+import { Check, Close, Delete, Plus, Setting } from "@element-plus/icons-vue";
 import { subscriptionApi } from "@/api/subscription";
 import { sshKeyApi } from "@/api/notification";
 import { configApi } from "@/api/system";
@@ -18,7 +28,11 @@ import { formatDuration } from "@/utils/duration";
 import { formatDateTime } from "@/utils/datetime";
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
+import DdMoreMenu from "@/components/ui/DdMoreMenu.vue";
 import DdFieldHelp from "@/components/ui/DdFieldHelp.vue";
+import { scrollListToTop } from "@/utils/scrollToTop";
+
+type SubTypeFilter = "" | "git-repo" | "single-file" | "disabled";
 
 const subList = ref<any[]>([]);
 const loading = ref(false);
@@ -29,7 +43,17 @@ const keyword = ref("");
 const selectedIds = ref<number[]>([]);
 const selectedIdSet = computed(() => new Set(selectedIds.value));
 const { isMobile, dialogFullscreen } = useResponsive();
-const typeFilter = ref<"" | "git-repo" | "single-file" | "disabled">("");
+const typeFilter = ref<SubTypeFilter>("");
+// 页面根：翻页回顶（scrollListToTop）以它为锚点往上找真正在滚的容器
+const pageRootRef = ref<HTMLElement | null>(null);
+
+// 类型分段控件的四项。桌面工具栏与移动端第二行各渲染一份，共用这张表，免得两处文案走样。
+const typeTabs: { value: SubTypeFilter; label: string }[] = [
+  { value: "", label: "全部" },
+  { value: "git-repo", label: "仓库" },
+  { value: "single-file", label: "单文件" },
+  { value: "disabled", label: "已禁用" },
+];
 
 const authStore = useAuthStore();
 const badgesStore = useBadgesStore();
@@ -43,6 +67,21 @@ const filteredSubList = computed(() => {
   if (typeFilter.value === "disabled")
     return subList.value.filter((s) => !s.enabled);
   return subList.value.filter((s) => s.type === typeFilter.value);
+});
+
+// 移动端批量栏「全选 / 取消全选」的判定，范围只到当前页可见的卡片
+const allSelectedOnPage = computed(
+  () =>
+    filteredSubList.value.length > 0 &&
+    filteredSubList.value.every((row) => selectedIdSet.value.has(row.id)),
+);
+
+// 跨断点时清空勾选：桌面 el-table 的内部选择并不认 selectedIds。
+// 从移动端切到桌面时表格一行都没勾，工具栏却还挂着「批量删除」，删的是看不见的行；
+// 从桌面切到移动端时 el-table 卸载不会回调 selection-change，旧勾选会让移动端一进来就处在批量态。
+// 所以两个方向都清空。
+watch(isMobile, () => {
+  selectedIds.value = [];
 });
 
 // 表头只引用语义令牌，明暗两套都成立；取值与 global.scss 里 .el-table th 的规则同口径。
@@ -301,6 +340,11 @@ async function loadData() {
     });
     subList.value = res.data || [];
     total.value = res.total || 0;
+    // 勾选裁剪到刷新后仍可见的行：移动卡片的勾选不经过 el-table，翻页、筛选、单删之后
+    // 旧勾选会残留，批量删除就会作用到看不见的订阅。裁剪后没有剩余时批量栏自动退出。
+    // 桌面无副作用：el-table 换了 data 数组本来就会清空选择并回调 selection-change([])。
+    const visibleIds = new Set(filteredSubList.value.map((row) => row.id));
+    selectedIds.value = selectedIds.value.filter((id) => visibleIds.has(id));
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || "加载订阅列表失败");
   } finally {
@@ -374,12 +418,33 @@ function handleSearch() {
   loadData();
 }
 
-function handleTypeFilter(value: "" | "git-repo" | "single-file" | "disabled") {
+// 翻页回顶（双端）：只挂在分页器的 current-change / size-change 上，数据回来之后再滚。
+// 不能挂进 loadData：拉取结束、保存、删除之后都会调它，用户正往下看着会被一把拽回顶部。
+async function handlePageChange() {
+  await loadData();
+  await nextTick();
+  scrollListToTop(pageRootRef.value);
+}
+
+async function handlePageSizeChange() {
+  page.value = 1;
+  await loadData();
+  await nextTick();
+  scrollListToTop(pageRootRef.value);
+}
+
+function handleTypeFilter(value: SubTypeFilter) {
   if (typeFilter.value === value) {
     return;
   }
   typeFilter.value = value;
   page.value = 1;
+  // 移动卡片的勾选不经过 el-table：分段一切，filteredSubList 就在旧数据上当场把不符的卡片筛掉了，
+  // 所以勾选要在这里就裁，不能只指望 loadData 成功分支里那次裁剪——请求一失败，
+  // 看不见的订阅会一直挂在勾选里，批量删除就会删到它们（约束 9）。
+  // 桌面同样无副作用：表格 data 跟着换成新数组，el-table 会自行清空选择。
+  const visibleIds = new Set(filteredSubList.value.map((row) => row.id));
+  selectedIds.value = selectedIds.value.filter((id) => visibleIds.has(id));
   loadData();
 }
 
@@ -828,6 +893,10 @@ function getRowClassName({ row }: { row: any }) {
  *（#133 起与环境变量页同一形态，原来那一整列「启用」el-switch 已删），刻意不在菜单里再放一份——
  * 已外置的操作不进菜单，否则同一件事两个入口、还得按行状态做 visible 联动；
  * 「停止拉取」也只挂在拉取日志弹窗的 footer（handleStopPull），本来就不属于这一列。
+ *
+ * 移动卡片右上角的「···」（DdMoreMenu）直接复用这一份数组和 onSubAction，
+ * 卡片末行已经外置了「拉取」「禁用 / 启用」，与桌面操作列同一套分工。
+ * 改这里的文案或顺序会同时改到两端。
  */
 const subActionItems: SplitButtonItem[] = [
   { key: "logs", label: "拉取日志" },
@@ -1134,14 +1203,18 @@ function handlePullDialogClose() {
 }
 
 async function handleBatchDelete() {
-  if (selectedIds.value.length === 0) return;
+  // 确认之前就把 ids 拷下来，确认框里的数量与真正发出去的请求用同一份：
+  // 确认框开着的时候，在途的 loadData 回来可能已把 selectedIds 裁小甚至裁空，
+  // 事后再读它就会删掉与用户确认的不一样的集合，裁空时还会发出 batchDelete([]) 却提示「批量删除成功」。
+  const ids = [...selectedIds.value];
+  if (ids.length === 0) return;
   try {
     await ElMessageBox.confirm(
-      `确定要删除选中的 ${selectedIds.value.length} 个订阅吗？`,
+      `确定要删除选中的 ${ids.length} 个订阅吗？`,
       "批量删除",
       { type: "warning" },
     );
-    await subscriptionApi.batchDelete(selectedIds.value);
+    await subscriptionApi.batchDelete(ids);
     ElMessage.success("批量删除成功");
     selectedIds.value = [];
     loadData();
@@ -1152,6 +1225,23 @@ async function handleBatchDelete() {
 
 function handleSelectionChange(rows: any[]) {
   selectedIds.value = rows.map((r) => r.id);
+}
+
+// 移动端批量栏「取消」：退出批量态。桌面不用它，el-table 的选择由表头复选框自己管。
+function clearSelection() {
+  selectedIds.value = [];
+}
+
+// 移动端批量栏「全选 / 取消全选」：只作用于当前页可见的卡片。
+// 取消全选后选择为空，批量栏随之退回普通工具栏，与点「取消」效果一致。
+function toggleSelectAllOnPage() {
+  const pageIds = filteredSubList.value.map((row) => row.id as number);
+  if (allSelectedOnPage.value) {
+    const pageIdSet = new Set(pageIds);
+    selectedIds.value = selectedIds.value.filter((id) => !pageIdSet.has(id));
+  } else {
+    selectedIds.value = [...new Set([...selectedIds.value, ...pageIds])];
+  }
 }
 
 function isSelected(id: number) {
@@ -1197,6 +1287,19 @@ function getStatusTag(status: number) {
 
 function getStatusText(status: number) {
   return status === 0 ? "正常" : "失败";
+}
+
+// 打开「SSH 密钥管理」弹窗并刷新列表。桌面工具栏的「SSH 密钥」按钮与移动端「设置」下拉里的同名项共用。
+function openSSHKeyManage() {
+  showSSHKeyManageDialog.value = true;
+  loadSSHKeys();
+}
+
+// 移动端工具栏「设置」下拉：桌面那两颗按钮（SSH 密钥 / 订阅设置）在手机上收进同一个齿轮菜单，
+// 第一行才放得下「搜索框 + 新建 + 设置」而不换行。
+function onMobileSettingsCommand(command: string | number | object) {
+  if (command === "settings") handleOpenSettings();
+  else if (command === "ssh-keys") openSSHKeyManage();
 }
 
 function openCreateSSHKey() {
@@ -1269,33 +1372,92 @@ function viewLogDetail(log: any) {
 </script>
 
 <template>
-  <div class="subscriptions-page dd-fixed-page dd-page-hide-heading">
-    <div class="toolbar">
+  <div
+    ref="pageRootRef"
+    class="subscriptions-page dd-fixed-page dd-page-hide-heading"
+  >
+    <!--
+      移动端工具栏（v3.3.1，issue #143）：与桌面拆成两支，桌面走下面的 v-else、结构原样保留。
+      第一行：常态是「搜索框 + 新建订阅 + 设置」；勾选卡片后整行换成批量栏。
+        移动端是普通文档流，两支直接 v-if 互换，不走桌面 §4.2 的 visibility 叠放；
+        两支高度都是 32px、外边距相同，切换时下面的内容不跳。
+      第二行：类型分段控件，贴屏幕左右边缘、放不下时横向滑动。它是「已禁用」唯一的筛选入口，所以保留。
+    -->
+    <div v-if="isMobile" class="subscription-mobile-toolbar">
+      <div v-if="selectedIds.length === 0" class="dd-mobile-toolbar">
+        <el-input
+          v-model="keyword"
+          placeholder="搜索订阅名称或 URL"
+          clearable
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
+        >
+          <template #prefix
+            ><el-icon><Search /></el-icon
+          ></template>
+        </el-input>
+        <el-button
+          type="primary"
+          class="dd-icon-only-btn"
+          :icon="Plus"
+          aria-label="新建订阅"
+          title="新建订阅"
+          @click="openCreate"
+        />
+        <!-- 桌面的「SSH 密钥」「订阅设置」两颗按钮在这里收进齿轮下拉，菜单观感与操作列 Split Button 一致 -->
+        <el-dropdown
+          trigger="click"
+          placement="bottom-end"
+          popper-class="dd-split-button__popper"
+          @command="onMobileSettingsCommand"
+        >
+          <el-button
+            class="dd-icon-only-btn"
+            :icon="Setting"
+            aria-label="设置"
+            title="设置"
+          />
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="settings">订阅设置</el-dropdown-item>
+              <el-dropdown-item command="ssh-keys">SSH 密钥</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
+      <!-- 批量栏：全选 / 取消全选 → 删除 → 取消（放最后）。不显示「已选 N 项」，数量在删除确认框里写明。
+           「删除」用实心 danger：订阅没有批量启停接口，这一栏只有这一个不可逆操作。 -->
+      <div v-else class="dd-scroll-row dd-mobile-batch-bar">
+        <el-button :icon="Check" @click="toggleSelectAllOnPage">
+          {{ allSelectedOnPage ? "取消全选" : "全选" }}
+        </el-button>
+        <el-button type="danger" :icon="Delete" @click="handleBatchDelete">
+          删除
+        </el-button>
+        <el-button :icon="Close" @click="clearSelection">取消</el-button>
+      </div>
+      <div class="status-tabs dd-scroll-row dd-mobile-bleed">
+        <button
+          v-for="tab in typeTabs"
+          :key="tab.value"
+          :class="['status-tab', { active: typeFilter === tab.value }]"
+          @click="handleTypeFilter(tab.value)"
+        >
+          {{ tab.label }}
+        </button>
+      </div>
+    </div>
+
+    <div v-else class="toolbar">
       <div class="toolbar__left">
         <div class="status-tabs">
           <button
-            :class="['status-tab', { active: typeFilter === '' }]"
-            @click="handleTypeFilter('')"
+            v-for="tab in typeTabs"
+            :key="tab.value"
+            :class="['status-tab', { active: typeFilter === tab.value }]"
+            @click="handleTypeFilter(tab.value)"
           >
-            全部
-          </button>
-          <button
-            :class="['status-tab', { active: typeFilter === 'git-repo' }]"
-            @click="handleTypeFilter('git-repo')"
-          >
-            仓库
-          </button>
-          <button
-            :class="['status-tab', { active: typeFilter === 'single-file' }]"
-            @click="handleTypeFilter('single-file')"
-          >
-            单文件
-          </button>
-          <button
-            :class="['status-tab', { active: typeFilter === 'disabled' }]"
-            @click="handleTypeFilter('disabled')"
-          >
-            已禁用
+            {{ tab.label }}
           </button>
         </div>
         <el-input
@@ -1312,13 +1474,7 @@ function viewLogDetail(log: any) {
         </el-input>
       </div>
       <div class="toolbar__right">
-        <el-button
-          @click="
-            showSSHKeyManageDialog = true;
-            loadSSHKeys();
-          "
-          title="SSH 密钥管理"
-        >
+        <el-button @click="openSSHKeyManage" title="SSH 密钥管理">
           <el-icon><Key /></el-icon> SSH 密钥
         </el-button>
         <el-button @click="handleOpenSettings" title="订阅设置">
@@ -1352,139 +1508,137 @@ function viewLogDetail(log: any) {
         class="dd-mobile-card"
         :class="{ 'subscription-card--disabled': !row.enabled }"
       >
-        <div class="dd-mobile-card__header">
-          <div class="dd-mobile-card__title-wrap">
-            <div class="subscription-card__title-row">
-              <div class="dd-mobile-card__selection">
-                <el-checkbox
-                  :model-value="isSelected(row.id)"
-                  @change="toggleSelected(row.id, $event)"
-                />
-                <!-- 启用状态圆点（#133）：卡片里原来的「启用」字段（el-switch）已删，启用/禁用改由这枚圆点
-                     + 操作区的「禁用 / 启用」按钮承载，与桌面表格同一套东西（a11y 三件套见 .sub-status-dot 的注释）。
-                     圆点与标题包成一组：标题允许折行，而 .dd-mobile-card__selection 是 align-items:center，
-                     两者平级的话名称折两行时圆点会落在两行中线上；组内顶对齐 + 圆点 margin-top 把它钉在首行。 -->
-                <div class="subscription-card__name">
-                  <span
-                    class="sub-status-dot"
-                    :class="{ 'is-enabled': row.enabled }"
-                    role="img"
-                    :title="row.enabled ? '已启用' : '已禁用'"
-                    :aria-label="row.enabled ? '已启用' : '已禁用'"
-                  />
-                  <span class="dd-mobile-card__title">{{ row.name }}</span>
-                </div>
-              </div>
-              <!--
-                标签整体包一层：title-row 是 space-between，直接并排放两个标签会被拉开到两端。
-                覆盖策略同桌面，只在「不是跟随全局」时才显示。
-              -->
-              <div class="subscription-card__title-tags">
-                <el-tag
-                  size="small"
-                  :type="row.type === 'git-repo' ? '' : 'warning'"
-                >
-                  {{ row.type === "git-repo" ? "Git 仓库" : "单文件" }}
-                </el-tag>
-                <el-tag
-                  v-if="row.overwrite_mode === 'force'"
-                  size="small"
-                  type="warning"
-                >
-                  强制覆盖
-                </el-tag>
-                <el-tag
-                  v-else-if="row.overwrite_mode === 'preserve'"
-                  size="small"
-                  type="info"
-                >
-                  保留本地
-                </el-tag>
-                <!--
-                  同步任务三态只标 disabled 这一档：全局默认是「开」，enabled 与绝大多数订阅的
-                  实际行为一致，标出来全是噪音；「这条订阅不建/不删任务」才是意料之外、
-                  值得在列表里一眼看到的状态。inherit 同理不标（写法照上面的 overwrite_mode）。
-                  桌面表格刻意不加这两个标签：名称列 min-width 136 扣掉名称前状态圆点那 16px 只剩 120，
-                  再挂标签会把订阅名挤到第二行，见下面表格里那段宽度测算。
-                -->
-                <el-tag
-                  v-if="row.auto_add_task_mode === 'disabled'"
-                  size="small"
-                  type="info"
-                >
-                  不建任务
-                </el-tag>
-                <el-tag
-                  v-if="row.auto_del_task_mode === 'disabled'"
-                  size="small"
-                  type="info"
-                >
-                  不删任务
-                </el-tag>
-              </div>
-            </div>
-            <div class="dd-mobile-card__subtitle">{{ row.url }}</div>
+        <!--
+          首行（v3.3.1，issue #143）：复选框 → 启用圆点 → 名称 → 类型标签 → 可选标签组 → 右上角「···」。
+          URL 与分支不再上卡片（issue 的保留清单里没有它们），需要时从「···」→「编辑」里看。
+          启用圆点（#133）与桌面名称格同一套东西，a11y 三件套见 .sub-status-dot 的注释；
+          名称改成单行省略后首行固定一行高，圆点直接跟着 align-items:center 居中，不再需要钉在首行的 margin-top。
+        -->
+        <div class="dd-mobile-card__head">
+          <el-checkbox
+            :model-value="isSelected(row.id)"
+            @change="toggleSelected(row.id, $event)"
+          />
+          <span
+            class="sub-status-dot"
+            :class="{ 'is-enabled': row.enabled }"
+            role="img"
+            :title="row.enabled ? '已启用' : '已禁用'"
+            :aria-label="row.enabled ? '已启用' : '已禁用'"
+          />
+          <span
+            class="dd-mobile-card__name subscription-card__name"
+            :title="row.name"
+            >{{ row.name }}</span
+          >
+          <!--
+            标签用桌面那套缩写（Git / 文件、覆盖 / 保留），全称挂 title，窄屏上能多放一枚。
+            类型标签单独放在标签组外、不参与收缩，保证每张卡至少看得到一枚标签；
+            其余可选标签进 .subscription-card__tags，只吃名称和类型标签用剩的宽度，
+            放不下的整枚隐藏、不换行、不做 +N，名称优先：原理见样式里 .subscription-card__tags 的注释。
+            覆盖策略同桌面，只在「不是跟随全局」时才显示。
+          -->
+          <el-tag
+            class="subscription-card__type-tag"
+            size="small"
+            :type="row.type === 'git-repo' ? '' : 'warning'"
+            :title="row.type === 'git-repo' ? 'Git 仓库' : '单文件'"
+          >
+            {{ row.type === "git-repo" ? "Git" : "文件" }}
+          </el-tag>
+          <div class="dd-mobile-card__head-tags subscription-card__tags">
+            <el-tag
+              v-if="row.overwrite_mode === 'force'"
+              size="small"
+              type="warning"
+              title="强制覆盖：该订阅强制覆盖本地脚本文件，不跟随全局设置"
+            >
+              覆盖
+            </el-tag>
+            <el-tag
+              v-else-if="row.overwrite_mode === 'preserve'"
+              size="small"
+              type="info"
+              title="保留本地修改：该订阅拉取时保留本地脚本改动，不跟随全局设置"
+            >
+              保留
+            </el-tag>
+            <!--
+              同步任务三态只标 disabled 这一档：全局默认是「开」，enabled 与绝大多数订阅的
+              实际行为一致，标出来全是噪音；「这条订阅不建/不删任务」才是意料之外、
+              值得在列表里一眼看到的状态。inherit 同理不标（写法照上面的 overwrite_mode）。
+              桌面表格刻意不加这两个标签：名称列 min-width 136 扣掉名称前状态圆点那 16px 只剩 120，
+              再挂标签会把订阅名挤到第二行，见下面表格里那段宽度测算。
+            -->
+            <el-tag
+              v-if="row.auto_add_task_mode === 'disabled'"
+              size="small"
+              type="info"
+              title="自动建任务：该订阅强制关闭，不跟随全局设置"
+            >
+              不建任务
+            </el-tag>
+            <el-tag
+              v-if="row.auto_del_task_mode === 'disabled'"
+              size="small"
+              type="info"
+              title="自动删任务：该订阅强制关闭，不跟随全局设置"
+            >
+              不删任务
+            </el-tag>
+          </div>
+          <!-- 「···」：拉取日志 / 编辑 / 删除，与桌面操作列 Split Button 的菜单同一份数组 -->
+          <DdMoreMenu
+            :items="subActionItems"
+            @command="(key: string) => onSubAction(key, row)"
+          />
+        </div>
+
+        <!-- 字段区：标签与值横排。「启用」字段早在 #133 就改由名称前的圆点 + 末行按钮承载 -->
+        <div class="dd-mobile-card__rows">
+          <div class="dd-mobile-card__row">
+            <span class="dd-mobile-card__row-label">定时拉取</span>
+            <span
+              class="dd-mobile-card__row-value"
+              :class="{ 'dd-mono': row.schedule }"
+              :title="row.schedule || undefined"
+              >{{ row.schedule || "手动拉取" }}</span
+            >
+          </div>
+          <div class="dd-mobile-card__row">
+            <span class="dd-mobile-card__row-label">最后拉取</span>
+            <span class="dd-mobile-card__row-value">{{
+              formatDateTime(row.last_pull_at)
+            }}</span>
           </div>
         </div>
 
-        <div class="dd-mobile-card__body">
-          <div class="dd-mobile-card__grid">
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">分支</span>
-              <span class="dd-mobile-card__value">{{ row.branch || "-" }}</span>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">状态</span>
-              <div class="dd-mobile-card__value">
-                <!-- 与桌面状态列同一套过渡，key 同样绑状态值 -->
-                <Transition name="dd-status-switch" mode="out-in">
-                  <el-tag
-                    :key="row.status"
-                    size="small"
-                    :type="getStatusTag(row.status)"
-                    >{{ getStatusText(row.status) }}</el-tag
-                  >
-                </Transition>
-              </div>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">定时拉取</span>
-              <span class="dd-mobile-card__value">{{
-                row.schedule || "手动拉取"
-              }}</span>
-            </div>
-            <!-- 原来这里还有一格「启用」（el-switch），已删除（#133，与环境变量页统一）：启用态改由标题前的圆点表达、
-                 切换改由下面操作区的「禁用 / 启用」按钮执行，与桌面端同源。少一格不会留空洞：移动卡片只在
-                 isMobile（≤768px）时渲染，而 ≤768px 下 .dd-mobile-card__grid 是单列纵向堆叠。 -->
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">最后拉取</span>
-              <span class="dd-mobile-card__value">{{
-                formatDateTime(row.last_pull_at)
-              }}</span>
-            </div>
+        <!--
+          末行：左侧「状态」（拉取结果），右侧「拉取」「禁用 / 启用」。与定时任务卡「上次结果在左、操作在右下角」同构。
+          日志 / 编辑 / 删除收进首行的「···」：不可逆的删除不再和高频按钮并排，误点代价最大的那颗离拇指最远。
+          「禁用 / 启用」的 type/plain 与桌面操作列那颗逐字一致，直接复用 handleToggle（确认框、报错、loadData 都在里面）。
+          按钮用 default 尺寸（32px），与工具栏图标按钮等高。
+        -->
+        <div class="dd-mobile-card__footer">
+          <div class="dd-mobile-card__footer-main">
+            <span class="dd-mobile-card__row-label">状态</span>
+            <!-- 与桌面状态列同一套过渡，key 同样绑状态值 -->
+            <Transition name="dd-status-switch" mode="out-in">
+              <el-tag
+                :key="row.status"
+                size="small"
+                :type="getStatusTag(row.status)"
+                >{{ getStatusText(row.status) }}</el-tag
+              >
+            </Transition>
           </div>
-
-          <!-- 5 颗按钮排成 3 + 2：拉取 | 禁用·启用 | 日志 / 编辑 | 删除（顺序对齐环境变量页「主操作 → 开关 → 其它 → 删除」）。
-               「禁用 / 启用」的 type/plain 与桌面操作列那颗逐字一致，直接复用 handleToggle（确认框、报错、loadData 都在里面）。
-               「删除」刻意改成实心 danger：启用态下「禁用」已是 danger + plain，删除若仍是 plain，两颗外观逐字相同，
-               用户分不出哪颗不可逆（与 design-system §4.2「批量禁用 plain / 批量删除实心」同一套层级）。 -->
-          <div class="dd-mobile-card__actions subscription-card__actions">
-            <el-button size="small" type="success" @click="handlePull(row)"
-              >拉取</el-button
-            >
+          <div class="dd-mobile-card__footer-actions">
+            <el-button type="success" @click="handlePull(row)">拉取</el-button>
             <el-button
-              size="small"
               :type="row.enabled ? 'danger' : 'default'"
               :plain="row.enabled"
               @click="handleToggle(row)"
               >{{ row.enabled ? "禁用" : "启用" }}</el-button
-            >
-            <el-button size="small" @click="openLogs(row.id)">日志</el-button>
-            <el-button size="small" type="primary" plain @click="openEdit(row)"
-              >编辑</el-button
-            >
-            <el-button size="small" type="danger" @click="handleDelete(row.id)"
-              >删除</el-button
             >
           </div>
         </div>
@@ -1541,8 +1695,8 @@ function viewLogDetail(log: any) {
                 覆盖策略只在「不是跟随全局」时才挂标签：它是低频配置，
                 绝大多数订阅都是 inherit，常驻一列会白占桌面表格本就紧张的宽度（操作列已 fixed）。
 
-                文案在桌面端缩成「覆盖 / 保留」，与同格的「Git / 文件」一个风格（那两个也是桌面缩写、
-                移动端卡片才用全称）：这一列 min-width 136 扣掉名称前状态圆点那 16px，留给「名称 + 标签」的只有 120，
+                文案在桌面端缩成「覆盖 / 保留」，与同格的「Git / 文件」一个风格（v3.3.1 起移动端卡片也用这套缩写，
+                同样靠 title 看全称）：这一列 min-width 136 扣掉名称前状态圆点那 16px，留给「名称 + 标签」的只有 120，
                 而「Git」+「强制覆盖」两个 small round 标签加 gap 粗算已经 124px、比这 120 本身还宽，订阅名一个字都放不下，
                 force/preserve 那几行会靠 .sub-name-cell 的 flex-wrap 掉到第二行、行高比 inherit 行高一截。
                 缩写后两个标签约 96px，常规订阅名能和标签同排。
@@ -1682,13 +1836,8 @@ function viewLogDetail(log: any) {
         :total="total"
         :page-sizes="[20, 50, 100]"
         layout="sizes, prev, pager, next"
-        @current-change="loadData"
-        @size-change="
-          () => {
-            page = 1;
-            loadData();
-          }
-        "
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
       />
     </div>
 
@@ -2135,6 +2284,11 @@ function viewLogDetail(log: any) {
           @current-change="loadLogs"
         />
       </div>
+      <!-- 移动端全屏时关闭入口放右下角（F2，issue #143）：有 footer 的弹窗在 ≤768 会隐藏右上角 ×（global.scss）。
+           只在 dialogFullscreen 时提供插槽，桌面 EP 拿不到 $slots.footer、不渲染 footer，零变化。 -->
+      <template v-if="dialogFullscreen" #footer>
+        <el-button @click="showLogDialog = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog
@@ -2148,6 +2302,10 @@ function viewLogDetail(log: any) {
         style="min-height: 100px"
         v-html="logDetailContentHtml"
       ></pre>
+      <!-- 同上：移动端全屏时的底部「关闭」（F2） -->
+      <template v-if="dialogFullscreen" #footer>
+        <el-button @click="showLogDetail = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog
@@ -2337,6 +2495,10 @@ function viewLogDetail(log: any) {
         v-if="!sshKeyLoading && sshKeys.length === 0"
         description="暂无 SSH 密钥"
       />
+      <!-- 同上：移动端全屏时的底部「关闭」（F2） -->
+      <template v-if="dialogFullscreen" #footer>
+        <el-button @click="showSSHKeyManageDialog = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <!-- SSH Key Edit Dialog -->
@@ -2612,48 +2774,54 @@ function viewLogDetail(log: any) {
   }
 }
 
-.subscription-card__title-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+// ===== 移动端工具栏与卡片（v3.3.1，issue #143） =====
+// 行、按钮、卡片各部件的几何都在 global.scss 的共享类里（.dd-mobile-toolbar / .dd-mobile-card__head 等），
+// 这里只补本页独有的几处。
+
+// 移动端工具栏外层：第一行离顶栏的 12px 由移动端 .layout-main 的上内边距给（MainLayout.vue），
+// 第一行与第二行之间的 10px 由 .dd-mobile-toolbar / .dd-mobile-batch-bar 的下外边距给（两者上外边距都是 0）；
+// 这里只给第二行（类型分段控件）与下面卡片列表之间留距离。
+.subscription-mobile-toolbar {
+  margin-bottom: 12px;
 }
-// 类型标签 + 覆盖策略标签同处右侧，靠内部 gap 挨在一起，不参与外层的 space-between 分配
-.subscription-card__title-tags {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+
+// 卡片名称字色。字号、省略由 .dd-mobile-card__name 给，它不管颜色；禁用卡在下面降一档。
+.subscription-card__name {
+  color: var(--el-text-color-primary);
+}
+
+// 类型标签（Git / 文件）：放在可选标签组外、不收缩，保证每张卡至少露一枚标签。
+// 它只有两三个字宽，名称被挤到省略时它也照样紧跟在名称后面。
+.subscription-card__type-tag {
   flex-shrink: 0;
 }
-// 移动卡片操作区（#133）：按钮从 4 颗变成 5 颗（拉取 / 禁用·启用 / 日志 / 编辑 / 删除），
-// 一行三个排成 3 + 2（gap 8px ⇒ 基准宽 33.33% − 6px 差不多正好三列），第二行两颗靠 flex-grow 各摊一半，
-// 与环境变量页 .env-card__actions 同一写法。原来的 calc(50% − 4px) 会排成 2 + 2 + 1，
-// 第 5 颗「删除」孤零零占满一整行，视觉最重的按钮反而最显眼。
-// global.scss ≤768px 那组 :has 网格规则只覆盖 1~3 颗，5 颗时走 flex 基态，排布由这条决定。
-// 极窄机型（320px）核算：卡片内容宽约 296px（同环境变量页），三列每列约 93px，
-// 最长文案 2 字 = 2×12 + 22（EP small 内边距）+ 2（边框）= 48px，放得下。
-.subscription-card__actions > * {
-  flex: 1 1 calc(33.33% - 6px);
-}
 
-// 移动卡标题前的圆点 + 标题（#133）。标题允许折行（global 的 .dd-mobile-card__title 带 word-break），
-// 所以这一组顶对齐，再给圆点一个 margin-top 把它钉在【首行】中线上：
-// 标题 15px × line-height 1.4 = 21px 一行，(21 − 8) / 2 = 6.5px。
-// 这两个数取自 global.scss 的 .dd-mobile-card__title，改那边的字号 / 行高要回来同步。
-// min-width:0 让标题能在 .dd-mobile-card__selection（inline-flex）里收窄折行，而不是撑破卡片。
-.subscription-card__name {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  min-width: 0;
+// 首行可选标签组（覆盖 / 保留 / 不建任务 / 不删任务）：放不下的整枚隐藏、不换行、不做 +N，名称优先。
+// 纯 CSS，四条缺一不可：
+// 1) flex:1 1 0：基准宽是 0，只吃名称与类型标签用剩的宽度。收缩按「收缩系数 × 基准宽」分摊，
+//    基准宽 0 就一像素都不分担，空间不够时全落在名称（0 1 auto）上，名称不会为标签提前省略。
+//    别改回「flex-shrink 给个大数」：那只是按比例让位，名称仍会分到零点几像素的收缩，一样出省略号；
+//    也别给 min-width:auto，多行 flex 容器的最小宽是最宽那枚标签，它折到被裁的第二行时首行会空出一截、名称白白让位。
+//    min-width:0 与 overflow:hidden 由 G0 类 .dd-mobile-card__head-tags 给，这里不再写。
+// 2) flex-wrap:wrap + 固定 20px 高：放不下的标签整枚折到下一行，被 overflow:hidden 裁掉，不会露出半枚。
+//    20px 是 el-tag size="small" 的高度，改了标签尺寸要连下面 ::before 的高一起同步。
+// 3) ::before 零宽占位：它永远占住第一行，第一枚真标签就不再享有「一行至少放一个」的待遇，
+//    放不下时同样整枚折走；没有它的话，第一枚会硬留在首行、被横着裁成半截。
+//    高度必须给满 20px：首行若只有它且是 0 高，第二行只往下错一个 6px 行距，折下去的标签会露出大半枚。
+// 4) margin-left:-8px 抵掉 .dd-mobile-card__head 的 8px gap：可选标签一枚都放不下或根本没有时，
+//    这个空容器不多占一道间距、不再从名称那里抢 8px；放得下时，::before 后面那道 6px 标签间距
+//    正好成为类型标签与第一枚可选标签的间距，与标签之间的 6px 一致。
+//    「···」靠 DdMoreMenu 自带的 margin-left:auto 贴右，本容器会长满剩余宽度，不影响它的位置。
+.subscription-card__tags {
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  height: 20px;
+  margin-left: -8px;
 
-  .dd-mobile-card__title {
-    min-width: 0;
-  }
-
-  .sub-status-dot {
-    margin-top: calc((15px * 1.4 - 8px) / 2);
+  &::before {
+    content: "";
+    width: 0;
+    height: 20px;
   }
 }
 
@@ -2674,9 +2842,9 @@ function viewLogDetail(log: any) {
   background: var(--el-fill-color-lighter);
 }
 
-// 桌面名称与移动卡标题共用同一档降级
+// 桌面名称与移动卡名称共用同一档降级
 :deep(.sub-row-disabled) .sub-name-text,
-.subscription-card--disabled .dd-mobile-card__title {
+.subscription-card--disabled .subscription-card__name {
   color: var(--el-text-color-regular);
 }
 
@@ -2907,6 +3075,8 @@ function viewLogDetail(log: any) {
   }
 }
 
+// ≤768 下桌面工具栏（.toolbar）不再渲染，移动端走上面的 .subscription-mobile-toolbar，
+// 原来那组把 .toolbar 竖排成三行的规则已随拆分删除。
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
@@ -2915,28 +3085,6 @@ function viewLogDetail(log: any) {
     h2 {
       font-size: 18px;
     }
-  }
-  .toolbar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-    &__left {
-      flex-direction: column;
-      gap: 10px;
-    }
-    &__search {
-      width: 100% !important;
-    }
-    &__right {
-      justify-content: flex-end;
-    }
-  }
-  .status-tabs {
-    width: 100%;
-    overflow-x: auto;
-  }
-  .subscription-card__title-row {
-    flex-direction: column;
   }
 }
 
@@ -2955,6 +3103,7 @@ function viewLogDetail(log: any) {
 }
 
 .toolbar,
+.subscription-mobile-toolbar,
 .table-card,
 .dd-mobile-list {
   animation: dd-subs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;

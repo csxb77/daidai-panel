@@ -620,6 +620,15 @@ const groupedTemplates = computed(() => {
             placeholder="名称（可留空，默认用表达式）"
           />
           <el-button size="small" @click="saveCurrentAsFavorite">把当前表达式存为常用</el-button>
+          <!-- 移动端全屏时补一个「关闭」（v3.3.1，issue #143 F2）：这个弹窗 close-on-click-modal=false，
+               而有 footer 的弹窗在 ≤768 下 EP 自带的右上角 × 会被 global.scss 隐藏，不补就只能靠选一条规则才能退出。
+               放进现有的 .template-footer 而不另起一栏；尺寸跟同一栏的输入框、按钮一致用 small。桌面不渲染。 -->
+          <el-button
+            v-if="dialogFullscreen"
+            size="small"
+            class="template-footer__close"
+            @click="showAllTemplates = false"
+          >关闭</el-button>
         </div>
       </template>
     </el-dialog>
@@ -929,6 +938,13 @@ const groupedTemplates = computed(() => {
 
     :deep(.el-input) {
       width: 100%;
+    }
+
+    // 输入框独占第一行后，「存为常用」与「关闭」落在第二行：margin-left:auto 把「关闭」推到右下角，
+    // 与其它弹窗的关闭按钮同一个位置。两个类叠加（scoped 后 (0,3,0)）是为了压过 EP 的
+    // `.el-button + .el-button { margin-left: 12px }`（(0,2,0)，懒注入顺序不定），否则 auto 会被它顶掉。
+    .template-footer__close {
+      margin-left: auto;
     }
   }
 }

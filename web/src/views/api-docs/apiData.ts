@@ -416,8 +416,10 @@ panel.add_or_update_env(
         method: 'GET',
         path: '/api/auth/preferences',
         title: '获取当前用户的界面偏好',
-        description: '读取当前登录用户自己的界面偏好，目前只有编辑器（脚本编辑 / 日志查看）那一组开关。⚠️ 这是【按用户】的偏好，不是全面板配置：每个账号各存一份、互不影响，也不在 /api/configs 里。鉴权只要求 JWTAuth、不限角色——operator / viewer 同样能读写自己那份，改自己的编辑器开关不该要管理员权限（对比 /api/configs 那组是管理员独占）。从没存过偏好的用户直接返回下面这份默认值，不会 404，但会带上 stored=false（见响应字段，这是升级路径的关键）。⚠️ 编辑器引擎（CodeMirror / Monaco）刻意【不在】这里：它带着设备自适应语义（触摸设备与窄屏硬回落 CodeMirror），只存在浏览器本地——引擎跟设备走，偏好跟人走。',
+        description: '读取当前登录用户自己的界面偏好，分两组：editor 是编辑器（脚本编辑 / 日志查看）的开关；list 是列表页偏好（定时任务页、环境变量页的每页条数，以及定时任务页视图栏「全部」「分组标签」的显隐）。⚠️ 这是【按用户】的偏好，不是全面板配置：每个账号各存一份、互不影响，也不在 /api/configs 里，换浏览器、换域名 / IP 登录都跟着账号走。鉴权只要求 JWTAuth、不限角色——operator / viewer 同样能读写自己那份，改自己的界面开关不该要管理员权限（对比 /api/configs 那组是管理员独占）。两组的存储口径不同：editor 从没存过时直接返回一整套默认值，不会 404，但会带上 stored=false（见响应字段，这是升级路径的关键）；list 是稀疏存储，只下发用户存过、且取值合法的键，从没存过就是 {}，服务端不替它补默认值。⚠️ 编辑器引擎（CodeMirror / Monaco）刻意【不在】这里：它带着设备自适应语义（触摸设备与窄屏硬回落 CodeMirror），只存在浏览器本地——引擎跟设备走，偏好跟人走。',
         auth: 'jwt',
+        // 示例刻意取「只存过 list、没存过 editor」的用户：stored=false 与 list 非空同时出现，
+        // 正好说明 stored 只管 editor 那一组，读文档的人不会把它当成「整份偏好存没存过」。
         responseExample: JSON.stringify({
           editor: {
             word_wrap: 'on',
@@ -427,6 +429,10 @@ panel.add_or_update_env(
             indent_width: 'auto',
           },
           stored: false,
+          list: {
+            tasks_page_size: 50,
+            tasks_view_all_hidden: true,
+          },
         }, null, 2),
         responseFields: [
           { name: 'editor.word_wrap', type: 'string', description: '自动换行，取值 on / off，默认 on' },
@@ -434,7 +440,12 @@ panel.add_or_update_env(
           { name: 'editor.indent_guides', type: 'boolean', description: '缩进参考线开关，JSON 布尔，默认 true' },
           { name: 'editor.whitespace', type: 'string', description: '空白符显示，取值 none（从不）/ selection（仅选中）/ all（始终），默认 selection' },
           { name: 'editor.indent_width', type: 'string', description: '缩进宽度，取值 auto / 2 / 4 / 6 / 8，默认 auto（按文件内容自动检测）。⚠️ 传输层是字符串，是 "4" 不是 4' },
-          { name: 'stored', type: 'boolean', description: '服务端是否真的存过这个用户的偏好。判定口径：有这个用户的记录 且 记录里的偏好能解析成 JSON 对象 → true；没有记录 / 空串 / 脏 JSON 一律 false（后两种当成「没存过」）。⚠️ 它是给客户端做升级路径判断用的：stored=false 说明服务端还没有这个用户的记录，此时客户端应当把【本机】那份偏好一次性 PUT 上去做上行迁移，而不是拿下面 editor 里这套默认值去覆盖本机——照着覆盖的话，老用户升级到有服务端偏好的版本时，本机调好的开关会在首屏被静默冲掉。stored=true 才允许拿 editor 的值写回本地。注意 editor 字段本身不受 stored 影响：无论 stored 是什么都下发一整套可用的值，不认得 stored 的老客户端行为与加这个字段之前逐字一致' },
+          { name: 'stored', type: 'boolean', description: '服务端是否真的存过这个用户的编辑器偏好（只看 editor 这一组）。判定口径：有这个用户的记录 且 记录里的编辑器偏好非空、能解析成 JSON 对象 → true；没有记录 / 空串 / 脏 JSON 一律 false（后两种当成「没存过」）。⚠️ 它是给客户端做升级路径判断用的：stored=false 说明服务端还没存过这个用户的编辑器偏好，此时客户端应当把【本机】那份偏好一次性 PUT 上去做上行迁移，而不是拿下面 editor 里这套默认值去覆盖本机——照着覆盖的话，老用户升级到有服务端偏好的版本时，本机调好的开关会在首屏被静默冲掉。stored=true 才允许拿 editor 的值写回本地。注意 editor 字段本身不受 stored 影响：无论 stored 是什么都下发一整套可用的值，不认得 stored 的老客户端行为与加这个字段之前逐字一致。⚠️ stored 只描述 editor 这一组，与 list 无关：只存过列表页偏好、没碰过编辑器开关的用户，stored 仍是 false' },
+          { name: 'list', type: 'object', description: '列表页偏好，稀疏存储：只含用户存过、且取值合法的键，从没存过就是 {}。list 没有 stored 标记——某个键在不在就说明它存没存过；缺的键客户端按下面各项写的默认值处理，服务端不下发默认值。库里存了脏值的键会被丢弃、不下发，不影响其余键。老版本服务端（v3.3.1 之前）的响应里没有这个字段' },
+          { name: 'list.tasks_page_size', type: 'number', description: '定时任务页每页条数，JSON 数字，取值 10 / 20 / 50 / 100。未设置时不下发，客户端按 20 处理。手机与电脑共用这一个值' },
+          { name: 'list.envs_page_size', type: 'string', description: '环境变量页每页条数，取值 "20" / "50" / "100" / "all"（all 表示一页显示全部）。⚠️ 传输层是字符串（因为有 all），是 "50" 不是 50。未设置时不下发，客户端按 "20" 处理' },
+          { name: 'list.tasks_view_all_hidden', type: 'boolean', description: '定时任务页视图栏是否隐藏内置的「全部」标签，JSON 布尔。未设置时不下发，客户端按 false（显示）处理。自定义视图全部隐藏时，标签栏仍会保底显示「全部」' },
+          { name: 'list.tasks_view_groups_hidden', type: 'boolean', description: '定时任务页视图栏是否整体隐藏分组标签（来自任务的「分组:」标签），JSON 布尔。未设置时不下发，客户端按 false（显示）处理。⚠️ 各个自定义视图自己的显隐不在这里，那是全面板共用的，走视图管理接口' },
         ],
       },
       {
@@ -442,15 +453,20 @@ panel.add_or_update_env(
         method: 'PUT',
         path: '/api/auth/preferences',
         title: '更新当前用户的界面偏好',
-        description: '更新当前登录用户自己的界面偏好。⚠️ 字段级合并：body 里只放要改的键，没传的键保持原值、不会被重置成默认值——面板自己就是这么用的（改一个开关只提交那一个键），两个标签页各改各的开关不会互相覆盖。鉴权同 GET：JWTAuth、不限角色，改的永远是调用者自己那份，没有「替别人改」的入口。任一字段取值非法返回 400，不做静默纠正。响应体是合并之后的完整偏好，与 GET 逐字同形。',
+        description: '更新当前登录用户自己的界面偏好。body 分 editor、list 两组，两组都可选。⚠️ 两组各自做字段级合并：body 里只放要改的键，没传的键保持原值、不会被重置成默认值——面板自己就是这么用的（改一个开关只提交那一个键）。服务端把「读出当前值 → 合并 → 写回」整段串行执行，所以几个 PUT 同时到达（两个标签页各改各的开关、一次保存连发两个请求）时，各自改的不同键都会落库、不会互相覆盖；同一个键被同时改时以后执行的那次为准。只带其中一组时，另一组原样不动：只改列表页每页条数不会顺手写入编辑器偏好，也不会把 stored 翻成 true。两组都不带（比如发 {}）是 no-op，回 200 并原样返回当前值（v3.3.1 之前发 {} 会写入一整套编辑器默认值并把 stored 置为 true，现已改掉）。鉴权同 GET：JWTAuth、不限角色，改的永远是调用者自己那份，没有「替别人改」的入口。任一字段取值或类型非法返回 400，这次请求两组都不会写入，不做静默纠正。响应体是合并之后的当前值，与 GET 同形。',
         auth: 'jwt',
         bodyParams: [
-          { name: 'editor', type: 'object', required: true, description: '编辑器偏好，取下面 5 个键的任意子集', example: '{ "whitespace": "all" }' },
+          { name: 'editor', type: 'object', required: false, description: '编辑器偏好，取下面 5 个键的任意子集。不带这一项时编辑器偏好保持原样', example: '{ "whitespace": "all" }' },
           { name: 'editor.word_wrap', type: 'string', description: '自动换行，取值 on / off', example: 'on' },
           { name: 'editor.minimap', type: 'boolean', description: '缩略图开关（只对 Monaco 引擎生效）。写入时是 JSON 布尔——面板前端提交的就是布尔；另外也接受 "on" / "off" / "true" / "false" 字符串，那是留给 APP 与历史客户端的。读出来统一是 JSON 布尔', example: 'false' },
           { name: 'editor.indent_guides', type: 'boolean', description: '缩进参考线开关。写入时是 JSON 布尔（面板前端提交的就是布尔），同样兼容 "on" / "off" / "true" / "false" 字符串以照顾 APP 与历史客户端。读出来统一是 JSON 布尔', example: 'true' },
           { name: 'editor.whitespace', type: 'string', description: '空白符显示，字符串，取值 none / selection / all', example: 'all' },
           { name: 'editor.indent_width', type: 'string', description: '缩进宽度，字符串，取值 auto / 2 / 4 / 6 / 8。⚠️ 传输层是字符串，要传 "4" 不是 4', example: 'auto' },
+          { name: 'list', type: 'object', required: false, description: '列表页偏好，取下面 4 个键的任意子集，只存你传了的键（稀疏存储）。不带这一项时列表页偏好保持原样。⚠️ 每个键的 JSON 类型是固定的，类型不对（比如把 tasks_page_size 传成 "50"）同样回 400', example: '{ "tasks_page_size": 50 }' },
+          { name: 'list.tasks_page_size', type: 'number', description: '定时任务页每页条数，JSON 数字，取值 10 / 20 / 50 / 100', example: '50' },
+          { name: 'list.envs_page_size', type: 'string', description: '环境变量页每页条数，字符串，取值 "20" / "50" / "100" / "all"。⚠️ 传输层是字符串（因为有 all），要传 "50" 不是 50', example: 'all' },
+          { name: 'list.tasks_view_all_hidden', type: 'boolean', description: '定时任务页视图栏是否隐藏「全部」标签，只收 JSON 布尔（这是新接口，不兼容 "on" / "off" 字符串）', example: 'true' },
+          { name: 'list.tasks_view_groups_hidden', type: 'boolean', description: '定时任务页视图栏是否整体隐藏分组标签，只收 JSON 布尔', example: 'false' },
         ],
         responseExample: JSON.stringify({
           editor: {
@@ -461,10 +477,14 @@ panel.add_or_update_env(
             indent_width: 'auto',
           },
           stored: true,
+          list: {
+            tasks_page_size: 50,
+          },
         }, null, 2),
         responseFields: [
-          { name: 'editor', type: 'object', description: '合并之后的完整偏好，字段说明见「获取当前用户的界面偏好」' },
-          { name: 'stored', type: 'boolean', description: '恒为 true——写完这一次，服务端必然已经有这个用户的记录了。含义与 GET 的 stored 相同（有记录且能解析 → true），客户端据此判断「服务端还没有这个用户的记录」并决定要不要做本机偏好上行迁移；PUT 之后这个判断的答案只可能是「已经有了」' },
+          { name: 'editor', type: 'object', description: '合并之后的完整编辑器偏好，字段说明见「获取当前用户的界面偏好」' },
+          { name: 'stored', type: 'boolean', description: '与 GET 的 stored 同一口径，只描述 editor 这一组，按实际情况判定：本次写入了 editor、或者此前就存过编辑器偏好时为 true；这次只写了 list（或发的是 {}）、而编辑器偏好从没存过时仍为 false。⚠️ 它不是「这次 PUT 成功了」的标志，成功与否看 HTTP 状态码；客户端照旧据它判断要不要把本机的编辑器偏好上行迁移' },
+          { name: 'list', type: 'object', description: '合并之后的列表页偏好，仍是稀疏的：只含存过的键，字段说明见「获取当前用户的界面偏好」' },
         ],
       },
       {
@@ -1634,6 +1654,74 @@ if __name__ == '__main__':
         pathParams: [{ name: 'id', type: 'integer', required: true, description: '依赖 ID' }],
         responseExample: JSON.stringify({ message: '重新安装中' }, null, 2),
       },
+      {
+        id: 'deps-playwright-status',
+        method: 'GET',
+        path: '/api/deps/playwright',
+        title: '查询 Playwright 运行环境',
+        description: '查询当前部署能不能一键安装 Playwright 运行环境，以及三样东西各自装好了没有：Linux 系统库、Python 的 playwright 包、Chromium 浏览器。依赖管理页 Linux 页签的「安装 Playwright 运行环境」按钮就是按它决定是否置灰、是否显示「已就绪」。只读，不会触发任何安装。仅管理员可调（/deps 整组都是），不对 Open API 应用开放。',
+        auth: 'jwt',
+        responseExample: JSON.stringify({
+          supported: true,
+          reason: '',
+          distribution: 'debian',
+          version_id: '12',
+          arch: 'amd64',
+          packages: [
+            'libasound2', 'libatk-bridge2.0-0', 'libatk1.0-0', 'libatspi2.0-0', 'libcairo2', 'libcups2', 'libdbus-1-3',
+            'libdrm2', 'libgbm1', 'libglib2.0-0', 'libnspr4', 'libnss3', 'libpango-1.0-0', 'libx11-6', 'libxcb1',
+            'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3', 'libxkbcommon0', 'libxrandr2',
+            'fonts-liberation', 'fonts-wqy-zenhei', 'fonts-noto-color-emoji', 'libfontconfig1', 'libfreetype6',
+          ],
+          browsers_path: '/app/Dumb-Panel/deps/ms-playwright',
+          python_installed: true,
+          browsers_installed: true,
+          linux_installed: 26,
+          linux_total: 26,
+        }, null, 2),
+        responseFields: [
+          { name: 'supported', type: 'boolean', description: '当前部署是否支持一键安装。只有 Debian 12（bookworm）+ apt + amd64 / arm64、在 Docker 容器里运行、且面板进程是 root 时才是 true（也就是以 root 运行的 Debian 版 Docker 镜像）。Alpine（musl 跑不了官方的 glibc 版 Chromium）、其它发行版或版本、非 Linux、其它 CPU 架构、非容器部署（裸机 Debian 12 或面具模块版：浏览器目录不由面板托管）、面板进程不是 root（比如设了 PUID 降权运行）时一律 false，原因见 reason。它与安装接口的前置检查是同一套规则：这里是 true，安装接口就不会因为环境或权限回 400' },
+          { name: 'reason', type: 'string', description: '不支持时的原因，中文，可直接展示给用户：发行版或版本不匹配时会带上探测到的 os-release 信息；非 root 时是权限说明（与安装接口 400 的文案相同）。supported=true 时为空串' },
+          { name: 'distribution', type: 'string', description: '探测到的发行版，即 /etc/os-release 的 ID，如 debian / ubuntu / alpine' },
+          { name: 'version_id', type: 'string', description: '发行版版本，即 /etc/os-release 的 VERSION_ID，如 12' },
+          { name: 'arch', type: 'string', description: '面板进程的 CPU 架构，如 amd64 / arm64' },
+          { name: 'packages', type: 'array', description: '一键安装会登记为 Linux 依赖的系统包：Chromium 必需的 21 个运行库，加上 5 个字体相关的包（含中文字体 fonts-wqy-zenhei，不装的话中文页面截图是方块），共 26 个，amd64 与 arm64 相同。不含 xvfb，那只有有头模式才用得到' },
+          { name: 'browsers_path', type: 'string', description: 'Chromium 的下载目录，也就是任务里 PLAYWRIGHT_BROWSERS_PATH 的实际取值。优先级：环境变量页里启用的同名变量 > 面板进程的环境变量 > 默认值。Docker 部署的默认值是数据目录下的 deps/ms-playwright（默认 /app/Dumb-Panel/deps/ms-playwright），在数据卷里，重建容器不丢；Windows、裸机与 Magisk 部署没有默认值' },
+          { name: 'python_installed', type: 'boolean', description: '默认 Python 版本下的 playwright 是否已登记为已安装的 Python 依赖、且 pip 里确实装着，两项都满足才为 true。在面板外手动 pip 装的（没有登记）、以及正在排队 / 安装 / 卸载中的（包括一键安装刚把它重新入队）都返回 false' },
+          { name: 'browsers_installed', type: 'boolean', description: 'browsers_path 下是否已经有 Chromium（存在 chromium 开头的目录即算）。只看目录在不在，不核对版本' },
+          { name: 'linux_installed', type: 'integer', description: 'packages 里已登记为 Linux 依赖、且系统里确实装着的包数。容器重建后系统库丢失、正在后台自动重装时，这个数会暂时小于 linux_total' },
+          { name: 'linux_total', type: 'integer', description: '需要的系统包总数，即 packages 的长度' },
+        ],
+      },
+      {
+        id: 'deps-playwright-install',
+        method: 'POST',
+        path: '/api/deps/playwright/install',
+        title: '一键安装 Playwright 运行环境',
+        description: '依赖管理页 Linux 页签的「安装 Playwright 运行环境」按钮调的就是它，不需要请求体。一次做三件事：① 把 packages 里的系统包逐个登记成 Linux 依赖（已登记且已装好的跳过，之前失败或取消的复用原记录）；② 在默认 Python 版本下登记 playwright 包，已经装过也会重新排队，用来补下载浏览器；③ pip 装好之后，在同一条依赖记录、同一份日志里接着执行 python -m playwright install chromium，把浏览器下载到 browsers_path。所有记录按「先系统库、后 Python」的顺序进同一个队列依次安装，接口只负责入队、立即返回，进度和日志照常在依赖列表里看。因为系统库已登记成 Linux 依赖，容器重建后面板的启动校验会在后台自动重装它们；浏览器与 pip 包在数据卷里，不需要重装。⚠️ 前置检查全部在建任何记录之前完成：不支持（非 Linux、Alpine / apk、非 apt、非 Debian 12、非 amd64 / arm64、非 Docker 部署——裸机 / 面具模块版）或面板进程不是 root 时直接回 400，不会留下一批失败记录；GET /deps/playwright 已按同样的规则给出 supported=false 与原因，调用前可以先查。仅管理员可调，不对 Open API 应用开放。',
+        auth: 'jwt',
+        responseExample: JSON.stringify({
+          '已加入安装队列 (201)': {
+            message: '已加入安装队列，共 27 项',
+            data: [
+              { id: 31, type: 'linux', name: 'libasound2', status: 'queued' },
+              { id: 57, type: 'python', name: 'playwright', python_version: '3.12', status: 'queued' },
+            ],
+            packages: ['libasound2', 'libatk-bridge2.0-0', 'libatk1.0-0'],
+            browsers_path: '/app/Dumb-Panel/deps/ms-playwright',
+          },
+          '不支持当前环境 (400)': {
+            error: 'Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请换 Debian 版镜像 linzixuanzz/daidai-panel:debian',
+          },
+        }, null, 2),
+        responseFields: [
+          { name: 'message', type: 'string', description: '入队结果的提示文案' },
+          { name: 'data', type: 'array', description: '本次加入队列的依赖记录（系统包 + playwright），字段同「获取依赖列表」的 data[]，status 为 queued（示例里截短了）。没有需要入队的项时仍回 201，data 为 []，message 会写明跳过的项数。playwright 那条记录只要不在处理中就会重新入队，所以 data 为空实际意味着上一轮还在排队或安装中' },
+          { name: 'packages', type: 'array', description: '系统包清单，同「查询 Playwright 运行环境」的 packages（示例里截短了）' },
+          { name: 'browsers_path', type: 'string', description: 'Chromium 将要下载到的目录，同「查询 Playwright 运行环境」的 browsers_path' },
+          { name: 'error', type: 'string', description: '失败原因（400 / 500 时返回），中文，可直接展示：400 时，不支持的给出具体原因，非 root 的说明需要以 root 运行；500 表示登记依赖记录时数据库出错（文案「登记 Playwright 依赖失败，请稍后重试」），本次新建的记录已回滚，可以直接重试' },
+        ],
+      },
     ],
   },
   {
@@ -2078,6 +2166,10 @@ export function generateCodeExamples(endpoint: ApiEndpoint): Record<string, stri
   const bodyObj: Record<string, any> = {}
   if (hasBody) {
     bodyParams!.forEach(p => {
+      // 带点号的是某个对象参数的子键说明（如 editor.word_wrap、list.tasks_page_size），只给文档表格看；
+      // 它们的取值已经体现在父参数（editor / list）的 example 里。按字面量写进示例的话，
+      // 会多出 "editor.word_wrap" 这种服务端根本不认的顶层键，读者照抄还以为它们生效了。
+      if (p.name.includes('.')) return
       if (p.example) {
         // number（如环境变量的 position 排序值）与 integer 一样按数字写进示例，否则会生成成字符串、发出去就 400
         if (p.type === 'integer' || p.type === 'number') {

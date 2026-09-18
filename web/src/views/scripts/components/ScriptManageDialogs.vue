@@ -185,10 +185,12 @@ watch(showVersionDiffDialog, (visible) => {
         清空版本历史
       </el-button>
     </div>
+    <!-- 移动端全屏时底部有「关闭」footer（约 57px），表格最大高度要把它让出来（300 = 无 footer 时的 240 + 60），
+         否则全屏弹窗的 body 会和表格自己的滚动叠成两层。桌面没有这条 footer，320px 不变。 -->
     <el-table
       :data="versions"
       v-loading="versionsLoading"
-      :max-height="isMobile ? 'calc(100dvh - 240px)' : 'calc(100dvh - 320px)'"
+      :max-height="isMobile ? 'calc(100dvh - 300px)' : 'calc(100dvh - 320px)'"
       table-layout="auto"
       class="version-history-table"
     >
@@ -210,6 +212,12 @@ watch(showVersionDiffDialog, (visible) => {
         <el-empty description="当前脚本还没有版本记录" />
       </template>
     </el-table>
+    <!-- 移动端全屏时右上角 × 被全局规则隐藏（F2），关闭入口放到右下角。
+         条件与本弹窗的 :fullscreen 同用 isMobile（父级传入的就是 useResponsive 的 isMobile）；
+         桌面不传 footer 插槽，EP 不渲染 footer，保持原样。 -->
+    <template v-if="isMobile" #footer>
+      <el-button @click="showVersionDialog = false">关闭</el-button>
+    </template>
   </el-dialog>
 
   <el-dialog
@@ -272,6 +280,11 @@ watch(showVersionDiffDialog, (visible) => {
         class="version-diff-editor"
       />
     </div>
+    <!-- 同上：移动端的关闭入口。本弹窗 close-on-click-modal=false，点遮罩关不掉，这颗按钮是移动端唯一的出口。
+         置 false 与点 × 走的是同一条 v-model，上面 watch(showVersionDiffDialog) 的复位逻辑照样执行。 -->
+    <template v-if="isMobile" #footer>
+      <el-button @click="showVersionDiffDialog = false">关闭</el-button>
+    </template>
   </el-dialog>
 
   <el-dialog v-model="showUploadDialog" title="上传文件" :width="isMobile ? '90%' : '480px'" :fullscreen="isMobile" destroy-on-close>

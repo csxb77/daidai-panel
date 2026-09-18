@@ -342,12 +342,16 @@ async function loadVersion() {
       </button>
     </aside>
 
-    <!-- Mobile Drawer -->
+    <!-- Mobile Drawer
+         宽度实际由 global.scss 的 .el-drawer.layout-mobile-drawer 决定（50%，夹在 220~320px）：
+         移动端通用的 .el-drawer{width:100% !important} 会压掉这里的 size，只能靠那条更高特异性的例外规则放出来。
+         size 仍写 50% 是为了让组件自己的语义与实际一致，免得后人以为抽屉是 260px。 -->
     <el-drawer
       v-if="isMobile"
       v-model="drawerVisible"
+      class="layout-mobile-drawer"
       direction="ltr"
-      :size="260"
+      size="50%"
       :with-header="false"
       :show-close="false"
     >
@@ -950,6 +954,11 @@ async function loadVersion() {
   top: 0;
   z-index: 20;
   flex-shrink: 0;
+  // 顶栏左右两块「胶囊」（面包屑、右侧工具区）与左上角菜单按钮的统一高度（v3.3.1，issue #143 O2）。
+  // 原来面包屑靠 padding + 行高撑出约 36px、右侧工具区被 34px 按钮与 38px 用户区撑到约 46px，
+  // 两块高度差 10px、底色还差一档；统一定高后两端（桌面与移动端）都对齐。
+  // 全局 * { box-sizing: border-box }，height 已包含 padding。
+  --dd-header-chip-height: 36px;
 }
 
 .header-left {
@@ -960,9 +969,10 @@ async function loadVersion() {
 }
 
 .header-toggle-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: var(--dd-radius-control);
+  // 与旁边的面包屑胶囊等高（O2），圆角吃「按钮」角色令牌（桌面 = control 档，移动端 rounded 为 16px）
+  width: var(--dd-header-chip-height);
+  height: var(--dd-header-chip-height);
+  border-radius: var(--dd-radius-button);
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
   display: flex;
@@ -987,8 +997,10 @@ async function loadVersion() {
 
 .header-breadcrumb {
   display: flex;
-  padding: 6px 10px;
-  border-radius: var(--dd-radius-control);
+  // 定高而不是靠 padding + 行高撑：与 .header-right 同一个高度令牌，两块胶囊才能严格等高（O2）
+  height: var(--dd-header-chip-height);
+  padding: 0 10px;
+  border-radius: var(--dd-radius-button);
   background: color-mix(in srgb, var(--el-fill-color-light) 76%, transparent);
   align-items: center;
   gap: 6px;
@@ -1071,17 +1083,21 @@ async function loadVersion() {
 
 .header-right {
   display: flex;
-  padding: 4px 6px;
-  border-radius: var(--dd-radius-control);
-  background: color-mix(in srgb, var(--el-fill-color-light) 82%, transparent);
+  // 与面包屑同高同底色（O2）：原来 82% 比面包屑的 76% 深一档，两块并排时像两种控件。
+  // padding 2px + 内部 32px 的按钮 / 用户区，正好填满 36px。
+  height: var(--dd-header-chip-height);
+  padding: 2px;
+  border-radius: var(--dd-radius-button);
+  background: color-mix(in srgb, var(--el-fill-color-light) 76%, transparent);
   align-items: center;
   gap: 6px;
 }
 
 .header-icon-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: var(--dd-radius-control);
+  // 32px：放进 36px 的胶囊里上下各留 2px；rounded 移动端配 16px 圆角正好是正圆
+  width: 32px;
+  height: 32px;
+  border-radius: var(--dd-radius-button);
   border: none;
   background: transparent;
   display: flex;
@@ -1112,8 +1128,11 @@ async function loadVersion() {
   overflow: hidden;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  border-radius: var(--dd-radius-control);
+  // 与 .header-icon-btn 同高 32px（O2）：原来 padding 5px 10px + 28px 头像约 38px，把右侧胶囊撑到 46px。
+  // 左侧只留 2px，让头像贴着 hover 底的左缘；移动端不显示用户名时见下方媒体查询收成 32×32。
+  height: 32px;
+  padding: 2px 8px 2px 2px;
+  border-radius: var(--dd-radius-button);
   cursor: pointer;
   transition: background-color var(--dd-motion-fast) var(--dd-ease-standard);
   outline: none;
@@ -1284,8 +1303,30 @@ async function loadVersion() {
 
   .layout-main {
     overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
-    padding: max(12px, env(safe-area-inset-top)) 12px calc(16px + env(safe-area-inset-bottom));
+    // 🔴 F1（v3.3.1，issue #143）：这里原来还有一条 -webkit-overflow-scrolling: touch，已删，不要加回来。
+    // 本项目的 el-dialog / el-drawer 默认【不 teleport】（EP 2.13.5 appendToBody 默认 false），
+    // 都原地渲染在 .layout-main 里面。iOS WebKit 会把「可滚动 + touch 滚动」的元素强制变成
+    // z-index:0 的层叠上下文，于是弹窗遮罩的 z-index 2000+ 只在这个上下文内部有效；
+    // 在根上下文里 .layout-main 排在 z-index 20 的 sticky 顶栏之下，全屏弹窗的标题栏和右上角 ×
+    // 被顶栏整块盖住、点不到。Chromium 不认这条属性，所以 DevTools 模拟复现不了。
+    // iOS 13 起 overflow 滚动默认就带惯性，构建目标 Safari 16，删掉没有任何损失。
+    //
+    // 下面 position + z-index 是第二道保险：显式把内容区整体排在顶栏（20）之上，
+    // 不再依赖「WebKit 会不会把它当层叠上下文」这个推断。正常文档流里两者不重叠，
+    // 只有内联弹窗 / 抽屉的 fixed 遮罩会越过顶栏，这正是想要的。
+    // 顶栏自己的下拉菜单、ElMessage / ElMessageBox 都 teleport 到 body（z 2000+），不受影响；
+    // position:relative 也不改变后代 fixed 元素的包含块（没有引入 transform / filter / contain）。
+    position: relative;
+    z-index: 21;
+    // R1：所有页面第一行离顶栏 12px，统一由这里的上内边距（= --dd-page-gutter-x）提供。
+    // issue 说的「上边距改 0」本意是去掉工具栏上外边距与这里的上内边距叠出来的双倍空隙，
+    // 所以归零的是 .dd-mobile-toolbar / .dd-mobile-batch-bar 的上外边距（global.scss），不是这里 ——
+    // 这里一归零，配置文件、仪表板、脚本、设置、用户、通知、OpenAPI、接口文档这些没有移动端工具栏的页面，
+    // 内容就直接贴着顶栏（v3.3.1 开发中浏览器实测踩过）。页面不要再自己补「离顶栏」的上外边距，否则又会叠出双倍。
+    // 横向留白同样吃 --dd-page-gutter-x，页面里贴屏幕边缘的元素（.dd-mobile-bleed）用等量负外边距抵消它。
+    // 顶部安全区不在这里处理：index.html 没开 viewport-fit=cover，env() 恒为 0；
+    // 将来要开，也应由顶栏承担顶部安全区，而不是内容区。
+    padding: var(--dd-page-gutter-x) var(--dd-page-gutter-x) calc(16px + env(safe-area-inset-bottom));
   }
 
   // 移动端 .route-shell 必须能被子内容撑高，否则被 flex column 容器压缩到等于 .layout-main 的可视高度，
@@ -1315,6 +1356,11 @@ async function loadVersion() {
 
   .header-right {
     gap: 2px;
+  }
+
+  // 移动端不显示用户名，只剩 28px 头像：四周各 2px，收成与主题按钮一样的 32×32
+  .header-user {
+    padding: 2px;
   }
 }
 </style>

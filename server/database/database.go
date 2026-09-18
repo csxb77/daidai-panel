@@ -379,6 +379,15 @@ func EnsureColumns() {
 		{"avatar_url", "VARCHAR(512) DEFAULT ''"},
 	})
 
+	ensureTableColumns("user_preferences", []columnDef{
+		// 列表页偏好（issue #143），稀疏 JSON。存量行补列后一律落 ''，即「一个键都没存过」，
+		// 前端据此只把本机老键里真有的值迁上来，升级后每页条数、视图栏显隐与升级前逐字节一致。
+		// NOT NULL 防 NULL 漏进来（GORM 把 NULL 扫进 string 会直接报错）；
+		// SQLite 的 ADD COLUMN 写 NOT NULL 必须同时给 DEFAULT，否则整条 ALTER 会失败。
+		// 回退到 v3.3.0 时老代码不认这一列，它插的新行也会靠这个 DEFAULT 落 ''。
+		{"list", "TEXT NOT NULL DEFAULT ''"},
+	})
+
 	dropEnvVarUniqueIndex()
 
 	log.Printf("column check completed")

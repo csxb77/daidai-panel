@@ -142,7 +142,7 @@ func (h *ScriptHandler) RunCode(c *gin.Context) {
 			}
 		}
 
-		if hint := service.BuildModuleCompatibilityHint(run.logOutput()); hint != "" {
+		if hint := service.BuildRuntimeFailureHint(run.logOutput()); hint != "" {
 			run.appendLog(hint)
 		}
 

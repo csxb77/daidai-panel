@@ -84,6 +84,14 @@ func buildSubscriptionHookEnv(sub *model.Subscription, workDir string) map[strin
 			env[key] = value
 		}
 	}
+	// 钩子里同样可能跑 Playwright（例如拉完仓库顺手装浏览器、做一次登录），浏览器目录要与任务看到的一致。
+	// 钩子环境不含环境变量页的值，所以这里取 ResolvePlaywrightBrowsersPath（它已按任务的优先级查过环境变量页），
+	// 而不是只补默认值。取到空串就不写：任务里拿到空串时 Playwright 同样按「没设」处理，两边一致。
+	if _, exists := env[PlaywrightBrowsersPathEnv]; !exists {
+		if value := ResolvePlaywrightBrowsersPath(); value != "" {
+			env[PlaywrightBrowsersPathEnv] = value
+		}
+	}
 	return env
 }
 

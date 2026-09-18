@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -255,37 +256,14 @@ func (h *DepsHandler) Create(c *gin.Context) {
 		}
 
 		for _, pythonVersion := range dependencyPythonInstallVersions(req.Type) {
-			// Python 依赖按 PEP 503 归一化键去重：同名（忽略大小写/分隔符差异）已存在且
-			// 已安装/安装中/排队中的，跳过、不重复安装。
-			if req.Type == model.DepTypePython {
-				if _, exists := service.FindExistingPythonDependency(name, pythonVersion,
-					model.DepStatusInstalled, model.DepStatusInstalling, model.DepStatusQueued); exists {
-					skipped++
-					continue
-				}
-			} else {
-				// nodejs / linux 同样做「先查后插」，但只按「类型 + 名称」精确匹配，
-				// 不套 Python 那套 PEP 503 归一化 —— 各生态的包名归一规则不同（npm 区分大小写、
-				// apt 包名带冒号架构后缀），硬套会把不同的包判成同一个，属于误伤。
-				// 这里也刻意不给 dependencies 加 DB 唯一索引，理由同上。
-				var existingCount int64
-				database.DB.Model(&model.Dependency{}).
-					Where("type = ? AND name = ? AND status IN ?", req.Type, name,
-						[]string{model.DepStatusInstalled, model.DepStatusInstalling, model.DepStatusQueued}).
-					Count(&existingCount)
-				if existingCount > 0 {
-					skipped++
-					continue
-				}
+			// 同名已安装 / 安装中 / 排队中的跳过、不重复安装。查重口径见 findExistingDependency。
+			if _, exists := findExistingDependency(req.Type, name, pythonVersion, dependencyActiveStatuses...); exists {
+				skipped++
+				continue
 			}
 
-			dep := model.Dependency{
-				Type:          req.Type,
-				Name:          name,
-				PythonVersion: pythonVersion,
-				Status:        model.DepStatusInstalling,
-			}
-			if err := database.DB.Create(&dep).Error; err != nil {
+			dep, err := createDependencyRecord(req.Type, name, pythonVersion, model.DepStatusInstalling, "")
+			if err != nil {
 				continue
 			}
 			created = append(created, dep.ToDict())
@@ -305,6 +283,51 @@ func (h *DepsHandler) Create(c *gin.Context) {
 		"message": message,
 		"data":    created,
 	})
+}
+
+// dependencyActiveStatuses 是「同名已存在就不再重复提交」认的三种状态。
+var dependencyActiveStatuses = []string{model.DepStatusInstalled, model.DepStatusInstalling, model.DepStatusQueued}
+
+// findExistingDependency 按「类型 + 名称（+ Python 版本）」找一条已登记的依赖记录，statuses 为空表示不限状态。
+// POST /deps 与 Playwright 一键安装共用这一份查重口径（#142 抽出）。
+//
+//   - Python 按 PEP 503 归一化键匹配（忽略大小写 / 分隔符差异，requests==2.31.0 也算 requests）；
+//   - nodejs / linux 只按名称精确匹配，不套 PEP 503 —— 各生态的包名归一规则不同（npm 区分大小写、
+//     apt 包名带冒号架构后缀），硬套会把不同的包判成同一个，属于误伤。
+//     这里也刻意不给 dependencies 加 DB 唯一索引，理由同上。
+//
+// 同名多条（历史遗留）时 nodejs / linux 取 id 最大的一条，即最近登记的那条。
+func findExistingDependency(depType, name, pythonVersion string, statuses ...string) (model.Dependency, bool) {
+	if depType == model.DepTypePython {
+		return service.FindExistingPythonDependency(name, pythonVersion, statuses...)
+	}
+
+	query := database.DB.Where("type = ? AND name = ?", depType, name)
+	if len(statuses) > 0 {
+		query = query.Where("status IN ?", statuses)
+	}
+	// 用 Limit(1).Find 而不是 First：查不到是常态，First 会让 GORM 打一条 record not found 日志。
+	var found []model.Dependency
+	if err := query.Order("id DESC").Limit(1).Find(&found).Error; err != nil || len(found) == 0 {
+		return model.Dependency{}, false
+	}
+	return found[0], true
+}
+
+// createDependencyRecord 登记一条新的依赖记录；POST /deps 建成 installing 后立刻起安装协程，
+// 一键安装建成 queued 后交给顺序队列。
+func createDependencyRecord(depType, name, pythonVersion, status, logText string) (model.Dependency, error) {
+	dep := model.Dependency{
+		Type:          depType,
+		Name:          name,
+		PythonVersion: pythonVersion,
+		Status:        status,
+		Log:           logText,
+	}
+	if err := database.DB.Create(&dep).Error; err != nil {
+		return model.Dependency{}, err
+	}
+	return dep, nil
 }
 
 func (h *DepsHandler) Delete(c *gin.Context) {
@@ -745,7 +768,34 @@ func (h *DepsHandler) SetMirrors(c *gin.Context) {
 	response.Success(c, gin.H{"message": "镜像源设置成功"})
 }
 
+// depFollowUpStep 是主命令成功之后、在同一条依赖记录里接着执行的一步（#142 的浏览器下载就是这样一步）。
+//
+// 它与主命令共用同一个 SSE 广播、同一份日志、同一个超时 / 取消 ctx：用户在弹窗里点「取消」、
+// 或者整体超时，都会连同这一步一起终止；这一步失败，整条记录记为 failed。
+type depFollowUpStep struct {
+	// build 在主命令成功之后才调用：像 `python -m playwright install` 这种命令，
+	// 要等 pip 装完才找得到模块。返回的 startLine 会在命令启动前写进日志。
+	build func() (cmd *exec.Cmd, startLine string, err error)
+	// doneLine 在这一步成功结束后写进日志，留空不写。
+	doneLine string
+	// acquire 可选，在 build 之前调用，用来拿这一步需要的全进程槽位（#142 的 Chromium 下载同一时刻只许一条）。
+	// 拿不到时先调 waiting 写一行排队提示再阻塞；ctx 结束（取消 / 超时）时必须立刻返回 ctx.Err()，
+	// 不能用拿不到就一直等的 sync.Mutex —— 那样排队中的记录点取消、到超时都停不下来。
+	// 返回的 release 在这一步命令结束之后才调用，而不是 build 返回时。
+	acquire func(ctx context.Context, waiting func(line string)) (release func(), err error)
+}
+
+// dependencyRunStartMarker 是每次依赖任务启动时写的第一行的开头。
+// 失败提示靠它切出「本次运行」的日志段：批量重装、一键安装都会把新一轮日志追加在旧日志后面。
+const dependencyRunStartMarker = "[依赖任务已启动，超时阈值："
+
 func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess bool) {
+	runCmdWithSSEThen(cmd, id, successStatus, deleteOnSuccess, nil)
+}
+
+// runCmdWithSSEThen 是 runCmdWithSSE 加上「成功后接着执行的后续步骤」。
+// followUps 为空时与改动前的 runCmdWithSSE 行为逐项一致（卸载、强制卸载等调用方都走这条）。
+func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess bool, followUps []depFollowUpStep) {
 	broadcaster := getOrCreateBroadcaster(id)
 	defer removeBroadcaster(id)
 
@@ -819,53 +869,146 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 		logDirty = false
 	}
 
-	appendLine(fmt.Sprintf("[依赖任务已启动，超时阈值：%s，可在「系统设置 - 任务运行 - 依赖安装超时(分钟)」调整]", operationTimeout.Truncate(time.Second)), true)
+	appendLine(fmt.Sprintf("%s%s，可在「系统设置 - 任务运行 - 依赖安装超时(分钟)」调整]", dependencyRunStartMarker, operationTimeout.Truncate(time.Second)), true)
 
-	scanDone := make(chan struct{})
-	go func() {
-		defer close(scanDone)
+	// waitCommand 读完一条已启动命令的输出并等它退出；超时 / 取消时杀掉整个进程组。
+	// 返回命令的退出错误，以及被 ctx 打断时应记的终态（没被打断为空串）。
+	// 主命令与后续步骤共用它，所以取消、超时对第二段下载同样生效。
+	waitCommand := func(running *exec.Cmd, output io.Reader) (error, string) {
+		scanDone := make(chan struct{})
+		go func() {
+			defer close(scanDone)
 
-		scanner := bufio.NewScanner(pipe)
-		scanner.Buffer(make([]byte, 64*1024), 256*1024)
-		for scanner.Scan() {
-			appendLine(scanner.Text(), true)
-			flushLog(false)
+			scanner := bufio.NewScanner(output)
+			scanner.Buffer(make([]byte, 64*1024), 256*1024)
+			for scanner.Scan() {
+				appendLine(scanner.Text(), true)
+				flushLog(false)
+			}
+
+			if err := scanner.Err(); err != nil {
+				appendLine("[读取安装输出失败] "+err.Error(), true)
+			}
+		}()
+
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- running.Wait()
+		}()
+
+		interrupted := ""
+		waitErr := error(nil)
+		select {
+		case waitErr = <-waitCh:
+		case <-ctx.Done():
+			if running.Process != nil {
+				service.KillProcessGroup(running.Process)
+			}
+			waitErr = <-waitCh
+			switch {
+			case waitErr == nil:
+				// 临界情况：进程恰好在超时/取消的同一瞬间正常退出，杀进程没杀到活的。
+				// 命令本身是成功的，不能因为抢跑了 ctx.Done() 就把成功记成失败。
+				appendLine("[依赖任务在超时/取消触发的同时已正常结束，按成功处理]", true)
+			case ctx.Err() == context.DeadlineExceeded:
+				appendLine("[依赖任务已超时，进程已终止]", true)
+				interrupted = model.DepStatusFailed
+			default:
+				appendLine("[依赖任务已取消]", true)
+				interrupted = model.DepStatusCancelled
+			}
 		}
 
-		if err := scanner.Err(); err != nil {
-			appendLine("[读取安装输出失败] "+err.Error(), true)
-		}
-	}()
-
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
+		<-scanDone
+		return waitErr, interrupted
+	}
 
 	status := successStatus
-	waitErr := error(nil)
-	select {
-	case waitErr = <-waitCh:
-	case <-ctx.Done():
-		if cmd.Process != nil {
-			service.KillProcessGroup(cmd.Process)
-		}
-		waitErr = <-waitCh
-		switch {
-		case waitErr == nil:
-			// 临界情况：进程恰好在超时/取消的同一瞬间正常退出，杀进程没杀到活的。
-			// 命令本身是成功的，不能因为抢跑了 ctx.Done() 就把成功记成失败。
-			appendLine("[依赖任务在超时/取消触发的同时已正常结束，按成功处理]", true)
-		case ctx.Err() == context.DeadlineExceeded:
-			appendLine("[依赖任务已超时，进程已终止]", true)
+	waitErr, interrupted := waitCommand(cmd, pipe)
+	if interrupted != "" {
+		status = interrupted
+	}
+
+	// skipFollowUps 在 ctx 已经结束（超时 / 取消）时记下「后续步骤没有执行」及对应的终态。
+	skipFollowUps := func(ctxErr error) {
+		if ctxErr == context.DeadlineExceeded {
+			appendLine("[依赖任务已超时，后续步骤未执行]", true)
 			status = model.DepStatusFailed
-		default:
-			appendLine("[依赖任务已取消]", true)
+		} else {
+			appendLine("[依赖任务已取消，后续步骤未执行]", true)
 			status = model.DepStatusCancelled
 		}
 	}
 
-	<-scanDone
+	for _, step := range followUps {
+		if waitErr != nil || status != successStatus {
+			break
+		}
+		// 主命令恰好在超时 / 取消的同一瞬间成功结束（上面的临界分支）时 ctx 已经失效，
+		// 后续步骤不能再启动 —— 否则它会脱离超时与取消的管控。
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			skipFollowUps(ctxErr)
+			break
+		}
+
+		// 每一步包进一个函数，只为用 defer 释放 acquire 拿到的槽位：
+		// 构造 / 启动失败、命令跑完、被取消，哪条路退出都会放掉；命令跑起来了的话，一定等它退出之后才放。
+		stop := func() bool {
+			if step.acquire != nil {
+				release, acquireErr := step.acquire(ctx, func(line string) {
+					appendLine(line, true)
+					// 排队可能要等好几分钟，立刻落库：只看列表、不开日志流的用户也能看到它在等什么。
+					flushLog(true)
+				})
+				if acquireErr != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						skipFollowUps(ctxErr)
+					} else {
+						appendLine("[后续步骤启动失败] "+acquireErr.Error(), true)
+						waitErr = acquireErr
+					}
+					return true
+				}
+				defer release()
+			}
+
+			next, startLine, buildErr := step.build()
+			if buildErr != nil {
+				appendLine(buildErr.Error(), true)
+				waitErr = buildErr
+				return true
+			}
+			service.SetPgid(next)
+			nextPipe, pipeErr := next.StdoutPipe()
+			if pipeErr != nil {
+				appendLine("[后续步骤启动失败] "+pipeErr.Error(), true)
+				waitErr = pipeErr
+				return true
+			}
+			next.Stderr = next.Stdout
+			if startLine != "" {
+				appendLine(startLine, true)
+			}
+			if startErr := next.Start(); startErr != nil {
+				appendLine("[后续步骤启动失败] "+startErr.Error(), true)
+				waitErr = startErr
+				return true
+			}
+			waitErr, interrupted = waitCommand(next, nextPipe)
+			if interrupted != "" {
+				status = interrupted
+				return true
+			}
+			if waitErr == nil && step.doneLine != "" {
+				appendLine(step.doneLine, true)
+			}
+			return false
+		}()
+		if stop {
+			break
+		}
+	}
+
 	if waitErr != nil && status == successStatus {
 		status = model.DepStatusFailed
 		if hint := buildDependencyFailureHint(logBuf.String()); hint != "" {
@@ -888,15 +1031,32 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 	}
 
 	if status == successStatus {
-		go service.SnapshotDepsToHost()
+		go dependencySnapshotFunc()
 	}
 
 	broadcaster.done()
 }
 
+// dependencySnapshotFunc 抽成变量只为测试能换掉它：真实实现在后台协程里读 config.C，
+// 用例结束时 testutil 会把 config.C 置空，协程晚一步执行就会空指针崩掉整个测试进程。
+var dependencySnapshotFunc = service.SnapshotDepsToHost
+
 func buildDependencyFailureHint(logText string) string {
 	lower := strings.ToLower(logText)
 	switch {
+	// 顺序契约：Playwright 浏览器下载失败必须排在最前面，连锁冲突都要让它。
+	//   - 其余分支都是在整段日志里「猜关键词」，而这条的判据是结构性事实：本次运行的日志里出现了
+	//     下载开始行、却没有就绪行，说明 pip 那一段已经成功结束、失败只可能发生在下载阶段。
+	//   - pip 阶段中途重试成功时会留下 Temporary failure in name resolution、Connection timed out
+	//     之类的行，按原顺序会被 DNS / 镜像源分支抢走，把用户引去查一个本来就没问题的 pip 镜像；
+	//     下载阶段不碰 apt，也不可能是 dpkg 锁冲突。
+	//   - 反过来它不会误伤别的分支：没有下载开始行（pip 就失败了、或根本不是 playwright）时一律不命中。
+	// 下载阶段里再细分一种：撞上浏览器目录的安装锁（__dirlock）不是网络问题，不能引去配代理。
+	case isPlaywrightBrowserDownloadFailure(logText):
+		if isPlaywrightBrowserDirLockConflict(logText) {
+			return buildPlaywrightDownloadLockHint()
+		}
+		return buildPlaywrightDownloadFailureHint()
 	case strings.Contains(lower, "could not get lock") ||
 		strings.Contains(lower, "unable to acquire the dpkg frontend lock") ||
 		strings.Contains(lower, "unable to lock database") ||
@@ -1172,6 +1332,7 @@ func ensureTmpDir() {
 func installDependency(id uint, depType, name string) {
 	ensureTmpDir()
 	var cmd *exec.Cmd
+	var followUps []depFollowUpStep
 	pythonVersion := ""
 	if depType == model.DepTypePython {
 		var dep model.Dependency
@@ -1210,9 +1371,15 @@ func installDependency(id uint, depType, name string) {
 			return
 		}
 		cmd.Env = append(service.PipInstallEnv(service.AppendProxyEnv(os.Environ()), service.CurrentPipMirror()), "TMPDIR=/tmp")
+		// playwright 装完接着把 Chromium 下到数据卷（#142）：网页安装、重装、一键安装都经过这里。
+		// 适用范围（只在容器、非 Alpine）由 service.PlaywrightBrowserDownloadApplies 判定。
+		if playwrightBrowserDownloadAppliesFunc(name) {
+			followUps = append(followUps, newPlaywrightBrowserDownloadStep(pythonVersion))
+		}
 	case model.DepTypeLinux:
-		linuxPackageOperationMu.Lock()
-		defer linuxPackageOperationMu.Unlock()
+		// 与容器重建后的自动重装共用 service 层这把锁，构造命令之前就拿、持有到命令结束（理由见 LockLinuxPackageOperation）。
+		linuxUnlock := service.LockLinuxPackageOperation()
+		defer linuxUnlock()
 
 		manager, err := detectLinuxPackageManager()
 		if err != nil {
@@ -1242,7 +1409,7 @@ func installDependency(id uint, depType, name string) {
 		return
 	}
 
-	runCmdWithSSE(cmd, id, model.DepStatusInstalled, false)
+	runCmdWithSSEThen(cmd, id, model.DepStatusInstalled, false, followUps)
 }
 
 func uninstallDependency(id uint, depType, name, pythonVersion string) {
@@ -1273,8 +1440,8 @@ func uninstallDependency(id uint, depType, name, pythonVersion string) {
 		}
 		cmd.Env = service.SanitizePipEnv(service.AppendProxyEnv(os.Environ()))
 	case model.DepTypeLinux:
-		linuxPackageOperationMu.Lock()
-		defer linuxPackageOperationMu.Unlock()
+		linuxUnlock := service.LockLinuxPackageOperation()
+		defer linuxUnlock()
 
 		manager, err := detectLinuxPackageManager()
 		if err != nil {
@@ -1323,8 +1490,8 @@ func forceUninstallDependency(depType, name, pythonVersion string) {
 		}
 		cmd.Env = service.SanitizePipEnv(service.AppendProxyEnv(os.Environ()))
 	case model.DepTypeLinux:
-		linuxPackageOperationMu.Lock()
-		defer linuxPackageOperationMu.Unlock()
+		linuxUnlock := service.LockLinuxPackageOperation()
+		defer linuxUnlock()
 
 		manager, err := detectLinuxPackageManager()
 		if err != nil {
@@ -1340,7 +1507,7 @@ func forceUninstallDependency(depType, name, pythonVersion string) {
 	}
 
 	// 强制卸载时依赖行已经被删掉了，没有 id 可以注册取消函数，前端也没有入口去点取消。
-	// 但它照样持有 apt / npm 的包锁（上面的 linuxPackageOperationMu、LockNodePackageOperation），
+	// 但它照样持有 apt / npm 的包锁（上面的 LockLinuxPackageOperation、LockNodePackageOperation），
 	// 卡死就会把后续所有依赖任务一起堵住，所以这里必须有超时兜底。
 	service.SetPgid(cmd)
 
@@ -1387,5 +1554,10 @@ func (h *DepsHandler) RegisterRoutes(r *gin.RouterGroup) {
 
 		deps.GET("/mirrors", h.GetMirrors)
 		deps.PUT("/mirrors", h.SetMirrors)
+
+		// Playwright 运行环境一键安装（#142），实现在 deps_playwright.go。
+		// /deps 不在开放 API 的 scope 里，MCP 不需要同步。
+		deps.GET("/playwright", h.PlaywrightStatus)
+		deps.POST("/playwright/install", h.InstallPlaywright)
 	}
 }

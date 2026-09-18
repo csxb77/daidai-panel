@@ -76,12 +76,17 @@ type BackupTwoFactorAuth struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// BackupUserPreference 是 per-user 的界面偏好（目前只有 Editor 那一组 JSON）。
+// BackupUserPreference 是 per-user 的界面偏好（Editor、List 两组 JSON，各对应 model.UserPreference 的一列）。
 // 和 BackupTwoFactorAuth 一样跟着用户走，所以刻意**不**给 BackupSelection 加新开关：
 // 用户在恢复界面看到的仍然是原来那几项，勾「配置」就一起带上。
+//
+// ⚠️ 这是手写平铺的结构体，不是嵌入 model：TestBackupPayloadModelsHaveNoJSONHiddenFields 那道反射护栏
+// 管不到它，model.UserPreference 以后每加一列偏好，这里、导出、restoreUserPreferences 三处都要手工跟上。
 type BackupUserPreference struct {
-	UserID    uint      `json:"user_id"`
-	Editor    string    `json:"editor"`
+	UserID uint   `json:"user_id"`
+	Editor string `json:"editor"`
+	// 列表页偏好（issue #143）。omitempty：v3.3.1 之前的备份没有这个键，反序列化成空串 = 一个键都没存过，与升级前一致。
+	List      string    `json:"list,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

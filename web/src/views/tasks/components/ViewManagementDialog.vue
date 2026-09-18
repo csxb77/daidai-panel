@@ -14,11 +14,12 @@ interface ManagedView extends TaskView {
 const props = defineProps<{
   modelValue: boolean
   views: TaskView[]
-  // 「全部」的当前显隐状态。它是标签栏里硬编码的内置项、库里没有对应行，
-  // 所以只能由父组件从 localStorage 读来传进来，再由本弹窗把结果原样回传。
+  // 「全部」的当前显隐状态。它是标签栏里硬编码的内置项、库里没有对应行、没有 task_views 的 hidden 字段可写，
+  // 所以由父组件（ViewManager）传进来，本弹窗只把结果原样回传；父组件再经 utils/listPreferences.ts 同步到账户
+  // （v3.3.1 起跟随账户，不再只存本机）。
   allHidden: boolean
   // 分组标签（issue #130）的整体显隐，与「全部」同一套来回：分组来自任务 labels 里的 `分组:` 标签，
-  // 同样没有 task_views 行、没有 hidden 字段可写，只能落本地存储。
+  // 同样没有 task_views 行，由父组件经 listPreferences 同步到账户。
   groupsHidden: boolean
   // 当前有几个分组，只用来写说明文字
   groupCount: number
@@ -112,7 +113,7 @@ async function handleSave() {
   saving.value = true
   try {
     // 「全部」与「分组标签」都不参与 sort_order 重编号、也不进 reorder 的提交列表 —— 库里根本没有这两行，
-    // 它们的显隐由父组件写本地存储。所以一个自定义视图都没有时也仍然要走到下面的 emit。
+    // 它们的显隐由父组件经 listPreferences 同步到账户。所以一个自定义视图都没有时也仍然要走到下面的 emit。
     if (managed.value.length > 0) {
       // Dense re-numbering keeps sort_order contiguous and mirrors the
       // visible list order.

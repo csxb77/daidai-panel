@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,30 @@ type LinuxPackageManager struct {
 }
 
 const AptPackageListTTL = 6 * time.Hour
+
+// aptLockTimeoutOption 让 apt-get 在 dpkg 锁被占用时最多等 300 秒，而不是立刻报错退出。
+//
+// ⚠️ 它只覆盖 dpkg 那把锁（install / remove 用的）。安装脚本里排在前面的 apt-get update 拿的是
+// /var/lib/apt/lists/lock，这把锁不看这个选项、占用时立刻失败；而脚本用 ; 串联，update 失败后
+// install 照跑，读着还是空的索引报 Unable to locate package。所以面板自己发起的 apt 操作之间
+// 靠进程内的 LockLinuxPackageOperation 串行（网页安装 / 卸载与容器重建后的自动重装共用），
+// 不指望这个选项。它留着是为了挡面板管不到的 apt（比如用户在系统终端里手动装包）。
+// 这个选项从 apt 1.9.11 起支持（Debian 11+ / Ubuntu 20.04+）；更老的 apt 会忽略未知的 -o 配置项，不会报错。
+const aptLockTimeoutOption = "DPkg::Lock::Timeout=300"
+
+var linuxPackageOperationMu sync.Mutex
+
+// LockLinuxPackageOperation 串行化面板发起的所有 Linux 系统包操作，返回解锁函数（写法同 LockNodePackageOperation）。
+//
+// 网页端安装 / 卸载 / 强制卸载，与容器重建后启动校验的后台重装（reinstallDependency）必须共用这一把：
+// 重建后 apt 索引是空的，两边都会先跑 apt-get update，而 update 的 lists 锁不等待（见 aptLockTimeoutOption），
+// 撞上就是一条 failed 记录。调用方要在构造命令之前就拿锁、一直持有到命令结束：
+// BuildLinuxPackageCommand 构造时就会判断索引要不要刷新、写镜像源，这两步同样不能与另一条 apt 交错。
+// 不可重入：拿着它的代码路径里不能再调用会拿它的函数。
+func LockLinuxPackageOperation() func() {
+	linuxPackageOperationMu.Lock()
+	return linuxPackageOperationMu.Unlock
+}
 
 var DetectLinuxPackageManagerLookPathFunc = exec.LookPath
 
@@ -87,7 +112,8 @@ func LinuxInstallCommandSpec(manager LinuxPackageManager, packageName string, re
 		if refreshApt {
 			script += "echo '[APT] 软件包索引过期，正在刷新...'; apt-get update; "
 		}
-		script += "echo '[APT] 正在安装软件包...'; apt-get install -y --no-install-recommends " + shellQuoteLinuxPackage(packageName)
+		script += "echo '[APT] 正在安装软件包...'; apt-get -o " + aptLockTimeoutOption +
+			" install -y --no-install-recommends " + shellQuoteLinuxPackage(packageName)
 		return "sh", []string{"-lc", script}, nil
 	case "dnf", "yum", "microdnf":
 		return manager.Binary, []string{"install", "-y", packageName}, nil
@@ -108,7 +134,7 @@ func LinuxRemoveCommandSpec(manager LinuxPackageManager, packageName string, for
 		args = append(args, packageName)
 		return manager.Binary, args, nil
 	case "apt":
-		args := []string{"remove", "-y"}
+		args := []string{"-o", aptLockTimeoutOption, "remove", "-y"}
 		if force {
 			args = append(args, "--allow-remove-essential", "--purge")
 		}

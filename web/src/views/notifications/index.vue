@@ -1,15 +1,18 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick } from 'vue'
 import { notificationApi, type NotifyChannelDefinition, type NotifyFieldDefinition, type NotifyPushScope } from '@/api/notification'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Bell, Plus, Refresh, Search } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { extractError, isCancel } from '@/utils/error'
 import { toast } from '@/utils/toast'
+import { scrollListToTop } from '@/utils/scrollToTop'
 import DdBadge from '@/components/ui/DdBadge.vue'
 import { formatDateTime } from '@/utils/datetime'
 
 const { isMobile, dialogFullscreen } = useResponsive()
+// 页面根：翻页回顶的锚点（scrollListToTop 从这里往上找移动端的 .layout-main、往里找桌面的 .table-card）
+const pageRootRef = ref<HTMLElement | null>(null)
 
 const channels = ref<any[]>([])
 const channelLoading = ref(false)
@@ -105,6 +108,23 @@ const filteredTotal = computed(() => filteredChannels.value.length)
 
 function handleChannelSearch() {
   channelPage.value = 1
+}
+
+// 翻页 / 改每页条数后回到列表顶部（issue #143 O3，双端都做）。
+// 只挂在分页器的 current-change / size-change 上：它们只在用户翻页（或 total 变小把页码夹回）时触发，
+// 搜索、改筛选时直接改 channelPage 不会触发，所以不会在筛选时把人拽回顶部。
+// 本页是前端分页，数据早已在内存里，没有「请求回来」的时机可等；
+// 等 nextTick 让新一页先渲染出来再滚，免得先回顶、后换内容，位置又被新内容的高度顶偏。
+async function handleChannelPageChange() {
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
+}
+
+async function handleChannelPageSizeChange() {
+  // 改每页条数后从第 1 页看起：原页码在新页大小下对应的是另一批数据，停在中间没有意义
+  channelPage.value = 1
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
 }
 
 function resetFilters() {
@@ -536,7 +556,7 @@ function getChannelConfigSummary(row: any): string[] {
 </script>
 
 <template>
-  <div class="notifications-page dd-fixed-page dd-page-hide-heading">
+  <div ref="pageRootRef" class="notifications-page dd-fixed-page dd-page-hide-heading">
     <!-- Page Header -->
     <div class="page-header">
       <div>
@@ -776,6 +796,8 @@ function getChannelConfigSummary(row: any): string[] {
             :total="filteredTotal"
             :page-sizes="[10, 20, 50]"
             layout="sizes, prev, pager, next"
+            @current-change="handleChannelPageChange"
+            @size-change="handleChannelPageSizeChange"
           />
         </div>
 

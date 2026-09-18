@@ -93,6 +93,18 @@ func TestAppbootWiresMagiskPythonMigrationBeforeDuplicateMerge(t *testing.T) {
 	)
 }
 
+// main：Playwright 浏览器目录（#142）要在 config / 数据库就绪之后、启动校验排队重装依赖之前写进进程环境。
+// 删掉它，系统命令行与依赖安装子进程会把浏览器下到容器可写层，重建即丢；挪到启动校验之后，
+// 第一批重装的 pip 子进程就拿不到这个目录。
+func TestMainWiresPlaywrightBrowsersPathBeforeDependencyVerification(t *testing.T) {
+	calls := collectCallNamesInFunc(t, "../main.go", "main")
+	assertStartupCallOrder(t, "main", calls,
+		"appboot.InitWithConfig",
+		"service.ApplyPlaywrightBrowsersPathProcessEnv",
+		"verifyInstalledDeps",
+	)
+}
+
 // main：Node ABI 重建检查接在启动校验之后。删掉它，换 Node 大版本后加载失败的原生扩展就不会自动修复。
 func TestMainWiresNodeABIRebuildAfterDependencyVerification(t *testing.T) {
 	calls := collectCallNamesInFunc(t, "../main.go", "main")

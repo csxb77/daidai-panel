@@ -160,26 +160,91 @@
 
 Playwright、Puppeteer、Selenium 这类脚本还有一层额外的坑。下面几条都跟调度无关，是**环境**问题 —— 但它们造成的现象是「任务日志里有一条失败记录」，而不是「没有日志」。如果你的现象是后者，请先走完前面 6 步。
 
-### 面板镜像里不预装 Playwright
+### 面板镜像不预装 Playwright：到「依赖管理 → Linux」一键安装
 
-面板镜像**不预装 Playwright，也不预装 Chromium 及其运行库**（fontconfig、libnss3、libatk、libgbm 等一大批系统包）。要跑得自己把这三件事补齐：
+面板镜像**不预装 Playwright，也不预装 Chromium 及其运行库**（libnss3、libatk、libgbm、字体等一大批系统包），不用浏览器的人不必多背这几百 MB。需要时在面板里一键补齐：
+
+**入口**：依赖管理 → **Linux** 页签 → 说明栏里「安装编译工具链」旁边的「**安装 Playwright 运行环境**」。「新增依赖」旁的下拉菜单里也有同名入口。需要管理员账号。
+
+点下去之后面板做三件事，全部排进同一个安装队列依次执行，进度和日志就在依赖管理页里看：
+
+1. **系统库**：把 Chromium 需要的 26 个系统包（21 个运行库 + 5 个字体相关的包，含中文字体 `fonts-wqy-zenhei`）逐个登记成 Linux 依赖并安装；
+2. **Python 包**：在默认 Python 版本下装 `playwright`；
+3. **浏览器**：`playwright` 装好后，在同一条依赖记录里接着下载 Chromium，放到数据目录下的 `deps/ms-playwright`（Docker 默认 `/app/Dumb-Panel/deps/ms-playwright`）。
+
+全部装完通常要几分钟，Chromium 本体有一两百 MB。
+
+> **只支持 Debian 12（bookworm）版镜像，且架构是 amd64 或 arm64。** 按钮会先检查当前环境，不满足时置灰并写明原因。Alpine 版镜像为什么不行，见本节后面的[「Alpine 版镜像跑不了浏览器」](#alpine-版镜像跑不了浏览器请用-debian-版)。
+>
+> 浏览器是从 Playwright 的官方 CDN 下载的，国内网络可能很慢甚至失败。失败时依赖日志会写明「是浏览器下载失败，不是 pip 失败」。两条出路：到 **系统设置 → 代理设置** 填好「代理地址」；或者给容器设置环境变量 `PLAYWRIGHT_DOWNLOAD_HOST`，指向可用的下载镜像。然后再点一次一键安装即可。
+
+### 容器重建 / Watchtower 更新之后
+
+一键安装装下的三样东西，重建容器后的去向不一样，但都不需要你再动手：
+
+| 装了什么 | 放在哪 | 重建容器后 |
+|----------|--------|-----------|
+| Chromium 浏览器 | 数据目录下的 `deps/ms-playwright` | 在数据卷里，**不丢** |
+| Python 的 `playwright` 包 | 数据目录下的托管 venv（`deps/python/<版本>`） | 在数据卷里，**不丢** |
+| 26 个系统库 | 容器的系统目录 | 随旧容器一起丢，但它们已经登记成 Linux 依赖，**面板启动校验会在后台自动重装** |
+
+所以刚重建完的几分钟里，Playwright 脚本可能报缺系统库（`error while loading shared libraries`、`Host system is missing dependencies`）—— 这是后台还在重装。到 **依赖管理 → Linux** 看进度，全部变成「已安装」后再跑即可；任务日志里碰上这类报错，面板也会在提示里写明正在后台重装几个系统依赖。
+
+> 以前按旧文档用 `playwright install` / `playwright install-deps` 装过、并且以 root 运行的：浏览器当时装在容器的 `/root/.cache` 里，系统库也没有登记，重建后两样都已经丢了。升级后点一次一键安装即可，以后重建就不会再丢。
+
+### 浏览器目录 `PLAYWRIGHT_BROWSERS_PATH`
+
+Playwright 靠环境变量 `PLAYWRIGHT_BROWSERS_PATH` 决定到哪里找浏览器。没设的话它会用 `~/.cache/ms-playwright`，在 Docker 里就是容器的可写层，**重建即丢** —— 这正是以前重建后脚本报 `Executable doesn't exist` 的原因。
+
+现在 **Docker 部署下面板会替你设好默认值**：数据目录下的 `deps/ms-playwright`（Docker 默认 `/app/Dumb-Panel/deps/ms-playwright`）。定时任务、调试运行、`ddp shell` / `ddp python`、依赖安装拿到的默认都是这个值。
+
+- **你自己设了，就以你的为准。** 在面板「环境变量」页里启用了同名变量，或者在容器环境（compose 的 `environment` / `docker run -e`）里设了它，面板都不会覆盖；一键安装下载 Chromium 时也按你的值下载。两处都设了时，「环境变量」页里的优先。
+- 自己设的路径记得放在数据卷里，否则重建照样丢。
+- Windows 桌面版、裸机二进制、Magisk 模块不设默认值，保持 Playwright 原本的行为。
+- 以前用 `PUID` 降权运行的，浏览器原本在数据目录下的 `.home/.cache/ms-playwright`（本来就在数据卷里）。升级后面板启动时会自动把它搬到新目录，不用重新下载。
+
+### 用 `PUID` / `PGID` 降权运行时，系统库要手动装
+
+apt 要写系统目录，必须 root。设了 `PUID` 的容器里，「安装 Playwright 运行环境」按钮（以及「新增依赖」下拉菜单里的同名入口）会置灰，旁边直接写明当前以非 root 运行、装不了系统库，也就不会建出一批失败记录。两个选择：
+
+- **推荐：去掉 `PUID` / `PGID`，改回 root 运行**，再点一键安装。这样系统库会登记成 Linux 依赖，重建后自动重装。
+- **坚持降权运行**：Python 包和浏览器照常在面板里装 —— 到「依赖管理 → Python」装 `playwright`，Docker 部署下装完会自动接着下载 Chromium。系统库则要在宿主机上用 root 身份手动装（容器名按你的实际情况替换）：
+
+  ```bash
+  docker exec -u 0 daidai-panel apt-get update
+  docker exec -u 0 daidai-panel apt-get install -y --no-install-recommends \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 libdbus-1-3 \
+    libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 libx11-6 libxcb1 \
+    libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+    fonts-liberation fonts-wqy-zenhei fonts-noto-color-emoji libfontconfig1 libfreetype6
+  ```
+
+  ⚠️ 这样装的系统库**没有登记**，面板不知道它们的存在，**重建容器后会丢**，每次重建都要重新执行一遍。
+
+### 手动方式
+
+不想用一键安装，或者只想补下载浏览器时：
 
 ```bash
 # 1. Python 包：到面板的「依赖管理 → Python」里装 playwright
+#    （Docker 部署下装完会自动接着下载 Chromium，通常到这一步就够了）
 
-# 2. 进容器，用与任务完全一致的环境开一个 shell
+# 2. 需要单独补下载浏览器时，进容器用与任务完全一致的环境开一个 shell
 docker exec -it daidai-panel ddp shell
 
-# 3. 在这个 shell 里拉浏览器 + 系统依赖
-playwright install                # 下载 Chromium 等浏览器本体
-playwright install-deps           # 装系统依赖（Debian 版镜像专用，见下）
+# 3. 在这个 shell 里下载 Chromium（会下到 PLAYWRIGHT_BROWSERS_PATH，也就是数据卷里）
+python -m playwright install chromium
 ```
 
-> 用 `ddp shell` 而不是直接 `docker exec -it daidai-panel sh` —— 前者会把面板托管的 venv 前置到 `PATH`，`playwright` 命令才找得到；后者进去的是系统环境，装的包在那儿看不见。
+> 用 `ddp shell` 而不是直接 `docker exec -it daidai-panel sh` —— 前者会把面板托管的 venv 前置到 `PATH`，并带上与任务一致的 `PLAYWRIGHT_BROWSERS_PATH`，`python` 才找得到 playwright，浏览器也才会下到数据卷里；后者进去的是系统环境，这两样都没有。
+>
+> ⚠️ **不要再用 `playwright install-deps` 装系统库。** 它直接调 apt，装下的包不会登记成 Linux 依赖，面板不知道它们的存在，**重建容器就丢**。系统库请用一键安装，或者在「依赖管理 → Linux」里逐个添加。
+
+不想进容器的话，面板里也有命令行：**依赖管理 → 「新增依赖」旁的下拉菜单 → 系统命令行**（仅管理员）。它一次执行一段非交互命令，同样可以跑 `python -m playwright install chromium`；但它用的是面板进程自己的环境，**不带「环境变量」页里的变量** —— 如果你在那里另设了 `PLAYWRIGHT_BROWSERS_PATH`，请改用上面的 `ddp shell`。
 
 ### Alpine 版镜像跑不了浏览器，请用 Debian 版
 
-面板默认的 Alpine 镜像是 **musl** 环境，而 Playwright 官方下载的 Chromium 是 **glibc** 构建的，**在 Alpine 里根本无法执行**。`playwright install-deps` 也只支持 Debian/Ubuntu，在 Alpine 上不可用。
+面板默认的 Alpine 镜像是 **musl** 环境，而 Playwright 官方下载的 Chromium 是 **glibc** 构建的，**在 Alpine 里根本无法执行**。一键安装在 Alpine 版上会直接提示不支持，`playwright install-deps` 也只支持 Debian/Ubuntu。
 
 要跑浏览器自动化，请改用 **Debian 版镜像**。仓库里有现成的 `Dockerfile.debian` 和 `docker-compose.debian.yml`，镜像标签的完整对照见 [README → Alpine 与 Debian 运行时和镜像标签](../README.md#alpine-与-debian-运行时和镜像标签)。
 

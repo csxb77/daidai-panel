@@ -9,19 +9,29 @@ import EnvEditDialog from './components/EnvEditDialog.vue'
 import EnvImportDialog from './components/EnvImportDialog.vue'
 import { useResponsive } from '@/composables/useResponsive'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
+import DdMoreMenu from '@/components/ui/DdMoreMenu.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
-// ArrowDown 不在 main.ts 的全局图标表里，要单独引；本页其余图标（Lock / Unlock / View / Hide / Check …）都是全局注册的
-import { ArrowDown } from '@element-plus/icons-vue'
+// ArrowDown 不在 main.ts 的全局图标表里，要单独引；模板里以 <Lock /> 这类标签写的图标（Lock / Unlock / View / Hide / Check …）走全局注册。
+// 其余几个是给 el-button 的 :icon 传组件对象用的（移动端纯图标按钮与批量栏），显式局部引入，不依赖 main.ts 的全局表。
+import { ArrowDown, CircleCheck, CircleClose, Close, Delete, Download, Edit, Folder, Plus } from '@element-plus/icons-vue'
 import { maskEnvValue, shouldMaskEnvValue, type EnvValueMaskMode } from '@/utils/envSecret'
+import { scrollListToTop } from '@/utils/scrollToTop'
+import {
+  ENVS_PAGE_SIZE_OPTIONS,
+  ensureListPreferencesLoaded,
+  readListPreference,
+  setListPreference,
+  type ListPreferences
+} from '@/utils/listPreferences'
 
 const envTableDensityStorageKey = 'daidai-env-table-density'
-const envPageSizeStorageKey = 'daidai-env-page-size'
-// 值的遮蔽模式（#127），和上面两项是同一类本地偏好，键名沿用本页 daidai-env-* 前缀
+// 值的遮蔽模式（#127），和上面的表格密度是同一类只存本机的偏好，键名沿用本页 daidai-env-* 前缀。
+// （每页条数原来也在这一类，v3.3.1 起改为跟随账户，读写统一走 utils/listPreferences.ts。）
 const envMaskModeStorageKey = 'daidai-env-mask-mode'
 const envAllFetchBatchSize = 100
 const { isMobile } = useResponsive()
 
-type EnvPageSizeSelection = '20' | '50' | '100' | 'all'
+type EnvPageSizeSelection = ListPreferences['envs_page_size']
 
 type EnvFormModel = {
   id: number
@@ -38,7 +48,8 @@ const envList = ref<any[]>([])
 const loading = ref(true)
 const total = ref(0)
 const page = ref(1)
-const initialPageSizeSelection = readEnvPageSizeSelection()
+// setup 时先按本机缓存（同步）给出条数；服务端的值由 onMounted 里 ensureListPreferencesLoaded() 补上，再发首个列表请求
+const initialPageSizeSelection = readListPreference('envs_page_size')
 const pageSizeSelection = ref<EnvPageSizeSelection>(initialPageSizeSelection)
 const pageSize = ref(initialPageSizeSelection === 'all' ? envAllFetchBatchSize : Number(initialPageSizeSelection))
 const keyword = ref('')
@@ -65,12 +76,12 @@ const statusFilter = ref<'' | 'enabled' | 'disabled'>('')
 const showFooterBar = computed(() => total.value > 0 || selectedCountInCurrentPage.value > 0)
 const showPager = computed(() => !showAllEnvs.value && total.value > pageSize.value)
 const sortableEnabled = computed(() => envList.value.length >= 2)
-const pageSizeOptions: Array<{ label: string; value: EnvPageSizeSelection }> = [
-  { label: '20 / 页', value: '20' },
-  { label: '50 / 页', value: '50' },
-  { label: '100 / 页', value: '100' },
-  { label: '全部', value: 'all' }
-]
+// 选项由 listPreferences 的白名单生成（与服务端 list.envs_page_size 白名单逐项对应），不在页面里再抄一份：
+// 多出一个服务端不认的档位，选了只在本机生效，换个浏览器就回到默认值
+const pageSizeOptions: Array<{ label: string; value: EnvPageSizeSelection }> = ENVS_PAGE_SIZE_OPTIONS.map((value) => ({
+  label: value === 'all' ? '全部' : `${value} / 页`,
+  value
+}))
 const selectionScopeText = computed(() =>
   showAllEnvs.value ? '批量操作作用于当前已勾选的数据。' : '批量操作仅作用于当前页勾选的数据。'
 )
@@ -79,8 +90,15 @@ const filteredEnvList = computed(() => {
   if (statusFilter.value === 'disabled') return envList.value.filter(item => !item.enabled)
   return envList.value
 })
+// 移动端批量栏的「全选 / 取消全选」：只看当前渲染出来的卡片（= 当前页；「全部」档下就是已加载的全部行）。
+// 手机上状态筛选不存在（进入移动端时已清空），filteredEnvList 就等于 envList，不会选中看不见的行。
+const allSelectedInPage = computed(() =>
+  filteredEnvList.value.length > 0 && filteredEnvList.value.every((item) => selectedIdSet.value.has(item.id))
+)
+// 手机上唯一还在的筛选是搜索框（状态 / 分组 / 变量名三个筛选在移动端不渲染，进入移动端时会被清空），
+// 所以「筛出来是空的」只可能来自关键词
 const mobileEmptyDescription = computed(() =>
-  statusFilter.value ? '当前筛选条件下暂无环境变量' : '暂无环境变量'
+  keyword.value.trim() ? '当前筛选条件下暂无环境变量' : '暂无环境变量'
 )
 const envTableClass = computed(() => ['env-table', 'env-table--' + tableDensity.value])
 const envTableHeaderStyle = { background: 'var(--el-fill-color-light)', color: 'var(--el-text-color-regular)', fontWeight: 600, fontSize: '13px' }
@@ -92,7 +110,8 @@ const tableDensity = ref<'comfortable' | 'compact'>(
 
 // ===== 敏感值遮蔽（issue #127）=====
 // 只管显示：接口、复制按钮、编辑弹窗、导出一律仍是明文，理由见 utils/envSecret.ts 文件头。
-// 三态是页面级本地偏好，默认「自动」（只遮名字像凭据的变量），存取方式与表格密度、每页条数相同。
+// 三态是页面级本地偏好，默认「自动」（只遮名字像凭据的变量），存取方式与表格密度相同（只存本机）。
+// 切换入口只在桌面「值」列表头；手机上沿用本机存的那一档（与同一浏览器的桌面共用），见模板里移动端工具栏的注释。
 const envMaskMode = ref<EnvValueMaskMode>(readEnvMaskMode())
 // 用小眼睛临时揭示过的行 id。刻意不持久化：loadData（刷新 / 翻页 / 改筛选 / 保存后重拉）和切换模式时都会清空，
 // 看完一眼就收回，不会因为「上次点开忘了关」一直明文挂在屏幕上。
@@ -132,6 +151,8 @@ const showBatchGroupDialog = ref(false)
 const batchGroupSubmitting = ref(false)
 
 const tableRef = ref()
+// 页面根：翻页后回顶（scrollListToTop）的锚点
+const pageRootRef = ref<HTMLElement | null>(null)
 const desktopTableReady = ref(false)
 const showDesktopLoadingPlaceholder = computed(
   () => !isMobile.value && (!desktopTableReady.value || (loading.value && envList.value.length === 0))
@@ -147,29 +168,11 @@ let sortableInitFrame = 0
 let desktopTableReadyFrame = 0
 const groupBadgeStyleCache = new Map<string, CSSProperties>()
 
-function readEnvPageSizeSelection(): EnvPageSizeSelection {
-  if (typeof window === 'undefined') {
-    return '20'
-  }
-
-  const raw = window.localStorage.getItem(envPageSizeStorageKey)
-  if (raw === '20' || raw === '50' || raw === '100' || raw === 'all') {
-    return raw
-  }
-
-  return '20'
-}
-
-function persistEnvPageSizeSelection(value: EnvPageSizeSelection) {
-  if (typeof window !== 'undefined') {
-    window.localStorage.setItem(envPageSizeStorageKey, value)
-  }
-}
-
+// 只改页面状态、不写偏好：挂载时按服务端值应用也走这里，那次若顺手写回，
+// 会多发一次 PUT，还会把这一键记成「本机改过」、挡住后面的下行同步。写偏好只在 handlePageSizeChange 这个用户动作里做。
 function applyEnvPageSizeSelection(value: EnvPageSizeSelection) {
   pageSizeSelection.value = value
   pageSize.value = value === 'all' ? envAllFetchBatchSize : Number(value)
-  persistEnvPageSizeSelection(value)
 }
 
 function loadSortable() {
@@ -196,6 +199,16 @@ function toggleSelected(id: number, checked: boolean | string | number) {
     next.delete(id)
   }
   selectedIds.value = [...next]
+}
+
+// 移动端批量栏的「全选 / 取消全选」。移动卡片的勾选不经过 el-table，直接改 selectedIds；
+// 取消全选后勾选数归零，第一行会自动换回搜索栏。
+function toggleSelectAllInPage() {
+  if (allSelectedInPage.value) {
+    clearTableSelection()
+    return
+  }
+  selectedIds.value = filteredEnvList.value.map((item) => item.id)
 }
 
 function handleDensityChange(value: 'comfortable' | 'compact') {
@@ -360,6 +373,11 @@ function queueDesktopTableReady() {
 // 拖拽成功后本地行上的 position 已经过期（原因见 openEdit 的注释）；loadData 拿回新列表时复位
 let envPositionsStale = false
 let loadDataDepth = 0
+// 列表请求序号闸（照任务页的 loadTasksSeq）。loadData 在本页十几处被调用（切状态 / 分组 / 变量名筛选、搜索、翻页、
+// 增删改后重拉、拖拽失败回滚、首拉……），几次请求可能同时在飞，返回顺序没有保证；原来是「后到者赢」：
+// 比如保存后的重拉还没回来就点了「已启用」，旧请求晚到会把另一种筛选的行和总数写回来，高亮却停在新标签上。
+// 现在每次 loadData 自增序号，只有最新一次能写回 envList / total、报错、收起 loading、重挂拖拽。
+let loadDataSeq = 0
 async function loadData() {
   if (loadDataDepth >= 3) {
     // 防止空页重算递归堆叠，超过 3 层直接中止
@@ -368,6 +386,8 @@ async function loadData() {
     return
   }
   loadDataDepth += 1
+  // 空页重算的递归调用也会在这里拿到自己的新序号，外层那次随之作废，收尾交给递归的这一次
+  const seq = ++loadDataSeq
   loading.value = true
   selectedIds.value = []
   // 临时揭示只管当前这一屏：一刷新、翻页、改筛选、保存后重拉，就全部收回遮蔽（#127）
@@ -384,6 +404,8 @@ async function loadData() {
     if (showAllEnvs.value) {
       // 服务端通过 all=1 一次性返回（带 5000 条硬上限保护），避免循环分页造成的等待与滚动卡顿。
       const res = await envApi.list({ ...params, all: 1 })
+      // 飞行期间又发出了新的一次：这份是按旧的筛选 / 条数拿的，整个丢弃（见 loadDataSeq）
+      if (seq !== loadDataSeq) return
       envList.value = normalizeEnvRows(res.data || [])
       total.value = res.total || envList.value.length
     } else {
@@ -392,6 +414,8 @@ async function loadData() {
         page: page.value,
         page_size: pageSize.value
       })
+      // 同上；要在空页重算之前判：过期的 total 不能拿来改 page
+      if (seq !== loadDataSeq) return
       envList.value = normalizeEnvRows(res.data || [])
       total.value = res.total || 0
 
@@ -404,13 +428,19 @@ async function loadData() {
     // 列表刚从服务端整份拿回来，每行的 position 都是新的
     envPositionsStale = false
   } catch (err: any) {
+    // 过期请求的失败同样丢弃：更新的那次还在飞，这时报「加载失败」只会误导
+    if (seq !== loadDataSeq) return
     ElMessage.error(err?.response?.data?.error || '加载环境变量失败')
   } finally {
-    loading.value = false
+    // loading 改由最新一次收尾：旧请求先回来就置 false 的话，新请求还没回，骨架屏 / 加载态已经撤掉露出旧数据。
+    // loadDataDepth 则无论新旧都要减回去，否则作废的请求会一直占着层数，攒够 3 层后正常的调用也会被当成递归拦掉
+    if (seq === loadDataSeq) loading.value = false
     loadDataDepth = Math.max(0, loadDataDepth - 1)
   }
 
   await nextTick()
+  // 等这一拍的工夫里可能又发出了新的一次：清勾选、重挂拖拽都交给它，这里再动只会拿旧的收尾去折腾新数据
+  if (seq !== loadDataSeq) return
   queueDesktopTableReady()
   clearTableSelection()
   queueSortableInit()
@@ -436,14 +466,43 @@ async function loadNames() {
   }
 }
 
-onMounted(() => {
+onMounted(async () => {
   queueDesktopTableReady()
-  void loadData()
   void loadGroups()
   void loadNames()
+  // 每页条数跟随账户（v3.3.1，issue #143 桌面端第 1 条）：首个列表请求等服务端的值回来再发。
+  // loadData 有了序号闸（loadDataSeq），其实也能像任务页那样「先按本地值拉，不同再按服务端值重拉」，谁先回来都会停在最新一次上；
+  // 仍选择先等，是因为两边不一致时（换浏览器 / 换域名后第一次打开）先拉的那次注定作废：白发一个列表请求
+  // （本地若是「全部」档，这一趟就是整表），屏幕上还会先闪一版按本地条数排的行与翻页器，再整页换掉。
+  // 等待期间状态标签、搜索框照样能点，由此发出的 loadData 不论回没回来，都会被下面这次更新的请求盖过
+  // （还在飞的由序号闸丢弃），最终按服务端的条数 + 用户当时选的筛选落地，不会停在旧条数那一版上。
+  // 代价只是首拉多等一个 GET 的往返：ensure 是记忆化的，同一会话里先去过任务页时这里零等待；
+  // 拉失败（离线、老服务端）也会正常 resolve，照本机缓存加载。
+  // loading 初始就是 true：只要用户不动，这段时间桌面一直是骨架屏，移动端的「暂无环境变量」空态也不会提前冒出来。
+  await ensureListPreferencesLoaded()
+  applyEnvPageSizeSelection(readListPreference('envs_page_size'))
+  void loadData()
 })
 
-watch(isMobile, () => {
+// 手机上不渲染状态分段、分组筛选、变量名筛选（见模板里移动端工具栏的注释）。桌面拖窄到 ≤768、平板旋转时，
+// 已经生效的这几项会变成「看不见、也关不掉」却仍在过滤的状态，用户只会以为变量丢了 ⇒ 进入移动端时清空并重拉。
+// 反方向（回到桌面）不用处理：三个控件又都看得见了。
+function resetFiltersHiddenOnMobile() {
+  if (!statusFilter.value && groupFilters.value.length === 0 && nameFilters.value.length === 0) return
+  statusFilter.value = ''
+  groupFilters.value = []
+  nameFilters.value = []
+  page.value = 1
+  void loadData()
+}
+
+watch(isMobile, (mobile) => {
+  // 两种布局切换时勾选一律作废：移动卡片的勾选不经过 el-table，切回桌面后表格里一格都没勾上，
+  // 批量栏却还挂着「已选 N 项」，批量操作会落到看不出被选中的行上（反方向同理）。
+  clearTableSelection()
+  if (mobile) {
+    resetFiltersHiddenOnMobile()
+  }
   nextTick(() => {
     queueDesktopTableReady()
     queueSortableInit()
@@ -610,19 +669,28 @@ function handleFilterByName(name: string) {
   void loadData()
 }
 
-function handlePageChange(newPage: number) {
+// 翻页 / 改每页条数之后回到列表顶部（v3.3.1，issue #143 O3，桌面与移动端都做），等数据回来再滚。
+// 只挂在分页器 current-change 与每页条数下拉的 change 上（= 用户翻页）；不放进 loadData：
+// 保存、删除、启用禁用、拖拽失败回滚都会调它，用户正往下看着会被一把拽回顶部。
+async function handlePageChange(newPage: number) {
   page.value = newPage
-  void loadData()
+  await loadData()
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
 }
 
-function handlePageSizeChange(newSize: EnvPageSizeSelection) {
+async function handlePageSizeChange(newSize: EnvPageSizeSelection) {
   applyEnvPageSizeSelection(newSize)
+  // 每页条数只在这个用户动作里写偏好：先写本机缓存，再后台同步到账户（失败静默，本机照样生效）
+  setListPreference('envs_page_size', newSize)
   page.value = 1
-  void loadData()
+  await loadData()
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
 }
 
 function handlePageSizeSelect(value: string) {
-  handlePageSizeChange(value as EnvPageSizeSelection)
+  void handlePageSizeChange(value as EnvPageSizeSelection)
 }
 
 function openCreate() {
@@ -782,15 +850,16 @@ async function handleToggle(row: any) {
 }
 
 /**
- * 操作列 Split Button 的菜单项（按行生成）。
+ * 行操作菜单项（按行生成）：桌面操作列 Split Button 的 ▾ 菜单与移动卡片右上角「···」（DdMoreMenu）共用这一份，两端同源。
  *
- * 主体是「编辑」——最常用，且点错了只是打开一个弹窗，代价最小。
+ * 桌面 Split Button 的主体是「编辑」——最常用，且点错了只是打开一个弹窗，代价最小；
+ * 移动卡片上「编辑」是末行的一级按钮，同样不进菜单。
  * 「删除」不可撤销，必须留在菜单里并加 divided + danger，绝不能占主体位置。
  * 「置顶 / 取消置顶」是同一个 handleToggleTop 的两面，用 visible 按 row 状态互斥，
  * 避免出现「已置顶的行菜单里还挂着置顶」。
  *
- * 🔴 这里【不要】再补「启用 / 禁用」：它已经外置成操作列里的一级按钮（谁上了一级谁就不在菜单里），
- * 补进来就会变成「点了外面的禁用，展开 ▾ 里还挂着一个禁用」。
+ * 🔴 这里【不要】再补「启用 / 禁用」：它在两端都已经外置成一级按钮（谁上了一级谁就不在菜单里），
+ * 补进来就会变成「点了外面的禁用，展开菜单里还挂着一个禁用」。
  */
 function buildEnvActionItems(row: any): SplitButtonItem[] {
   const pinned = isTopPinned(row)
@@ -1070,8 +1139,56 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 </script>
 
 <template>
-  <div class="envs-page dd-fixed-page dd-page-hide-heading">
-    <div class="toolbar">
+  <div ref="pageRootRef" class="envs-page dd-fixed-page dd-page-hide-heading">
+    <!-- 移动端工具栏（v3.3.1，issue #143）：与桌面工具栏分成 v-if / v-else 两支，桌面那支 DOM 原样不动，
+         design-system §4.2 的左槽叠放不变式只在桌面那支里成立，这边不受它约束。
+         第一行非批量态 = 搜索框 + 导出 + 新建变量（后两个是 32×32 纯图标按钮）；勾选后整行换成批量栏。
+         手机上刻意不渲染（用 v-if 不用 CSS 藏，el-select 的下拉浮层就不会挂载）：
+           - 状态分段、分组筛选、变量名筛选：进入移动端时由 watch(isMobile) 清空重拉，免得留下看不见也关不掉的筛选；
+           - 导出的下拉菜单（Shell / JS / Python 预览与导入）：手机上「导出」直接下载 JSON；
+           - 遮蔽模式切换：沿用本机存的那一档（与同一浏览器的桌面端共用，默认「自动」），每行的小眼睛照样能临时揭示。
+         外面包一层 .env-mobile-toolbar 只为挂入场动画：两支来回切换时外层不重建，动画不会在每次勾选时重放。 -->
+    <div v-if="isMobile" class="env-mobile-toolbar">
+      <!-- 批量栏：全选 → 批量按钮（图标 + 短文字）→ 取消放最后；不显示「已选 N 项」，勾了几张卡一眼就能数。
+           横向滑动、隐藏滚动条（dd-scroll-row），7 颗按钮在窄屏上放不下时左右划。
+           按钮形态沿用桌面批量区：禁用 = danger plain、删除 = 实心 danger，两者之间隔着改名 / 分组两个中性按钮。 -->
+      <div v-if="selectedCountInCurrentPage > 0" class="dd-scroll-row dd-mobile-batch-bar">
+        <el-button @click="toggleSelectAllInPage">{{ allSelectedInPage ? '取消全选' : '全选' }}</el-button>
+        <el-button :icon="CircleCheck" @click="handleBatchEnable">启用</el-button>
+        <el-button type="danger" plain :icon="CircleClose" @click="handleBatchDisable">禁用</el-button>
+        <el-button :icon="Edit" @click="handleBatchRename">改名</el-button>
+        <el-button :icon="Folder" @click="handleBatchGroup">分组</el-button>
+        <el-button type="danger" :icon="Delete" @click="handleBatchDelete">删除</el-button>
+        <el-button :icon="Close" @click="clearTableSelection">取消</el-button>
+      </div>
+      <div v-else class="dd-mobile-toolbar">
+        <el-input
+          v-model="keyword"
+          placeholder="搜索变量名、值、备注或分组"
+          clearable
+          @keyup.enter="handleSearch"
+          @clear="handleSearch"
+        >
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <el-button
+          class="dd-icon-only-btn"
+          :icon="Download"
+          aria-label="导出 JSON"
+          title="导出 JSON"
+          @click="handleExportAll"
+        />
+        <el-button
+          type="primary"
+          class="dd-icon-only-btn"
+          :icon="Plus"
+          aria-label="新建变量"
+          title="新建变量"
+          @click="openCreate"
+        />
+      </div>
+    </div>
+    <div v-else class="toolbar">
       <!-- 左槽是恒在的容器（flex:1 + 固定高度下限），内部的「筛选区」与「批量区」两支【都常驻 DOM】，
            叠放在同一个 1×1 网格格子里，只用 visibility 切换显示：勾一下就让批量按钮就地显形，
            筛选控件同一帧立即隐藏（transition 只列了 opacity，visibility 是即时生效的，
@@ -1164,32 +1281,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         </div>
       </div>
       <div class="toolbar__right">
-        <!-- 值的显示方式（#127 三态）：手机端没有表头，所以放在这里；桌面端在「值」列表头上，理由见那里的注释。
-             只放一颗 32×32 的图标按钮：右区还要装「导出」「新建变量」，320 宽的屏幕放不下带字的按钮。
-             菜单内容与表头那一份逐字相同，改一处要同步另一处。 -->
-        <el-dropdown v-if="isMobile" trigger="click" placement="bottom-end" @command="handleEnvMaskModeCommand">
-          <el-button
-            class="env-mask-mode-btn"
-            :class="{ 'is-unmasked': envMaskMode === 'none' }"
-            :title="envMaskModeTitle"
-            :aria-label="envMaskModeTitle"
-          >
-            <el-icon><Unlock v-if="envMaskMode === 'none'" /><Lock v-else /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item v-for="mode in envMaskModeOrder" :key="mode" :command="mode">
-                <span class="env-mask-option" :class="{ 'is-active': envMaskMode === mode }">
-                  <el-icon class="env-mask-option__check"><Check /></el-icon>
-                  <span class="env-mask-option__text">
-                    <span class="env-mask-option__label">{{ envMaskModeMeta[mode].label }}</span>
-                    <span class="env-mask-option__hint">{{ envMaskModeMeta[mode].hint }}</span>
-                  </span>
-                </span>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
         <!-- 原来是一个「…」更多下拉：主体只能展开菜单，最常用的导出永远要点两次，
              按钮上也看不出这里能干什么。改成真正的 Split Button：
              主体「导出」直接下载 JSON（默认/往返格式），其余格式与导入留在菜单里。 -->
@@ -1218,133 +1309,116 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
             'env-card--disabled': !row.enabled
           }"
         >
-          <div class="dd-mobile-card__header">
-            <div class="dd-mobile-card__title-wrap">
-              <div class="env-card__title-row">
-                <div class="dd-mobile-card__selection">
-                  <button
-                    v-if="sortableEnabled"
-                    class="env-mobile-drag-handle"
-                    type="button"
-                    aria-label="长按拖动排序"
-                    @click.stop
-                  >
-                    <el-icon :size="16"><Rank /></el-icon>
-                  </button>
-                  <el-checkbox :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
-                  <div class="env-name-wrap">
-                    <!-- 状态圆点：卡片里原来的「状态」字段（switch + 文字）已删掉，
-                         启用/禁用改由名称前这枚 8×8 圆点 + 操作区的启用/禁用按钮承载，
-                         与桌面表格完全同一套东西。title / aria-label 的必要性见下方 .env-status-dot 的注释。 -->
-                    <span
-                      class="env-status-dot"
-                      :class="{ 'is-enabled': row.enabled }"
-                      role="img"
-                      :title="row.enabled ? '已启用' : '已禁用'"
-                      :aria-label="row.enabled ? '已启用' : '已禁用'"
-                    />
-                    <!-- 与桌面表格同一套结构（同样的类、同样的 handler）：名称文本是 <span>、
-                         「只看这个变量名」由后面那颗图标按钮承担，理由见桌面表格那一处的注释。
-                         触屏这边收益更直接：长按 <span> 才会弹出系统的文本选择/复制浮层，
-                         长按 <button> 不会（而卡片的长按拖拽只绑在 .env-mobile-drag-handle 上，不抢这个手势）。
-                         这里不套 el-tooltip：触屏没有 hover，同卡片里「值」的复制按钮也是裸按钮，保持一致。 -->
-                    <span class="env-name">{{ row.name }}</span>
-                    <el-button
-                      class="env-name-filter-btn"
-                      size="small"
-                      link
-                      :aria-label="`只看变量名 ${row.name} 的全部条目`"
-                      @click.stop="handleFilterByName(row.name)"
-                    >
-                      <el-icon :size="14"><Search /></el-icon>
-                    </el-button>
-                    <span v-if="isTopPinned(row)" class="pinned-chip">
-                      <el-icon><Top /></el-icon>
-                      置顶
-                    </span>
-                  </div>
-                </div>
-                <div class="env-card__tools">
-                  <div v-if="row.groups.length > 0" class="group-pill-list">
-                    <span
-                      v-for="group in row.groups"
-                      :key="group"
-                      class="group-pill"
-                      :style="getGroupBadgeStyle(group)"
-                    >
-                      <span class="group-dot" />
-                      <span class="group-pill__text">{{ group }}</span>
-                    </span>
-                  </div>
-                  <span v-else class="env-empty-text">未分组</span>
-                </div>
-              </div>
+          <!-- 首行：拖拽手柄 → 复选框 → 状态灯 → 变量名 → 分组 / 置顶小标签 → 右上角「···」。
+               手机上不再有「只看这个变量名」的放大镜：变量名筛选在移动端整体不提供（见移动端工具栏的注释），
+               留着它，点一下就会造出一个手机上看不见、也关不掉的变量名筛选。桌面表格那颗照旧。 -->
+          <div class="dd-mobile-card__head">
+            <button
+              v-if="sortableEnabled"
+              class="env-mobile-drag-handle"
+              type="button"
+              aria-label="长按拖动排序"
+              @click.stop
+            >
+              <el-icon :size="16"><Rank /></el-icon>
+            </button>
+            <el-checkbox :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
+            <!-- 状态圆点：卡片里原来的「状态」字段（switch + 文字）已删掉，
+                 启用/禁用改由名称前这枚 8×8 圆点 + 末行的启用/禁用按钮承载，
+                 与桌面表格完全同一套东西。title / aria-label 的必要性见下方 .env-status-dot 的注释。 -->
+            <span
+              class="env-status-dot"
+              :class="{ 'is-enabled': row.enabled }"
+              role="img"
+              :title="row.enabled ? '已启用' : '已禁用'"
+              :aria-label="row.enabled ? '已启用' : '已禁用'"
+            />
+            <!-- 名称是 <span> 而不是按钮：长按 <span> 才会弹出系统的文本选择/复制浮层
+                 （卡片的长按拖拽只绑在 .env-mobile-drag-handle 上，不抢这个手势）。
+                 同挂 .env-name 是为了沿用等宽字体、主题色与禁用卡的降档规则；字号由卡片作用域里的覆盖交还给 16px。
+                 单行省略，:title 挂全名。 -->
+            <span class="env-name dd-mobile-card__name" :title="row.name">{{ row.name }}</span>
+            <!-- 没有分组时什么都不显示（不再写灰字「未分组」）；置顶除了这枚标签，卡片左缘还有橙色色条。 -->
+            <div
+              v-if="row.groups.length > 0 || isTopPinned(row)"
+              class="dd-mobile-card__head-tags env-card__tags"
+            >
+              <span
+                v-for="group in row.groups"
+                :key="group"
+                class="group-pill"
+                :style="getGroupBadgeStyle(group)"
+                :title="group"
+              >
+                <span class="group-dot" />
+                <span class="group-pill__text">{{ group }}</span>
+              </span>
+              <span v-if="isTopPinned(row)" class="pinned-chip">
+                <el-icon><Top /></el-icon>
+                置顶
+              </span>
+            </div>
+            <!-- 「···」菜单与桌面操作列的 ▾ 同一份 buildEnvActionItems / onEnvAction：复制同名变量、置顶 / 取消置顶、删除 -->
+            <DdMoreMenu
+              :items="buildEnvActionItems(row)"
+              :aria-label="`${row.name} 的更多操作`"
+              @command="(key: string) => onEnvAction(key, row)"
+            />
+          </div>
+
+          <!-- 字段区：标签与值横排，先「备注」再「值」。「更新时间」在卡片上不再显示（桌面表格仍有这一列）。 -->
+          <div class="dd-mobile-card__rows">
+            <div class="dd-mobile-card__row">
+              <span class="dd-mobile-card__row-label">备注</span>
+              <span class="dd-mobile-card__row-value env-remarks-text" :title="row.remarks || ''">{{ row.remarks || '-' }}</span>
+            </div>
+            <div class="dd-mobile-card__row env-card__value-row">
+              <span class="dd-mobile-card__row-label">值</span>
+              <!-- 🔴 遮蔽（#127）：文本只能输出 envValueDisplay(row)；title / aria-label / data-* 一律不许出现 row.value，
+                   否则遮着的明文会从属性里露出来（读屏、长按预览、DOM 检查都能看到）。这一格因此不挂 title。
+                   最多显示两行、超出省略；被小眼睛临时揭示的明文也只露两行。 -->
+              <span class="dd-mobile-card__row-value dd-mobile-card__row-value--clamp2 env-value-text">{{ envValueDisplay(row) }}</span>
+              <span v-if="row.value" class="env-card__value-actions">
+                <!-- 小眼睛：和桌面值列同一套判定，只有当前模式会遮这一行时才出现，是手机上唯一的临时揭示入口；
+                     与旁边的复制按钮同样是裸 link 按钮、不套 tooltip（触屏没有 hover），所以另挂 aria-label -->
+                <el-button
+                  v-if="isEnvValueMaskable(row)"
+                  class="env-reveal-btn"
+                  size="small"
+                  link
+                  :aria-label="isEnvValueRevealed(row) ? `重新遮住 ${row.name} 的值` : `临时查看 ${row.name} 的明文`"
+                  @click.stop="toggleEnvValueReveal(row)"
+                >
+                  <el-icon :size="14"><Hide v-if="isEnvValueRevealed(row)" /><View v-else /></el-icon>
+                </el-button>
+                <!-- 复制仍然复制明文（#127 的刻意设计：遮蔽防的是肩窥和截图，不是防自己用）；无障碍名称只写变量名 -->
+                <el-button
+                  class="env-copy-btn"
+                  size="small"
+                  link
+                  :aria-label="`复制 ${row.name} 的值`"
+                  @click.stop="copyEnvValue(row.value)"
+                >
+                  <el-icon :size="14"><CopyDocument /></el-icon>
+                </el-button>
+              </span>
             </div>
           </div>
 
-          <div class="dd-mobile-card__body">
-            <div class="dd-mobile-card__grid">
-              <div class="dd-mobile-card__field dd-mobile-card__field--full">
-                <span class="dd-mobile-card__label">值</span>
-                <div class="dd-mobile-card__value env-value-cell">
-                  <span class="env-value-text">{{ envValueDisplay(row) }}</span>
-                  <!-- 小眼睛（#127）：和桌面值列同一套判定，只有当前模式会遮这一行时才出现；
-                       与旁边的复制按钮同样是裸 link 按钮、不套 tooltip（触屏没有 hover），所以另挂 aria-label -->
-                  <el-button
-                    v-if="isEnvValueMaskable(row)"
-                    size="small"
-                    link
-                    :aria-label="isEnvValueRevealed(row) ? `重新遮住 ${row.name} 的值` : `临时查看 ${row.name} 的明文`"
-                    @click.stop="toggleEnvValueReveal(row)"
-                  >
-                    <el-icon :size="14"><Hide v-if="isEnvValueRevealed(row)" /><View v-else /></el-icon>
-                  </el-button>
-                  <el-button v-if="row.value" size="small" link @click.stop="copyEnvValue(row.value)">
-                    <el-icon :size="14"><CopyDocument /></el-icon>
-                  </el-button>
-                </div>
-              </div>
-              <div class="dd-mobile-card__field dd-mobile-card__field--full">
-                <span class="dd-mobile-card__label">备注</span>
-                <span class="dd-mobile-card__value env-remarks-text">{{ row.remarks || '-' }}</span>
-              </div>
-              <!-- 原来这里还有一格「状态」（switch + 启用/禁用文字），已删除：状态改由标题行的圆点表达、
-                   切换改由下面操作区的「启用 / 禁用」按钮执行，与桌面端同源。
-                   少一格不影响布局：.dd-mobile-card__grid 基态是 2 列，但 ≤768px 那条媒体查询把它压成
-                   单列，而移动卡片本身只在 isMobile（width ≤ 768）时才渲染 ⇒ 实际永远是单列纵向堆叠，
-                   剩下的「值 / 备注 / 更新时间」照旧一行一格。 -->
-              <div class="dd-mobile-card__field">
-                <span class="dd-mobile-card__label">更新时间</span>
-                <span class="dd-mobile-card__value time-text">{{ formatDateTime(row.updated_at) }}</span>
-              </div>
-            </div>
-
-            <div class="dd-mobile-card__actions env-card__actions">
-              <el-button size="small" type="primary" @click="openEdit(row)">编辑</el-button>
-              <!-- 与桌面操作列同一个按钮、同一套 type/plain 组合、同一个 handleToggle：
-                   启用态显示「禁用」= danger plain，禁用态显示「启用」= 不写 type（EP default 白底）。
-                   移动端原来用 el-switch，桌面改成按钮后两端就成了两套东西，必须跟着换。 -->
+          <!-- 末行：右下角只留「编辑」与「启用 / 禁用」两个一级按钮（default 尺寸），其余操作在右上角「···」里。
+               「启用 / 禁用」与桌面操作列同一个按钮、同一套 type/plain 组合、同一个 handleToggle：
+               启用态显示「禁用」= danger plain，禁用态显示「启用」= 不写 type（EP default 白底）。
+               它落在最外侧是与桌面操作列相同的有意让步：handleToggle 带二次确认，真正不可逆的「删除」仍在菜单里。 -->
+          <div class="dd-mobile-card__footer">
+            <div class="dd-mobile-card__footer-actions">
+              <el-button type="primary" @click="openEdit(row)">编辑</el-button>
               <el-button
-                size="small"
                 :type="row.enabled ? 'danger' : 'default'"
                 :plain="row.enabled"
                 @click="handleToggle(row)"
               >
                 {{ row.enabled ? '禁用' : '启用' }}
               </el-button>
-              <el-button size="small" @click="openDuplicate(row)">复制</el-button>
-              <el-button
-                size="small"
-                :type="isTopPinned(row) ? 'info' : 'warning'"
-                @click="handleToggleTop(row)"
-              >
-                {{ isTopPinned(row) ? '取消置顶' : '置顶' }}
-              </el-button>
-              <!-- 删除必须是【实心】danger：同一张卡片里「禁用」已经占了 danger + plain，
-                   删除若也写 plain，两个红描边白底按钮外观逐字相同，用户分不出哪个不可逆。
-                   与本页工具栏「批量禁用（plain）/ 批量删除（实心）」以及 design-system §4.2
-                   是同一条层级规则：一组按钮里最醒目的永远留给不可逆的那个。 -->
-              <el-button size="small" type="danger" @click="handleDelete(row.id)">删除</el-button>
             </div>
           </div>
         </div>
@@ -1457,7 +1531,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
               <span>值</span>
               <!-- 桌面端的三态切换就放在它管的这一列表头上：选的是「这一列怎么显示」，放这里一眼就对得上。
                    也不去挤工具栏右区：右区再宽一点，1280 宽 + 展开侧栏时左边的筛选区就要换成两行（账见 .toolbar__search 的注释）。
-                   手机端没有表头，工具栏右区另有一份同样的菜单，改一处要同步另一处。 -->
+                   这是全站唯一的切换入口：手机端（v3.3.1 起）不提供，沿用本机存的那一档，理由见移动端工具栏的注释。 -->
               <el-dropdown trigger="click" placement="bottom-start" @command="handleEnvMaskModeCommand">
                 <el-button
                   class="env-mask-mode-trigger"
@@ -1658,6 +1732,11 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         description="内容是明文，包含凭据，不受页面遮蔽设置影响。复制、截图或分享前请留意。"
       />
       <pre class="export-preview">{{ exportContent }}</pre>
+      <!-- 移动端全屏时右上角的 × 由全局规则隐藏（有 footer 的弹窗一律如此），关闭入口放到右下角拇指够得着的地方。
+           只在全屏（= isMobile，与上面 :fullscreen 同一个条件）时提供 footer 插槽，桌面弹窗结构不变。 -->
+      <template v-if="isMobile" #footer>
+        <el-button @click="showExportDialog = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <EnvEditDialog
@@ -1847,7 +1926,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 // 批量操作条：搬进左槽后可用宽度由左槽给（右边还站着导出/新建），窄窗口下这六个按钮排不下时
 // 必须允许换行，否则会横向溢出被裁掉；换行后的两行高度也会被左槽如实吃进去（见下面的叠放规则），
 // 所以勾选前后工具栏依然等高。
-// 移动端竖排也吃这条 flex-wrap，不再在 768px 断点里重复写一遍。
+// 这一支只在桌面渲染：移动端另有一套 .dd-mobile-batch-bar（见模板里的移动端工具栏），不吃这里的任何规则。
 .batch-actions {
   display: flex;
   align-items: center;
@@ -2071,11 +2150,80 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 /* ---- Mobile Card ---- */
-.env-card__title-row {
-  display: flex;
+// 卡片骨架（首行 / 字段区 / 末行）全部用 global.scss 的 .dd-mobile-card__head / __rows / __footer 系共享类，
+// 下面只写本页特有的几处覆盖，且一律带 .env-card 前缀：.env-name / .env-value-text / .group-pill 这些类与桌面表格共用，
+// 不带前缀直接改基态会波及桌面（例如值列从单行省略变成两行、行高翻倍）。
+
+// 名称：.env-name 是 scoped 单类 (0,2,0)，它的 13px 会压过全局 .dd-mobile-card__name (0,1,0) 的 16px，
+// 这里在卡片里把字号交还回去；字重 / 行高 / 单行省略仍由 __name 给，等宽字体与主题色沿用 .env-name。
+.env-card .env-name {
+  font-size: 16px;
+}
+
+// 名称右侧的分组 / 置顶小标签组（与 .dd-mobile-card__head-tags 同挂，这里只改两处）：
+//   - 名称优先：flex-basis 取 0，只分名称用剩的宽度。全局那条是 0 1 auto，会和名称按各自内容宽等比例一起缩，
+//     分组一多，变量名就被砍得只剩几个字；变量名才是认卡片的依据，分组是次要信息。
+//   - 放不下的整枚隐藏：flex-wrap + 定高 20px + overflow:hidden，挤不下的标签整枚换到第二行、被高度裁掉，
+//     不会出现半截标签，也不会把首行撑高；只剩第一枚都放不下时，靠 .group-pill 基态的 max-width:100% 收成带省略号的短标签。
+//   不做「+N」计数：它本身也要占宽，而且点开看全部分组有编辑弹窗。
+.env-card__tags {
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  height: 20px;
+}
+
+// 分组标签在卡片里收成 el-tag size="small" 的尺寸（20px 高、左右 7px、字重 500），与其它页卡片首行的状态标签同一规格。
+// 只在卡片作用域里改：.group-pill 基态还服务于桌面表格的「分组」列与紧凑模式。
+.env-card .group-pill {
+  flex-shrink: 0;
+  height: 20px;
+  padding: 0 7px;
+  gap: 4px;
+  line-height: 1;
+  font-weight: 500;
+}
+
+// 色标跟着缩到 6px，圆角仍是 .group-dot 基态固定的 2px（≤12px 分类色标不吃令牌的判据，理由见 .group-dot）
+.env-card .group-dot {
+  width: 6px;
+  height: 6px;
+}
+
+// 置顶标签缩到与分组标签同一尺寸；配色与字重不动，仍是全页统一的置顶金色
+.env-card .pinned-chip {
+  height: 20px;
+  padding: 0 7px;
+  line-height: 1;
+}
+
+// 「值」一行：最多两行，所以整行改成顶端对齐（全局 __row 是居中，两行值会把标签和小眼睛挤到两行中间）；
+// 行高统一成 20px，标签、值的第一行、右侧 20px 高的按钮组三者落在同一条中线上。
+.env-card__value-row {
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+  line-height: 20px;
+}
+
+// 值文本同挂 .env-value-text（等宽字体、禁用卡降档）与全局 --clamp2（两行截断）。
+// 但 .env-value-text 基态是给桌面值列的单行省略（display:block + nowrap），scoped (0,2,0) 压过全局修饰类 (0,1,0)，
+// 不在卡片里把 display / white-space 交还回去，两行截断就不生效、仍是一行。
+.env-card .env-value-text {
+  display: -webkit-box;
+  white-space: normal;
+}
+
+// 值后面的小眼睛 + 复制：一组紧挨的 18px 行内图标按钮，组内间距只由 gap 决定
+.env-card__value-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  flex-shrink: 0;
+
+  // 清掉 EP 的 .el-button + .el-button { margin-left: 12px }，否则与 gap 叠加
+  > .el-button + .el-button {
+    margin-left: 0;
+  }
 }
 
 // 移动端拖拽手柄（特有元素）：色板已走令牌，过渡统一到 motion/ease 令牌
@@ -2088,8 +2236,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   justify-content: center;
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-fill-color-light);
-  // 30×30 的图标按钮 → control 档
-  border-radius: var(--dd-radius-control);
+  // 30×30 的图标按钮，只在移动卡片里渲染 → 「按钮」角色令牌：rounded 面板在手机上与同屏的其它按钮一样放大到 16px，
+  // square 面板仍是直角（v3.3.1 前吃 control 档，手机上会和旁边已经变圆的按钮对不上）
+  border-radius: var(--dd-radius-button);
   color: var(--el-text-color-secondary);
   cursor: grab;
   touch-action: none;
@@ -2107,25 +2256,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   background: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
   border-color: var(--el-color-primary-light-7);
-}
-
-.env-card__tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  min-width: 0;
-}
-
-// 移动卡片的操作区分栏：一行三个（gap 8px ⇒ 基准宽 33.33% - 6px 差不多正好三列）。
-// v3.2.0 起按钮从 4 个变成 5 个（编辑 / 禁用·启用 / 复制 / 置顶 / 删除），排成 3 + 2 两行，
-// 第二行两个靠 flex-grow 各自摊到约一半——比原来 ≤768px 那条 `calc(50% - 4px)` 的
-// 2 + 2 + 1 好看：那样第 5 个会孤零零地占满一整行，而落在第 5 位的正好是 danger 的「删除」，
-// 视觉重量最重的按钮反而最显眼。所以 ≤768px 那条覆写已删除，两档共用这一条。
-// 极窄机型（320px）核算：卡片内容宽约 296px，三列每列约 93px，
-// 最长的「取消置顶」= 4×12 + 22（EP small 内边距）= 70px，仍放得下。
-.env-card__actions > * {
-  flex: 1 1 calc(33.33% - 6px);
 }
 
 // 禁用移动卡：与桌面禁用行同一套弱化（浅底 + 文本降一档），完整理由见下方
@@ -2202,7 +2332,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   white-space: nowrap;
 }
 
-// 「只看这个变量名」按钮：桌面表格与移动卡片共用这一个类（跟 .env-name 一样两端同源）。
+// 「只看这个变量名」按钮：只在桌面表格的名称列里有（v3.3.1 起移动卡片不再放这颗按钮，
+// 手机上不提供变量名筛选，理由见模板里移动卡片首行的注释）。
 // 除 margin-right 外，其余声明与「值」列的 .env-copy-btn 逐字相同 —— 同一张表里的行内图标按钮
 // 只有一款外观；padding 2px 也正是名称列 min-width 那笔账里按 18px 计的来源（图标 14 + 2×2），
 // 改动它要回去同步改列宽。
@@ -2266,7 +2397,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 // 顺带说明：本页操作栏（.action-btns）一直就是常驻的，没有任何 hover/opacity 门控 ——
 // 那是要守住的不变量，别顺手给它加 hover 显隐。
 // 值列的小眼睛（.env-reveal-btn，#127）与复制按钮同一款：尺寸 18px（图标 14 + padding 2×2）也是值列 min-width
-// 那笔像素账的来源，改这里要回去同步。它同样常驻、不做 hover 显隐，理由同下面 1)~3)。
+// 那笔像素账的来源，改这里要回去同步。它同样常驻、不做 hover 显隐，理由同上面 1)~3)。
+// v3.3.1 起移动卡片「值」一行里的两颗也挂这两个类，两端同一款外观（卡片里 20px 的按钮组高度按 18px 算）。
 .env-copy-btn,
 .env-reveal-btn {
   flex-shrink: 0;
@@ -2306,15 +2438,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 // EP 只给「图标后面紧跟的文字」加 6px 左边距，文字后面的箭头要自己隔开一点
 .env-mask-mode-trigger__caret {
   margin-left: 2px;
-}
-
-// 手机工具栏里的同一个切换：纯图标按钮，padding 收成 8px，正好是与同排按钮等高的 32×32
-.env-mask-mode-btn {
-  padding: 8px;
-
-  &.is-unmasked {
-    color: var(--el-color-warning);
-  }
 }
 
 // 三态菜单项：勾 + 名称 + 一行说明。菜单虽然 teleport 到了 body，但这些 span 是写在本组件模板里的，
@@ -2587,56 +2710,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     }
   }
 
-  .toolbar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-
-    // 竖排下左槽由内容自然撑高：桌面那条 39px 下限是为了对齐单行工具栏，
-    // 这里筛选控件本来就要堆四行（状态分段 / 搜索框 / 分组筛选 / 变量名筛选），留着只会在批量区那一支下面多出一截空白。
-    // 左槽是 1×1 网格、子项默认就铺满整列宽，align-items 从 start 放回 stretch 让还显示着的那一支填满行高。
-    // 注意：这条 min-height:0 与下面那条 display:none 是配套的——藏起来的那一支被拿出流之后，
-    // 左槽高度就完全由还显示着的那一支说了算，不该再被 39px 顶着。
-    &__left {
-      align-items: stretch;
-      min-height: 0;
-    }
-
-    &__filters {
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    // 🔴 竖排下必须把 flex 收回 `0 0 auto`：主轴变成【纵向】后，桌面那套
-    // `flex: 2 1 160px` 里的 160px 就变成了【高度】基准，grow 还会把控件按余量拉高，
-    // 三个筛选控件会被撑成一柱高块。max-width 同理要放开，否则 220px 会把满宽控件截短。
-    &__search,
-    &__group-filter,
-    &__name-filter {
-      flex: 0 0 auto;
-      width: 100% !important;
-      max-width: none;
-    }
-
-    &__right {
-      justify-content: flex-end;
-    }
-  }
-
-  // 移动端把藏起来的那一支直接从流里拿掉。
-  // 桌面端留着它是为了锁死工具栏高度（dd-fixed-page 是定高 flex 列，工具栏差多少表格就反向补多少），
-  // 但 dd-fixed-page 只在 ≥769px 生效，移动端是普通文档流、表格不会被工具栏挤压，
-  // 留着竖排的筛选区（状态分段 + 搜索框 + 分组筛选 + 变量名筛选各占一行）会在批量态白占一大截空高。
-  // 这条【只能】落在 ≤768px 内：写到外面桌面端就退回今天的跳动。
-  .toolbar__filters.is-swapped-out,
-  .batch-actions.is-swapped-out {
-    display: none;
-  }
-
-  .status-tabs {
-    width: 100%;
-    overflow-x: auto;
-  }
+  // 这里不再有 .toolbar / .status-tabs / 批量区的移动端规则（v3.3.1）：桌面工具栏整支是 v-else，≤768 下根本不渲染，
+  // 手机上的工具栏换成模板里 .env-mobile-toolbar 那一支，样式全部来自 global.scss 的 .dd-mobile-toolbar / .dd-mobile-batch-bar。
+  // useResponsive 的 isMobile（innerWidth ≤ 768）与这条媒体查询口径一致，都按含滚动条的视口宽判定。
 
   .pagination-bar {
     flex-direction: column;
@@ -2651,18 +2727,6 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
     width: 100%;
     justify-content: space-between;
   }
-
-  .env-card__title-row {
-    flex-direction: column;
-  }
-
-  .env-card__tools {
-    width: 100%;
-    justify-content: space-between;
-  }
-
-  // 原来这里有一条 `.env-card__actions > * { flex: 1 1 calc(50% - 4px) }`（4 个按钮排成 2×2），
-  // 按钮加到 5 个后已删除，统一走基态的 33.33%（3 + 2），理由见 .env-card__actions 那段注释。
 }
 
 // ===== 入场动画 =====
@@ -2680,7 +2744,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   }
 }
 
+// 移动端工具栏挂在外层 .env-mobile-toolbar 上：批量栏与搜索栏在它里面 v-if 切换，外层不重建，动画只在进页时跑一次
 .toolbar,
+.env-mobile-toolbar,
 .table-card,
 .dd-mobile-list {
   animation: dd-envs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;

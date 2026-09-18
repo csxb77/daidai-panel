@@ -14,8 +14,11 @@ import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
 import { formatDuration } from '@/utils/duration'
 import { formatDateTime, toDateRangeParams } from '@/utils/datetime'
-import { Download } from '@element-plus/icons-vue'
+import { scrollListToTop } from '@/utils/scrollToTop'
+// 移动端纯图标按钮走 el-button 的 :icon prop，要拿到组件对象本身，所以显式局部引入（不依赖 main.ts 的全局注册）
+import { Close, Delete, Download, Refresh } from '@element-plus/icons-vue'
 import DdDateRangePicker from '@/components/ui/DdDateRangePicker.vue'
+import DdMoreMenu from '@/components/ui/DdMoreMenu.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE, type TerminalLineBuffer } from '@/utils/ansi'
@@ -44,7 +47,19 @@ const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
 const autoRefresh = ref(true)
 const { isMobile, dialogFullscreen } = useResponsive()
-const { isPageActive } = usePageActivity()
+const { isPageActive, isViewActive } = usePageActivity()
+// 页面根，翻页回顶（scrollListToTop）的锚点
+const pageRootRef = ref<HTMLElement | null>(null)
+
+// 状态分段的选项。桌面工具栏与移动端第二行共用这一份，两处的文案与顺序不会各改各的
+const LOG_STATUS_TABS = [
+  { value: '', label: '全部记录' },
+  { value: '0', label: '成功' },
+  { value: '1', label: '失败' },
+  { value: '3', label: '已终止' },
+  { value: '2', label: '运行中' },
+] as const
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let logEventSource: EventStreamConnection | null = null
 const logContentRef = ref<HTMLElement>()
@@ -281,6 +296,45 @@ function handleSearch() {
   page.value = 1
   loadLogs()
 }
+
+function selectStatusFilter(value: string) {
+  statusFilter.value = value
+  handleSearch()
+}
+
+// 翻页后回到顶部（v3.3.1，issue #143 O3，桌面与移动端都做）。
+// 🔴 只挂在分页器的 current-change / size-change 上，不能塞进 loadLogs 或 watch(page)：
+// 自动刷新每 5 秒就调一次 loadLogs，路由 task_id 变化的 watch 也会把 page 置 1，
+// 挂在那里会把正在往下翻看的人一把拽回顶部。
+async function handlePageChange() {
+  await loadLogs()
+  // 等新数据渲染出来再回顶：数据还没换就滚，旧内容会先闪到顶部再被替换
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
+}
+
+// 改每页条数后从第 1 页看起：旧页码配上新的页大小，对应的是另一批不相干的数据。
+// ⚠️ 旧页码超出新的总页数时，EP 会在 size-change 之后同步再发一次 current-change，把页码夹到末页
+// （element-plus pagination 的 handleSizeChange），于是会并发两次 loadLogs、以后回来的那次为准。
+// 本页 loadLogs 没有请求序号闸，这是改动前就有的行为（原来两个事件都直接绑 loadLogs）。
+function handlePageSizeChange() {
+  page.value = 1
+  void handlePageChange()
+}
+
+// 断点切换时的两件收尾（v3.3.1，issue #143）：
+// ① 桌面表格与移动卡片各有一套勾选 UI，selectedIds 却是同一份。切过去以后另一套 UI 不认旧勾选
+//    （el-table 挂载时不会按 selectedIds 回显），会出现「批量栏说已选 N 项、界面上一个勾都没有」，所以直接清空。
+// ② 移动端不渲染日期范围筛选：桌面选过日期再缩到手机宽，筛选仍在生效却没有入口清除，
+//    所以进入移动端时清空并回到第 1 页重拉。页面被 keep-alive 缓存着（在别的页缩窗口）时只清不拉：
+//    再次进入本页时 onActivated 本来就会重拉一次，这里再拉就是白发一个请求。
+watch(isMobile, (mobile) => {
+  clearSelection()
+  if (!mobile || !dateRange.value) return
+  dateRange.value = null
+  page.value = 1
+  if (isViewActive.value) void loadLogs()
+})
 
 function getStatusType(status: number | null) {
   if (status === 2) return 'warning'
@@ -617,6 +671,15 @@ async function browseLogFiles(log: any) {
   }
 }
 
+// 移动端卡片右上角「···」（v3.3.1，issue #143 LG3）：卡片末行只留「查看 / 删除」两颗实体按钮，
+// 「日志文件」收进这里。所有角色都可见，与桌面表格的「文件」按钮一致（browseLogFiles 本身不做权限判断）。
+// 每一行都一样、不随行状态变，所以是一份常量，不必按行现算。
+const logCardMenuItems: SplitButtonItem[] = [{ key: 'files', label: '日志文件' }]
+
+function onLogCardCommand(row: any, key: string) {
+  if (key === 'files') void browseLogFiles(row)
+}
+
 async function viewLogFile(file: any) {
   try {
     const res = await taskApi.logFileContent(currentTaskId.value, file.filename, file.path)
@@ -729,9 +792,55 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="logs-page dd-fixed-page dd-page-hide-heading">
-    <!-- ======= Toolbar ======= -->
-    <div class="toolbar">
+  <div ref="pageRootRef" class="logs-page dd-fixed-page dd-page-hide-heading">
+    <!-- ======= Toolbar（移动端） ======= -->
+    <!-- 移动端单独一支（v3.3.1，issue #143 LG1）；桌面那条 .toolbar 原样挪到 v-else，DOM 与样式都没动。
+         第一行：非批量态是「搜索框 + 自动刷新开关 + 清理日志」，后两颗是 32px 纯图标按钮；
+         批量态整行换成批量栏：全选/取消全选 → 删除 → 取消，不显示「已选 N 项」（删除确认框里有条数）。
+         第二行：状态分段，贴屏幕左右边缘、横向滑动。
+         日期范围筛选在移动端不渲染，进入移动端时的清空见 watch(isMobile)。
+         这一支用不着桌面那套「左槽叠放」：移动端是普通文档流，工具栏高度变了也不会挤压列表，
+         而第一行两种形态同为 32px 高、外边距相同，切换批量态时下面的内容也不会跳。 -->
+    <div v-if="isMobile" class="logs-mobile-toolbar">
+      <div v-if="canOperateLogs && selectedIds.length > 0" class="dd-mobile-batch-bar dd-scroll-row">
+        <el-button @click="toggleSelectAll(!allSelectedOnPage)">{{ allSelectedOnPage ? '取消全选' : '全选' }}</el-button>
+        <el-button type="danger" :icon="Delete" @click="handleBatchDelete">删除</el-button>
+        <el-button :icon="Close" @click="clearSelection">取消</el-button>
+      </div>
+      <div v-else class="dd-mobile-toolbar">
+        <el-input v-model="keyword" placeholder="搜索任务名称..." clearable @keyup.enter="handleSearch" @clear="handleSearch">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <!-- 只剩图标后开 / 关只能靠 primary 与 default 两种底色区分，所以读屏名称跟着状态换成「要做的动作」 -->
+        <el-button
+          class="dd-icon-only-btn"
+          :type="autoRefresh ? 'primary' : 'default'"
+          :icon="Refresh"
+          :aria-label="autoRefresh ? '停止自动刷新' : '开启自动刷新'"
+          :title="autoRefresh ? '停止自动刷新' : '开启自动刷新'"
+          @click="toggleAutoRefresh"
+        />
+        <el-button
+          v-if="canOperateLogs"
+          class="dd-icon-only-btn"
+          :icon="Delete"
+          aria-label="清理日志"
+          title="清理日志"
+          @click="handleClean"
+        />
+      </div>
+      <div class="status-tabs dd-scroll-row dd-mobile-bleed">
+        <button
+          v-for="tab in LOG_STATUS_TABS"
+          :key="tab.value"
+          :class="['status-tab', { active: statusFilter === tab.value }]"
+          @click="selectStatusFilter(tab.value)"
+        >{{ tab.label }}</button>
+      </div>
+    </div>
+
+    <!-- ======= Toolbar（桌面） ======= -->
+    <div v-else class="toolbar">
       <!-- 左槽是【恒在】的容器，勾选时只切换它内部显示哪一支：批量条原来挂在 toolbar__right 里，
            一出现就把整条工具栏顶成两行、表格跟着下移。
            这里两支【对有操作权限的账号都常驻 DOM】、在同一个 1×1 网格里叠放，只用 visibility 切换显示：
@@ -752,11 +861,12 @@ onBeforeUnmount(() => {
              哪天给 viewer 开了只读多选，这里也不会连筛选区一起藏掉、把左槽变成一片空白。 -->
         <div class="toolbar__filters" :class="{ 'is-swapped-out': canOperateLogs && selectedIds.length > 0 }">
           <div class="status-tabs">
-            <button :class="['status-tab', { active: statusFilter === '' }]" @click="statusFilter = ''; handleSearch()">全部记录</button>
-            <button :class="['status-tab', { active: statusFilter === '0' }]" @click="statusFilter = '0'; handleSearch()">成功</button>
-            <button :class="['status-tab', { active: statusFilter === '1' }]" @click="statusFilter = '1'; handleSearch()">失败</button>
-            <button :class="['status-tab', { active: statusFilter === '3' }]" @click="statusFilter = '3'; handleSearch()">已终止</button>
-            <button :class="['status-tab', { active: statusFilter === '2' }]" @click="statusFilter = '2'; handleSearch()">运行中</button>
+            <button
+              v-for="tab in LOG_STATUS_TABS"
+              :key="tab.value"
+              :class="['status-tab', { active: statusFilter === tab.value }]"
+              @click="selectStatusFilter(tab.value)"
+            >{{ tab.label }}</button>
           </div>
           <el-input v-model="keyword" placeholder="搜索任务名称..." clearable class="toolbar__search" @keyup.enter="handleSearch" @clear="handleSearch">
             <template #prefix><el-icon><Search /></el-icon></template>
@@ -811,45 +921,52 @@ onBeforeUnmount(() => {
         :key="row.id"
         class="dd-mobile-card log-card"
       >
-        <div class="dd-mobile-card__header">
-          <div class="dd-mobile-card__title-wrap">
-            <div class="dd-mobile-card__selection">
-              <el-checkbox v-if="canOperateLogs" :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
-              <span class="dd-mobile-card__title">{{ row.task_name || `任务#${row.task_id}` }}</span>
-            </div>
-            <!-- 与桌面表格同一处理。这里不能再套一层 span 包裹：
-                 .dd-mobile-card__title-wrap 是纵向 flex 且 align-items 取默认 stretch，
-                 el-tag 是直接子项才会被拉满整行宽；包一层会把它压回内容宽，白白改了版式。
-                 Transition 自身不产生 DOM 节点，所以直接包住 el-tag 不影响这条继承关系。 -->
-            <Transition name="dd-status-switch" mode="out-in">
-              <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="row.status === 2 ? 'tag-with-dot' : ''">
-                <span v-if="row.status === 2" class="pulse-dot"></span>
-                {{ getStatusText(row.status) }}
-              </el-tag>
-            </Transition>
+        <!-- 首行（issue #143 LG2）：复选框 → 任务名（单行省略，title 给全称）→ 状态标签紧跟名称 → 右上角「···」。
+             状态标签与桌面表格同一套 out-in 交接：key 绑状态值，自动刷新把「运行中」换成「成功」时有一次淡切；
+             Transition 不产生 DOM 节点，el-tag 仍是首行的直接 flex 子项。 -->
+        <div class="dd-mobile-card__head">
+          <el-checkbox v-if="canOperateLogs" :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
+          <span class="dd-mobile-card__name log-card__name" :title="row.task_name || `任务#${row.task_id}`">{{ row.task_name || `任务#${row.task_id}` }}</span>
+          <Transition name="dd-status-switch" mode="out-in">
+            <el-tag
+              :key="row.status"
+              :type="getStatusType(row.status)"
+              size="small"
+              class="log-card__status"
+              :class="row.status === 2 ? 'tag-with-dot' : ''"
+            >
+              <span v-if="row.status === 2" class="pulse-dot"></span>
+              {{ getStatusText(row.status) }}
+            </el-tag>
+          </Transition>
+          <DdMoreMenu :items="logCardMenuItems" @command="onLogCardCommand(row, $event)" />
+        </div>
+
+        <!-- 字段区：「标签 值」横排。结束时间恒显示（运行中时 formatDateTime 回落成「-」），
+             运行中 → 已结束时卡片不会凭空多长一行、把下面的卡片往下推。 -->
+        <div class="dd-mobile-card__rows">
+          <div class="dd-mobile-card__row">
+            <span class="dd-mobile-card__row-label">开始时间</span>
+            <span class="dd-mobile-card__row-value time-text">{{ formatDateTime(row.started_at) }}</span>
+          </div>
+          <div class="dd-mobile-card__row">
+            <span class="dd-mobile-card__row-label">结束时间</span>
+            <span class="dd-mobile-card__row-value time-text">{{ formatDateTime(row.ended_at) }}</span>
           </div>
         </div>
 
-        <div class="dd-mobile-card__body">
-          <div class="dd-mobile-card__grid">
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">耗时</span>
-              <span class="dd-mobile-card__value">{{ formatDuration(row.duration) }}</span>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">开始时间</span>
-              <span class="dd-mobile-card__value time-text">{{ formatDateTime(row.started_at) }}</span>
-            </div>
-            <div class="dd-mobile-card__field" v-if="row.ended_at">
-              <span class="dd-mobile-card__label">结束时间</span>
-              <span class="dd-mobile-card__value time-text">{{ formatDateTime(row.ended_at) }}</span>
+        <!-- 末行（issue #143 LG3）：左侧「耗时」，右侧「查看」「删除」。
+             耗时也套一层 __row，标签吃同样的 4.5em 最小宽，数值与上面两行的数值左对齐。 -->
+        <div class="dd-mobile-card__footer">
+          <div class="dd-mobile-card__footer-main">
+            <div class="dd-mobile-card__row">
+              <span class="dd-mobile-card__row-label">耗时</span>
+              <span class="dd-mobile-card__row-value time-text">{{ formatDuration(row.duration) }}</span>
             </div>
           </div>
-
-          <div class="dd-mobile-card__actions">
-            <el-button type="primary" size="small" @click="viewDetail(row)">查看日志</el-button>
-            <el-button size="small" @click="browseLogFiles(row)">日志文件</el-button>
-            <el-button v-if="canOperateLogs" size="small" type="danger" plain @click="handleDelete(row)">删除</el-button>
+          <div class="dd-mobile-card__footer-actions">
+            <el-button type="primary" @click="viewDetail(row)">查看</el-button>
+            <el-button v-if="canOperateLogs" type="danger" plain @click="handleDelete(row)">删除</el-button>
           </div>
         </div>
       </div>
@@ -927,8 +1044,8 @@ onBeforeUnmount(() => {
         :total="total"
         :page-sizes="[10, 20, 50, 100]"
         :layout="isMobile ? 'prev, pager, next' : 'sizes, prev, pager, next'"
-        @current-change="loadLogs"
-        @size-change="loadLogs"
+        @current-change="handlePageChange"
+        @size-change="handlePageSizeChange"
       />
     </div>
 
@@ -1083,6 +1200,12 @@ onBeforeUnmount(() => {
         </el-table-column>
       </el-table>
       <el-empty v-if="!logFilesLoading && logFiles.length === 0" description="暂无日志文件" />
+
+      <!-- 移动端全屏时补一个底部「关闭」（v3.3.1，issue #143 F2）：有了 footer，global.scss 会在 ≤768 收起右上角的 ×，
+           关闭入口挪到拇指够得着的右下角。v-if 在插槽上，桌面 EP 不渲染 footer，弹窗与原来完全一样。 -->
+      <template v-if="dialogFullscreen" #footer>
+        <el-button @click="showFileBrowser = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog v-model="showFileContent" :title="fileContentName" width="1100px" :fullscreen="dialogFullscreen">
@@ -1293,7 +1416,7 @@ onBeforeUnmount(() => {
 }
 
 // 状态 tag 的 out-in 交接。位移一律禁掉：
-// 表格行内的 transform 会带着整行一起动，移动端卡片里则会顶动下面的字段网格。
+// 表格行内的 transform 会带着整行一起动，移动端卡片首行里标签一动整行看着也在抖。
 .dd-status-switch-enter-active,
 .dd-status-switch-leave-active {
   transition: opacity var(--dd-motion-fast) var(--dd-ease-standard);
@@ -1302,6 +1425,23 @@ onBeforeUnmount(() => {
 .dd-status-switch-enter-from,
 .dd-status-switch-leave-to {
   opacity: 0;
+}
+
+/* =============== Mobile Toolbar / Card =============== */
+// 移动端工具栏两行（只在 isMobile 时渲染，所以不必写进媒体查询）。第一行离顶栏的 12px 由移动端
+// .layout-main 的上内边距给（MainLayout.vue）；第一行的高度与下外边距（上外边距为 0）由全局
+// .dd-mobile-toolbar / .dd-mobile-batch-bar 给，这里只负责把两行竖着排、并和下面的卡片列表隔开。
+// 用 flex 列而不是普通块：状态分段是 inline-flex，放在块里会落进行框、底下多出一截基线留白；
+// 作为 flex 子项会被块级化，高度就是它自己的 39px。
+.logs-mobile-toolbar {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 12px;
+}
+
+// 状态标签不参与压缩：首行放不下时让任务名去省略，标签始终完整
+.log-card__status {
+  flex-shrink: 0;
 }
 
 /* =============== Table Card =============== */
@@ -1758,59 +1898,6 @@ onBeforeUnmount(() => {
     }
   }
 
-  .toolbar {
-    flex-direction: column;
-    // 容器级 stretch 同时接管了桌面端的 align-items: flex-start：
-    // 竖排时交叉轴是水平方向，左右两区都要铺满整行，不能收成内容宽
-    align-items: stretch;
-    gap: 10px;
-
-    // 竖排改在筛选区上做。左槽是 1×1 网格，子项默认就铺满整列宽，
-    // 这里把纵向对齐从 start 放回 stretch，让唯一还显示着的那一支填满行高。
-    &__left {
-      align-items: stretch;
-    }
-
-    &__filters {
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    &__search {
-      width: 100% !important;
-    }
-
-    &__right {
-      justify-content: stretch;
-      flex-wrap: wrap;
-    }
-
-    &__right > * {
-      flex: 1 1 calc(50% - 4px);
-    }
-  }
-
-  .status-tabs {
-    width: 100%;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .batch-actions {
-    flex-wrap: wrap;
-    width: 100%;
-  }
-
-  // 移动端把藏起来的那一支直接从流里拿掉。
-  // 桌面端留着它是为了锁死工具栏高度（dd-fixed-page 是定高 flex 列，工具栏矮多少表格就长多少），
-  // 但 dd-fixed-page 只在 ≥769px 生效，移动端是普通文档流、表格不会被工具栏挤压，
-  // 留着竖排的筛选区（4 个控件竖着摞起来）会在批量态白占一大截空高。
-  // 这条【只能】落在 ≤768px 内：写到外面桌面端就退回今天的跳动。
-  .toolbar__filters.is-swapped-out,
-  .batch-actions.is-swapped-out {
-    display: none;
-  }
-
   .pagination-bar {
     flex-direction: column;
     gap: 10px;
@@ -1823,11 +1910,18 @@ onBeforeUnmount(() => {
   }
 
   .detail-hero-title { font-size: 15.5px; }
+
+  // 详情弹窗在移动端全屏，底部 footer 本来就有「关闭」（issue #143 F2）：
+  // 与其它弹窗统一成「关闭只在右下角」，自定义头部右上角这颗 × 收起，标题行也多出一点宽度
+  .detail-hero-close {
+    display: none;
+  }
 }
 
 // ===== 入场动画 =====
 // 与定时任务页统一：只对卡片级容器（工具条 / 表格卡 / 移动列表）做克制的淡入上移 + 轻微错落；
 // 不给表格每一行或每张移动卡做 stagger。时长走令牌，prefers-reduced-motion 时令牌自动降为 1ms 即等效关闭。
+// 移动端工具栏（.logs-mobile-toolbar）是桌面 .toolbar 在手机上的替身，同样算「工具条」这一级。
 @keyframes dd-logs-rise-in {
   from {
     opacity: 0;
@@ -1840,6 +1934,7 @@ onBeforeUnmount(() => {
 }
 
 .toolbar,
+.logs-mobile-toolbar,
 .table-card,
 .dd-mobile-list {
   animation: dd-logs-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;

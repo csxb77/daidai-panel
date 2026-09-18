@@ -736,3 +736,45 @@ func TestSubscriptionUpdateValidatesOnlyChangedRegexFilters(t *testing.T) {
 		t.Fatalf("expected depend_on updated verbatim, got %q", current.DependOn)
 	}
 }
+
+// 批量删除的空列表必须回 400：binding:"required" 放行 "ids": []，而空列表一条都不删却回「已删除 0 个订阅」，
+// 前端据此提示「批量删除成功」，用户以为删掉了。非空列表照常删除。
+func TestSubscriptionBatchDeleteRejectsEmptyIDs(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	operator := testutil.MustCreateUser(t, "subscription-batch-operator", "operator")
+	token := testutil.MustCreateAccessToken(t, operator.Username, operator.Role)
+	engine := newProtectedRouter()
+	headers := map[string]string{"Authorization": "Bearer " + token}
+
+	keep := model.Subscription{Name: "batch-keep", Type: model.SubTypeGitRepo, URL: "https://github.com/example/keep.git", Enabled: true}
+	drop := model.Subscription{Name: "batch-drop", Type: model.SubTypeGitRepo, URL: "https://github.com/example/drop.git", Enabled: true}
+	for _, sub := range []*model.Subscription{&keep, &drop} {
+		if err := database.DB.Create(sub).Error; err != nil {
+			t.Fatalf("create subscription: %v", err)
+		}
+	}
+
+	for _, body := range []string{`{"ids":[]}`, `{}`, `{"ids":null}`} {
+		rec := performJSONRequest(engine, http.MethodDelete, "/api/v1/subscriptions/batch", body, headers, "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d, body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+	var count int64
+	database.DB.Model(&model.Subscription{}).Count(&count)
+	if count != 2 {
+		t.Fatalf("rejected requests must not delete anything, got %d subscriptions", count)
+	}
+
+	rec := performJSONRequest(engine, http.MethodDelete, "/api/v1/subscriptions/batch",
+		`{"ids":[`+strconv.FormatUint(uint64(drop.ID), 10)+`]}`, headers, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-empty ids should succeed, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var remaining []model.Subscription
+	database.DB.Find(&remaining)
+	if len(remaining) != 1 || remaining[0].ID != keep.ID {
+		t.Fatalf("only the listed subscription should be deleted, remaining %+v", remaining)
+	}
+}

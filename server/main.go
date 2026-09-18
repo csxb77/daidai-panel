@@ -168,6 +168,10 @@ func main() {
 		log.Fatalf("bootstrap failed: %v", err)
 	}
 
+	// 容器部署下把 PLAYWRIGHT_BROWSERS_PATH 钉到数据卷（#142），系统命令行、依赖安装、自动装依赖
+	// 这些直接继承 os.Environ 的子进程才看得到。必须在 config 与数据库就绪之后（要读 data.dir、
+	// 要查环境变量页决定是否搬迁 PUID 存量浏览器），并赶在启动校验排队重装依赖之前。
+	service.ApplyPlaywrightBrowsersPathProcessEnv()
 	verifyInstalledDeps()
 	// Node 换了大版本（刷新版 Magisk 模块、换 Docker 镜像）后 deps/nodejs 里原生扩展的 ABI 会对不上。
 	// 排在启动校验之后：它排队的 Node 依赖重装与这里的 npm rebuild 共用同一把包操作锁，后台串行、不阻塞启动。

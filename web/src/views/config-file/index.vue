@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { Check, CopyDocument, Document, Refresh, Setting, Switch } from '@element-plus/icons-vue'
 import { configScriptApi } from '@/api/system'
 import CodeEditor from '@/components/CodeEditor.vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { setUnsavedWork } from '@/utils/chunkReload'
 import { copyText } from '@/utils/clipboard'
 import {
@@ -40,6 +41,15 @@ const copying = ref(false)
 // /api/auth/preferences，换设备、换 IP 登进来还是这一份（issue #116）。
 // 默认值全在那个模块里定，本页只管「读到什么用什么」，不复制一份默认值到这里。
 const prefs = ref<EditorPreferences>(readEditorPreferences())
+
+// 移动端工具栏（v3.3.1，issue #143 CF1）：Wrap / 刷新 / 复制三颗按钮只留图标，与齿轮、保存排成一行。
+// 本页原来全靠 ≤768 媒体查询；这次要改的是「按钮文字渲不渲染」，CSS 做不到
+// （把文字包成 span 再 display:none 会被 EP 的 `[class*=el-icon]+span{margin-left:6px}` 命中，图标偏心），
+// 所以引入 isMobile，在模板里用 v-if 去掉文字节点。阈值与 ≤768 媒体查询同源（useResponsive 的 MOBILE_BREAKPOINT）。
+const { isMobile } = useResponsive()
+
+// Wrap 按钮的动作说明：桌面给悬停提示用，移动端只剩图标时再兼作读屏名称
+const wordWrapActionLabel = computed(() => (prefs.value.word_wrap === 'on' ? '关闭自动换行' : '开启自动换行'))
 
 function toggleWordWrap() {
   const next = prefs.value.word_wrap === 'on' ? 'off' : 'on'
@@ -279,25 +289,31 @@ async function copyConfigScript() {
             <div class="editor-card__actions">
               <!-- 状态类按钮排在动作类按钮之前。配色沿用本仓工具栏切换按钮的既有写法
                    （tasks 页快捷排序：开启时 primary + plain），不另造一套语汇；
-                   与「保存」的实心 primary 靠 plain 区分，不会抢主操作的注意力。 -->
-              <el-tooltip :content="prefs.word_wrap === 'on' ? '关闭自动换行' : '开启自动换行'" placement="bottom">
+                   与「保存」的实心 primary 靠 plain 区分，不会抢主操作的注意力。
+                   移动端（issue #143 CF1）Wrap / 刷新 / 复制三颗只留图标：图标仍放默认插槽，文字包进
+                   <template v-if="!isMobile">，桌面仍是原来的裸文本节点、间距不变；移动端挂 dd-icon-only-btn 成 32×32。
+                   aria-label 只在移动端挂：桌面按钮有可见文字，读屏直接念文字，再挂一个与可见文字不同的
+                   aria-label（如 Wrap 按钮的「开启自动换行」）会违反「可见标签须包含在可访问名称里」。 -->
+              <el-tooltip :content="wordWrapActionLabel" placement="bottom">
                 <el-button
+                  :class="{ 'dd-icon-only-btn': isMobile }"
                   :type="prefs.word_wrap === 'on' ? 'primary' : 'default'"
                   :plain="prefs.word_wrap === 'on'"
+                  :aria-label="isMobile ? wordWrapActionLabel : undefined"
                   @click="toggleWordWrap"
                 >
                   <el-icon><Switch /></el-icon>
-                  Wrap
+                  <template v-if="!isMobile">Wrap</template>
                 </el-button>
               </el-tooltip>
               <!-- 四个视图选项（缩略图 / 缩进参考线 / 缩进宽度 / 空白符）收进齿轮下拉，与脚本页同一套交互。
-                   本页工具栏虽然能换行（.editor-card__actions 带 flex-wrap，不像脚本页会被裁掉），
-                   但四个选项并排就是四个按钮，窄屏必然把这一行折成好几行；
+                   本页工具栏在桌面端虽然能换行（.editor-card__actions 带 flex-wrap，不像脚本页会被裁掉），
+                   但四个选项并排就是四个按钮，窄屏必然把这一行折成好几行（移动端这一行更是固定单行，见 ≤768 媒体查询）；
                    而且两页的这组选项是同一份记忆，入口长得不一样只会让人以为是两套东西。
                    :hide-on-click="false"：这几项经常连着切（缩进宽度和空白符还要连点好几下
                    才能转到想要的档），点一下就收菜单会逼用户反复重开。 -->
               <el-dropdown trigger="click" placement="bottom-end" :hide-on-click="false">
-                <el-button aria-label="编辑器选项">
+                <el-button :class="{ 'dd-icon-only-btn': isMobile }" aria-label="编辑器选项">
                   <el-icon><Setting /></el-icon>
                 </el-button>
                 <template #dropdown>
@@ -380,15 +396,28 @@ async function copyConfigScript() {
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
-              <el-button :loading="loading" @click="loadConfigScript(true)">
+              <el-button
+                :class="{ 'dd-icon-only-btn': isMobile }"
+                :loading="loading"
+                :aria-label="isMobile ? '刷新' : undefined"
+                :title="isMobile ? '刷新' : undefined"
+                @click="loadConfigScript(true)"
+              >
                 <el-icon><Refresh /></el-icon>
-                刷新
-              </el-button>
-              <el-button :loading="copying" @click="copyConfigScript">
-                <el-icon><CopyDocument /></el-icon>
-                复制
+                <template v-if="!isMobile">刷新</template>
               </el-button>
               <el-button
+                :class="{ 'dd-icon-only-btn': isMobile }"
+                :loading="copying"
+                :aria-label="isMobile ? '复制' : undefined"
+                :title="isMobile ? '复制' : undefined"
+                @click="copyConfigScript"
+              >
+                <el-icon><CopyDocument /></el-icon>
+                <template v-if="!isMobile">复制</template>
+              </el-button>
+              <el-button
+                class="editor-card__save"
                 type="primary"
                 :loading="saving"
                 :disabled="loading || !hasChanged"
@@ -498,9 +527,11 @@ async function copyConfigScript() {
 .editor-card,
 .info-card,
 .tips-card {
-  // 三张都是容器类表面 → surface 档
+  // 三张都是卡片级表面 → 「卡片」角色令牌：桌面就是 surface 档（与改动前一致），
+  // ≤768 的 rounded 面板为 20px，与其它页的移动端卡片同一刻度（v3.3.1，issue #143）。
+  // 这里写死 surface 的话会顶掉 global.scss 给 .el-card 派的角色令牌，手机上只有本页卡片圆角对不上。
   // （.editor-card 还带 overflow: hidden，内部贴边的 header 与编辑器会被裁成同样的角）
-  border-radius: var(--dd-radius-surface);
+  border-radius: var(--dd-radius-card);
   border: 1px solid var(--el-border-color-lighter);
 }
 
@@ -779,37 +810,37 @@ code {
     flex-direction: column;
   }
 
-  .editor-card__header,
-  .editor-card__actions {
+  .editor-card__header {
     align-items: stretch;
   }
 
-  // 工具栏这一排现在是五个控件（Wrap / 齿轮 / 刷新 / 复制 / 保存）。
-  // v3.2.2 加齿轮之前是四个，当年的结论「375px 及以上四个正好排得下一行」已经不成立，
-  // 按同一套算法重推：
+  // 工具栏这一排五个控件在移动端排成**一行、不折行**（v3.3.1，issue #143 CF1）：
+  // 「保存」用 order:-1 挪到行首并吃掉剩余宽度（它是主操作，点击面积给最大），
+  // 后面依次是 Wrap / 齿轮 / 刷新 / 复制四颗 32×32 纯图标按钮
+  // （dd-icon-only-btn，文字在模板里按 isMobile 去掉；齿轮的 flex item 是外面那层 div.el-dropdown，
+  // 它按里面 32px 的按钮取宽，不会被压缩）。
   //
-  // ① 参与等分的只有 4 个。下面的 `.el-button { flex: 1 }` 是后代选择器，
-  //    但 flex 只对**直接**子元素生效：`<el-tooltip>` 不产生额外 DOM 节点（Wrap 按钮本身就是 flex item），
-  //    而 `<el-dropdown>` 会渲染一层 `div.el-dropdown` —— 那层 div 才是 flex item，选不到，
-  //    于是齿轮不参与等分、保持内容宽度（纯图标约 44px）。这正是想要的：撑宽一个纯图标按钮没有意义，
-  //    宽度应该留给带文字的四个。
-  // ② 可用宽度 = 视口 375 − .layout-main 左右各 12 − .editor-card 边框各 1 − 卡片头左右各 18 ≈ 313px。
-  //    扣掉齿轮 44px 和 4 个 8px 间隙，剩 ≈ 237px 给四个带文字的按钮等分，每个约 59px。
-  // ③ `flex: 1` 展开是 `1 1 0%`，但 min-width 仍是 auto ——
-  //    自动最小尺寸等于 min-content（左右内边距 + 图标 + 文字），
-  //    带图标的两字按钮约 78px、Wrap 约 83px，都比等分得到的 59px 宽，压不下去
-  //    （只有无图标的「保存」约 58px 压得住）。压不动就只能溢出或换行。
-  // ④ 兜底的是 .editor-card__actions 自身的 flex-wrap：这一档实际是**折成两行**，不再是一行等分。
-  //    按上面的估算断点大约落在「保存」之前（前四个一行、保存独占第二行并被 flex: 1 拉满），
-  //    但这个切分随字体度量浮动，别当成保证；要保证的只有一条：无论怎么折都不会挤出横向滚动条。
+  // 宽度核算（按最窄的 320px 视口）：可用宽 ≈ 320 − .layout-main 左右各 12 − 卡片边框各 1 − 卡片头左右各 18 = 258px；
+  // 四颗图标按钮 4×32 加四个 8px 间距共 160px，「保存」还剩约 98px，高于它约 58px 的最小内容宽，一行放得下。
+  // 四个视图选项之所以全塞进齿轮的下拉、而不是并排加四个按钮，也是为了这一行放得下。
   //
-  // 四个视图选项之所以全塞进齿轮的下拉、而不是并排加四个按钮，就是为了这一档只多占约 44px。
+  // order 只改视觉顺序，Tab 焦点顺序仍是 Wrap → 齿轮 → 刷新 → 复制 → 保存。
+  // 刷新 / 复制带 :loading，加载中 EP 会在图标前再插一个转圈图标，这颗 32px 按钮会短暂变成两个图标，
+  // 刷新期间整张卡本来就有 v-loading 遮罩、复制又很快，接受这一瞬。
   .editor-card__actions {
     width: 100%;
+    flex-wrap: nowrap;
 
-    .el-button {
-      flex: 1;
+    // 间距只由 gap 决定：EP 的 `.el-button + .el-button { margin-left: 12px }` 按 DOM 相邻命中「复制」「保存」，
+    // 「保存」被 order 挪到行首后仍带着这 12px，就和卡片左缘对不齐了
+    .el-button + .el-button {
+      margin-left: 0;
     }
+  }
+
+  .editor-card__save {
+    order: -1;
+    flex: 1 1 auto;
   }
 
   .side-panel {

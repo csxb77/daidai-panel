@@ -1066,7 +1066,9 @@ function handleClose() {
               <el-icon :size="15"><Download /></el-icon>
             </button>
           </el-tooltip>
-          <button class="tool-btn tool-btn--close" @click="handleClose" aria-label="关闭">
+          <!-- 移动端（全屏）不渲染：关闭入口挪到右下角的 footer（见模板末尾的 #footer）。
+               与 footer 用同一个 dialogFullscreen 判定，任何宽度下两者恰好出现一个，不会一个关闭按钮都没有。 -->
+          <button v-if="!dialogFullscreen" class="tool-btn tool-btn--close" @click="handleClose" aria-label="关闭">
             <el-icon :size="16"><Close /></el-icon>
           </button>
         </div>
@@ -1121,6 +1123,12 @@ function handleClose() {
         </div>
       </div>
     </div>
+    <!-- 移动端全屏时关闭入口放右下角（v3.3.1，issue #143 F2）：自定义头部右上角的 × 离拇指最远，
+         iOS 上整个头部还曾被面板顶栏盖住、根本点不到。桌面不渲染 footer，日志区高度不受影响。
+         本弹窗是 show-close=false + 自定义头部，EP 自带的 × 本来就没有，所以头部的 .tool-btn--close 在移动端由上面的 v-if 撤掉。 -->
+    <template v-if="dialogFullscreen" #footer>
+      <el-button @click="handleClose">关闭</el-button>
+    </template>
   </el-dialog>
 </template>
 
@@ -1620,12 +1628,14 @@ function handleClose() {
 </style>
 
 <!--
-  独立的非 scoped style：专门处理 teleport 到 body 的 el-dialog 根元素。
-  原因：LogViewer.vue 的 template root 就是 el-dialog 自身，而 el-dialog 会把 DOM teleport 到 body，
-  在这种组合下 Vue scoped 的 data-v 属性往 teleport 元素传递不可靠，
-  :deep(.log-viewer-dialog) 编译出的 [data-v-xxx] .log-viewer-dialog 选择器在实际 DOM 里没办法命中。
+  独立的非 scoped style：专门处理 el-dialog 渲染出来的 .el-dialog 元素（class="log-viewer-dialog" 落在它上面）。
+  原因：LogViewer.vue 的 template root 就是 el-dialog 组件自身，.el-dialog 这个元素由 Element Plus 在组件内部渲染，
+  本组件模板里没有任何一个带本组件 data-v 属性的元素包在它外面，
+  所以 :deep(.log-viewer-dialog) 编译出的 [data-v-xxx] .log-viewer-dialog 选择器在实际 DOM 里没办法命中。
+  注意这【不是】因为 teleport：EP 2.13.5 的 el-dialog 默认 append-to-body=false，是原地渲染在页面里的（.layout-main 之内）。
+  本项目也不要为了层级问题给弹窗加 append-to-body —— 各页面 scoped 的 :deep(.xxx-dialog) 选择器正依赖原地渲染。
   改用非 scoped 块，编译后是纯 .log-viewer-dialog 选择器，不依赖 scope，一定生效。
-  类名唯一 log-viewer-dialog不会污染其他组件。
+  类名唯一 log-viewer-dialog，不会污染其他组件。
 -->
 <style lang="scss">
 .log-viewer-dialog {

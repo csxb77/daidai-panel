@@ -187,6 +187,12 @@ function handleClose() {
         <span v-else style="color: var(--el-text-color-placeholder)">无</span>
       </el-descriptions-item>
     </el-descriptions>
+    <!-- 移动端全屏时关闭入口放右下角（v3.3.1，issue #143 F2）：右上角 × 离拇指最远，iOS 上还曾被顶栏整块盖住。
+         有 footer 后 global.scss 会在 ≤768 隐藏 EP 自带的 ×。桌面不渲染 footer，保持原样。
+         关闭走 handleClose 通知父组件；v-model 置 false 时 EP 仍会触发 @close，再回传一次 false 无害。 -->
+    <template v-if="dialogFullscreen" #footer>
+      <el-button @click="handleClose">关闭</el-button>
+    </template>
   </el-dialog>
 </template>
 

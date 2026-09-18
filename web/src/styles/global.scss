@@ -192,6 +192,20 @@ body {
   --dd-radius-control: 0;
   --dd-radius-surface: 0;
   --dd-radius-pill: 0;
+  // 移动端刻度（v3.3.1，issue #143）：≤768px 下「按钮」「卡片」两个角色的圆角，
+  // rounded 档由 applyPanelShapeStyle() 运行时写成 16px / 20px，square 档写 0。
+  // 🔴 与上面三档同理【绝不能带 !important】：JS 写的是内联普通声明，带了就永远切不动。
+  // 组件不直接吃这两条，统一经下面的角色令牌 --dd-radius-button / --dd-radius-card 取用。
+  --dd-radius-control-mobile: 0;
+  --dd-radius-surface-mobile: 0;
+  // 角色令牌：「卡片级表面」与「按钮」。桌面上就是 surface / control 两档，
+  // ≤768px 在文件后部的移动端媒体查询里改指上面两条移动端刻度 ——
+  // 所以页面里想要「手机上卡片 20px、按钮 16px」的地方引用它们即可，不要自己写 media 和像素值。
+  // 自定义属性里的 var() 在【声明它的元素】上代换，后代继承的是代换后的结果。
+  // 这里声明在 :root（即 <html>），JS 的内联刻度也写在 <html> 上，所以能取到运行时的值；
+  // 🔴 因此不要在 :root 以外的元素上重声明这两条角色令牌，否则那一支子树会绕开运行时刻度。
+  --dd-radius-card: var(--dd-radius-surface);
+  --dd-radius-button: var(--dd-radius-control);
   // Element Plus 的三条基础圆角令牌全部派生自上面的刻度，切 shape 时它们跟着一起变。
   //
   // ⚠️ 这三条【必须带 !important】，2026-08-24 浏览器实测才发现的静默失效：
@@ -222,6 +236,12 @@ body {
   --dd-sidebar-width: 220px;
   --dd-header-height: 56px;
   --dd-page-padding: 20px;
+  // 内容区（.layout-main）的横向内边距：桌面 20px、≤768px 为 12px（见移动端媒体查询）。
+  // 抽成令牌是为了让「贴屏幕边缘」的元素（.dd-mobile-bleed）用等量负外边距抵消它：
+  // 两边各写各的像素，改了一边另一边就会错位，露出一条缝或顶出横向滚动。
+  // 目前只有移动端的 .layout-main padding 引用它（MainLayout.vue）；桌面端 padding 仍是原来的
+  // 20px / 矮屏 16px 字面值（本版不动桌面），.dd-mobile-bleed 也只在 ≤768px 生效，两者不会对不上。
+  --dd-page-gutter-x: 20px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   // ===== 表面质感令牌 =====
   // 阴影刻度：纯扁平方案下不再用阴影制造悬浮层次，一律 none；
@@ -904,6 +924,20 @@ a {
   }
 }
 
+// 菜单里「可撤销的正向操作」（v3.3.1，issue #143 D2：任务的「启用」，与「禁用」的红色对称）。
+// 只在 hover / focus 时换绿字 + 淡绿底；常态【刻意不写颜色】，沿用上面 popper 根节点改指的
+// primary 字色，与同菜单其它项一致（#133 约定「菜单项字色统一」，常态就变绿会比旁边的项抢眼一档）。
+// 特异性 (0,4,0) 高于 EP 的 `.el-dropdown-menu__item:not(.is-disabled):hover`(0,3,0)，不需要 !important。
+// 取值只用令牌：暗色下 --el-color-success-light-9 由 EP 的 dark css-vars 换成深绿底，写死 #f0f9eb 会出亮斑。
+// 使用方：DdSplitButton / DdMoreMenu 菜单项的 success 字段（目前是任务页桌面操作列与移动端卡片「···」）。
+.dd-split-button__popper .dd-split-button__item--success {
+  &:not(.is-disabled):hover,
+  &:not(.is-disabled):focus {
+    color: var(--el-color-success);
+    background-color: var(--el-color-success-light-9);
+  }
+}
+
 // el-switch 的形状处理统一放到文件末尾的「Element Plus 圆角兜底」一块。
 // v3.1.0 起它进了白名单：轨道与滑块两种 shape 模式下都保持 EP 原本的圆形，
 // 但仍要按尺寸变体逐档写（特异性问题见那一块的说明）。
@@ -1182,8 +1216,8 @@ a {
 //    需要单独缩比例，见本段末尾的 .el-checkbox 一处。
 .el-card {
   // `.el-card{--el-card-border-radius:4px}`——整个系统设置页都是 el-card，漏了很显眼。
-  // 卡片是容器类表面 → surface 档。
-  --el-card-border-radius: var(--dd-radius-surface) !important;
+  // 卡片是容器类表面 → 吃「卡片」角色令牌（桌面 = surface 档；≤768 的 rounded 面板为 20px，v3.3.1 #143）。
+  --el-card-border-radius: var(--dd-radius-card) !important;
 }
 
 .el-tag {
@@ -2019,8 +2053,8 @@ html.dark {
   background: var(--el-bg-color);
   // 去阴影后靠这条边框与页面底色分隔
   border: 1px solid var(--el-border-color-lighter);
-  // 统计卡片是容器类表面 → surface 档
-  border-radius: var(--dd-radius-surface);
+  // 统计卡片是容器类表面 → 「卡片」角色令牌（桌面 = surface 档，移动端 rounded 为 20px）
+  border-radius: var(--dd-radius-card);
   padding: 16px 18px;
   display: flex;
   align-items: center;
@@ -2257,8 +2291,8 @@ html.dark {
   background: var(--el-bg-color);
   // 去阴影后靠这条边框与页面底色分隔
   border: 1px solid var(--el-border-color-lighter);
-  // 数据卡片是容器类表面 → surface 档
-  border-radius: var(--dd-radius-surface);
+  // 数据卡片是容器类表面 → 「卡片」角色令牌（桌面 = surface 档，移动端 rounded 为 20px）
+  border-radius: var(--dd-radius-card);
   // overflow:hidden 让内部贴边的 toolbar / 表格 / 分页条自动被圆角裁掉四角，
   // 所以 .dd-data-card__toolbar 与 .dd-pagination 刻意不写圆角（贴边内嵌，写了反而露角）
   overflow: hidden;
@@ -2348,8 +2382,8 @@ html.dark {
 
 .dd-mobile-card {
   padding: var(--dd-mobile-card-padding);
-  // 移动端卡片是容器类表面 → surface 档
-  border-radius: var(--dd-radius-surface);
+  // 移动端卡片是容器类表面 → 「卡片」角色令牌（rounded 面板在 ≤768 下为 20px，square 仍是直角）
+  border-radius: var(--dd-radius-card);
   // 去掉底色渐变与投影，纯色底 + 1px 边框划分卡片
   border: 1px solid var(--el-border-color-lighter);
   background: var(--el-bg-color);
@@ -2465,11 +2499,310 @@ html.dark {
   min-height: 24px;
 }
 
+// ============================================================================
+// 移动端列表页共享类（v3.3.1，issue #143）
+// ----------------------------------------------------------------------------
+// tasks / subscriptions / envs / logs / deps 五个列表页的移动端工具栏与卡片统一用这一组，
+// 页面 scoped 里不要再各写一份同类样式。类名与规格是跨页面的契约，改之前先全仓 grep 使用方。
+// 🔴 只新增、不改上面的旧类：.dd-mobile-card__field / __title / __actions / __grid 被 13 个文件共用
+//    （含本期不改的设置页卡片、users、notifications、open-api），新布局一律用这里的新类。
+// 🔴 横向滚动行一律不要加 -webkit-overflow-scrolling: touch（iOS 上弹窗被顶栏盖住的根因，见 MainLayout.vue）。
+// 圆角只吃角色令牌 --dd-radius-button / --dd-radius-card，不写死像素。
+// 贴屏幕边缘的 .dd-mobile-bleed（批量栏 .dd-mobile-batch-bar 与它共用）只在 ≤768 生效，写在文件后部的移动端媒体查询里。
+// ============================================================================
+
+// 移动端工具栏第一行：搜索框占满剩余宽度，后面跟 32px 图标按钮，单行不换行。
+// 上外边距刻意为 0：「第一行离顶栏」的 12px 统一由移动端 .layout-main 的上内边距给（见 MainLayout.vue），
+// 这样有工具栏和没工具栏的页面离顶栏一样远；这里再给上外边距就会与它叠出双倍空隙（issue #143「上边距改 0」说的就是这个）。
+// 使用方：tasks / subscriptions / envs / logs / deps 的移动端工具栏（非批量态）。
+.dd-mobile-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  min-width: 0;
+
+  > .el-input {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  // 间距只由 gap 决定：EP 自带 .el-button + .el-button { margin-left: 12px }，不清零会与 gap 叠加
+  .el-button + .el-button {
+    margin-left: 0;
+  }
+}
+
+// 32×32 纯图标按钮：挂在 el-button 上，配 :icon prop 且不传默认插槽，并且必须带 aria-label / title。
+// 圆角由移动端媒体查询里的 `html .el-button` 规则决定：rounded 移动端 16px 即正圆，square 仍是直角。
+// 🔴 不要用 el-button 的 circle 属性凑圆：EP 的 is-circle 写死 50%，会绕过形状开关（项目已全部移除）。
+// 选择器带上 .el-button：EP 的 .el-button { padding; height } 与单类选择器打平且懒注入排在后面，写成单类会被顶掉。
+// 使用方：tasks / subscriptions / envs / logs / deps / config-file 的移动端图标按钮。
+.el-button.dd-icon-only-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+// 横向滑动、隐藏滚动条的一行，子项不换行也不被压缩。
+// 使用方：tasks 视图分组栏、subscriptions / logs 的 status-tabs 第二行，以及五页的 .dd-mobile-batch-bar。
+// 与页面 scoped 的 .status-tabs 同挂时，display / gap 以页面那条 (0,2,0) 为准；
+// 单挂本类（不贴边）时页面要保留自己的 width: 100%，否则 inline-flex 会按内容收宽、滚不起来。
+// 滚动条两种写法都要：Chrome 121+ 设了 scrollbar-width 就忽略 ::-webkit-scrollbar，Safari 只认后者。
+.dd-scroll-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+
+  &::-webkit-scrollbar {
+    display: none;
+  }
+
+  // 缺了 flex-shrink: 0，汉字按钮会被压成一字一行；nowrap 防止单个子项内部折行
+  > * {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  > .el-button + .el-button {
+    margin-left: 0;
+  }
+}
+
+// 移动端批量栏：与 .dd-scroll-row 同挂，批量态时整行替换 .dd-mobile-toolbar。
+// 上下外边距与高度下限都与 .dd-mobile-toolbar 一致（上 0、下 10px、32px 高），两支切换时下面的内容不跳。
+// 左右贴屏幕边缘（横滑时是一整条干净的横排）：几何与 .dd-mobile-bleed 共用一条规则，写在文件后部的移动端媒体查询里。
+// 内容顺序固定：全选/取消全选 → 批量按钮（图标 + 短文字，default 尺寸）→ 取消（最后）；不显示「已选 N 项」。
+// 使用方：tasks / subscriptions / envs / logs / deps。
+.dd-mobile-batch-bar {
+  align-items: center;
+  margin: 0 0 10px;
+  min-height: 32px;
+}
+
+// 卡片首行：复选框 → 名称 → 状态 / 分组等小标签 → 右上角「···」（DdMoreMenu，自带 margin-left:auto 贴右）。
+// 使用方：tasks / subscriptions / envs / logs / deps 的移动端卡片。
+.dd-mobile-card__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+// 卡片名称：16px 单行省略；模板上必须挂 :title 显示全称（省略后没有别的途径看全）。
+// 字色必须显式写：body / .dd-mobile-card 都没有定字色，不写会落成浏览器默认色，和主文字色对不上（暗色下尤其刺眼）。
+// 页面 scoped 里的字色（链接色、禁用卡的降档色等）带 data-v 属性、特异性更高，照样能覆盖这里。
+// 使用方：同上五页（tasks 同挂 .task-name-link，那个类写了 font: inherit，任务页自己保证 16px）。
+.dd-mobile-card__name {
+  color: var(--el-text-color-primary);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  min-width: 0;
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+// 名称右侧的小标签组（状态 / 类型 / 分组等），标签统一 el-tag size="small"（20px）。
+// 放不下时由 overflow:hidden 裁掉，不换行、不把卡片首行撑高。
+// 使用方：subscriptions / envs 的卡片首行（多枚标签）；只有一个状态标签的页面也可以直接放进 __head。
+.dd-mobile-card__head-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+// 卡片右上角「···」触发器（原生 <button>），由 DdMoreMenu 渲染，页面不要自己再写一份。
+// 只换字色、不加底色：卡片末行已经有「运行 / 日志」这类实体按钮，这里再铺一块底会抢视觉。
+// margin-right:-6px 让图标贴近卡角，同时保住 32×32 的点击热区。
+// 使用方：DdMoreMenu（tasks / subscriptions / envs / logs / deps 的卡片首行）。
+.dd-mobile-card__more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  margin-right: -6px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dd-radius-button);
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  transition: color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  &:hover {
+    color: var(--el-color-primary);
+  }
+
+  // 第二个选择器是给 el-dropdown 里的情形加特异性：EP 会给自定义触发器挂 .el-dropdown-selfdefine，
+  // 并写 `.el-dropdown .el-dropdown-selfdefine { outline: none }`(0,2,0)，与单类的 :focus-visible 打平后 EP 赢，
+  // 键盘用户就看不到焦点在哪。
+  &:focus-visible,
+  .el-dropdown &:focus-visible {
+    outline: 2px solid var(--el-color-primary);
+    outline-offset: -2px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    color: var(--el-text-color-disabled);
+  }
+}
+
+// DdMoreMenu 的根元素（el-dropdown）：在 .dd-mobile-card__head 里靠 margin-left:auto 贴到最右。
+// 使用方：DdMoreMenu。
+.dd-mobile-card__more-wrap {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+// 字段区：若干「标签 值」横排行。使用方：五个列表页的移动端卡片。
+.dd-mobile-card__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+// 标签与值横排的一行（旧类 __field 是纵向排列，两者不要混用）。使用方：同上。
+.dd-mobile-card__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+// 行内标签：最小 4.5em 让各行的值左对齐；刻意不大写、不加粗（与旧类 __label 的 11px 大写粗体区分）。
+// 使用方：同上。
+.dd-mobile-card__row-label {
+  flex: 0 0 auto;
+  min-width: 4.5em;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+// 行内值：默认单行省略。字色显式取 regular 档，理由同 .dd-mobile-card__name（不写就是浏览器默认色）。
+// 使用方：同上。
+.dd-mobile-card__row-value {
+  color: var(--el-text-color-regular);
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+// 行内值的两行截断版（envs 卡片的「值」）：anywhere 让没有空格的长 token / URL 也能在任意位置折行，
+// 否则 -webkit-line-clamp 对一整串不可断的字符不起作用，会直接顶出卡片。
+.dd-mobile-card__row-value--clamp2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+// 卡片末行：左侧主信息（「上次结果」tag、耗时等），右侧操作按钮组。使用方：五个列表页的移动端卡片。
+.dd-mobile-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+  min-width: 0;
+}
+
+// 末行左侧。使用方：同上。
+.dd-mobile-card__footer-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+// 末行右侧按钮组：default 尺寸（32px）靠右排，不用 size="small"、不设 width:100%。
+// 刻意不复用 __actions：≤768 下它会把 1~3 个子元素切成等分 grid、按钮 width:100%，与「靠右」正相反。
+// 使用方：同上。
+.dd-mobile-card__footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+
+  > .el-button + .el-button {
+    margin-left: 0;
+  }
+}
+
 .dd-mono {
   font-family: var(--dd-font-mono);
 }
 
 @media screen and (max-width: 768px) {
+  // 角色令牌切到移动端刻度（v3.3.1，issue #143 R1）：rounded 面板在手机上卡片 20px、按钮 16px，
+  // square 面板两条移动端刻度都是 0，照旧直角。刻度值由 applyPanelShapeStyle() 运行时写在 <html> 上。
+  // 与文件开头的 :root 同特异性、源码在后，同属入口包的 global.scss，先后顺序是确定的。
+  :root {
+    --dd-radius-card: var(--dd-radius-surface-mobile);
+    --dd-radius-button: var(--dd-radius-control-mobile);
+    --dd-page-gutter-x: 12px;
+  }
+
+  // 按钮圆角吃「按钮」角色令牌。特异性 (0,1,1) 是刻意算过的：
+  //   - 压过 EP 懒注入的 .el-button / .el-button--small（都是 (0,1,0)，写成单类会被同特异性后注入顶掉）；
+  //   - 低于 el-button-group 首尾项的 (0,3,0) 规则，Split Button 中缝两侧的内侧直角保持不变；
+  //   - 低于 .el-button.is-round (0,2,0)，模板里显式要胶囊的按钮不受影响。
+  // 只写在移动端：桌面仍由上面那条 .el-button { border-radius: var(--dd-radius-control) } 与 EP 令牌管，零变化。
+  html .el-button {
+    border-radius: var(--dd-radius-button);
+  }
+
+  // 移动端工具栏里的搜索框与同排 32px 圆按钮同吃「按钮」角色令牌：rounded 下 16px（32px 高即胶囊），
+  // 不然搜索框还是 control 档的小圆角，挨着正圆按钮很不协调；square 下两条令牌都是 0，照旧直角。
+  // 特异性 (0,3,0) 是刻意算过的：要压过上面全局那条 `.el-input .el-input__wrapper`（(0,2,0)，control 档）
+  // 与 EP 懒注入的 .el-input__wrapper（(0,1,0)）。只写在移动端：.dd-mobile-toolbar 本来也只在移动端渲染。
+  .dd-mobile-toolbar .el-input .el-input__wrapper {
+    border-radius: var(--dd-radius-button);
+  }
+
+  // 贴屏幕左右边缘：用等量负外边距抵消 .layout-main 的横向内边距，再用同值内边距把内容缩回对齐线。
+  // 只在 ≤768 生效，所以与桌面共用同一个元素时（如某页的 status-tabs）可以无条件挂这个类，桌面零影响。
+  // !important：它要接管同一元素上页面 scoped 规则写的横向几何（.status-tabs 的 padding / width:100% / 圆角，
+  //   特异性 (0,2,0) 且随页面 chunk 注入在后），不加就被静默顶掉，右侧差一截贴不到边。
+  // width 必须显式撑到「容器 + 两侧留白」：块级元素定了宽时右侧负外边距不起作用，inline-flex 又会按内容收宽。
+  // .dd-mobile-batch-bar 直接并进来、不要求页面再挂 .dd-mobile-bleed：批量栏横滑时两端若停在页面留白处，
+  //   按钮会在离屏幕 12px 的地方被硬生生切断，贴边后才是一整条干净的横排。它的上下外边距仍由自己那条规则给。
+  // ⚠️ 前提是它到 .layout-main 之间的祖先在移动端都不做 overflow 裁剪（hidden / auto 都算）：负外边距伸出去的那一截
+  //   会被裁掉、看起来不贴边。页面给根节点或外层容器加横向裁剪时，要么限定在桌面，要么别让贴边元素落在它里面。
+  // 使用方：tasks 视图分组栏、subscriptions / logs 的 status-tabs 第二行，以及五页的批量栏。
+  .dd-mobile-bleed,
+  .dd-mobile-batch-bar {
+    width: calc(100% + 2 * var(--dd-page-gutter-x)) !important;
+    max-width: none !important;
+    margin-left: calc(-1 * var(--dd-page-gutter-x)) !important;
+    margin-right: calc(-1 * var(--dd-page-gutter-x)) !important;
+    padding-left: var(--dd-page-gutter-x) !important;
+    padding-right: var(--dd-page-gutter-x) !important;
+    // 贴边例外①：整条已经顶到屏幕左右边缘，圆角只会在四角露出页面底色的缺口，所以保持直角、不吃令牌
+    border-radius: 0 !important;
+  }
+
   .dd-page-header {
     flex-direction: column;
     align-items: stretch;
@@ -2551,6 +2884,22 @@ html.dark {
     }
   }
 
+  // F2（v3.3.1，issue #143）：移动端弹窗的关闭入口统一放到右下角 footer，有 footer 的弹窗隐藏右上角 ×。
+  // 理由：移动端弹窗几乎都是全屏，× 落在屏幕右上角、离拇指最远；iOS 上还曾被顶栏整块盖住（F1）。
+  // 用 :has(> footer) 做安全网：将来有人新增了没有 footer 的弹窗，× 仍然在，不会出现关不掉的弹窗。
+  // 所以【新增弹窗一律要带底部「关闭 / 取消」】，只读型弹窗用 <template v-if="dialogFullscreen" #footer>。
+  // 只认 EP 自己的 .el-dialog__headerbtn；自定义头部里的 ×（logs 的 .detail-hero-close、
+  // LogViewer 的 .tool-btn--close）由各页在自己的移动端媒体查询里隐藏。
+  .el-dialog:has(> .el-dialog__footer) > .el-dialog__header > .el-dialog__headerbtn {
+    display: none;
+  }
+
+  // EP 给 × 预留的右内边距（.el-dialog__header.show-close，(0,2,0) 且懒注入在后）一起收回到 16px，
+  // 与上面移动端 header 的左右内边距对称。特异性 (0,4,0)，必须 ≥ (0,3,0) 才压得过它与上面那条 header padding。
+  .el-dialog:has(> .el-dialog__footer) > .el-dialog__header.show-close {
+    padding-right: 16px;
+  }
+
   .el-message-box {
     width: 88vw !important;
   }
@@ -2586,6 +2935,25 @@ html.dark {
 
   .el-drawer {
     width: 100% !important;
+  }
+
+  // O1（v3.3.1，issue #143）：主布局的移动端侧栏抽屉（MainLayout.vue 的 class="layout-mobile-drawer"）
+  // 是上面那条 100% 的唯一例外，占半屏、右侧露出遮罩可点关闭。
+  // (0,2,0) + !important 压过上面 (0,1,0) + !important；其它抽屉（api-docs / dev-motion）仍是 100%。
+  // 最小 220px = 桌面侧栏宽（--dd-sidebar-width），桌面已证明放得下全部菜单与 Logo；
+  // 所以 360~430px 的手机上实际占 51~61%，严格的 50% 只在 ≥440px 时成立。最大 320px 防平板上过宽。
+  .el-drawer.layout-mobile-drawer {
+    width: 50% !important;
+    min-width: 220px;
+    max-width: 320px;
+  }
+
+  // 抽屉 body 清掉全局那条 24px 内边距（左右白吃 48px），并改成 flex 列：
+  // 这样菜单区的 flex:1 才生效，用户卡贴到底部，与桌面侧栏一致。
+  .el-drawer.layout-mobile-drawer .el-drawer__body {
+    padding: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .el-card {

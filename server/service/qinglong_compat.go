@@ -69,24 +69,9 @@ func qingLongCompatApplicable() bool {
 		return true
 	}
 
-	// Docker / Podman 的标志文件
-	for _, marker := range []string{"/.dockerenv", "/run/.containerenv"} {
-		if _, err := os.Stat(marker); err == nil {
-			return true
-		}
-	}
-
-	// 兜底：cgroup 里带运行时名字。cgroup v2 下这里可能只有 "0::/"，认不出来也没关系 ——
-	// 上面那两个标志文件已经覆盖了 Docker 与 Podman，认不出就退回「不动 /」这个安全方向。
-	if data, err := os.ReadFile("/proc/1/cgroup"); err == nil {
-		text := string(data)
-		for _, keyword := range []string{"docker", "containerd", "kubepods", "lxc", "podman"} {
-			if strings.Contains(text, keyword) {
-				return true
-			}
-		}
-	}
-	return false
+	// Docker / Podman：标志文件 + cgroup 兜底，与 Playwright 默认目录共用同一套判据（见 playwright_env.go）。
+	// 认不出来就退回「不动 /」这个安全方向。
+	return runningInContainer()
 }
 
 // ensureQingLongCompatLayoutAt 是 EnsureQingLongCompatLayout 的真实实现。

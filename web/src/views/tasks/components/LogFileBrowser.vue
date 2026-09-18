@@ -312,6 +312,12 @@ function handleClose() {
         <pre v-else class="content-text dd-log-surface" v-html="renderedFileHtml || '(空文件)'"></pre>
       </div>
     </div>
+    <!-- 移动端全屏时关闭入口放右下角（v3.3.1，issue #143 F2）：右上角 × 离拇指最远，iOS 上还曾被顶栏整块盖住。
+         有 footer 后 global.scss 会在 ≤768 隐藏 EP 自带的 ×。桌面不渲染 footer，保持原样。
+         关闭走 handleClose：父组件把 visible 置 false 后 EP 照常触发 @close，上面 watch(visible) 里的清理逻辑不受影响。 -->
+    <template v-if="dialogFullscreen" #footer>
+      <el-button @click="handleClose">关闭</el-button>
+    </template>
   </el-dialog>
 </template>
 
@@ -453,6 +459,9 @@ function handleClose() {
 @media (max-width: 768px) {
   .log-files-browser {
     flex-direction: column;
+    // 140 = 全屏弹窗的上下「框」：标题栏约 49（14 + 24 + 10 + 1px 分隔线）+ body 上下内边距 32
+    // + 底部「关闭」那一栏约 57（1px 分隔线 + 10 + 32 + 14），以 global.scss 移动端弹窗内边距为准。
+    // 改那几处内边距或去掉 footer 时这里要跟着算，否则 body 会多出一条滚动条或在底部留一截空白。
     height: calc(100dvh - 140px);
     gap: 12px;
   }

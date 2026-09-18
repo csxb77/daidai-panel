@@ -899,8 +899,10 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			}
 		}
 
-		if hint := BuildModuleCompatibilityHint(lastFailureOutput); hint != "" {
-			onOutput(hint)
+		// BuildRuntimeFailureHint = ESM 兼容提示 + Playwright 环境提示（#142）。
+		// 补一个换行：提示本身不带换行，原来会和下一行「[第 N 次重试…]」或「=== 执行结束」粘在同一行。
+		if hint := BuildRuntimeFailureHint(lastFailureOutput); hint != "" {
+			onOutput(hint + "\n")
 			outputCollectorMu.Lock()
 			lastFailureOutput = strings.TrimSpace(outputCollector.String())
 			outputCollectorMu.Unlock()
@@ -1124,7 +1126,7 @@ func summarizeTaskFailureOutput(output string) string {
 		return ""
 	}
 
-	if hint := BuildModuleCompatibilityHint(output); hint != "" {
+	if hint := BuildRuntimeFailureHint(output); hint != "" {
 		return truncateTaskFailureSummary(hint, 320)
 	}
 

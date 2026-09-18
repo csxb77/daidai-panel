@@ -24,7 +24,10 @@
           :command="item.key"
           :disabled="item.disabled"
           :divided="item.divided"
-          :class="{ 'dd-split-button__item--danger': item.danger }"
+          :class="{
+            'dd-split-button__item--danger': item.danger,
+            'dd-split-button__item--success': item.success
+          }"
         >
           <el-icon v-if="item.icon"><component :is="item.icon" /></el-icon>
           <span>{{ item.label }}</span>
@@ -48,6 +51,12 @@ export interface SplitButtonItem {
   divided?: boolean
   /** 危险操作（删除、卸载、清空…），文字标红 */
   danger?: boolean
+  /**
+   * 可撤销的正向操作（如任务的「启用」），只在 hover / focus 时显示绿色；
+   * 常态沿用菜单统一字色，不像 danger 那样常驻着色（样式见 global.scss 的 --success）。
+   * 与 danger 互斥，同一项不要两个都设。
+   */
+  success?: boolean
   /**
    * 是否显示。写成字段而不是让调用方在外面 filter，是为了让「运行 / 停止互斥」
    * 这类联动能直接写在同一份数组里，不至于出现「停止 ▾ 菜单里还挂着停止」。

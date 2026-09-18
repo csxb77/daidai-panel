@@ -3,6 +3,8 @@ import type { AxiosAdapter, AxiosResponse, InternalAxiosRequestConfig } from 'ax
 import { ElMessage } from 'element-plus'
 import request from '@/api/request'
 import { EDITOR_PREFERENCES_DEFAULTS } from '@/utils/editorPreferences'
+import { ENVS_PAGE_SIZE_OPTIONS, TASKS_PAGE_SIZE_OPTIONS } from '@/utils/listPreferences'
+import type { ListPreferences } from '@/utils/listPreferences'
 import notificationTypesFixture from './fixtures/notification-types.json'
 import {
   appendEnvToSortBucket,
@@ -347,15 +349,15 @@ route('POST', '/auth/avatar', () => blocked())
 route('DELETE', '/auth/avatar', () => ({ message: '头像已删除' }))
 
 /**
- * 当前登录用户的编辑器偏好（issue #116）。
+ * 当前登录用户的界面偏好：编辑器一组（issue #116）+ 列表页一组（issue #143，见下方 DEMO_LIST_PREFERENCES_KEY）。
  *
  * 真实面板按用户存一份在服务端；演示站没有后端，落在 localStorage 里 ——
- * 这是整套 mock 里【唯一】持久化的东西，其余数据都在内存、刷新即回到初始 fixture（见 db.ts 顶部）。
- * 偏好必须例外：#116 要的就是「换设备 / 换标签页也记得住」，跟着一起丢就正好演示不出来。
+ * 这两组是整套 mock 里【仅有的两处】持久化例外，其余数据都在内存、刷新即回到初始 fixture（见 db.ts 顶部）。
+ * 偏好必须例外：#116 / #143 要的就是「换设备 / 换浏览器也记得住」，跟着一起丢就正好演示不出来。
  *
- * ⚠️ 键名与 utils/editorPreferences.ts 的 `dd:editor:*` 刻意分开：那 5 个键是前端的本地缓存，
- *    这里模拟的是服务端那一份真源。共用一处的话「从服务端拉回来覆盖本地缓存」这条链路
- *    等于自己覆盖自己，永远看不出差别。
+ * ⚠️ 键名与前端的本地缓存刻意分开：utils/editorPreferences.ts 的 `dd:editor:*`、
+ *    utils/listPreferences.ts 沿用的那 4 个老键，都是前端缓存；这里模拟的是服务端那一份真源。
+ *    共用一处的话「从服务端拉回来覆盖本地缓存」这条链路等于自己覆盖自己，永远看不出差别。
  */
 const DEMO_EDITOR_PREFERENCES_KEY = 'dd:demo:editor-preferences'
 
@@ -474,27 +476,125 @@ function writeDemoEditorPreferences(value: DemoEditorPreferences) {
 }
 
 /**
+ * 列表页偏好（issue #143）的「服务端真源」，同样落在 localStorage。
+ *
+ * 形状照真实服务端：【稀疏存储】，只存访客显式设过的键，不存、也不下发默认值。
+ * 这是前端迁移逻辑的前提 —— ensureListPreferencesLoaded 只在「服务端没有这个键、本机老缓存里确实有值」
+ * 时才上行；mock 要是替它补上默认值，访客本机调过的每页条数就会被默认值冲掉。
+ * 也正因为「键在不在」本身就是「存没存过」，这一组不需要 editor 那样的 stored 标记。
+ */
+const DEMO_LIST_PREFERENCES_KEY = 'dd:demo:list-preferences'
+
+type DemoListPreferences = Partial<ListPreferences>
+
+// 白名单直接引用 utils/listPreferences.ts 的常量，不在这里手抄第二份（理由同 demoEditorPreferenceDefaults）。
+// 先放宽成 number[] / string[] 再 includes：常量是字面量联合类型，直接拿 unknown 去 includes 过不了类型检查。
+function isDemoTasksPageSize(value: unknown): value is ListPreferences['tasks_page_size'] {
+  return typeof value === 'number' && (TASKS_PAGE_SIZE_OPTIONS as readonly number[]).includes(value)
+}
+
+function isDemoEnvsPageSize(value: unknown): value is ListPreferences['envs_page_size'] {
+  return typeof value === 'string' && (ENVS_PAGE_SIZE_OPTIONS as readonly string[]).includes(value)
+}
+
+/**
+ * 按白名单挑出合法的键，其余丢弃。
+ *
+ * JSON 类型照真实服务端卡死：tasks_page_size 只认数字、envs_page_size 只认字符串、两个开关只认布尔。
+ * 前端上行发的就是这三种类型；mock 放宽成「"50" 也认」反而会把前端发错类型的问题藏起来，
+ * 到了真面板上才变成一次静默失败（setListPreference 的 catch 是空的）。
+ * 非法值这里是【忽略】而不是回 400，理由同 mergeDemoEditorPreferences：mock 绝不让访客撞上 4xx。
+ */
+function pickDemoListPreferences(source: Record<string, unknown>): DemoListPreferences {
+  const picked: DemoListPreferences = {}
+
+  const tasksPageSize = source['tasks_page_size']
+  if (isDemoTasksPageSize(tasksPageSize)) picked.tasks_page_size = tasksPageSize
+
+  const envsPageSize = source['envs_page_size']
+  if (isDemoEnvsPageSize(envsPageSize)) picked.envs_page_size = envsPageSize
+
+  for (const key of ['tasks_view_all_hidden', 'tasks_view_groups_hidden'] as const) {
+    const value = source[key]
+    if (typeof value === 'boolean') picked[key] = value
+  }
+
+  return picked
+}
+
+function readDemoListPreferences(): DemoListPreferences {
+  try {
+    const raw = window.localStorage.getItem(DEMO_LIST_PREFERENCES_KEY)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    // 读出来也过一遍白名单：存进去的 JSON 被人手改坏时只丢脏键、其余照用，
+    // 与真实服务端 GET 丢弃脏键的口径一致。
+    return pickDemoListPreferences(parsed as Record<string, unknown>)
+  } catch {
+    // 隐私模式读不到、或者 JSON 坏了，一律当「没存过」回 {}：
+    // 前端会把本机老缓存里的值迁上来，而不是被冲掉。
+    return {}
+  }
+}
+
+function writeDemoListPreferences(value: DemoListPreferences) {
+  try {
+    window.localStorage.setItem(DEMO_LIST_PREFERENCES_KEY, JSON.stringify(value))
+  } catch {
+    // 写失败只是这一次记不住，响应体照常带回合并后的值，理由同 writeDemoEditorPreferences
+  }
+}
+
+/** body 里的某一组是不是「真的带了」：只有普通对象才算，null / 数组 / 字符串一律当没带。 */
+function demoPreferencePatch(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+/**
  * ⚠️ stored 这个字段不是可选装饰，缺了它演示站会复现真面板的同一个缺陷：
  * 访客先在演示站里调好偏好（落在本机 `dd:editor:*`），下一次进来首屏 GET 拿到的是一整套默认值，
  * 前端逐项写回本地缓存 —— 他刚调好的开关被静默冲掉。
  * 有了 stored=false，前端改走「把本机那 5 项一次性 PUT 上去」的上行迁移，本机偏好才保得住。
  * editor 字段本身不受影响：无论 stored 是什么都下发一整套可用的值，不认得 stored 的老客户端行为零变化。
+ * stored 只描述 editor 这一组；list 是稀疏的，键在不在就说明存没存过。
  */
 route('GET', '/auth/preferences', () => {
   const { editor, stored } = readDemoEditorPreferences()
-  return { editor, stored }
+  return { editor, stored, list: readDemoListPreferences() }
 })
 
+/**
+ * 两组各自可选、各自做字段级合并，口径与真实服务端 handler/user_preference.go 一致：
+ *   - body.editor 是对象才动编辑器那一组；
+ *   - body.list 是对象才动列表页那一组；
+ *   - 两组都不带（比如 {}）就是 no-op，原样返回当前值。
+ * ⚠️ editor 这条分支不能写成「拿不到就按 {} 合并、照样写库、回 stored:true」（v3.3.0 的 mock 就是这么写的）：
+ *    前端改列表页每页条数时只发 {list}，那样会顺手把一整套默认值写成访客的编辑器偏好、并把 stored 翻成 true，
+ *    下一次进脚本页时，访客本机调好的编辑器开关被默认值冲掉 —— 与真实服务端这次修掉的是同一个缺陷。
+ */
 route('PUT', '/auth/preferences', (ctx) => {
-  const patch = bodyObject(ctx)['editor']
-  const merged = mergeDemoEditorPreferences(
-    readDemoEditorPreferences().editor,
-    patch && typeof patch === 'object' && !Array.isArray(patch) ? (patch as Record<string, unknown>) : {},
-  )
-  writeDemoEditorPreferences(merged)
-  // 写完必然是存过了，所以恒为 true。注意即使 writeDemoEditorPreferences 因隐私模式写失败也照样返回 true：
-  // 本次响应带回的就是合并后的值，这一轮对前端而言确实「服务端已有记录」，与真面板落库成功后的口径一致。
-  return { editor: merged, stored: true }
+  const body = bodyObject(ctx)
+
+  let { editor, stored } = readDemoEditorPreferences()
+  const editorPatch = demoPreferencePatch(body['editor'])
+  if (editorPatch) {
+    editor = mergeDemoEditorPreferences(editor, editorPatch)
+    writeDemoEditorPreferences(editor)
+    // 这次写了 editor，stored 必然为 true。注意即使 writeDemoEditorPreferences 因隐私模式写失败也照样是 true：
+    // 本次响应带回的就是合并后的值，这一轮对前端而言确实「服务端已有记录」，与真面板落库成功后的口径一致。
+    stored = true
+  }
+
+  let list = readDemoListPreferences()
+  const listPatch = demoPreferencePatch(body['list'])
+  if (listPatch) {
+    // 稀疏合并：只覆盖这次带了的合法键，没带的键保持原样，没存过的键也不会被补出来
+    list = { ...list, ...pickDemoListPreferences(listPatch) }
+    writeDemoListPreferences(list)
+  }
+
+  return { editor, stored, list }
 })
 
 // ===========================================================================
@@ -2580,6 +2680,41 @@ route('GET', '/deps/:id/status', (ctx) => {
 route('POST', '/deps', () => blocked())
 route('PUT', '/deps/:id/reinstall', () => blocked())
 route('POST', '/deps/batch-reinstall', () => blocked())
+
+/**
+ * Playwright 一键安装的系统包清单（issue #142）。
+ *
+ * 这是服务端 service/playwright_runtime.go 那份 Debian 12 清单的【展示副本】，只用来让演示站上
+ * 「系统库 0/26」这类文案有数可显。它不像 notification-types / configs 那样走生成器：
+ * 服务端改清单时这里漂移了，最多是演示站上的个数对不上，不会让任何功能出错。
+ */
+const DEMO_PLAYWRIGHT_PACKAGES: readonly string[] = [
+  'libasound2', 'libatk-bridge2.0-0', 'libatk1.0-0', 'libatspi2.0-0', 'libcairo2', 'libcups2', 'libdbus-1-3',
+  'libdrm2', 'libgbm1', 'libglib2.0-0', 'libnspr4', 'libnss3', 'libpango-1.0-0', 'libx11-6', 'libxcb1',
+  'libxcomposite1', 'libxdamage1', 'libxext6', 'libxfixes3', 'libxkbcommon0', 'libxrandr2',
+  'fonts-liberation', 'fonts-wqy-zenhei', 'fonts-noto-color-emoji', 'libfontconfig1', 'libfreetype6',
+]
+
+// 静态的「可用、尚未安装」状态：发行版与包管理器口径和上面 /deps/mirrors 的 mock 一致（debian + apt），
+// 架构与 /system/info 的 mock 一致（amd64），这样依赖页的按钮在演示站上呈现的是可点击的正常形态。
+// 三项都报未安装，与 fixture 里没有 playwright、也没有这些系统包的事实对得上。
+route('GET', '/deps/playwright', () => ({
+  supported: true,
+  reason: '',
+  distribution: 'debian',
+  version_id: '12',
+  arch: 'amd64',
+  packages: [...DEMO_PLAYWRIGHT_PACKAGES],
+  browsers_path: '/app/Dumb-Panel/deps/ms-playwright',
+  python_installed: false,
+  browsers_installed: false,
+  linux_installed: 0,
+  linux_total: DEMO_PLAYWRIGHT_PACKAGES.length,
+}))
+
+// 一键安装会真的调 apt / pip 并下载浏览器，同样拒绝。必须显式注册：
+// 不注册会落到 createFallbackBody 的 200 空数据，前端会误报「已加入安装队列」。
+route('POST', '/deps/playwright/install', () => blocked())
 
 route('POST', '/deps/batch-delete', (ctx) => {
   const ids = idList(ctx, 'ids')

@@ -6,13 +6,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, Close, Edit, Setting, Folder } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { usePageActivity } from '@/composables/usePageActivity'
+import { ensureListPreferencesLoaded, readListPreference, setListPreferences, type ListPreferences } from '@/utils/listPreferences'
 import ViewManagementDialog from './ViewManagementDialog.vue'
 
 const emit = defineEmits<{
   'view-change': [filters: TaskViewFilter[], sortRules: TaskViewSortRule[]]
 }>()
 
-const { dialogFullscreen } = useResponsive()
+const { dialogFullscreen, isMobile } = useResponsive()
 const views = ref<TaskView[]>([])
 // 当前高亮项由两个互斥的 ref 共同表达：选中视图时 activeViewId 是它的 id、activeGroupName 为 null；
 // 选中分组标签时反过来。两者都为 null 有两层含义：一是「不带任何筛选」，二是「全部」标签处于高亮。
@@ -33,38 +34,15 @@ const showManagementDialog = ref(false)
 
 const visibleViews = computed(() => views.value.filter(view => !view.hidden))
 
-// 「全部」是模板里硬编码的内置筛选项，库里没有对应行，后端的 hidden 字段够不到它，
-// 它的显隐只能落到本地存储。默认 '0'（显示），老用户升级后第一眼观感不变。
-const VIEW_ALL_HIDDEN_STORAGE_KEY = 'dd:tasks:view_all_hidden'
-// 分组标签（issue #130）同理：它们来自任务 labels 里的 `分组:` 标签，不在 task_views 表里。
-// 照「全部」的先例只做一个整体开关（不逐个分组隐藏），默认 '0'（显示）。
-const VIEW_GROUPS_HIDDEN_STORAGE_KEY = 'dd:tasks:view_groups_hidden'
-
-function readStoredHiddenFlag(key: string) {
-  if (typeof window === 'undefined') {
-    return false
-  }
-  try {
-    return window.localStorage.getItem(key) === '1'
-  } catch {
-    // 隐私模式下读 localStorage 会直接抛错，必须吞掉：否则整个 setup 挂掉、标签栏整块白
-    return false
-  }
-}
-
-function persistHiddenFlag(key: string, hidden: boolean) {
-  if (typeof window === 'undefined') {
-    return
-  }
-  try {
-    window.localStorage.setItem(key, hidden ? '1' : '0')
-  } catch {
-    // 存储不可用只影响「下次进页还记不记得」，不该阻断当前这次交互
-  }
-}
-
-const allTabHidden = ref(readStoredHiddenFlag(VIEW_ALL_HIDDEN_STORAGE_KEY))
-const groupTabsHidden = ref(readStoredHiddenFlag(VIEW_GROUPS_HIDDEN_STORAGE_KEY))
+// 「全部」是模板里硬编码的内置筛选项，库里没有对应行，task_views 的 hidden 字段够不到它；
+// 分组标签（issue #130）同理：它们来自任务 labels 里的 `分组:` 标签，不在 task_views 表里，
+// 照「全部」的先例只做一个整体开关（不逐个分组隐藏）。
+// 这两个开关是【个人偏好】，v3.3.1（issue #143 桌面端第 1 条）起跟随账户，读写都经 utils/listPreferences.ts
+// （服务端为真源、本机缓存兜首屏；老的 localStorage 键由它接管并自动迁移，本文件不再直接碰 localStorage）。
+// 默认都显示，老用户升级后第一眼观感不变。
+// 注意作用域不同：各自定义视图自己的 hidden 仍存在全局的 task_views 表里（不分用户）。
+const allTabHidden = ref(readListPreference('tasks_view_all_hidden'))
+const groupTabsHidden = ref(readListPreference('tasks_view_groups_hidden'))
 
 // 保底规则：一个可见视图都没有时，忽略隐藏设置强制把「全部」放回来。
 // 否则标签栏只剩右侧两个图标按钮，用户既没有可点的筛选项、也退不回不带筛选的状态。
@@ -78,6 +56,11 @@ const showAllTab = computed(() => !allTabHidden.value || visibleViews.value.leng
 const groups = ref<TaskGroupSummary[]>([])
 const showGroupTabs = computed(() => !groupTabsHidden.value && groups.value.length > 0)
 const allTabActive = computed(() => activeViewId.value === null && activeGroupName.value === null)
+
+// 「视图管理」入口出不出现：有自定义视图，或者有分组时都要给。
+// 分组标签的显隐开关在管理弹窗里，一个自定义视图都没有的用户（很多人只用 App 建分组）也得能关掉它、关掉后也得能再打开。
+// expose 给父组件：移动端这个入口挪进了工具栏的「+」菜单，两处用同一份判据。
+const canManageViews = computed(() => views.value.length > 0 || groups.value.length > 0)
 
 const filterFields = [
   { value: 'command', label: '命令' },
@@ -209,12 +192,24 @@ function openManagementDialog() {
 }
 
 async function handleManagementSaved(allHidden: boolean, groupsHidden: boolean) {
-  // 「全部」与分组标签都不进 taskViewApi.reorder 的提交列表，弹窗只把结果回传上来，由这里写本地存储。
+  // 「全部」与分组标签都不进 taskViewApi.reorder 的提交列表，弹窗只把结果回传上来，由这里经 listPreferences 同步到账户。
+  // 只在值【真的变了】时才写：什么都没改就点保存时不发请求 —— 服务端对这组偏好是稀疏存储，
+  // 写一次就等于替用户「占坑」存下默认值，会挡住他在别的域名 / IP 上存过、还没迁上来的自定义值。
+  // 两个开关都变了时合进同一个 patch、只调一次 setListPreferences：一次 PUT 带齐两个键，省一个请求。
+  // 这不是为了防丢键：服务端 preferenceWriteMu 已把读-合并-写串行化，分两次发也都会落库（见 listPreferences.ts setListPreferences 的说明）。
   // 分组标签被隐藏时若正选中某个分组，下面 loadViews 末尾的 applyViewFallback 会把它回落掉。
-  allTabHidden.value = allHidden
-  persistHiddenFlag(VIEW_ALL_HIDDEN_STORAGE_KEY, allHidden)
-  groupTabsHidden.value = groupsHidden
-  persistHiddenFlag(VIEW_GROUPS_HIDDEN_STORAGE_KEY, groupsHidden)
+  const patch: Partial<ListPreferences> = {}
+  if (allHidden !== allTabHidden.value) {
+    allTabHidden.value = allHidden
+    patch.tasks_view_all_hidden = allHidden
+  }
+  if (groupsHidden !== groupTabsHidden.value) {
+    groupTabsHidden.value = groupsHidden
+    patch.tasks_view_groups_hidden = groupsHidden
+  }
+  if (Object.keys(patch).length > 0) {
+    setListPreferences(patch)
+  }
   await loadViews()
 }
 
@@ -372,6 +367,14 @@ async function doDeleteView(viewId: number) {
 onMounted(() => {
   void loadViews()
   void loadGroups()
+  // 两个隐藏开关跟随账户：setup 时先按本机缓存显示，服务端值回来后重读一遍，再按新值校正一次高亮项
+  // （比如服务端存的是「隐藏全部」，要落到第一个可见视图）。与任务页调用的是同一个记忆化的 ensure，只发一次请求。
+  // 先后顺序无所谓：视图列表还没回来时 showAllTab 保底为真，applyViewFallback 是空操作，等 loadViews 回来会再校正一次。
+  void ensureListPreferencesLoaded().then(() => {
+    allTabHidden.value = readListPreference('tasks_view_all_hidden')
+    groupTabsHidden.value = readListPreference('tasks_view_groups_hidden')
+    applyViewFallback()
+  })
 })
 
 // 分组清单的第三个刷新时机：页面重新可见 —— 切回这个浏览器标签页，
@@ -382,15 +385,19 @@ watch(isPageActive, (active) => {
   if (active) void loadGroups()
 })
 
-defineExpose({ loadViews, loadGroups })
+// openCreateDialog / openManagementDialog / canManageViews：移动端「新建视图」「视图管理」两个入口
+// 由任务页工具栏的「+」菜单承担（本组件在移动端不渲染右侧那两个按钮），经这里打开同一个弹窗。
+defineExpose({ loadViews, loadGroups, openCreateDialog, openManagementDialog, canManageViews })
 </script>
 
 <template>
   <div class="view-manager">
     <!-- 槽内只放筛选项（全部 + 各视图 + 分组标签），动作按钮（新建 / 视图管理）放槽外：
-         「选哪一个」与「做什么」语义分开，顺带消掉了原来「全部」24px、视图 32px 的高度不一致 -->
+         「选哪一个」与「做什么」语义分开，顺带消掉了原来「全部」24px、视图 32px 的高度不一致。
+         移动端（v3.3.1，issue #143）：槽独占一行、单行横滑、贴屏幕左右边缘（两个全局共享类只在移动端挂上，
+         桌面 DOM 与换行行为不变）；槽外两个动作按钮不渲染，入口挪进了任务页工具栏的「+」菜单。 -->
     <div class="view-tabs">
-      <div class="view-seg">
+      <div class="view-seg" :class="{ 'dd-scroll-row': isMobile, 'dd-mobile-bleed': isMobile }">
         <button
           v-if="showAllTab"
           :class="['view-tab', { active: allTabActive }]"
@@ -425,15 +432,14 @@ defineExpose({ loadViews, loadGroups })
           </button>
         </template>
       </div>
-      <div class="view-tabs__actions">
+      <div v-if="!isMobile" class="view-tabs__actions">
         <el-tooltip content="新建视图" placement="top">
           <el-button @click="openCreateDialog">
             <el-icon><Plus /></el-icon>
           </el-button>
         </el-tooltip>
-        <!-- 有分组时也要给入口：分组标签的显隐开关在管理弹窗里，
-             一个自定义视图都没有的用户（很多人只用 App 建分组）也得能关掉它、关掉后也得能再打开 -->
-        <el-tooltip v-if="views.length > 0 || groups.length > 0" content="视图管理" placement="top">
+        <!-- 有分组时也要给入口，判据见 canManageViews -->
+        <el-tooltip v-if="canManageViews" content="视图管理" placement="top">
           <el-button @click="openManagementDialog">
             <el-icon><Setting /></el-icon>
           </el-button>
@@ -534,9 +540,10 @@ defineExpose({ loadViews, loadGroups })
   border-radius: var(--dd-radius-control);
   padding: 3px;
   gap: 2px;
-  // 视图数量由用户决定、可能很多，这里保留原来的换行而不是照抄 status-tabs 的单行排布。
+  // 视图数量由用户决定、可能很多，桌面保留原来的换行而不是照抄 status-tabs 的单行排布。
   // 取舍：换行会让灰底槽变成两行、把下方工具栏推低；改成横向滚动虽然能锁死高度，
   // 但滚动条会遮住选中项、也没有溢出提示，权衡后选「宁可换行也别把视图藏起来」。
+  // 移动端（v3.3.1，issue #143）反过来改成单行横滑，见文件末尾的移动端媒体查询。
   flex-wrap: wrap;
   // inline-flex 的基准宽是 max-content，窄屏下不加这条会顶破容器让页面横向滚
   max-width: 100%;
@@ -658,6 +665,18 @@ defineExpose({ loadViews, loadGroups })
 @media (max-width: 768px) {
   .filter-row {
     flex-wrap: wrap;
+  }
+
+  // 移动端视图分组栏（issue #143 T7/T8）：灰底槽独占一行、单行左右滑动、隐藏滚动条，并贴屏幕左右边缘。
+  // 横滑与贴边由模板里只在移动端挂上的 .dd-scroll-row / .dd-mobile-bleed 两个全局类负责
+  // （滚动、隐藏滚动条、子项不收缩；负外边距抵消页面留白、左右内边距让首尾标签与页面内容对齐、贴边后直角）。
+  // 这里只补被本文件 .view-seg 那条（scoped 后 (0,2,0)，压过全局单类）盖掉的两项：
+  // 块级 flex（inline-flex 会按内容收宽、滚不起来）与不换行。gap 仍用本文件的 2px，与桌面分段控件一致。
+  // 为什么手机上改横滑：窄屏上换行会把灰底槽堆成好几行，工具栏与列表被一路推到屏幕下半截；
+  // 手机上左右滑动是熟悉的手势，槽的右缘被截断本身就在提示「还有更多」。
+  .view-seg.dd-scroll-row {
+    display: flex;
+    flex-wrap: nowrap;
   }
 }
 </style>

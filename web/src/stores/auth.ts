@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { authApi } from '@/api/auth'
 import { resetEditorPreferencesCache } from '@/utils/editorPreferences'
+import { resetListPreferencesCache } from '@/utils/listPreferences'
 import router from '@/router'
 import type { GeeTestValidateResult } from '@/utils/geetest'
 
@@ -45,6 +46,8 @@ export const useAuthStore = defineStore('auth', () => {
     // 只清记忆不清 localStorage 里的值：那份值同时还是本机的离线缓存，
     // 下次登录会被服务端值覆盖，没必要在这里制造一次闪变。
     resetEditorPreferencesCache()
+    // 列表页偏好（每页条数、视图栏显隐，v3.3.1）同理，也是按用户存的
+    resetListPreferencesCache()
   }
 
   async function login(username: string, password: string, totpCode?: string, captcha?: GeeTestValidateResult | null) {

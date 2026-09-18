@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"daidai-panel/config"
 	"daidai-panel/database"
@@ -166,6 +167,85 @@ func TestReconcileDependenciesAfterRestartMarksLinuxInstalledWhenDetected(t *tes
 	}
 }
 
+// 一键安装 / 批量重装排到一半时面板重启：排队协程只活在内存里，剩下的 queued 记录没人再接手，
+// 而删除、重装、取消、再点一键安装都把 queued 当「正在处理」拒掉 —— 不在启动时收口就永远卡住。
+// 已经装上的同步成 installed，没装上的置 failed 并写明原因；恢复备份的续装分支不受影响。
+func TestReconcileDependenciesAfterRestartSettlesQueuedRecords(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	mustCreate := func(dep model.Dependency) model.Dependency {
+		t.Helper()
+		if err := database.DB.Create(&dep).Error; err != nil {
+			t.Fatalf("create dependency %s: %v", dep.Name, err)
+		}
+		return dep
+	}
+	queuedLinux := mustCreate(model.Dependency{Type: model.DepTypeLinux, Name: "libnss3", Status: model.DepStatusQueued,
+		Log: "[Playwright 一键安装] 已加入顺序队列（3/27）"})
+	queuedPython := mustCreate(model.Dependency{Type: model.DepTypePython, Name: "playwright", PythonVersion: "3.12", Status: model.DepStatusQueued,
+		Log: "[Playwright 一键安装] 已加入顺序队列（27/27）"})
+	queuedPresent := mustCreate(model.Dependency{Type: model.DepTypeLinux, Name: "libgbm1", Status: model.DepStatusQueued,
+		Log: "[Playwright 一键安装] 已加入顺序队列（4/27）"})
+	restoring := mustCreate(model.Dependency{Type: model.DepTypeNodeJS, Name: "left-pad", Status: model.DepStatusInstalling,
+		Log: "[恢复备份] 已提交依赖重装"})
+
+	originalInstalled := dependencyInstalledFunc
+	originalReinstallBatch := dependencyReinstallBatchFunc
+	originalRestartReinstallBatch := dependencyRestartReinstallBatchFunc
+	t.Cleanup(func() {
+		dependencyInstalledFunc = originalInstalled
+		dependencyReinstallBatchFunc = originalReinstallBatch
+		dependencyRestartReinstallBatchFunc = originalRestartReinstallBatch
+	})
+	dependencyInstalledFunc = func(depType, name, pythonVersion string) bool {
+		return depType == model.DepTypeLinux && name == "libgbm1"
+	}
+	var resumed []model.Dependency
+	dependencyReinstallBatchFunc = func(deps []model.Dependency) {
+		resumed = append(resumed, deps...)
+	}
+	dependencyRestartReinstallBatchFunc = func(deps []model.Dependency) {
+		t.Errorf("没有 installed 记录丢失，不应触发重启重装，实际 %d 条", len(deps))
+	}
+
+	ReconcileDependenciesAfterRestart()
+
+	reload := func(id uint) model.Dependency {
+		t.Helper()
+		var dep model.Dependency
+		if err := database.DB.First(&dep, id).Error; err != nil {
+			t.Fatalf("reload dependency %d: %v", id, err)
+		}
+		return dep
+	}
+	for _, dep := range []model.Dependency{queuedLinux, queuedPython} {
+		got := reload(dep.ID)
+		if got.Status != model.DepStatusFailed {
+			t.Fatalf("%s: 没装上的排队记录应置为 failed，实际 %q", dep.Name, got.Status)
+		}
+		if !strings.Contains(got.Log, "[启动校验] 排队中的任务因服务重启而中断，未执行，可重新安装") ||
+			!strings.Contains(got.Log, dep.Log) {
+			t.Fatalf("%s: 日志应保留原内容并写明因重启中断，实际 %q", dep.Name, got.Log)
+		}
+	}
+	if got := reload(queuedPresent.ID); got.Status != model.DepStatusInstalled || !strings.Contains(got.Log, "已同步状态为已安装") {
+		t.Fatalf("已经装上的排队记录应同步为 installed，实际 %q：%q", got.Status, got.Log)
+	}
+
+	if len(resumed) != 1 || resumed[0].ID != restoring.ID {
+		t.Fatalf("恢复备份的续装应照旧只续这一条，实际 %+v", resumed)
+	}
+	if got := reload(restoring.ID); got.Status != model.DepStatusInstalling {
+		t.Fatalf("恢复备份续装的记录应保持 installing，实际 %q", got.Status)
+	}
+
+	var leftover int64
+	database.DB.Model(&model.Dependency{}).Where("status = ?", model.DepStatusQueued).Count(&leftover)
+	if leftover != 0 {
+		t.Fatalf("启动校验之后不应再有 queued 记录，实际 %d 条", leftover)
+	}
+}
+
 func TestReinstallDependencyUsesCurrentLinuxPackageManagerFlowOnApt(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
@@ -199,6 +279,60 @@ func TestReinstallDependencyUsesCurrentLinuxPackageManagerFlowOnApt(t *testing.T
 	if !called {
 		t.Fatal("expected restart reinstall path to use linux package manager builder")
 	}
+}
+
+// 重启重装的 Linux 分支必须与网页端安装 / 卸载共用 LockLinuxPackageOperation，而且在构造命令之前就要拿到：
+// 构造时会判断 apt 索引要不要刷新、写镜像源；重建后两边都会先跑 apt-get update，lists 锁不等待，撞上就失败。
+// 命令结束后锁必须放掉，否则网页端之后的 Linux 依赖操作会被永远堵住。
+func TestReinstallDependencyLinuxWaitsForSharedPackageLock(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	dep := model.Dependency{Type: model.DepTypeLinux, Name: "curl", Status: model.DepStatusInstalling}
+	if err := database.DB.Create(&dep).Error; err != nil {
+		t.Fatalf("create dependency: %v", err)
+	}
+
+	originalBuild := buildLinuxDependencyInstallCommandFunc
+	t.Cleanup(func() { buildLinuxDependencyInstallCommandFunc = originalBuild })
+	built := make(chan struct{})
+	buildLinuxDependencyInstallCommandFunc = func(packageName string) (*exec.Cmd, error) {
+		close(built)
+		if _, err := exec.LookPath("cmd"); err == nil {
+			return exec.Command("cmd", "/c", "exit", "0"), nil
+		}
+		return exec.Command("sh", "-c", "exit 0"), nil
+	}
+
+	// 模拟网页端正在装另一个 Linux 包。
+	unlock := LockLinuxPackageOperation()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		reinstallDependency(dep, "[启动校验]")
+	}()
+
+	select {
+	case <-built:
+		unlock()
+		t.Fatal("网页端持有 Linux 包操作锁期间，重启重装不应开始构造命令")
+	case <-time.After(300 * time.Millisecond):
+	}
+	unlock()
+
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("放锁后重启重装应能继续执行完")
+	}
+	select {
+	case <-built:
+	default:
+		t.Fatal("放锁后应构造并执行安装命令")
+	}
+	if !linuxPackageOperationMu.TryLock() {
+		t.Fatal("重启重装结束后必须放掉 Linux 包操作锁")
+	}
+	linuxPackageOperationMu.Unlock()
 }
 
 func TestRestoreBackupManifestPreservesCurrentPanelUsers(t *testing.T) {

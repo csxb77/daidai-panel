@@ -6,17 +6,24 @@ export interface PanelAppearanceSettings extends PanelSettingsPayload {}
  * 圆角三档刻度表。
  *
  * 刻度集中在这一处，不要把数值散到分支里：调一档、加一档都只改这里。
- * square 三条全 0，与 styles/global.scss `:root` 里的默认值一致 ——
+ * square 各项全 0，与 styles/global.scss `:root` 里的默认值一致 ——
  * 这样「没写过内联变量」和「显式写成直角」看到的是同一个结果。
  *
  * 对应关系（详见 spec/frontend/design-system.md）：
  * - control：按钮、输入框、tag、分段项、图标按钮、浮层菜单项
  * - surface：卡片、表格容器、弹窗、日志面板等容器类表面
  * - pill：状态 chip、计数角标、进度条这类天然胶囊
+ * - mobileControl / mobileSurface（v3.3.1，issue #143）：≤768px 下「按钮」「卡片」两个角色的刻度。
+ *   它们不直接被组件消费，而是由 global.scss 里的角色令牌 --dd-radius-button / --dd-radius-card
+ *   在移动端媒体查询里取用（桌面上这两个角色令牌仍等于 control / surface）。
+ *   square 档同样全 0：形状是全局配置，默认直角的面板在手机上也必须是直角，不能自己圆起来。
  */
-const PANEL_SHAPE_RADIUS: Record<PanelShapeStyle, { control: string; surface: string; pill: string }> = {
-  square: { control: '0', surface: '0', pill: '0' },
-  rounded: { control: '6px', surface: '10px', pill: '999px' },
+const PANEL_SHAPE_RADIUS: Record<
+  PanelShapeStyle,
+  { control: string; surface: string; pill: string; mobileControl: string; mobileSurface: string }
+> = {
+  square: { control: '0', surface: '0', pill: '0', mobileControl: '0', mobileSurface: '0' },
+  rounded: { control: '6px', surface: '10px', pill: '999px', mobileControl: '16px', mobileSurface: '20px' },
 }
 
 const DEFAULT_PANEL_SHAPE: PanelShapeStyle = 'square'
@@ -154,7 +161,7 @@ function readCachedPanelShape(): PanelShapeStyle {
 let lastAppliedShape: PanelShapeStyle = readCachedPanelShape()
 
 /**
- * 把圆角刻度写进 documentElement 的三条 `--dd-radius-*`。
+ * 把圆角刻度写进 documentElement 的 `--dd-radius-*`（三档刻度 + 两条移动端刻度）。
  *
  * 传了合法值就以它为准并记进本机缓存；不传（或值不认识）就沿用上一次的结果。
  * 两个调用方：
@@ -184,6 +191,11 @@ export function applyPanelShapeStyle(raw?: string | null) {
   root.style.setProperty('--dd-radius-control', radius.control)
   root.style.setProperty('--dd-radius-surface', radius.surface)
   root.style.setProperty('--dd-radius-pill', radius.pill)
+  // 移动端刻度必须和三档刻度在同一个函数里一起写：main.ts 首屏预热调用的就是这里，
+  // 漏写的话 rounded 面板在手机上会先按 :root 的 0 画一帧直角卡片，再等 panel-settings 回来才变圆。
+  // 与三档一样，global.scss 的 :root 里这两条【绝不能带 !important】，否则这里的内联普通声明写不进去。
+  root.style.setProperty('--dd-radius-control-mobile', radius.mobileControl)
+  root.style.setProperty('--dd-radius-surface-mobile', radius.mobileSurface)
 }
 
 // 最近一次显式传入的外观设置。

@@ -652,9 +652,10 @@ onBeforeUnmount(() => {
 
 <style lang="scss">
 /*
-  el-dialog 会 teleport 到 body，scoped 样式很难稳定命中根节点，
-  这里用唯一 class 让全屏工作区在桌面端和移动端都吃满可用高度。
-  写法与脚本页的 .script-execution-fullscreen-dialog 保持一致。
+  el-dialog 默认原地渲染、不 teleport（EP 2.13 的 append-to-body 默认 false），
+  但 .el-dialog 及其 header / body / footer 是 EP 内部组件渲染的节点，带不上本组件的 scopeId，
+  scoped 选择器命中不到它们。所以这里用唯一 class 写一个非 scoped 块，
+  让全屏工作区在桌面端和移动端都吃满可用高度。写法与脚本页的 .script-execution-fullscreen-dialog 保持一致。
 */
 .system-console-dialog {
   display: flex;

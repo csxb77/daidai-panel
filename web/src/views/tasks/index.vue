@@ -7,6 +7,9 @@ import { useAuthStore } from '@/stores/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
 // 全局注册的图标里没有 WarningFilled / InfoFilled，这里按仓库既有做法（settings/SystemHealthCard.vue 同款）局部引入
 import { InfoFilled, WarningFilled } from '@element-plus/icons-vue'
+// 移动端工具栏 / 批量栏的按钮走 el-button 的 :icon prop，要的是组件对象而不是全局注册名；
+// PriceTag 全局也没注册（本期约定不改 main.ts）。与全局同名的几个在模板里解析到的是同一个组件，桌面端不受影响。
+import { Sort, Plus, CircleCheck, CircleClose, VideoPlay, VideoPause, PriceTag, Top, Delete, Close } from '@element-plus/icons-vue'
 import TaskForm from './components/TaskForm.vue'
 import LogViewer from './components/LogViewer.vue'
 import TaskDetail from './components/TaskDetail.vue'
@@ -18,6 +21,7 @@ import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
 import TaskDeleteDialog from './components/TaskDeleteDialog.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
+import DdMoreMenu from '@/components/ui/DdMoreMenu.vue'
 import { getDisplayTaskLabels, classifyDisplayTaskLabels, isTaskSwitchOn } from './taskLabels'
 import type { DisplayTaskLabelKind } from './taskLabels'
 import { splitTaskCommandDisplay } from './taskCommand'
@@ -25,6 +29,13 @@ import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
 import { canOperate } from '@/utils/roles'
 import { formatDuration } from '@/utils/duration'
+import { scrollListToTop } from '@/utils/scrollToTop'
+import {
+  TASKS_PAGE_SIZE_OPTIONS,
+  ensureListPreferencesLoaded,
+  readListPreference,
+  setListPreference,
+} from '@/utils/listPreferences'
 import type { TaskViewFilter, TaskViewSortRule } from '@/api/taskView'
 
 const route = useRoute()
@@ -45,35 +56,9 @@ let statusTimer: ReturnType<typeof setInterval> | null = null
 // 3 秒状态轮询与运行后的回读不自增，只在发请求时记下序号，飞行期间一旦有新的 loadTasks 发出就丢弃自己的结果。
 let loadTasksSeq = 0
 
-const TASK_PAGE_SIZE_STORAGE_KEY = 'dd:tasks:page_size'
-const supportedTaskPageSizes = [10, 20, 50, 100]
-
-function readStoredTaskPageSize() {
-  if (typeof window === 'undefined') {
-    return 20
-  }
-
-  // 隐私模式 / 禁用站点存储时访问 localStorage 会直接抛错。这两个函数一个跑在 setup 里、
-  // 一个跑在 watch 里，任何一处漏兜都会让整页白掉，所以和下面的显示设置一样统一包住。
-  try {
-    const raw = window.localStorage.getItem(TASK_PAGE_SIZE_STORAGE_KEY)
-    const parsed = Number(raw)
-    return supportedTaskPageSizes.includes(parsed) ? parsed : 20
-  } catch {
-    return 20
-  }
-}
-
-function persistTaskPageSize(value: number) {
-  if (typeof window === 'undefined') {
-    return
-  }
-  try {
-    window.localStorage.setItem(TASK_PAGE_SIZE_STORAGE_KEY, String(value))
-  } catch {
-    // 写不进去只影响「下次进来还记不记得」，本次会话内照常生效，不打扰用户
-  }
-}
+// 每页条数的可选档位（v3.3.1 起跟随账户，读写都经 utils/listPreferences.ts，本页不再直接碰 localStorage）。
+// 展开成可变数组：el-pagination 的 page-sizes 声明的是 number[]，只读数组直接传会被 vue-tsc 拒绝。
+const taskPageSizeOptions = [...TASKS_PAGE_SIZE_OPTIONS]
 
 // 任务名后面那一排标签的分项显隐偏好（工具栏「显示设置」下拉）。
 // 四项默认全 true = 与改造前完全一致，老用户升级后第一眼一个标签都不会少。
@@ -122,7 +107,9 @@ function persistTaskNameLabelPrefs(value: TaskNameLabelPrefs) {
 const tasks = ref<any[]>([])
 const total = ref(0)
 const page = ref(1)
-const pageSize = ref(readStoredTaskPageSize())
+// 先用本机缓存同步起步（首屏不能等网络），服务端值由 onMounted 里的 applyAccountPageSize 异步补上。
+// 显式标成 number：分页器的 v-model 回写的是 number，不是 10|20|50|100 的字面量联合。
+const pageSize = ref<number>(readListPreference('tasks_page_size'))
 const keyword = ref('')
 const statusFilter = ref<string>('')
 const loading = ref(false)
@@ -130,6 +117,10 @@ const selectedIds = ref<number[]>([])
 const selectedIdSet = computed(() => new Set(selectedIds.value))
 // 桌面表格实例：勾选状态存在 el-table 内部，「取消选择」只清 selectedIds 复选框不会回弹
 const taskTableRef = ref<any>(null)
+// 页面根：翻页回顶（scrollListToTop）的锚点
+const pageRootRef = ref<HTMLElement | null>(null)
+// 视图分组栏实例：移动端「新建视图 / 视图管理」两个入口收进了工具栏的「+」菜单，要经它 expose 的方法打开
+const viewManagerRef = ref<InstanceType<typeof ViewManager> | null>(null)
 const nameLabelPrefs = ref<TaskNameLabelPrefs>(readStoredTaskNameLabelPrefs())
 const batchLabelVisible = ref(false)
 // 删除确认弹窗（单删与批量共用，issue #124）。taskIds 存打开那一刻的快照，而不是直接绑 selectedIds：
@@ -581,10 +572,6 @@ async function initSortable() {
   }
 }
 
-watch(pageSize, (value) => {
-  persistTaskPageSize(value)
-})
-
 // 拖拽可用性或端形态变了就重挂实例：从「禁用」翻成「可用」时表格里才刚长出手柄，
 // 只靠 loadTasks 末尾那一次挂载会漏掉（比如清掉列排序但不刷新列表的场景）。
 watch([sortableEnabled, isMobile], () => {
@@ -598,6 +585,30 @@ watch(nameLabelPrefs, (value) => {
 
 watch(canPollTaskStatus, () => {
   syncStatusPolling()
+})
+
+// 移动端没有状态分段（全部 / 运行中 / 已禁用 / 已启用）。在桌面选了某个状态再缩到移动端，
+// 列表会带着一个看不见、也关不掉的筛选，所以进入移动端时清掉它并重拉。
+watch(isMobile, (mobile) => {
+  if (mobile && statusFilter.value !== '') {
+    statusFilter.value = ''
+    handleSearch()
+  }
+})
+
+// 移动端勾选不经过 el-table，列表数据一换就要把 selectedIds 裁剪到新数据里仍在的 id。
+// 桌面端 el-table 在 data 换成新数组时会自己整体清空勾选（再经 selection-change 清掉 selectedIds），移动端没人管：
+// 翻页后旧页的 id 留在 selectedIds 里，批量栏不消失、批量操作会作用到看不见的任务，
+// canPollTaskStatus 也因此一直为假，3 秒状态轮询被卡停。
+// 挂在 tasks 的整体替换上而不是只写进 loadTasks：运行后的回读、轮询合并剔除行也会换数组，一处收口。
+// 只裁不清：批量启用 / 置顶之后重拉，勾着的任务都还在，接着做下一个批量操作不用重选。
+watch(tasks, (rows) => {
+  if (!isMobile.value || selectedIds.value.length === 0) return
+  const present = new Set<number>(rows.map(row => row?.id))
+  const kept = selectedIds.value.filter(id => present.has(id))
+  if (kept.length !== selectedIds.value.length) {
+    selectedIds.value = kept
+  }
 })
 
 function buildTaskListParams() {
@@ -843,7 +854,28 @@ async function handleRouteQueryAction() {
 
 let skipInitialActivated = true
 
+/**
+ * 每页条数跟随账户（issue #143 桌面端第 1 条）：把服务端存的值应用到本页。
+ *
+ * 刻意不阻塞首拉：首屏先按本机缓存拉一次，服务端值回来、且与当前不同时再回到第 1 页重拉。
+ * 两次请求谁先回来都没关系，loadTasksSeq 保证最后停在最新一次上。
+ * 只有换浏览器 / 换域名后第一次打开才会多这一次；之后缓存与服务端一致，这里是空操作。
+ * 用户在 GET 回来之前已经亲手改过条数的话，listPreferences 会跳过这一键的下行写回，
+ * 这里读到的就是他刚选的值，与当前相等，不会把他的选择弹回去。
+ * onActivated 不用再调：ensure 是记忆化的，同一会话里只拉一次。
+ */
+function applyAccountPageSize() {
+  return ensureListPreferencesLoaded().then(() => {
+    const next = readListPreference('tasks_page_size')
+    if (next === pageSize.value) return
+    pageSize.value = next
+    page.value = 1
+    void loadTasks()
+  })
+}
+
 onMounted(async () => {
+  void applyAccountPageSize()
   await Promise.all([loadTasks(), loadNotificationChannels(), loadDefaultPythonVersion()])
   await handleRouteQueryAction()
 })
@@ -908,9 +940,29 @@ function navigateToScript(path: string) {
   router.push({ path: '/scripts', query: { file: path } })
 }
 
+// 翻页（O3，桌面与移动端都做）：数据回来、DOM 换完之后再回到顶部，避免「先滚到顶、再换内容」跳两下。
+// 🔴 回顶只挂在分页器的两个事件上，不能挪进 loadTasks：轮询、增删改后的重拉都会调它，用户正往下看着会被拽回顶部。
+async function reloadAndScrollToTop() {
+  await loadTasks()
+  await nextTick()
+  // 请求期间页面被卸载时 ref 已置空：不能把 null 传进去，那样 scrollListToTop 会回落到「当前活动页」，
+  // 把用户已经切过去的别的页面滚回顶部。被 keep-alive 失活时 ref 还在，由 scrollListToTop 自己判 offsetParent 挡掉。
+  if (pageRootRef.value) scrollListToTop(pageRootRef.value)
+}
+
+function handlePageChange() {
+  void reloadAndScrollToTop()
+}
+
 function handlePageSizeChange() {
   page.value = 1
-  void loadTasks()
+  // 只在这个用户动作里写偏好（同步到账户）；程序化应用服务端值时不经过这里，不会多发一次 PUT。
+  // 按白名单取一遍而不是断言类型：分页器给的是 number，白名单外的值（理论上不会出现）直接不存。
+  const size = TASKS_PAGE_SIZE_OPTIONS.find(option => option === pageSize.value)
+  if (size !== undefined) {
+    setListPreference('tasks_page_size', size)
+  }
+  void reloadAndScrollToTop()
 }
 
 // 「已终止」（issue #133）：从橙改成比「未运行」更深的灰 —— type 仍是 info，
@@ -1208,7 +1260,7 @@ async function handleToggle(task: any) {
 
 // 删除的确认、请求与成败提示都在 TaskDeleteDialog 里：它会先向服务端预览这个任务用到的脚本，
 // 让用户选择是否一并删除（默认不勾）。这里只保留权限闸并打开弹窗，删完的收尾见 handleDeleteSuccess。
-// 桌面行内菜单（onTaskAction）与移动端「更多」下拉都走到这里。
+// 桌面行内菜单与移动端卡片的「···」菜单都经 onTaskAction 走到这里。
 function handleDelete(task: any) {
   if (!ensureCanOperate('当前账号没有删除任务权限')) return
   deleteDialogMode.value = 'single'
@@ -1294,14 +1346,19 @@ async function handlePin(task: any) {
  * 被手动运行的禁用任务 status 是 0.5 / 2，原来这里会显示成「禁用」。
  * 「禁用」项标红（danger）是 issue #133 要的配色，与删除同一套红字 + 悬停淡红底；
  * 但它可撤销、又是第一项，所以【不加】divided —— 分隔线只留给不可撤销的删除。
+ * 「启用」项挂 success（issue #143 D2）：与「禁用」的红色对称，只在 hover / focus 时显示绿字淡绿底，
+ * 常态沿用菜单统一字色。桌面 Split Button 与移动端卡片「···」用的是同一份数组，两边自动一致。
+ *
+ * alwaysShowDetail：移动端卡片没有 Split Button 的主体，观察者那一支「详情」没地方承担，
+ * 只能留在「···」菜单里，否则观察者在手机上就看不到详情了（桌面仍按上面的规则由主体承担）。
  */
-function taskActionItems(row: any): SplitButtonItem[] {
+function taskActionItems(row: any, options: { alwaysShowDetail?: boolean } = {}): SplitButtonItem[] {
   const op = canOperateTasks.value
   const switchOn = isTaskSwitchOn(row)
   return [
-    { key: 'toggle', label: switchOn ? '禁用' : '启用', danger: switchOn, visible: op },
+    { key: 'toggle', label: switchOn ? '禁用' : '启用', danger: switchOn, success: !switchOn, visible: op },
     { key: 'edit', label: '编辑', visible: op },
-    { key: 'detail', label: '详情', visible: op },
+    { key: 'detail', label: '详情', visible: op || options.alwaysShowDetail === true },
     { key: 'logFiles', label: '日志文件' },
     { key: 'copy', label: '复制', visible: op },
     { key: 'pin', label: row.is_pinned ? '取消置顶' : '置顶', visible: op },
@@ -1348,6 +1405,56 @@ function toggleSelected(id: number, checked: boolean | string | number) {
   selectedIds.value = [...next]
 }
 
+// ---- 移动端工具栏（v3.3.1，issue #143）----
+
+// 移动端批量态：有勾选时第一行整行换成批量栏。权限一并判：观察者没有复选框，永远进不来。
+const mobileBatchActive = computed(() => canOperateTasks.value && selectedIds.value.length > 0)
+
+// 「全选」只作用于当前页：批量接口按 id 执行，拿不到全部任务的 id；桌面表头复选框也只选当前页，口径一致。
+// 移动端没有表格，taskTableRef 是 null，toggleAllSelection 用不了，所以直接改 selectedIds。
+const allPageSelected = computed(
+  () => tasks.value.length > 0 && tasks.value.every(task => selectedIdSet.value.has(task.id))
+)
+
+function toggleSelectAllOnPage() {
+  selectedIds.value = allPageSelected.value ? [] : tasks.value.map(task => task.id)
+}
+
+/**
+ * 移动端工具栏「+」菜单。第一行只放得下搜索框、排序和这一个按钮，所以把这些入口都收进来，移动端不丢功能：
+ *   - 新建任务 / 新建视图 / 视图管理：后两项原来在视图分组栏右侧，移动端那两个按钮不再渲染（见 ViewManager.vue）；
+ *   - 导入 / 导出 / 清理日志：桌面「⋯」菜单里的三项。
+ * 「新建视图」按 canOperateTasks 收权限：后端 POST /tasks/views 要求 operator，观察者点了只会 403。
+ * 分隔线挂在第二组的第一个可见项上，第一组一项都没有时不画（画在菜单顶端像一条多余的横线）。
+ * 「导出任务」对所有角色可见，所以这份菜单实际不会为空；为空时整个「+」不渲染只是兜底。
+ */
+const mobileAddMenuItems = computed<SplitButtonItem[]>(() => {
+  const op = canOperateTasks.value
+  const createGroup: SplitButtonItem[] = [
+    { key: 'createTask', label: '新建任务', visible: op },
+    { key: 'createView', label: '新建视图', visible: op },
+    { key: 'manageViews', label: '视图管理', visible: Boolean(viewManagerRef.value?.canManageViews) },
+  ].filter(item => item.visible)
+  const moreGroup: SplitButtonItem[] = [
+    { key: 'import', label: '导入任务', visible: op },
+    { key: 'export', label: '导出任务', visible: true },
+    { key: 'cleanLogs', label: '清理日志', visible: op },
+  ].filter(item => item.visible)
+  return [
+    ...createGroup,
+    ...moreGroup.map((item, index) => ({ ...item, divided: index === 0 && createGroup.length > 0 })),
+  ]
+})
+
+function onMobileAddCommand(command: string | number | object) {
+  if (command === 'createTask') openCreate()
+  else if (command === 'createView') viewManagerRef.value?.openCreateDialog()
+  else if (command === 'manageViews') viewManagerRef.value?.openManagementDialog()
+  else if (command === 'import') triggerImport()
+  else if (command === 'export') void handleExport()
+  else if (command === 'cleanLogs') void handleCleanLogs()
+}
+
 async function handleBatchAction(action: string) {
   if (!ensureCanOperate()) return
   if (selectedIds.value.length === 0) {
@@ -1385,7 +1492,7 @@ async function handleBatchAction(action: string) {
 }
 
 // 删除成功（单删或批量）后的收尾：
-// - 批量：清掉选中态。原来批量删除后不清 selectedIds，移动端「已选 N 项」会残留已删除的 id；
+// - 批量：清掉选中态。原来批量删除后不清 selectedIds，移动端批量栏会带着已删除的 id 一直不退出；
 // - 单删：被删的这一行若正好被勾着，也从选中项里摘掉，否则批量条会带着一个已不存在的 id；
 // - 详情弹窗开着的正是被删的任务时关掉它，免得对着一条已删除的记录继续操作。
 function handleDeleteSuccess(payload: { mode: 'single' | 'batch'; taskIds: number[] }) {
@@ -1518,10 +1625,97 @@ async function handleImport(event: Event) {
 </script>
 
 <template>
-  <div class="tasks-page dd-fixed-page dd-page-hide-heading">
-    <ViewManager @view-change="handleViewChange" />
+  <div ref="pageRootRef" class="tasks-page dd-fixed-page dd-page-hide-heading">
+    <!-- 移动端工具栏（v3.3.1，issue #143）：与桌面 .toolbar 是两套独立 DOM，桌面那套只多了 v-if="!isMobile"，内容与样式不动
+         （§4.2 左槽叠放范式只属于桌面，移动端不渲染它）。
+         第一行（非批量态）：搜索框 + 排序 + 「+」菜单；有勾选时整行换成批量栏（两者外边距与高度一致，切换时下面不跳）。
+         刻意放在 ViewManager【前面】、桌面 .toolbar 放在它后面，用两个互斥的 v-if 而不是 v-if / v-else 相邻：
+         移动端要求视图分组栏排在工具栏下面，这样 DOM 顺序就是视觉顺序（Tab 顺序、读屏顺序跟着一致），
+         不用给页面根改 flex 再靠 order 调位置；ViewManager 仍是同一个实例，不会因为换端被重建、丢掉当前选中的视图。
+         导入用的隐藏 file input 两套各放一份、共用同一个 ref：同一时刻只渲染其中一套，桌面那份的位置保持原样。 -->
+    <div v-if="isMobile" class="task-mobile-toolbar">
+      <!-- 批量栏：全选 / 取消全选 → 批量按钮（图标 + 短文字）→ 取消（最后）。不显示「已选 N 项」，横向放不下时左右滑动。
+           三个红按钮的相对位置与桌面批量区一致（任意两个不相邻，实心删除不放最外侧），理由见桌面那一支的注释。 -->
+      <div v-if="mobileBatchActive" class="dd-scroll-row dd-mobile-batch-bar">
+        <el-button @click="toggleSelectAllOnPage">{{ allPageSelected ? '取消全选' : '全选' }}</el-button>
+        <el-button :icon="CircleCheck" @click="handleBatchAction('enable')">启用</el-button>
+        <el-button type="danger" plain :icon="CircleClose" @click="handleBatchAction('disable')">禁用</el-button>
+        <el-button :icon="VideoPlay" @click="handleBatchAction('run')">运行</el-button>
+        <el-button type="danger" plain :icon="VideoPause" @click="handleBatchAction('stop')">停止</el-button>
+        <el-button :icon="PriceTag" @click="openBatchAddLabel">标签</el-button>
+        <el-button :icon="Top" @click="handleBatchPin">置顶</el-button>
+        <el-button type="danger" :icon="Delete" @click="handleBatchAction('delete')">删除</el-button>
+        <el-button :icon="Close" @click="clearSelection">取消</el-button>
+      </div>
+      <div v-else class="dd-mobile-toolbar">
+        <el-input v-model="keyword" placeholder="搜索任务名称/命令" clearable @keyup.enter="handleSearch" @clear="handleSearch">
+          <template #prefix><el-icon><Search /></el-icon></template>
+        </el-input>
+        <!-- 排序只留图标：激活时仍是 primary plain 高亮，看得出「正在按某列排序」；具体排的是哪一列交给 title / 读屏 -->
+        <el-dropdown trigger="click" placement="bottom-end">
+          <el-button
+            class="dd-icon-only-btn"
+            :type="quickSort ? 'primary' : 'default'"
+            :plain="!!quickSort"
+            :icon="Sort"
+            :aria-label="quickSortButtonText"
+            :title="quickSortButtonText"
+          />
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="option in quickSortOptions"
+                :key="option.key"
+                @click="handleQuickSortSelect(option.value)"
+              >
+                <!-- 与桌面排序下拉同一套「选中打勾」写法（下拉菜单 teleport 到 body，scoped 命中不到，故用内联色） -->
+                <el-icon
+                  v-if="activeQuickSortKey === option.key"
+                  style="margin-right: 6px; color: var(--el-color-primary);"
+                ><Check /></el-icon>
+                <span v-else style="display: inline-block; width: 20px;"></span>
+                <span :style="activeQuickSortKey === option.key ? 'color: var(--el-color-primary); font-weight: 600;' : ''">
+                  {{ option.label }}
+                </span>
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <!-- 挂 dd-split-button__popper：菜单字色、分隔线与全站操作菜单一致 -->
+        <el-dropdown
+          v-if="mobileAddMenuItems.length > 0"
+          trigger="click"
+          placement="bottom-end"
+          popper-class="dd-split-button__popper"
+          @command="onMobileAddCommand"
+        >
+          <el-button
+            type="primary"
+            class="dd-icon-only-btn"
+            :icon="Plus"
+            aria-label="新建与更多操作"
+            title="新建与更多操作"
+          />
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item
+                v-for="item in mobileAddMenuItems"
+                :key="item.key"
+                :command="item.key"
+                :divided="item.divided"
+              >
+                {{ item.label }}
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
+      <input ref="importFileRef" type="file" accept=".json" style="display:none" @change="handleImport" />
+    </div>
 
-    <div class="toolbar">
+    <ViewManager ref="viewManagerRef" @view-change="handleViewChange" />
+
+    <div v-if="!isMobile" class="toolbar">
       <!-- 左槽是一个【恒在】的容器（flex:1 + min-width:0 + 锁定 min-height），
            内部的「筛选区」与「批量区」两支【对有操作权限的账号都常驻 DOM】，叠放在同一个 1×1 网格格子里，
            只用 visibility 切换显示（观察者没有选择列、勾不动，批量区对他直接 v-if 掉，
@@ -1578,7 +1772,7 @@ async function handleImport(event: Event) {
                长文案下这一排放不下，会换行把工具栏从 39px 顶成两行。
                短文案 + .is-narrow 的 6px gap 后实测内容宽约 695px，左槽 712.1px。
                「添加标签」不缩：只剩「标签」两个字看不出是添加还是筛选。
-               移动端 isNarrowDesktop 为 false，卡片布局本来就竖排换行，保持长文案。 -->
+               这一支只在桌面渲染；移动端另有 .dd-mobile-batch-bar（带图标，图标兜住了「标签」的歧义），见上方。 -->
           <el-button @click="handleBatchAction('enable')">{{ isNarrowDesktop ? '启用' : '批量启用' }}</el-button>
           <el-button type="danger" plain @click="handleBatchAction('disable')">{{ isNarrowDesktop ? '禁用' : '批量禁用' }}</el-button>
           <el-button @click="handleBatchAction('run')">{{ isNarrowDesktop ? '运行' : '批量运行' }}</el-button>
@@ -1672,146 +1866,70 @@ async function handleImport(event: Event) {
         class="dd-mobile-card task-card"
         :class="{ 'task-card--pinned': row.is_pinned }"
       >
-        <div class="dd-mobile-card__header">
-          <div class="dd-mobile-card__title-wrap task-card__title-wrap">
-            <div class="task-card__title-row">
-              <div class="dd-mobile-card__selection">
-                <el-checkbox v-if="canOperateTasks" :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
-                <div class="task-card__name-block">
-                  <div class="task-card__name-line">
-                    <button
-                      type="button"
-                      class="dd-mobile-card__title task-name-link"
-                      :title="`查看 ${row.name} 的日志文件`"
-                      @click.stop="openLogFiles(row)"
-                    >
-                      {{ row.name }}
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <!-- 与桌面表格同一套 out-in 过渡：轮询把状态换掉时先淡出旧值再淡入新值。 -->
-              <Transition name="dd-status-switch" mode="out-in">
-                <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="getStatusTagClass(row.status)">
-                  <span v-if="row.status === 2" class="pulse-dot"></span>
-                  {{ getStatusText(row.status) }}
-                </el-tag>
-              </Transition>
-            </div>
+        <!-- 卡片（v3.3.1，issue #143 C1）：首行「复选框 · 任务名 · 状态 · ···」，中间两行横排的时间字段，
+             末行左侧上次结果、右侧「运行 / 停止」「日志」。类型 / 分组 / 订阅 / 自定义标签、命令、定时规则、耗时
+             在卡片上不再展示（「详情」里都有），其余操作（启用 / 禁用、编辑、详情、日志文件、复制、置顶、删除）收进「···」。 -->
+        <div class="dd-mobile-card__head">
+          <el-checkbox v-if="canOperateTasks" :model-value="isSelected(row.id)" @change="toggleSelected(row.id, $event)" />
+          <!-- 名称单行省略，title 里带着全称；点击行为与桌面一致：打开日志文件 -->
+          <button
+            type="button"
+            class="task-name-link dd-mobile-card__name"
+            :title="`查看 ${row.name} 的日志文件`"
+            @click.stop="openLogFiles(row)"
+          >
+            {{ row.name }}
+          </button>
+          <!-- 状态紧跟名称。与桌面表格同一套 out-in 过渡：轮询把状态换掉时先淡出旧值再淡入新值（key 绑状态值的理由见桌面那一列）。 -->
+          <Transition name="dd-status-switch" mode="out-in">
+            <el-tag :key="row.status" :type="getStatusType(row.status)" size="small" :class="getStatusTagClass(row.status)">
+              <span v-if="row.status === 2" class="pulse-dot"></span>
+              {{ getStatusText(row.status) }}
+            </el-tag>
+          </Transition>
+          <!-- 与桌面操作列 Split Button 共用 taskActionItems / onTaskAction，菜单项与配色两端一致 -->
+          <DdMoreMenu
+            :items="taskActionItems(row, { alwaysShowDetail: true })"
+            @command="onTaskAction($event, row)"
+          />
+        </div>
 
-            <div class="dd-mobile-card__badges task-name-inline">
-              <!-- 类型标签跟随工具栏「显示设置」的开关。桌面那一份还额外带 !isNarrowDesktop，
-                   移动端卡片没有列宽压力，所以只受手动开关控制。 -->
-              <el-tag v-if="nameLabelPrefs.type" size="small" effect="plain" class="task-label task-label--type">
-                {{ getTaskTypeLabel(row.task_type) }}
-              </el-tag>
-              <!-- 与桌面表格共用同一份「显示设置」开关（分组 / 订阅 / 自定义三类分项过滤）。
-                   :key 用 entry.key（带下标）而不是标签文字：订阅名与分组名重名时会并排两条同名标签，
-                   用文字当 key 会触发 Vue 重复 key 警告。 -->
-              <el-tag
-                v-for="entry in visibleTaskLabels(row)"
-                :key="entry.key"
-                size="small"
-                effect="plain"
-                class="task-label"
-                :class="`task-label--${entry.kind}`"
-                :title="taskLabelKindTitles[entry.kind]"
-              >
-                {{ entry.label }}
-              </el-tag>
-            </div>
-
-            <div class="dd-mobile-card__subtitle task-card__command">
-              <code class="command-text">
-                <template v-if="splitTaskCommandDisplay(row.command).script">
-                  <span>{{ splitTaskCommandDisplay(row.command).before }}</span>
-                  <span class="script-link" @click.stop="navigateToScript(splitTaskCommandDisplay(row.command).script!)">{{ splitTaskCommandDisplay(row.command).script }}</span>
-                  <span>{{ splitTaskCommandDisplay(row.command).after }}</span>
-                </template>
-                <template v-else>{{ row.command }}</template>
-              </code>
-            </div>
+        <div class="dd-mobile-card__rows">
+          <div class="dd-mobile-card__row">
+            <span class="dd-mobile-card__row-label">最后运行</span>
+            <span class="dd-mobile-card__row-value time-text">{{ row.last_run_at ? formatTime(row.last_run_at) : '-' }}</span>
+          </div>
+          <div class="dd-mobile-card__row">
+            <span class="dd-mobile-card__row-label">下次运行</span>
+            <span class="dd-mobile-card__row-value next-run-cell">
+              <span class="time-text">{{ row.next_run_at ? formatTime(row.next_run_at) : '-' }}</span>
+              <!-- 与桌面表格同一套图标与分级，说明见那边的注释 -->
+              <el-tooltip v-if="row.schedule_hint" :content="row.schedule_hint" placement="top">
+                <el-icon :class="['schedule-hint-icon', isScheduleFault(row) ? 'schedule-hint-icon--fault' : 'schedule-hint-icon--info']">
+                  <WarningFilled v-if="isScheduleFault(row)" />
+                  <InfoFilled v-else />
+                </el-icon>
+              </el-tooltip>
+            </span>
           </div>
         </div>
 
-        <div class="dd-mobile-card__body">
-          <div class="dd-mobile-card__grid">
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">定时规则</span>
-              <div class="dd-mobile-card__value">
-                <template v-if="row.task_type === 'cron'">
-                  <TaskCronList
-                    :expressions="getCronExpressions(row)"
-                    compact
-                  />
-                </template>
-                <span v-else class="text-muted">{{ getTaskTypeLabel(row.task_type) }}</span>
-              </div>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">上次结果</span>
-              <div class="dd-mobile-card__value">
-                <div class="last-run-result">
-                  <Transition name="dd-status-switch" mode="out-in">
-                    <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" :class="getRunStatusClass(row.last_run_status)" size="small">
-                      {{ getRunStatusText(row.last_run_status) }}
-                    </el-tag>
-                  </Transition>
-                </div>
-              </div>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">最后运行</span>
-              <span class="dd-mobile-card__value time-text">{{ row.last_run_at ? formatTime(row.last_run_at) : '-' }}</span>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">下次运行</span>
-              <div class="dd-mobile-card__value next-run-cell">
-                <span class="time-text">{{ row.next_run_at ? formatTime(row.next_run_at) : '-' }}</span>
-                <!-- 与桌面表格同一套图标与分级，说明见那边的注释 -->
-                <el-tooltip v-if="row.schedule_hint" :content="row.schedule_hint" placement="top">
-                  <el-icon :class="['schedule-hint-icon', isScheduleFault(row) ? 'schedule-hint-icon--fault' : 'schedule-hint-icon--info']">
-                    <WarningFilled v-if="isScheduleFault(row)" />
-                    <InfoFilled v-else />
-                  </el-icon>
-                </el-tooltip>
-              </div>
-            </div>
-            <div class="dd-mobile-card__field">
-              <span class="dd-mobile-card__label">耗时</span>
-              <span class="dd-mobile-card__value">{{ formatDuration(row.last_running_time) }}</span>
+        <div class="dd-mobile-card__footer">
+          <div class="dd-mobile-card__footer-main task-card__result">
+            <span class="dd-mobile-card__row-label">上次结果</span>
+            <div class="last-run-result">
+              <Transition name="dd-status-switch" mode="out-in">
+                <el-tag :key="String(row.last_run_status)" :type="getRunStatusType(row.last_run_status)" :class="getRunStatusClass(row.last_run_status)" size="small">
+                  {{ getRunStatusText(row.last_run_status) }}
+                </el-tag>
+              </Transition>
             </div>
           </div>
-
-          <div class="dd-mobile-card__actions task-card__actions">
-            <!-- 「停止」与桌面 Split Button 的主体同色：issue #133 起从 warning 改成 danger（与「批量删除」一致）。
-                 运行中且开关开着时，它会与右边空心红的「禁用」相邻 —— 两者实心 / 空心、文案都不同，且都有二次确认。 -->
-            <el-button v-if="canOperateTasks && row.status !== 2" type="primary" size="small" @click="handleRun(row)">运行</el-button>
-            <el-button v-else-if="canOperateTasks" type="danger" size="small" @click="handleStop(row)">停止</el-button>
-            <!-- 按开关位而不是 status === 0 判（issue #133），理由见 isTaskSwitchOn -->
-            <el-button v-if="canOperateTasks" :type="isTaskSwitchOn(row) ? 'danger' : 'success'" size="small" plain @click="handleToggle(row)">
-              {{ isTaskSwitchOn(row) ? '禁用' : '启用' }}
-            </el-button>
-            <el-button size="small" @click="openLogViewer(row)">实时日志</el-button>
-            <el-button v-if="canOperateTasks" size="small" @click="openEdit(row)">编辑</el-button>
-            <!-- 挂与桌面 Split Button 同一个 popper-class：菜单项字色加深（契约 C7）与删除项的红字 + 悬停淡红底
-                 都由 global.scss 里 .dd-split-button__popper 那几条全局规则统一给，两端观感一致。
-                 原来删除靠内联 span 染红，悬停时却是 EP 默认的主题色淡底，和桌面对不上。 -->
-            <el-dropdown trigger="click" placement="bottom-end" popper-class="dd-split-button__popper">
-              <el-button size="small">
-                更多
-                <el-icon><More /></el-icon>
-              </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item @click="openDetail(row)">详情</el-dropdown-item>
-                  <el-dropdown-item @click="openLogFiles(row)">日志文件</el-dropdown-item>
-                  <el-dropdown-item v-if="canOperateTasks" @click="handleCopy(row)">复制</el-dropdown-item>
-                  <el-dropdown-item v-if="canOperateTasks" @click="handlePin(row)">{{ row.is_pinned ? '取消置顶' : '置顶' }}</el-dropdown-item>
-                  <el-dropdown-item v-if="canOperateTasks" divided class="dd-split-button__item--danger" @click="handleDelete(row)">删除</el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
+          <div class="dd-mobile-card__footer-actions">
+            <!-- 「停止」与桌面 Split Button 的主体同色：issue #133 起从 warning 改成 danger（与「批量删除」一致） -->
+            <el-button v-if="canOperateTasks && row.status !== 2" type="primary" @click="handleRun(row)">运行</el-button>
+            <el-button v-else-if="canOperateTasks" type="danger" @click="handleStop(row)">停止</el-button>
+            <el-button @click="openLogViewer(row)">日志</el-button>
           </div>
         </div>
       </div>
@@ -2070,9 +2188,9 @@ async function handleImport(event: Event) {
         v-model:current-page="page"
         v-model:page-size="pageSize"
         :total="total"
-        :page-sizes="[10, 20, 50, 100]"
+        :page-sizes="taskPageSizeOptions"
         layout="sizes, prev, pager, next"
-        @current-change="loadTasks"
+        @current-change="handlePageChange"
         @size-change="handlePageSizeChange"
       />
     </div>
@@ -2254,7 +2372,7 @@ async function handleImport(event: Event) {
   // 「已选 N 项」是一段纯文字，默认的 stretch 会让它按整个行高拉满、与 32px 的按钮基线对不齐
   align-items: center;
   gap: 8px;
-  // 极窄的桌面视口（以及移动端的竖排工具栏）下这一排装不下时换行，不要顶破左槽横向溢出
+  // 极窄的桌面视口下这一排装不下时换行，不要顶破左槽横向溢出（移动端不渲染这一支，另有横滑的 .dd-mobile-batch-bar）
   flex-wrap: wrap;
   min-width: 0;
   // 与 .toolbar__right 站同一条基线：右区也是 min-height:39px + 内部 center，中心线在 19.5px。
@@ -2465,9 +2583,9 @@ async function handleImport(event: Event) {
   gap: 4px;
 }
 
-// 移动端卡片里这一格是靠左排的字段值，不能跟着居中。
+// 移动端卡片里这一格是「标签 值」横排行的值，靠左排，不能跟着居中。
 // 用「两个类同时命中」而不是媒体查询：卡片布局由 isMobile 决定渲染哪一套 DOM，不由视口宽度决定样式。
-.dd-mobile-card__value.next-run-cell {
+.dd-mobile-card__row-value.next-run-cell {
   justify-content: flex-start;
 }
 
@@ -2493,8 +2611,8 @@ async function handleImport(event: Event) {
   align-items: center;
   gap: 4px;
   // out-in 有一段「旧的已走、新的未来」的空档，这一格会瞬间没有内容。
-  // 撑住 el-tag small 的高度，免得移动端网格里这一格塌成 0、把同行其它字段拽着抖一下。
-  // 桌面表格的行高由定时规则/操作列撑着，这里只是顺带保险。
+  // 撑住 el-tag small 的高度，空档期这一格不塌成 0。
+  // 桌面表格的行高由定时规则/操作列撑着、移动端卡片末行由右侧 32px 的按钮撑着，这里只是顺带保险。
   min-height: 20px;
 }
 
@@ -2643,20 +2761,6 @@ async function handleImport(event: Event) {
   }
 }
 
-.task-card {
-  .command-text {
-    // 移动端卡片要反着来：基态的单行省略是给窄表格列准备的，卡片是竖向布局、宽度充裕，
-    // 而且这里的 <code> 没有挂 title，一旦省略用户就再也看不到完整命令。
-    // 只覆盖 white-space / word-break 还不够 —— 基态的 overflow:hidden 会继续把换行后的第二行裁掉，
-    // 所以必须连 overflow / text-overflow 一起还原。
-    display: block;
-    white-space: pre-wrap;
-    word-break: break-all;
-    overflow: visible;
-    text-overflow: clip;
-  }
-}
-
 // 置顶移动卡：与环境变量页 .env-card--pinned 同一套，只改边框色与左缘竖条、不改底色。
 // global.scss 的 `.dd-mobile-card` 是 (0,1,0)，这条 scoped 之后是 (0,2,0)，压得过。
 .task-card--pinned {
@@ -2664,27 +2768,19 @@ async function handleImport(event: Event) {
   box-shadow: inset 4px 0 0 #f5a623;
 }
 
-.task-card__title-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+// 移动卡片的任务名：同挂 .task-name-link（蓝字、点击打开日志文件）与全局 .dd-mobile-card__name（16px 单行省略）。
+// .task-name-link 的 `font: inherit` 在 scoped 下是 (0,2,0)，会把全局那条 (0,1,0) 的 16px / 600 冲回页面的 14px，
+// 这里用两个类叠加（scoped 后 (0,3,0)）把字号字重补回来 —— global.scss 那条的注释里约定了由任务页自己保证。
+.task-name-link.dd-mobile-card__name {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+// 末行左侧「上次结果 + 状态标签」：间距取与上方 .dd-mobile-card__row 相同的 10px（全局 footer-main 是 8px），
+// 标签的左缘才能和「最后运行 / 下次运行」两行的值对齐成一条竖线（三个标签字样都是 4 个字、同一个 min-width）。
+.task-card__result {
   gap: 10px;
-}
-
-.task-card__name-block {
-  min-width: 0;
-}
-
-.task-card__name-line {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.task-card__actions {
-  > * {
-    flex: 1 1 calc(50% - 4px);
-  }
 }
 
 @media screen and (max-width: 768px) {
@@ -2700,47 +2796,6 @@ async function handleImport(event: Event) {
       width: 100%;
       flex-wrap: wrap;
     }
-  }
-
-  .toolbar {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-
-    // 移动端左槽是竖排：状态分段与搜索框各占一行，所以高度由内容决定，
-    // 不能被桌面那条 min-height:39px 顶着（批量区在这里同样只是占住左槽的位置，竖排下谈不上「移到左侧」）。
-    &__left {
-      min-height: 0;
-    }
-
-    &__filters {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 10px;
-    }
-
-    &__search {
-      width: 100% !important;
-    }
-
-    &__right {
-      justify-content: flex-end;
-    }
-  }
-
-  // 移动端把藏起来的那一支直接从流里拿掉。
-  // 桌面端留着它是为了锁死工具栏高度（dd-fixed-page 是定高 flex 列，工具栏高多少表格就矮多少），
-  // 但 dd-fixed-page 只在 ≥769px 生效，移动端是普通文档流、表格不会被工具栏挤压，
-  // 留着竖排的筛选区（状态分段 + 搜索框各占一行）会在批量态白占一大截空高。
-  // 这条【只能】落在 ≤768px 内：写到外面桌面端就退回今天的跳动。
-  .toolbar__filters.is-swapped-out,
-  .batch-actions.is-swapped-out {
-    display: none;
-  }
-
-  .status-tabs {
-    width: 100%;
-    overflow-x: auto;
   }
 }
 
@@ -2759,6 +2814,7 @@ async function handleImport(event: Event) {
 }
 
 .toolbar,
+.task-mobile-toolbar,
 .table-card,
 .dd-mobile-list {
   animation: dd-tasks-rise-in var(--dd-motion-page) var(--dd-ease-decelerate) both;

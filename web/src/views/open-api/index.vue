@@ -1,5 +1,5 @@
 <template>
-  <div class="open-api-page dd-scroll-page dd-page-hide-heading">
+  <div ref="pageRootRef" class="open-api-page dd-scroll-page dd-page-hide-heading">
     <div class="page-header">
       <div>
         <h2 class="page-title-with-icon"><el-icon><Key /></el-icon><span>Open API 管理</span></h2>
@@ -341,6 +341,7 @@
         :page-size="apiPageSize"
         layout="prev, pager, next"
         small
+        @current-change="handleApiPageChange"
       />
     </div>
 
@@ -476,6 +477,12 @@
           </div>
         </div>
       </div>
+      <!-- 移动端全屏时右上角 × 被全局规则隐藏（F2），关闭入口放到右下角；
+           本弹窗 close-on-click-modal=false，点遮罩也关不掉，这颗按钮是移动端唯一的出口。
+           桌面不传 footer 插槽，EP 不渲染 footer，保持原样。 -->
+      <template v-if="dialogFullscreen" #footer>
+        <el-button @click="secretDialogVisible = false">关闭</el-button>
+      </template>
     </el-dialog>
 
     <el-dialog
@@ -520,12 +527,16 @@
         v-model:current-page="logPage"
         @current-change="loadLogs"
       />
+      <!-- 移动端全屏时右上角 × 被全局规则隐藏（F2），关闭入口放到右下角；桌面不渲染 footer。 -->
+      <template v-if="dialogFullscreen" #footer>
+        <el-button @click="logsDialogVisible = false">关闭</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, nextTick } from "vue";
 import { openApiApi } from "@/api/open-api";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
@@ -541,6 +552,7 @@ import {
 } from "@element-plus/icons-vue";
 import { useResponsive } from "@/composables/useResponsive";
 import { formatDateTime } from "@/utils/datetime";
+import { scrollListToTop } from "@/utils/scrollToTop";
 import DdBadge from "@/components/ui/DdBadge.vue";
 import DdSplitButton from "@/components/ui/DdSplitButton.vue";
 import type { SplitButtonItem } from "@/components/ui/DdSplitButton.vue";
@@ -560,6 +572,9 @@ const logPage = ref(1);
 const currentLogAppId = ref(0);
 const revealedSecrets = reactive<Record<number, string>>({});
 const { isMobile, dialogFullscreen } = useResponsive();
+// 页面根：翻页回顶的锚点。本页是 dd-scroll-page，桌面由页面根自己滚，移动端由外层 .layout-main 滚，
+// scrollListToTop 会沿锚点及其祖先链把两者都覆盖到。
+const pageRootRef = ref<HTMLElement | null>(null);
 
 const searchKeyword = ref("");
 const statusFilter = ref("");
@@ -703,6 +718,16 @@ const pagedApps = computed(() => {
 
 const handleSearch = () => {
   apiPage.value = 1;
+};
+
+// 翻页后回到列表顶部（issue #143 O3，双端都做）。本页分页器固定每页 10 条，没有 size-change。
+// 只挂在分页器的 current-change 上：它只在用户翻页（或 total 变小把页码夹回）时触发，
+// handleSearch 直接改 apiPage 不会触发，所以不会在搜索时把人拽回顶部。
+// 本页是前端分页，数据早已在内存里，没有「请求回来」的时机可等；
+// 等 nextTick 让新一页先渲染出来再滚，免得先回顶、后换内容，位置又被新内容的高度顶偏。
+const handleApiPageChange = async () => {
+  await nextTick();
+  scrollListToTop(pageRootRef.value);
 };
 
 const copyText = async (text: string) => {

@@ -633,8 +633,10 @@ func (h *SubscriptionHandler) Logs(c *gin.Context) {
 }
 
 func (h *SubscriptionHandler) BatchDelete(c *gin.Context) {
+	// min=1：binding:"required" 只挡缺字段 / null，挡不住 "ids": []。空列表会生成 IN (NULL)、一条都不删，
+	// 却照样回「已删除 0 个订阅」的成功，前端据此提示「批量删除成功」—— 明确回 400 才不会假装删过了。
 	var req struct {
-		IDs []uint `json:"ids" binding:"required"`
+		IDs []uint `json:"ids" binding:"required,min=1"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "请求参数错误")

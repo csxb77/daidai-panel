@@ -18,12 +18,19 @@ import "time"
 // 一列一个字段的唯一收益（能被 SQL 过滤/排序）在这里完全用不上，
 // 代价却是每加一个开关都要改表结构 + 补 EnsureColumns。
 // 将来要加别的偏好组（比如主题、列表密度）就再加一列 JSON，不要往 Editor 里混。
+// 列表页偏好（List）就是按这条加出来的第二组。
 type UserPreference struct {
 	ID     uint `gorm:"primarykey" json:"id"`
 	UserID uint `gorm:"uniqueIndex;not null" json:"user_id"`
 	// 编辑器偏好 JSON，形状见 server/handler/user_preference.go 的 editorPreferences。
 	// 允许为空串：表示这个用户从没改过任何开关，读的时候整体回落默认值。
-	Editor    string    `gorm:"type:text;not null;default:''" json:"editor"`
+	Editor string `gorm:"type:text;not null;default:''" json:"editor"`
+	// 列表页偏好 JSON（issue #143：任务 / 环境变量页每页条数、视图栏显隐跟随账户），
+	// 形状见 server/handler/user_preference.go 的 listPreferences。
+	// 与 Editor 不同，这一组是**稀疏存储**：只装用户显式设过的键，服务端不维护默认值。
+	// 空串 = 一个键都没存过；老库由 database.EnsureColumns 补列，存量行落 ''，升级后行为不变。
+	// ⚠️ 只写 list 那一组时绝不能碰 Editor 列（反之亦然），见 UpdatePreferences 的按组 upsert。
+	List      string    `gorm:"type:text;not null;default:''" json:"list"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
