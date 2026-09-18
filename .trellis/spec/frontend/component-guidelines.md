@@ -271,6 +271,8 @@ if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
 - `GET|PUT /api/auth/preferences`（`middleware.JWTAuth()`，不限角色），per-user 偏好表，
   **不复用**全局 `system_configs` —— 那张表是「面板级配置」，偏好是「这个人的」，混进去会让
   两个用户互相覆盖，并且非管理员没有写权限。
+  v3.3.1 起同一个接口还承载列表页偏好（`list` 组，另一列），两组按组写入、互不碰对方的列，
+  前端见下方「Scenario: 列表页偏好」。
 
 **依赖**
 - `@codemirror/{state,view,language,commands,search,autocomplete,merge,legacy-modes}` + `@codemirror/lang-*` + `@lezer/highlight`
@@ -441,9 +443,13 @@ if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
 
 #### 首屏偏好同步的两条铁律（v3.2.4）🔴
 - `GET /api/auth/preferences` 的响应带一个 `stored`（布尔）：
-  **有这个用户的记录 且 记录里的偏好能解析成 JSON 对象**才是 `true`；
+  **有这个用户的记录 且 记录里的 editor 列能解析成 JSON 对象**才是 `true`；
   没记录 / 空串 / 脏 JSON 一律 `false`（后两种当成「没存过」，正好让前端把本机那份重新迁上去）。
-  `PUT` 的响应恒为 `"stored": true`。
+  `stored` 只描述 editor 这一组，与 v3.3.1 加的 `list` 组无关。
+  `PUT` 的响应：请求里带了 `editor` 组（哪怕是空对象 `{}`）时为 `true`；
+  🔴 v3.3.1 起**不再恒为 `true`**：只带 `list` 组、或两组都不带的 PUT，按读库时的真实状态回。
+  写死 `true` 的话，只改列表偏好的请求会让前端误以为 editor 存过，拿默认值把本机那份编辑器偏好冲掉。
+  服务端按组写入的完整契约见 backend `quality-guidelines.md`「场景：用户界面偏好按组写入」。
   `editor` 字段本身**不受它影响**：无论 `stored` 是什么都下发一整套可用的值，
   不认得 `stored` 的老客户端行为与加这个字段之前逐字一致。
 - 🔴 **`stored !== true` 时必须走【上行迁移】，绝不许下行覆盖**：
@@ -1185,3 +1191,331 @@ watch(() => props.fileTree, async () => {
 
 - 8 个列表页（环境变量、依赖、日志、开放接口、通知、任务、用户、订阅）的 `:header-cell-style` 取值必须是 `var(--el-fill-color-light)` / `var(--el-text-color-regular)`，不得写死 `#f8fafc` / `#64748b`：写死值在暗色下要靠 `!important` 补丁盖回来，而内联样式只有 `!important` 压得住，漏一页就是一块浅色表头。
 - `global.scss` 里那条 `html.dark` 表头补丁取的是同一对令牌，现在是兜底（防以后又有人写死浅色内联样式）。
+
+---
+
+## Scenario: 列表页偏好（`utils/listPreferences.ts`，v3.3.1，issue #143）
+
+### 1. Scope / Trigger
+
+- 触发：改 `web/src/utils/listPreferences.ts`；改任务页、环境变量页的每页条数；改任务页视图栏「全部」「分组标签」的显隐；
+  或者要往服务端的 `list` 白名单里加键时，必须看本节。
+- 背景：这 4 项原来分散在 `tasks/index.vue`、`envs/index.vue`、`ViewManager.vue` 里，各自直接读写 localStorage。
+  localStorage 按 origin 隔离，issue 的报告者正是多域名 / 多 IP 在用，换个地址打开就全没了。v3.3.1 起跟随账户。
+
+### 2. Signatures
+
+```ts
+export interface ListPreferences {
+  tasks_page_size: 10 | 20 | 50 | 100
+  envs_page_size: '20' | '50' | '100' | 'all'
+  tasks_view_all_hidden: boolean
+  tasks_view_groups_hidden: boolean
+}
+export const TASKS_PAGE_SIZE_OPTIONS    // [10, 20, 50, 100]
+export const ENVS_PAGE_SIZE_OPTIONS     // ['20', '50', '100', 'all']
+export const LIST_PREFERENCES_DEFAULTS  // { tasks_page_size: 20, envs_page_size: '20', 两个 hidden: false }，Object.freeze
+export const LIST_PREFERENCE_KEYS       // 四个键，供遍历
+export function parseListPreferenceWire(key, raw)                  // 校验「接口上的值」，口径与服务端白名单一致（类型不对也算非法）
+export function readListPreference(key): ListPreferences[K]        // 同步读本地缓存
+export function setListPreferences(patch: Partial<ListPreferences>): void  // 一次改多项，只发一次 PUT
+export function setListPreference(key, value): void                // 等于只带这一个键的 setListPreferences
+export function ensureListPreferencesLoaded(): Promise<void>       // 记忆化
+export function resetListPreferencesCache(): void
+```
+
+- `api/auth.ts`：`getPreferences()` 的返回类型多了 `list?: Record<string, unknown>`；新增 `updateListPreferences(list)`，
+  发 `PUT /auth/preferences`，body 只有 `{ list }`。editor 那条 `updatePreferences(editor)` 不动。
+- 消费方：`tasks/index.vue`（`tasks_page_size`）、`tasks/components/ViewManager.vue`（两个 hidden）、`envs/index.vue`（`envs_page_size`）；
+  `stores/auth.ts` 的 `clearAuth` 调 `resetListPreferencesCache()`。
+- 服务端契约（按组写入、稀疏白名单、400 文案、写锁）：backend `quality-guidelines.md`「场景：用户界面偏好按组写入」。
+
+### 3. Contracts
+
+**存储模型与 `editorPreferences.ts` 同构**：localStorage 是首屏 / 离线 / 隐私模式下的同步缓存（页面 setup 时必须立刻拿到条数，不能等网络），
+服务端 `list` 组是真源。不要另发明一套。与 editor 刻意不同的只有两点：
+
+1. **稀疏存储、逐键迁移**，没有 editor 那种组级 `stored`：服务端有这个键就下行，没有这个键、本机老键里真有值才上行，精确到每一个键。
+   组级 `stored` 在多 origin 下会出事：第一个被打开的 origin 哪怕从没改过设置，也会把默认值「占坑」写上去，其它 origin 的自定义值随后被全部冲掉。
+2. **不派发变更事件**：消费方只有三处，都在挂载时调 `ensure`，等它 resolve 之后自己重读一遍并应用。
+
+**本地缓存**
+- **沿用老键和老格式**：`dd:tasks:page_size`（数字字符串）、`daidai-env-page-size`（`'20'|'50'|'100'|'all'`）、
+  `dd:tasks:view_all_hidden` / `dd:tasks:view_groups_hidden`（`'1'` / `'0'`）。老值天然就是上行迁移的数据源；回退到 v3.3.0 时老版本照样读得懂。
+- 读写都包 try/catch，外加一层内存覆盖（`memoryOverrides`）：隐私模式下 `setItem` 抛错时，本次改动仍然生效。
+- `readListPreference(key)`：本地有合法值就用它，否则取 `LIST_PREFERENCES_DEFAULTS`。
+  默认值只有前端这一份（服务端不存默认值），与改造前三个页面各自的回落值逐字相同。
+
+**`ensureListPreferencesLoaded()`**
+- 记忆化，失败也不把 promise 置回 null（未登录、离线这类失败是稳定的，同 editor）；刻意不放进 `main.ts` 的 bootstrap，不给其它页面加请求。
+- 🔴 响应里的 `list` 不是对象（v3.3.0 及以前的老服务端）→ 直接 return，**一个请求都不上行**。
+  老服务端的 PUT 不认识 `list`，会把整套 editor 默认值写进库、把 editor 的 `stored` 翻成 `true`，下次打开编辑器时本机的编辑器偏好被默认值冲掉。
+- 服务端有合法值 → 写回本地缓存；但本次会话里用户亲手改过的键（`locallyChanged`）跳过：那条 GET 是在他改之前发出的，带回来的是旧值。
+- 服务端没有这个键、本机老键里**真的有**合法值 → 放进迁移补丁。「真的有」指 `parseStored` 解析出了值，不是回落出来的默认值；
+  开关存的 `'0'` 也算真的有（用户在视图管理里保存过「显示」）。
+- 补丁非空才发，且只发**一次** PUT，不等它回来就 resolve（迁上去的就是本机当前值，本地什么都不用变）。
+  本机一个老键都没有时，不发任何请求，避免给服务端「占坑」写默认值。
+
+**写入**
+- 🔴 **所有写入必须经 `setListPreference(s)`**。验收 grep：
+  `dd:tasks:page_size|daidai-env-page-size|dd:tasks:view_(all|groups)_hidden` 在 `web/src` 里只允许出现在 `listPreferences.ts`（v3.3.1 时零违例）。
+  绕过它直接写 localStorage 的后果：改动只留在本机，下次加载被服务端的旧值静默改回去，不报错、构建全绿。
+- `setListPreferences(patch)` 的顺序：按白名单键遍历 → `parseWire` 逐键校验（非法或缺失的那一键单独丢弃，其余照发）→ 记脏 → 写本地缓存 →
+  后台发**一次** `updateListPreferences(accepted)`；一个合法键都没有就不发；同步失败静默（本机已经生效了）。
+  按白名单遍历而不是遍历 patch：白名单外的键天然被忽略；非法值要是放行，服务端会对整个请求回 400，同一批里合法的键也跟着丢。
+- 同一个动作要改好几项时用 `setListPreferences`，不要连调几次 `setListPreference`（请求数白白翻倍）。
+  `ViewManager.handleManagementSaved` 就是把两个开关合进一个 patch。这不是为了防丢键：服务端的 `preferenceWriteMu`
+  已经把「读 - 合并 - 写」串行化，改不同键的并发 PUT 都会落库；两个 PUT 改**同一个**键时，以服务端后处理的那个为准。
+- 🔴 **只在用户动作里 set，程序化回写不 set**。当前三处：tasks 与 envs 的 `handlePageSizeChange`、ViewManager 的 `handleManagementSaved`（而且只在值真的变了时）。
+  不要挂进 `watch(pageSize)`：应用服务端值时 watch 也会触发，多发一次 PUT，还会把这一键误记成「本地改过」，挡住后面的下行同步。
+  视图管理什么都没改就点保存时不发请求：服务端是稀疏存储，写一次就等于替用户占坑。
+- 分页器给的是 number：写之前按白名单取一遍（`TASKS_PAGE_SIZE_OPTIONS.find(option => option === pageSize.value)`），不要用 `as` 断言。
+  `:page-sizes` / 条数下拉的选项也由两个 OPTIONS 常量生成，不在页面里再抄一份。
+
+**首拉时机：两页刻意不同**
+- **tasks 不阻塞首拉**：挂载时先按本机缓存拉一次，同时 `ensureListPreferencesLoaded().then(...)`；服务端值与当前不同才回到第 1 页重拉（`applyAccountPageSize`）。
+  两次请求谁先回来都没关系，`loadTasksSeq` 保证最后停在最新一次上。
+- **envs 先 `await ensureListPreferencesLoaded()` 再发首个列表请求**。`loadData` 现在也有请求序号闸（`loadDataSeq`），理论上也能照任务页那样写；
+  仍然选择先等，是因为两边不一致时（换浏览器、换域名后第一次打开）先拉的那次注定作废：白发一个列表请求（本地是「全部」档时就是整表），
+  屏幕上还会先闪一版按本地条数排的行与翻页器，再整页换掉。代价是首拉多等一个 GET 的往返；ensure 是记忆化的，同一会话先去过任务页就零等待。
+  等待期间用户点状态标签、搜索触发的 `loadData`，会被随后那次更新的请求盖过（还在飞的由序号闸丢弃）。
+- ViewManager：挂载时 ensure 之后刷新两个 ref，再调 `applyViewFallback()`（服务端存的是「隐藏全部」时，要把高亮落到第一个可见视图）。
+- `onActivated` 里不用再调 ensure：它是记忆化的，同一会话只拉一次。
+
+**退出登录**
+- 🔴 `clearAuth` 必须调 `resetListPreferencesCache()`（已挂上）：清掉「已经拉过」的记忆和本会话的脏键集合；
+  不清 localStorage 里的值，它同时是本机的离线缓存，下次登录会被服务端值覆盖。
+- 已知且接受的边界：共用一个浏览器时，上一个账号留在本机的老值，会在下一个账号的服务端没有该键时被迁上去。影响只是观感，PRD 接受。
+
+**白名单要三处一起改**：`listPreferences.ts` 的类型与两个 OPTIONS、`server/handler/user_preference.go` 的
+`listTasksPageSizeValues` / `listEnvsPageSizeValues` 与 `listPreferences` 结构体。演示站 mock（`demo/adapter.ts`）从 `listPreferences.ts` 导入，不手抄。
+两边对不上的表现：多出来的档位 PUT 上去被 400、只在本机生效，换个浏览器就回到默认值。
+
+### 4. Validation & Error Matrix
+
+- 老服务端（响应里没有 `list`）-> ensure 直接 return，不上行，本机缓存照用
+- 服务端 `list` 为 `{}`、本机没有老键 -> 不发任何请求
+- 服务端 `list` 为 `{}`、本机 `dd:tasks:page_size` 为 `'50'` -> 只发一次 `PUT {list:{tasks_page_size:50}}`
+- 服务端有值、用户在 GET 回来之前改过同一个键 -> 跳过这一键的下行写回，用户刚选的值保留
+- 本机老键是脏值（`'30'`、`'abc'`）-> 当作没存过：不迁移，读出来是默认值
+- `setListPreference` 收到白名单外的值 -> 这一键丢弃，不写本地、不发请求
+- 隐私模式 `setItem` 抛错 -> 走内存覆盖，本次会话生效，刷新后丢失
+- 页面直接读写老键 -> 验收 grep 违例；运行时表现为下次加载被服务端值改回去，不报错
+
+### 5. Good/Base/Bad Cases
+
+- Good：只在用户动作里 set；一次动作改多项时合成一个 patch；首拉阻塞与否按页面有没有请求序号闸、以及「先拉那次是否注定作废」来定
+- Base：从没改过这几项的新用户 -> 服务端一行都不写，全部用前端默认值
+- Bad：`watch(pageSize, v => setListPreference(...))`；ensure 里把回落出来的默认值也迁上去；页面自己 `localStorage.getItem('dd:tasks:page_size')`
+
+### 6. Tests Required
+
+- 前端没有自动化测试：`cd web && npm run build`（含 vue-tsc）+ 上面的验收 grep。
+- 浏览器实测：
+  - 换一个浏览器 profile 用同一账号登录：tasks 与 envs 的每页条数、视图栏两个隐藏开关都还在
+  - 只改过列表偏好的账号打开编辑器页：本机的编辑器偏好不被默认值冲掉（`GET` 的 `stored` 仍为 `false`）
+  - 本机有老键、服务端没有：首次加载后 Network 里只有一个 PUT，只带本机真有的键；本机没有老键：零个 PUT
+  - 视图管理什么都不改点保存：零个 PUT；两个开关都改：一个 PUT 带两个键
+  - DevTools 限速到 Slow 3G，进任务页后立刻改条数：GET 回来之后不会被弹回去
+  - 退出登录、换一个账号：看到的是新账号自己的值
+- 服务端用例：`cd server && go test ./handler -run Preferences -count=1`（清单见 backend `quality-guidelines.md`）。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+// 页面自己读写老键：改动只留在本机，下次加载被服务端旧值静默改回去
+const pageSize = ref(Number(localStorage.getItem('dd:tasks:page_size')) || 20)
+watch(pageSize, (v) => localStorage.setItem('dd:tasks:page_size', String(v)))
+```
+
+```ts
+// 挂在 watch 上：应用服务端值时也会触发，多发一次 PUT，还把这一键误记成「本地改过」
+watch(pageSize, (v) => setListPreference('tasks_page_size', v as 10 | 20 | 50 | 100))
+```
+
+#### Correct
+
+```ts
+const pageSize = ref<number>(readListPreference('tasks_page_size'))
+
+function handlePageSizeChange() {
+  page.value = 1
+  const size = TASKS_PAGE_SIZE_OPTIONS.find(option => option === pageSize.value)
+  if (size !== undefined) setListPreference('tasks_page_size', size)  // 只在这个用户动作里写
+  void reloadAndScrollToTop()
+}
+```
+
+---
+
+## Scenario: 移动端卡片的「···」菜单（`DdMoreMenu`）与菜单项的 `success`（v3.3.1，issue #143）
+
+### 1. Scope / Trigger
+
+- 触发：改 `web/src/components/ui/DdMoreMenu.vue`、`DdSplitButton.vue` 的 `SplitButtonItem`，
+  或给移动端卡片加「···」菜单、给操作菜单加「启用」这类正向操作时，必须看本节。卡片整体结构见 `design-system.md` §4.4。
+
+### 2. Signatures
+
+- `DdMoreMenu`：
+  - props：`items: SplitButtonItem[]`（类型从 `./DdSplitButton.vue` 导入）、`ariaLabel?: string`（默认「更多操作」）、`disabled?: boolean`（默认 `false`）；
+  - emit：`command(key: string)`（EP 给的 key 统一 `String()`）；
+  - 没有插槽，也没有 scoped 样式。
+- `SplitButtonItem`：`key` / `label` / `icon?` / `disabled?` / `divided?` / `danger?` / **`success?`（v3.3.1 新增）** / `visible?`。
+
+### 3. Contracts
+
+- **渲染**：外层是 `el-dropdown`，`trigger="click"`、`placement="bottom-end"`、`popper-class="dd-split-button__popper"`，根元素带 `class="dd-mobile-card__more-wrap"`（`margin-left: auto`）。
+  触发器是原生 `<button type="button" class="dd-mobile-card__more" :aria-label>`，里面放 `MoreFilled` 图标（组件内局部 import，不依赖 `main.ts` 的全局注册）：
+  键盘可达，读屏能念出 `aria-label`；`type="button"` 防止放进表单时被当成提交按钮。
+- 菜单项只渲染 `visible !== false` 的；`disabled` / `divided` 照传；`danger` 挂 `dd-split-button__item--danger`，`success` 挂 `dd-split-button__item--success`。
+  **一项都不可见时整个不渲染**：空菜单点开只有一块空白浮层，看起来像坏了。
+- **放在 `.dd-mobile-card__head` 的最后**，靠根元素的 `margin-left: auto` 贴到最右。
+- **items 直接复用桌面操作列那份数组**，菜单项与配色两端才一致：
+  - tasks：`taskActionItems(row, { alwaysShowDetail: true })` + `onTaskAction`。移动端卡片没有 Split Button 主体，观察者那一支的「详情」没地方承担，
+    所以用 `alwaysShowDetail` 让它留在菜单里，否则观察者在手机上看不到详情；
+  - subscriptions：`subActionItems` + `onSubAction`；envs：`buildEnvActionItems(row)` + `onEnvAction`；
+  - deps：`depCardMenuItems(row)`，即 `depActionItems(row)` 去掉 `delete` 项（卡片末行已有「卸载」按钮），并把分隔线挂到 `force-delete` 上；
+  - logs：`logCardMenuItems`（只有「日志文件」一项，所有角色可见）。
+- **`success`**：标记可撤销的正向操作。目前只有任务的「启用」：`success: !switchOn`，与「禁用」的 `danger: switchOn` 对称。
+  - 只在 hover / focus 时显示绿字加 `--el-color-success-light-9` 淡绿底；**常态刻意不写颜色**，沿用 popper 统一的 primary 字色，
+    常态就变绿会比同菜单其它项抢眼一档。
+  - 与 `danger` 互斥，同一项不要两个都设。
+  - 样式在 global.scss 的 `.dd-split-button__popper .dd-split-button__item--success`，特异性 (0,4,0)，高于 EP 的 hover 规则 (0,3,0)，不需要 `!important`；
+    取值只用令牌，暗色下 `--el-color-success-light-9` 会由 EP 的 dark css-vars 换成深绿底。
+  - `DdSplitButton` 与 `DdMoreMenu` 的模板都绑了这个 class。**页面自己手写 `el-dropdown` 渲染同一份 items 时，`--danger` / `--success` 两个 class 都要绑**
+    （deps 移动端工具栏的下拉就是这样写的），漏绑的话那个菜单里「启用」hover 不变绿。
+- 样式全部写在 global.scss（`.dd-mobile-card__more`、`.dd-split-button__popper`）：菜单浮层 teleport 到 body，scoped 命中不到。
+
+### 4. Validation & Error Matrix
+
+- DdMoreMenu 放在 `__head` 中间 -> 「···」不贴右，后面的元素被它的 `margin-left: auto` 推到最右
+- 移动端另写一份菜单数组 -> 与桌面漂移，某一项只在一端有
+- 同一项同时设 `danger` 和 `success` -> 两条 hover 规则打架
+- 手写 `el-dropdown` 只绑了 `--danger` -> 这个菜单里「启用」hover 不变绿
+- 给 `.dd-split-button__item--success` 写常态颜色 -> 与 #133「菜单项字色统一」冲突
+
+### 5. Good/Base/Bad Cases
+
+- Good：`<DdMoreMenu :items="taskActionItems(row, { alwaysShowDetail: true })" @command="onTaskAction($event, row)" />` 放在首行最后
+- Base：菜单里全是中性项 -> 不设 `danger` / `success`
+- Bad：在卡片里手写一个 `<el-dropdown>` + 自定义触发器 + 一份新的菜单项
+
+### 6. Tests Required
+
+- `cd web && npm run build`。
+- 浏览器实测：
+  - 390 宽下五个列表页的「···」都贴在卡片右上角，菜单项与桌面操作列一致；观察者账号下任务卡片的菜单里有「详情」「日志文件」
+  - 任务菜单（桌面 Split Button 与移动端「···」）里「启用」hover / 键盘聚焦时是绿字淡绿底、常态与其它项同色；「禁用」仍是红字。明暗两种主题都看
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```vue
+<!-- 移动端另写一份菜单：与桌面漂移，也没有 success / danger 配色 -->
+<el-dropdown @command="onMobileCommand">
+  <span class="more">···</span>
+  <template #dropdown>
+    <el-dropdown-menu><el-dropdown-item command="enable">启用</el-dropdown-item></el-dropdown-menu>
+  </template>
+</el-dropdown>
+```
+
+#### Correct
+
+```vue
+<div class="dd-mobile-card__head">
+  <el-checkbox … />
+  <span class="dd-mobile-card__name" :title="row.name">{{ row.name }}</span>
+  <el-tag size="small">…</el-tag>
+  <DdMoreMenu :items="taskActionItems(row, { alwaysShowDetail: true })" @command="onTaskAction($event, row)" />
+</div>
+```
+
+---
+
+## Scenario: 翻页回到顶部（`utils/scrollToTop.ts`，v3.3.1，issue #143 O3）
+
+### 1. Scope / Trigger
+
+- 触发：给列表页的分页器接事件、改 `web/src/utils/scrollToTop.ts`、新建带分页的列表页时，必须看本节。桌面与移动端都生效。
+
+### 2. Signatures
+
+```ts
+export function scrollListToTop(anchor?: Element | null, extraTargets?: Array<Element | null | undefined>): void
+```
+
+- 当前调用方：tasks、subscriptions、envs、logs、deps、users、notifications、open-api 八个列表页。
+
+### 3. Contracts
+
+- **为什么不能只滚一个固定容器**：真正在滚的元素随断点和页面类型变化。
+  ≤768 是外层 `.layout-main`；≥769 的 `dd-scroll-page`（deps / open-api 等）是页面根自己；
+  ≥769 的 `dd-fixed-page`（tasks / logs / envs / subscriptions）是页面根里的 `.table-card`，el-table 定了高度时是 `.el-table__body-wrapper .el-scrollbar__wrap`；
+  桌面的 `.layout-main` / `.route-shell` 都是 `overflow: hidden`，`scrollTop` 恒为 0。
+  所以函数把「可能在滚的」都收集起来，只处理 `scrollTop > 0` 的，其余不动：
+  1. 锚点自身及整条祖先链，走到弹窗遮罩 `.el-overlay` 就停（锚点在弹窗里时，不去拽弹窗背后列表的阅读位置）；
+  2. 锚点内部的 `.table-card` 与 `.el-table__body-wrapper .el-scrollbar__wrap`；
+  3. `extraTargets`。
+- `anchor` 传**页面根的 ref**。不传时取 `.route-shell > :not(.page-shell-leave-active)`：切页时新旧两页会短暂并存，不能取到正在离场的旧页。
+- 锚点 `offsetParent === null`（页面被 keep-alive 失活、DOM 已脱离文档，或被隐藏）时直接返回：量出来全是 0，滚了也白滚；
+  也挡住「数据回来时用户已经切走了」的情况，不去动别的页面的滚动位置。
+- 一律 `behavior: 'auto'`（瞬时）：翻页是整块换内容，平滑滚动会和换数据叠在一起，画面发飘。
+  刻意不用 `scrollIntoView`：它会连带滚动所有能滚的祖先，还可能横向滚动带 overflow 的容器（理由同 `ScriptsSidebar.vue` 的 `scrollRowIntoView`）。
+- 🔴 **只挂在分页器的 `current-change` / `size-change` 上**，不能挂进 `loadXxx`，也不能挂进 `watch(page)`：
+  自动刷新、轮询、增删改后的重拉都会调它们，用户正往下看着，会被一把拽回顶部。
+  EP 分页器只在用户点页码、改每页条数、total 变小把页码夹回时才 emit 这两个事件，程序直接改 `v-model` 不会触发，所以挂在事件上正好等于「用户翻页」。
+- **等数据回来、DOM 换完之后再调**：`await loadXxx()` → `await nextTick()` → `scrollListToTop(...)`，避免「先回顶、再换内容」跳两下。
+  前端分页的页面（users / notifications / open-api / deps）没有请求可等，只 `await nextTick()`。
+  `size-change` 先把 page 置 1。分页器原来只有 `v-model` 的页面，要补上这两个事件监听。
+- 异步翻页期间页面被卸载时 ref 已经是 null：不要把 null 传进去，否则会回落到「当前活动页」，把用户已经切过去的别的页面滚回顶部。
+  tasks 的写法是 `if (pageRootRef.value) scrollListToTop(pageRootRef.value)`；被 keep-alive 失活时 ref 还在，由 `offsetParent` 判断挡掉。
+
+### 4. Validation & Error Matrix
+
+- 挂进 `loadXxx` / `watch(page)` -> 3 秒轮询、5 秒自动刷新把用户拽回顶部
+- 数据回来之前就调 -> 先回顶再换内容，位置被新内容的高度顶偏
+- 用 `scrollIntoView` 或平滑滚动 -> 整页 / 布局容器跟着跳，或者画面发飘
+- 页面卸载后把 null 传进去 -> 别的页面被滚回顶部
+
+### 5. Good/Base/Bad Cases
+
+- Good：`handlePageChange` / `handlePageSizeChange` 里 `await loadXxx(); await nextTick(); scrollListToTop(pageRootRef.value)`
+- Base：前端分页页面只等 `nextTick`
+- Bad：`watch(page, () => { loadXxx(); scrollListToTop() })`
+
+### 6. Tests Required
+
+- `cd web && npm run build`。
+- 浏览器实测：八个页面在 1440 桌面与 390 移动端各翻一次页，真正在滚的容器 `scrollTop === 0`；
+  tasks（3 秒轮询）与 logs（开启自动刷新）滚到中间后等一轮刷新，滚动位置不变；翻页请求在途时切到别的菜单页，别的页面的滚动位置不变。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+// 轮询、自动刷新也会调 loadLogs：用户正往下看着，被拽回顶部
+async function loadLogs() {
+  // ...请求...
+  scrollListToTop()
+}
+```
+
+#### Correct
+
+```ts
+async function handlePageChange() {
+  await loadLogs()
+  await nextTick()
+  scrollListToTop(pageRootRef.value)
+}
+function handlePageSizeChange() {
+  page.value = 1
+  void handlePageChange()
+}
+```

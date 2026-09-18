@@ -3811,3 +3811,412 @@ idle2, total2 := readCPUStat()
 sample := defaultLinuxResourceSampler.current() // 有后台采样缓存直接返回，没有时才同步采样一次
 // 使用率统一由纯函数 cpuUsagePercent(prev, cur procStatCPU) 计算，便于单测覆盖各种口径
 ```
+
+---
+
+## 场景：用户界面偏好按组写入（`/api/v1/auth/preferences`，v3.3.1 #143）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/user_preference.go`、`server/model/user_preference.go`、`database.go` 里 `user_preferences` 的补列、
+  备份里的 `BackupUserPreference`，或前端 `web/src/utils/editorPreferences.ts` / `listPreferences.ts` 的同步逻辑时必须看本节。
+- 跨层链路：DB 两列 JSON → handler 按组合并 → 同形响应 → 前端两套偏好同步（editor 靠组级 `stored` 决定上行还是下行，list 稀疏、逐键迁移）。
+  前端侧契约见 `frontend/component-guidelines.md` 的「代码编辑器」与「列表页偏好」两节。
+
+### 2. Signatures
+
+- 路由（`server/handler/auth.go`）：`GET /api/v1/auth/preferences`、`PUT /api/v1/auth/preferences`，都只挂 `middleware.JWTAuth()`，不限角色。
+- model：`UserPreference.Editor`；v3.3.1 新增 `List string` + `gorm:"type:text;not null;default:''" json:"list"`。
+- database：`EnsureColumns` 里 `ensureTableColumns("user_preferences", {"list", "TEXT NOT NULL DEFAULT ''"})`。
+  SQLite 的 `ADD COLUMN` 写 `NOT NULL` 必须同时给 `DEFAULT`；存量行补列后落 `''`，即「一个键都没存过」。
+- 响应（GET 与 PUT 同形，由 `preferencesPayload` 拼）：`{ editor: 完整 5 项, stored: bool, list: 稀疏对象 }`。
+  `list` 一个键都没有时编码成 `{}` 而不是 `null`：前端靠「list 是不是对象」判断服务端认不认识这一组。
+- PUT 入参：`{ editor?: editorPreferencesPatch, list?: listPreferences }`，**两个都是指针**。
+- `list` 白名单（`listPreferences` 结构体，全是指针 + `omitempty`）：
+  - `tasks_page_size`：JSON number，取 10 / 20 / 50 / 100；
+  - `envs_page_size`：JSON string，取 `"20"` / `"50"` / `"100"` / `"all"`（有 `"all"`，只能走字符串）；
+  - `tasks_view_all_hidden` / `tasks_view_groups_hidden`：JSON bool，**不**兼容 `"on"` / `"off"`（新接口，没有历史客户端要照顾）。
+- 常量：`editorPreferenceMaxBytes` / `listPreferenceMaxBytes`（都是 4KB）；包级锁 `preferenceWriteMu sync.Mutex`。
+- 备份：`BackupUserPreference` 新增 `List string json:"list,omitempty"`，导出（`backup_runtime.go` 的 snapshot）与 `restoreUserPreferences` 成对带上。
+  ⚠️ `restoreUserPreferences` 目前没有调用点（用户、2FA、偏好都只导出不恢复），补字段不代表恢复会生效。
+
+### 3. Contracts
+
+- **按组写入**：请求里带了哪组才写哪组的列，没带的那组的列**一个字节都不碰**。
+  upsert 的 `DoUpdates: clause.AssignmentColumns(columns)` 按这次实际写了的组动态拼（外加 `updated_at`）；
+  新建行时没写的那组列落列定义的 `DEFAULT ''`，也就是「没存过」。
+  - 为什么：以前 `Editor` 入参是值类型、`DoUpdates` 写死 `editor`，于是只发 `{"list":{...}}`（或 `{}`）的请求也会把一整套 editor 默认值写进库，
+    `stored` 从 false 翻成 true。前端的列表偏好迁移恰好就是「只发 list」，它一上线，每个升级用户存在本机 `dd:editor:*` 的编辑器偏好，
+    都会在下次打开编辑器时被默认值静默冲掉 —— 不报错、测试全绿。
+- **editor 组**：只要带了 editor 对象就写，**哪怕是空对象 `{}`**，照旧写入合并后的整套值、`stored` 置 true。只发 editor 的客户端（APP、历史前端）行为必须逐字不变。
+- **list 组**：稀疏存储、逐键合并。`{"list":{}}`、或 list 里只有白名单外的键时不写：稀疏存储下空补丁没有东西可存，写下去只会凭空建出一行。
+- **两组都不带**（`{}`、`{"editor":null,"list":null}`、`{"list":{}}`、`{"list":{"unknown_key":1}}`）→ 200 no-op：原样回当前值，不落库、不建行。
+- **`stored` 只描述 editor 组**：GET 按「有行 + Editor 非空 + 能解析成 JSON 对象」判定；PUT 带了 editor 就是 true，没带时沿用这次读库的判定。
+  🔴 **不能再写死 true**，否则只改 list 的请求会让前端误以为 editor 存过，拿默认值冲掉本机那份编辑器偏好。
+- **先校验、再读库加锁**：两组的取值都校验完，才去查用户、拿 `preferenceWriteMu`、读库；任何一组非法就整单 400，另一组也一个字节不写，非法请求也不用排进锁里。
+- **下发前清洗 list**（`decodeListPreferences`）：空串、不是 JSON、不是对象（含 `null`、数组、裸字符串）一律当 `{}`；
+  是对象时逐键过类型与白名单，只丢脏的那一个键，白名单外的键不下发；JSON `null` 当「没有这个键」（解到 `*T` 上，免得被当成显式的 false）。
+  在脏行上 PUT 时，以清洗后的值为底合并，脏键不会被原样写回。GET 读库失败按「没有行」处理，不 500。
+- 用户显式存的 `false` 照常下发（`omitempty` 只看指针是否为 nil），与「从没存过」是两种形态，前端能分清。
+- **4KB 上限**：两列各自按合并后编码的长度判，超了 400。现在 list 编码后撑死一百来字节，这道闸是给将来加键时留的。
+- **`preferenceWriteMu` 把「读整行 → 合并 → upsert 整列」串成一段**：
+  - 为什么非加不可：upsert 写回的是合并后的**整列** JSON。两个只改不同键的 PUT（视图管理一次保存两个隐藏开关、两个标签页各改各的、
+    首次迁移紧跟着一次改动）如果都先读到旧行、再先后写回，后写的那个会把先写的那个键改回旧值：服务端静默丢一个设置，
+    下次加载时前端还拿旧值冲掉本机缓存，用户看到设置「自己变回去了」。
+    `database.go` 的 `SetMaxOpenConns(1)` 只让单条语句轮流用连接，挡不住两段读-改-写在语句之间交错。
+  - 为什么不用事务：单连接池下，事务里任何一处用了 `database.DB` 而不是 `tx`（`loadPreferenceRecord` 现在就是），都会去等那条被事务自己占着的连接，直接死锁。
+    SQLite 文件只有这一个面板进程在写，进程内锁就够；所有用户共用一把，偏好写入频率很低，不值得按用户分锁。
+  - 串行化管不了先后：两个 PUT 改**同一个**键时，以服务端后处理的那个为准。
+  - 锁内读库失败必须 500 中止（「读取偏好失败」），不能像 GET 那样回落：拿空记录合并再写回，会把 list 里之前存过的其它键整片抹掉。
+- 白名单与前端 `listPreferences.ts` 的 `TASKS_PAGE_SIZE_OPTIONS` / `ENVS_PAGE_SIZE_OPTIONS` 逐项对齐；editor 默认值与 `editorPreferences.ts` 逐字对齐。两边都有注释，改一边必须改另一边。
+
+### 4. Validation & Error Matrix
+
+| 输入 / 情形 | 结果 |
+|---|---|
+| body 不是 JSON；editor 或 list 不是对象；list 某键类型不对（`"50"`、`50.5`、`1`、`"1"`） | 400「请求参数错误」 |
+| minimap / indent_guides 取值不认识 | 400「minimap / indent_guides 取值需为 true、false、on 或 off」 |
+| `tasks_page_size` 不在白名单（如 30） | 400「tasks_page_size 取值需为 10、20、50 或 100」 |
+| `envs_page_size` 不在白名单（如 `"ALL"`、`"1"`） | 400「envs_page_size 取值需为 20、50、100 或 all」 |
+| editor 的枚举项非法 | 400，按字段报（如「word_wrap 取值需为 on 或 off」） |
+| 合法的 editor + 非法的 list | 整单 400，editor 也不落库，`stored` 仍为 false |
+| 合并后编码超过 4KB | 400「编辑器偏好数据过大」/「列表偏好数据过大」 |
+| 用户不存在 | 404「用户不存在」（校验在前：非法 body 先得到 400） |
+| PUT 锁内读库失败 / upsert 失败 | 500「读取偏好失败」/「保存偏好失败」 |
+| `{}`、`{"list":{}}`、只有白名单外键的 list | 200 no-op，不建行，`stored` 如实 |
+| GET 时 list 列是脏数据 | 200；整列解不开当 `{}`，单键脏只丢那一个键 |
+
+### 5. Good/Base/Bad Cases
+
+- Good：前端列表偏好迁移只发 `{"list":{"tasks_page_size":50}}`，editor 列逐字节不变、`stored` 仍为 false；两个改不同键的并发 PUT 都落库。
+- Base：只发 editor 的 APP 客户端，行为与 v3.3.0 逐字一致（包括发 `{"editor":{}}` 会写入整套默认值）。
+- Bad：`DoUpdates` 写死 `editor`；把 `Editor` 入参改回值类型；PUT 响应写死 `stored: true`；为了串行化包一层 `database.DB.Transaction`，里面却还在用 `database.DB`。
+
+### 6. Tests Required
+
+- `server/handler/user_preference_test.go`：
+  - editor 组原有 7 条：`TestGetEditorPreferencesReturnsDefaultsForFreshUser`、`TestUpdateEditorPreferencesMergesPerField`、
+    `TestUpdateEditorPreferencesAcceptsOnOffFlags`、`TestUpdateEditorPreferencesRejectsInvalidValues`、`TestEditorPreferencesAreIsolatedPerUser`、
+    `TestGetEditorPreferencesFallsBackOnCorruptedRow`、`TestEditorPreferencesStoredFlagTracksPersistence`。
+  - v3.3.1 新增：
+    - `TestUpdateListPreferencesNeverTouchesEditorColumn`：三种起点（没有行 / 有行但 editor 为空 / editor 已存过），Raw SELECT 确认 editor 列逐字节不变、`stored` 不被翻成 true；
+    - `TestUpdateEditorPreferencesNeverTouchesListColumn`：反方向；
+    - `TestListPreferencesSparseStorageAndTypes`：只下发存过的键，每个键的 JSON 类型正确，显式存的 false 照常下发；
+    - `TestUpdateListPreferencesRejectsInvalidValues`：11 种非法输入全部 400，且一个键都不落库、不建行，同请求里合法的 editor 也不落；
+    - `TestListPreferencesAreIsolatedPerUser`；
+    - `TestGetListPreferencesDropsCorruptedValues`：脏 JSON 仍 200，逐键丢弃，在脏行上合并不写回脏键；
+    - `TestUpdatePreferencesWithoutAnyGroupIsNoop`：4 种 no-op body 不建行；已存过两组时 `{}` 两列都不动；
+    - `TestUpdateListPreferencesConcurrentDifferentKeysDoNotOverwrite`：20 轮，每轮复位后同时放出一对单键 PUT，两个键最后都必须为 true。
+      测试库与生产一样是单连接池——换成多连接反而测不出来。突变验证：注释掉锁后 5/5 失败。
+- `server/database/user_preference_list_migration_test.go`：`TestEnsureColumnsAddsUserPreferenceListToLegacyDatabase`。
+- `server/service/backup_user_preferences_test.go`：`TestSnapshotConfigBundleKeepsUserPreferenceColumns`。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./handler -run Preferences -count=1
+go test ./database -run UserPreferenceList -count=1
+go test ./service -run UserPreferenceColumns -count=1
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：值类型 + DoUpdates 写死 editor —— 只发 list 的请求也会把 editor 默认值写进库、stored 翻成 true；
+// 而且读-合并-写没有串行化，两个改不同键的并发 PUT 会互相覆盖。
+var req struct {
+    Editor editorPreferencesPatch `json:"editor"`
+    List   *listPreferences       `json:"list"`
+}
+record, _ := loadPreferenceRecord(user.ID)
+// ...合并...
+database.DB.Clauses(clause.OnConflict{
+    Columns:   []clause.Column{{Name: "user_id"}},
+    DoUpdates: clause.AssignmentColumns([]string{"editor", "updated_at"}),
+}).Create(&upsert)
+response.Success(c, preferencesPayload(editorPrefs, true, listPrefs))
+```
+
+#### Correct
+
+```go
+var req struct {
+    Editor *editorPreferencesPatch `json:"editor"`
+    List   *listPreferences        `json:"list"`
+}
+// 先校验两组（非法整单 400）……
+preferenceWriteMu.Lock()
+defer preferenceWriteMu.Unlock()
+record, err := loadPreferenceRecord(user.ID) // 锁内读失败必须 500，不能回落成空记录
+var columns []string
+if req.Editor != nil { /* 合并、编码、查 4KB */ columns = append(columns, "editor") }
+if writeList      { /* 同上 */                columns = append(columns, "list") }
+if len(columns) == 0 { response.Success(c, preferencesPayload(editorPrefs, editorStored, listPrefs)); return }
+columns = append(columns, "updated_at")
+// DoUpdates: clause.AssignmentColumns(columns)；stored 只在写了 editor 时置 true
+```
+
+---
+
+## 场景：Playwright 运行环境——浏览器目录、一键安装与重建后自愈（v3.3.1 #142）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/playwright_env.go`、`playwright_runtime.go`、`server/handler/deps_playwright.go`，
+  `deps.go` 的 `runCmdWithSSEThen` / `depFollowUpStep` / `buildDependencyFailureHint` / `installDependency`，
+  `linux_packages.go` 的包锁与 apt 选项、`linux_mirror.go` 的 apt 源改写、`dependency_reconcile.go`、`backup_runtime.go` 的 `reinstallDependency`，
+  或 `main.go` 的启动顺序时，必须看本节。
+- 背景：镜像不预装 Playwright（体积不变，用户 2026-09-18 拍板），改成「面板一键安装 + 容器重建后自动重装」。
+  三样东西各有去处：Chromium 与 pip 包都在数据卷里，重建不丢；系统库登记成 Linux 依赖，重建后由启动校验在后台按记录重装。
+
+### 2. Signatures
+
+- `service`（`playwright_env.go`）：
+  - `PlaywrightBrowsersPathEnv = "PLAYWRIGHT_BROWSERS_PATH"`、`PlaywrightDownloadHostEnv = "PLAYWRIGHT_DOWNLOAD_HOST"`；
+  - `DefaultPlaywrightBrowsersPath() string`、`ResolvePlaywrightBrowsersPath() string`、`ApplyPlaywrightBrowsersPathProcessEnv()`；
+  - 包内：`runningInContainer()`、`applyPlaywrightBrowsersPathDefault(envMap)`、`migrateLegacyPlaywrightBrowsers(legacy, target)`。
+- `service`（`playwright_runtime.go`）：
+  - `DetectLinuxOSRelease() LinuxOSRelease{ID, VersionID, VersionCodename}`；
+  - `PlanPlaywrightRuntime() PlaywrightRuntimePlan`（`supported` / `reason` / `distribution` / `version_id` / `arch` / `packages` / `browsers_path`）、`PlaywrightDebian12Packages()`、`PlaywrightPythonPackage = "playwright"`；
+  - `PlaywrightBrowserDownloadApplies(packageName) bool`、`NewPlaywrightBrowserInstallCommand(pythonVersion) (*exec.Cmd, browsersPath string, error)`；
+  - `PlaywrightDownloadStartPrefix` / `PlaywrightDownloadStartLine(path)` / `PlaywrightDownloadReadyLine`；
+  - `BuildPlaywrightEnvironmentHint(output)`、`BuildRuntimeFailureHint(output)`。
+- `service`（`linux_packages.go`）：`LockLinuxPackageOperation() func()`、`aptLockTimeoutOption = "DPkg::Lock::Timeout=300"`。
+- `handler`（/deps 组，`JWTAuth()` + `RequireAdmin()`；/deps 不在开放 API 的 scope 里，MCP 不用同步）：
+  - `GET /api/v1/deps/playwright` → `PlaywrightRuntimePlan` 加 `python_installed` / `browsers_installed` / `linux_installed` / `linux_total`，
+    与前端 `web/src/api/deps.ts` 的 `PlaywrightStatus` 逐字段对应；
+  - `POST /api/v1/deps/playwright/install` → 201 `{ message, data: Dependency[], packages, browsers_path }`；
+  - `depFollowUpStep{ build, doneLine, acquire }`、`runCmdWithSSEThen(cmd, id, successStatus, deleteOnSuccess, followUps)`；
+  - `playwrightInstallMu`、`playwrightBrowserDownloadSem`（容量 1 的 channel）。
+
+### 3. Contracts
+
+**`PLAYWRIGHT_BROWSERS_PATH`：Go 侧是唯一真源**（`entrypoint.sh` 不另写一套公式，免得 `DATA_DIR` 与 config.yaml 的 `data.dir` 两套算法分叉）
+
+- 默认值 `DefaultPlaywrightBrowsersPath()` **只在容器部署时**返回 `<data.dir>/deps/ms-playwright`（绝对路径），其余一律空串：
+  - 容器判定 `runningInContainer()`：`/.dockerenv`、`/run/.containerenv`，兜底看 `/proc/1/cgroup` 里有没有 docker / containerd / kubepods / lxc / podman。
+    **不含 Magisk 分支**：青龙兼容层把 Magisk 的 ruri chroot 也当成可以动 `/` 的环境，这里要把它排除，两边口径相反，各自在调用方判断。
+  - Windows 桌面版、裸机不设：浏览器本来就在 `%LOCALAPPDATA%\ms-playwright` / `~/.cache/ms-playwright`，重建不会丢，改默认目录反而让装好的浏览器「消失」。
+  - Magisk 模块版不设：`deps/` 会被快照整体 `cp -rf`、每 10 分钟同步、开机回填，几百 MB 的浏览器放进去会被反复拷贝。
+- 优先级（`ResolvePlaywrightBrowsersPath`，与任务环境一致）：**环境变量页里启用的同名变量 > config.sh > 进程环境 > 默认值**。
+  用户在面板里设过就算设过，**哪怕是空串**（任务里拿到的就是空串）；进程环境里的空串视同没设。非空的用户值原样尊重，包括 `0`（Node 版里表示装进 node_modules）。
+- 注入点：
+  - **进程级**：`main.go` 在 `appboot.InitWithConfig` 之后、`verifyInstalledDeps()` 之前调 `ApplyPlaywrightBrowsersPathProcessEnv()`：
+    进程环境没设、且默认值非空时 `MkdirAll` + `os.Setenv`。系统命令行、依赖安装（pip / apt）、任务缺包时的自动安装都直接继承 `os.Environ`，只有它们靠这一步。
+    必须在数据库就绪之后（要查环境变量页决定是否搬迁），并赶在启动校验排队重装之前。全程 best-effort，失败只打日志。
+  - **任务级**：`BuildManagedRuntimeEnvMapWithScriptToken` 在合并完环境变量页与 config.sh 之后调 `applyPlaywrightBrowsersPathDefault`：
+    **键不存在才写**（语义同 QL_DIR 那批青龙兼容变量，不像 TZ 那样强制覆盖），值取进程环境、为空再取默认值。
+    任务、调试运行、run-code、ddp python / shell 的子进程都是白名单环境，只靠进程环境传不进去。
+  - **订阅钩子**：`subscription_hook.go` 键不存在时写 `ResolvePlaywrightBrowsersPath()`（钩子环境不含环境变量页的值，所以取 Resolve 而不是只补默认值），取到空串就不写。
+  - **浏览器下载子进程**：显式设 `PLAYWRIGHT_BROWSERS_PATH=ResolvePlaywrightBrowsersPath()`，并带上环境变量页里的 `PLAYWRIGHT_DOWNLOAD_HOST`、面板代理和可写 HOME。
+    依赖安装子进程只继承 `os.Environ`，看不到环境变量页，不显式传就会下到与任务不一样的目录。
+- **PUID 存量搬迁**：降权部署的 HOME 被 entrypoint 钉成 `<data.dir>/.home`，老浏览器在 `<data.dir>/.home/.cache/ms-playwright`。
+  用户没在面板里自己设这个变量、旧目录非空、新目录不存在或为空时，`os.Rename` 过去（同一个卷，瞬时完成）；
+  新目录已有内容时不合并、不覆盖；失败只打日志，不阻塞启动。
+
+**一键安装的前置判定**（`planPlaywrightRuntime`，顺序是契约：越靠前的原因越根本，Alpine 用户该看到的是换镜像，而不是「架构不对」）
+
+| 顺序 | 条件 | `reason` |
+|---|---|---|
+| 1 | 非 Linux | 一键安装只支持 Linux 上的 Debian 12 版 Docker 镜像，当前系统是 %s |
+| 2 | Alpine / apk | Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请换 Debian 版镜像 linzixuanzz/daidai-panel:debian |
+| 3 | 非 apt | 一键安装只支持 apt 系统（Debian 12），当前包管理器：%s |
+| 4 | 架构不是 amd64 / arm64 | Playwright 的 Chromium 只有 amd64 / arm64 构建，当前架构是 %s |
+| 5 | 不是 Debian 12 | 一键安装目前只内置 Debian 12（bookworm）的系统库清单，当前系统：ID=… VERSION_ID=… VERSION_CODENAME=… |
+| 6 | 浏览器目录不归面板管（非容器部署 / 面具模块版） | 一键安装只在 Docker 部署下可用：%s的浏览器目录不由面板托管，请在终端执行 python3 -m playwright install --with-deps chromium |
+| — | 以上都过 | `supported=true`，`packages` 为 26 个 |
+
+- root 判定不在 plan 里（文案要按部署形态分岔，复用 `EnsureLinuxPackageManagerPrivilege`）：
+  GET 把它的失败并进 `supported=false` + `reason`，前端按钮直接置灰、旁边写原因；POST 同样在建任何记录之前 400。
+- **包清单**：`playwrightDebian12Packages` 是 Debian 12 bookworm 的常量，amd64 与 arm64 共用，共 26 个：
+  21 个 chromium 必需库（来自 Playwright `nativeDeps.ts` 里 debian12-x64 的 chromium 组）+ 5 个字体相关
+  （fonts-liberation、fonts-wqy-zenhei、fonts-noto-color-emoji、libfontconfig1、libfreetype6）。
+  不装 xvfb（会拉进上百 MB，只有有头模式才需要）。Playwright 升级或镜像换代（bookworm → trixie，多数包名会变成 `*t64`）时要重新核对；
+  其它发行版在 plan 里明确拒绝，不套用这份清单。
+
+**POST `/deps/playwright/install`**
+
+- 两道前置检查（plan、root）都排在建任何记录之前：原来 Alpine / 非 root 下会先建出一批记录再全部 failed，白白多出一串失败记录和侧栏角标。
+- `playwrightInstallMu` 把「查重 → 复用 / 新建 → 置为排队」整段串行：连点两次时，第二次必须看到第一次已经排上的记录。
+- 系统包（`resolvePlaywrightLinuxRecord`，按清单顺序）：queued / installing / removing 的不动（容器重建后启动校验正在重装的就属于这类，再排一次等于装两遍）；
+  登记为 installed 且确实装着的跳过；登记为 installed、实际却不在的复用原记录重装；failed / cancelled 的复用原记录（不新建，免得失败记录和角标越积越多）；
+  没登记过的新建为 queued。查重口径与 POST /deps 共用 `findExistingDependency`，建记录共用 `createDependencyRecord`。
+- Python `playwright`（默认 Python 版本，`resolvePlaywrightPythonRecord`）：只有处理中的不动，**已安装的也重新入队**——重装会在 pip 之后接着下载浏览器，
+  这正是补浏览器的途径（老版本升级上来的用户，浏览器原本在 `/root/.cache`，pip 记录是已安装，浏览器早就丢了）。
+- 全部置为 queued，日志追加「[Playwright 一键安装] 已加入顺序队列（i/n）」；单个协程按「先系统库、后 Python」依次执行，
+  每条开始前确认它仍是 queued，再写「开始执行（i/n）」，写法照 BatchReinstall。Python 放最后：它后面接的 Chromium 下载与启动自检要用到这些系统库。
+- 201 的 `message`：「已加入安装队列，共 N 项」，有跳过时追加「，已就绪或正在处理的 M 项已跳过」。没有要入队的项时仍回 201，`data` 为 `[]`。
+- 🔴 **建记录中途失败要回滚**：`collectPlaywrightInstallQueue` 记下本次新建的 id，任何一步出错就先删掉它们再返回，响应 500「登记 Playwright 依赖失败，请稍后重试」。
+  新记录一出生就是 queued，而出错时不会起安装协程，留下来就是没人接手的 queued。复用的旧记录这时还没被改过，原样保留。
+  删除本身失败时，只能留给下次启动的 `ReconcileDependenciesAfterRestart` 收口（见下）。
+
+**GET `/deps/playwright` 的就绪状态**
+
+- `python_installed`：默认 Python 版本的 playwright **登记为 installed，且 pip 里确实装着**。先查库，库里是已安装才跑 `pip show`，免得每次打开依赖页都起一个子进程。
+  面板外手动 pip 装的（没登记）、正在排队 / 安装的，都返回 false。
+- `browsers_installed`：`browsers_path` 是绝对路径，且下面有 `chromium` 开头的目录（`chromium-*` 或 `chromium_headless_shell-*`）。
+  目录为空或不是绝对路径（例如用户设成了 `0`）时查不了，按未就绪处理。
+- `linux_installed` / `linux_total`：清单里「登记为 installed 且确实装着」的个数 / 清单长度。只登记不算（重建后 dpkg 里已经没了），只装着也不算（没登记，重建就丢）。
+
+**pip 之后链式下载 Chromium**
+
+- `PlaywrightBrowserDownloadApplies(name)` 为真的条件：名字按 PEP 503 归一化后等于 `playwright`（`playwright==x` 这类写法也算）、
+  `DefaultPlaywrightBrowsersPath() != ""`（容器）、且不是 Alpine。Windows / 裸机 / 面具版用户自己管理浏览器，
+  给每个手动装 playwright 的人悄悄多下 150-300MB 不可接受；Alpine 上官方 Chromium 跑不起来，下了也白下。
+- 为真时 `installDependency` 的 Python 分支给 `runCmdWithSSEThen` 追加一个 `depFollowUpStep`：pip 成功后，
+  在**同一条记录、同一个 SSE 广播、同一份日志、同一个超时 / 取消 ctx** 里执行 `<托管 venv 的 python> -m playwright install chromium`。
+  - 前后各一行日志：「[Playwright] 正在下载 Chromium 到 <path>」「[Playwright] 浏览器已就绪」。失败提示靠这两行判断失败发生在哪个阶段，
+    所以写日志和判定引用同一组常量。
+  - 下载失败 → 整条记录 failed；取消 / 超时同样覆盖第二段（整个进程组被杀）。主命令恰好在 ctx 结束的同一瞬间成功时，后续步骤不再启动，
+    记「[依赖任务已超时，后续步骤未执行]」或「[依赖任务已取消，后续步骤未执行]」，否则它会脱离超时与取消的管控。
+  - `followUps` 为空时，`runCmdWithSSEThen` 与改动前的 `runCmdWithSSE` 逐项一致（卸载、强制卸载都走这条）。
+  - 网页安装、重装、一键安装都经过 `installDependency`；**重启后的自动重装（`reinstallDependency`）不追加下载**：浏览器在数据卷里，重建不丢。
+- **下载全进程串行**：step 的 `acquire` 是 `acquirePlaywrightBrowserDownloadSlot`，先试一次拿 `playwrightBrowserDownloadSem`；
+  拿不到就写一行「[Playwright] 另一条记录正在下载 Chromium，排队等待……」并立刻落库，再 `select` 等槽位或 `ctx.Done()`。
+  等待中被取消 / 超时立刻返回，按「后续步骤未执行」收尾。槽位在这一步命令退出之后才释放（`defer release()`），build / start 失败也会释放。
+  - 为什么：all 镜像上 POST /deps 装 playwright 会按 Python 版本各建一条记录、各起一个协程，pip 装完几乎同时进入下载，下到同一个目录；
+    Playwright 自己的 `<浏览器目录>/__dirlock` 抢不到时只重试约 8 分钟，慢网下其余几条全部 failed。连点几次重装也是同样的局面。
+  - 不能用 `sync.Mutex`：排队中的记录点取消、到超时都停不下来。
+
+**失败提示的顺序契约**（`buildDependencyFailureHint`）
+
+- **Playwright 浏览器下载失败的分支排在最前面，连 dpkg 锁冲突都要让它。** 它的判据是结构性事实：本次运行的日志段（最后一个 `dependencyRunStartMarker` 之后）
+  里有下载开始行、没有就绪行，说明 pip 已经成功，失败只可能发生在下载阶段。其余分支都是在整段日志里猜关键词：
+  pip 阶段中途重试成功时留下的 `Temporary failure in name resolution` 之类的行，会被 DNS / 镜像源分支抢走，把用户引去查一个没问题的 pip 镜像。
+  反过来它不会误伤别的分支：没有下载开始行（pip 就失败了，或者根本不是 playwright）时一律不命中。
+- 下载阶段里再细分一种：下载开始行之后的输出含 `lockfile` / `__dirlock` / `lock file is already being held` → 浏览器目录正被**面板管不到的**
+  `playwright install` 进程占用（面板内的下载已经串行，不可能是列表里的其它记录）。与网络无关，不能引去配代理。
+- 其余下载失败：讲清楚「pip 包已经装好，失败的是随后下载 Chromium 这一步（走 Playwright 官方源，与 pip 镜像无关）」，给两条出路：
+  到「系统设置 → 代理设置」配代理后重装；或在「环境变量」页添加 `PLAYWRIGHT_DOWNLOAD_HOST` 指向可用的下载镜像后重装。
+
+**任务失败提示**（`BuildPlaywrightEnvironmentHint`，经 `BuildRuntimeFailureHint` 接进 4 个调用点：`task_executor.go` 两处、`script_debug.go`、`script_run_code.go`；
+先认 ESM 兼容提示，两者关键词不相交）
+
+- 报错含 `Executable doesn't exist` 且含 `ms-playwright` → 写出当前生效的 `PLAYWRIGHT_BROWSERS_PATH`；容器部署引导去「依赖管理 → Linux」点「安装 Playwright 运行环境」，否则给命令。
+- 含 `Host system is missing dependencies` 或 `error while loading shared libraries` → 有 N 个 Linux 依赖在 installing / queued 时，
+  提示「容器重建后正在后台自动重装 N 个系统依赖，完成后重试即可」：这段时间里该让用户等，而不是再去点一次安装。
+  否则容器部署引导去点一键安装，其它部署给 `python3 -m playwright install-deps chromium`（以 root 执行）。
+  `error while loading shared libraries` 是任何原生程序缺库都会报的通用错误，报错里没提到 playwright 时宁可不给提示。
+- 正在重装的依赖数通过可注入的 `playwrightHintEnvFunc` 取，只在命中缺库关键词时才查库。
+- 提示要短：失败摘要会截断到 320 字符。
+
+**Linux 包操作锁与 apt**
+
+- `service.LockLinuxPackageOperation()`（v3.3.1 从 handler 的 `linuxPackageOperationMu` 搬到 service，写法同 `LockNodePackageOperation`），
+  由网页端的 `installDependency` / `uninstallDependency` / `forceUninstallDependency` 与重启重装 `reinstallDependency` 的 Linux 分支**共用**。
+- 调用方要在**构造命令之前**拿锁，一直持有到命令结束：`BuildLinuxPackageCommand` 在构造时就会判断 apt 索引要不要刷新、写镜像源，这两步同样不能与另一条 apt 交错。
+  锁不可重入：拿着它的代码路径里不能再调用会拿它的函数。
+- 为什么：重建后 apt 索引是空的（`Dockerfile.debian` 构建时删了 `/var/lib/apt/lists/*`），两边都会先跑 `apt-get update`，
+  而 **`apt-get update` 拿的 lists 锁不等待**，撞上立刻失败；安装脚本用 `;` 串联，update 失败后 install 照跑，读着空索引报 Unable to locate package。
+- `-o DPkg::Lock::Timeout=300` 加在 apt 的 install 与 remove 上（`LinuxInstallCommandSpec` / `LinuxRemoveCommandSpec`，网页端与重启路径都走它们）。
+  它**只覆盖 dpkg 锁**，面板内部靠上面那把进程内锁串行，这个选项留着挡面板管不到的 apt（比如用户在系统命令行里手动装包）。apt 1.9.11 以下会忽略未知的 `-o`，不会报错。
+- 重启重装的 Linux 分支接上了与网页安装同一个换源（`EnsureDefaultLinuxMirror`，原来传 nil，重建后一律走 deb.debian.org）；权限检查仍排在换源之前。
+- apt 源改写的 security 段：URI 路径以 `-security` 结尾，或（仅 Debian）Suites 里有 `*-security` / `*/updates` 时，目标改为 `<mirror>-security`；
+  Ubuntu 的 `noble-security` 就在 `/ubuntu` 下，加后缀反而指到不存在的路径。
+
+**启动收口 queued**：`ReconcileDependenciesAfterRestart`（`main.go` 的 `verifyInstalledDeps()`）把 `queued` 与 installing / removing 一起纳入：
+
+- 包已经装着 → installed（「[启动校验] 检测到依赖已安装，已同步状态为已安装」）；
+- 否则 → failed（「[启动校验] 排队中的任务因服务重启而中断，未执行，可重新安装」），**不自动续装**：保守，也不和别的恢复逻辑抢着装。
+- 为什么：排队只活在进程内存里的那个协程中，面板一重启协程就没了。剩下的 queued 以前会永远卡住：删除、重装、取消、再点一键安装都把 queued 当「正在处理」拒掉，
+  侧栏角标一直亮着，缺库提示还会一直说「正在后台自动重装」。收口成 failed 后，再点一次一键安装（它复用 failed 记录）就能恢复。
+- 恢复备份续装那条分支只认 installing（`shouldResumeRestoredDependency`），不受影响。
+
+### 4. Validation & Error Matrix
+
+| 接口 / 情形 | 结果 |
+|---|---|
+| POST：非 Linux / Alpine / 非 apt / 非 amd64、arm64 / 非 Debian 12 / 非容器部署 | 400，`error` 是上表对应的 `reason`，不建任何记录 |
+| POST：面板进程不是 root（如 PUID 降权） | 400，`EnsureLinuxPackageManagerPrivilege` 的说明（按容器 / systemd / Magisk 给出路），不建任何记录 |
+| POST：建记录中途数据库出错 | 500「登记 Playwright 依赖失败，请稍后重试」，本次新建的记录已删掉，不起安装协程 |
+| POST：全部已就绪或正在处理 | 201，`data` 为 `[]`，`message` 写明跳过几项 |
+| GET：以上任一不支持的情形 | 200，`supported=false` + `reason`。plan 判定不支持时 `packages` 为 `[]`；只有 root 判定失败时清单照常下发，前端仍能显示「系统库 x/y 已安装」 |
+| pip 成功、Chromium 下载失败 | 记录 failed，日志末尾是下载失败提示（代理 / `PLAYWRIGHT_DOWNLOAD_HOST`） |
+| 下载撞上 `__dirlock` | 记录 failed，提示是「目录被面板外的 playwright install 占用」，不提代理 |
+| 下载排队中点取消 / 超时 | cancelled / failed，日志「后续步骤未执行」，不会启动下载 |
+| 一键安装跑到一半面板重启 | 没轮到的 queued 在下次启动置为 failed（已装着的置为 installed） |
+| 重建后网页端装包与启动校验重装同时发生 | 两条 apt 串行执行，不再出现 `Could not get lock /var/lib/apt/lists/lock` |
+
+### 5. Good/Base/Bad Cases
+
+- Good：Debian 12 容器（root）里点一键安装 → 26 个系统库依次装完，最后 pip 装 playwright 并把 Chromium 下到 `<data.dir>/deps/ms-playwright`；
+  容器重建后系统库由启动校验在后台重装，浏览器与 pip 包原地可用，重装期间跑的任务得到「正在后台自动重装 N 个系统依赖」的提示。
+- Base：Windows / 裸机 / 面具版 → 不设默认目录、不注入、不链式下载，行为与 v3.3.0 一致；用户在环境变量页设了 `PLAYWRIGHT_BROWSERS_PATH=0` → 原样生效。
+- Bad：在 entrypoint.sh 里再算一遍默认目录；任务环境里无条件覆盖用户设的值；用 `sync.Mutex` 串行下载；把下载失败的提示排到 DNS 分支后面；
+  重启重装的 Linux 分支不拿包锁，或拿锁晚于构造命令；启动校验不管 queued。
+
+### 6. Tests Required
+
+- `server/service/playwright_env_test.go`：
+  `TestRunningInContainerDetectsMarkersAndCgroup`、`TestDefaultPlaywrightBrowsersPathOnlyForContainers`（非容器 / Magisk / Windows 不设）、
+  `TestManagedRuntimeEnvInjectsPlaywrightBrowsersPath`（进程环境优先于默认值）、`TestManagedRuntimeEnvKeepsUserPlaywrightBrowsersPath`（envMap 已有同名键不覆盖）、
+  `TestResolvePlaywrightBrowsersPathMatchesTaskPriority`、`TestSubscriptionHookEnvCarriesPlaywrightBrowsersPath`、
+  `TestApplyPlaywrightBrowsersPathProcessEnv`、`TestMigrateLegacyPlaywrightBrowsers`、`TestWithEnvEntryKeepsSingleValue`。
+- `server/service/playwright_runtime_test.go`：
+  `TestParseLinuxOSRelease`、`TestDetectLinuxOSReleaseFallsBackToUsrLib`、`TestPlaywrightDebian12PackagesList`、`TestPlanPlaywrightRuntime`（判定顺序与各分支，含 Debian 12 裸机、面具模块版）、
+  `TestPlaywrightBrowserDownloadApplies`、`TestNewPlaywrightBrowserInstallCommand`、`TestPlaywrightDownloadStartLine`、
+  `TestBuildPlaywrightEnvironmentHint`、`TestBuildPlaywrightEnvironmentHintSkipsEnvLookupWhenUnrelated`、`TestCountPendingLinuxDependencies`、
+  `TestBuildRuntimeFailureHintCombinesModuleAndPlaywrightHints`。
+- `server/handler/deps_playwright_test.go`：
+  `TestPlaywrightStatusReportsReadiness`、`TestPlaywrightStatusFoldsPrivilegeIntoSupported`、`TestInstallPlaywrightRejectsBeforeCreatingRecords`、
+  `TestInstallPlaywrightQueuesLinuxThenPython`、`TestInstallPlaywrightTwiceDoesNotDuplicate`、`TestInstallPlaywrightRollsBackCreatedRecordsOnError`、
+  `TestDependencyCreateStillAllowsResubmittingFailedName`、
+  `TestRunCmdWithSSEThenRunsFollowUpInSameRecord`、`TestRunCmdWithSSEThenFailsRecordWhenFollowUpFails`、`TestRunCmdWithSSEThenSkipsFollowUpWhenMainFails`、
+  `TestRunCmdWithSSEThenRecordsBuildError`、`TestRunCmdWithSSEThenCancelCoversFollowUp`、`TestRunCmdWithSSEWithoutFollowUpsKeepsBehavior`、
+  `TestNewPlaywrightBrowserDownloadStepUsesInjectedCommand`、`TestPlaywrightBrowserDownloadRunsOneAtATime`、`TestPlaywrightBrowserDownloadWaitIsCancellable`
+  （后两条去掉信号量后都会失败）、`TestBuildDependencyFailureHintPlaywrightDownload`、`TestBuildDependencyFailureHintPlaywrightDirLock`。
+- 抽出 `findExistingDependency` / `createDependencyRecord` 的回归：`deps_duplicate_skip_test.go`（`TestNodeAndLinuxDependencyCreateSkipsExistingName`、
+  `TestNodeDependencyCreateStillAddsDifferentName`）、`deps_regression_test.go`（`TestBatchReinstallRunsSequentially`、`TestPythonDependencyCreateInstallsAllPythonVersions` 等）。
+- `server/service/linux_packages_test.go`：`TestAptCommandsWaitForDpkgLock`、`TestRestartLinuxReinstallEnsuresMirror`、`TestBuildLinuxPackageCommandChecksPrivilegeBeforeTouchingMirror`。
+- `server/service/linux_mirror_test.go`：`TestRewriteAPTSourcesKeepsDebianSecuritySuffix`、`TestRewriteAPTSourcesSecurityFollowsRequestedMirror`、
+  `TestRewriteAPTListLineKeepsDebianSecuritySuffix`、`TestRewriteAPTSourcesLeavesUbuntuSecurityUnderUbuntu`。
+- `server/service/backup_restore_regression_test.go`：`TestReconcileDependenciesAfterRestartSettlesQueuedRecords`、`TestReinstallDependencyLinuxWaitsForSharedPackageLock`。
+- `server/service/startup_wiring_test.go`：`TestMainWiresPlaywrightBrowsersPathBeforeDependencyVerification`（静态断言 `main.go` 的调用顺序）。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "Playwright|RunningInContainer|WithEnvEntry|LinuxOSRelease|CountPendingLinux|AptCommands|RestartLinuxReinstall|BuildLinuxPackageCommand|RewriteAPT|ReconcileDependencies|ReinstallDependency" -count=1
+go test ./handler -run "Playwright|RunCmdWithSSE|BuildDependencyFailureHint|DependencyCreate|BatchReinstall" -count=1
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误一：任务环境里无条件覆盖。用户在环境变量页看到自己设的值，脚本里实际却是另一个目录。
+envMap[PlaywrightBrowsersPathEnv] = DefaultPlaywrightBrowsersPath()
+
+// 错误二：下载排队用 Mutex。排在后面的记录点取消、到超时都停不下来。
+playwrightDownloadMu.Lock()
+defer playwrightDownloadMu.Unlock()
+
+// 错误三：重启重装的 Linux 分支不拿包锁（或构造完命令才拿），重建后与网页端同时 apt-get update，lists 锁不等待、直接失败。
+cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
+```
+
+#### Correct
+
+```go
+// 用户没配才补默认值（同 QL_DIR）
+if _, exists := envMap[PlaywrightBrowsersPathEnv]; !exists {
+    if value := managedPlaywrightBrowsersPath(); value != "" {
+        envMap[PlaywrightBrowsersPathEnv] = value
+    }
+}
+
+// 容量 1 的 channel：拿不到先写排队提示，再同时等槽位与 ctx
+select {
+case playwrightBrowserDownloadSem <- struct{}{}:
+case <-ctx.Done():
+    return nil, ctx.Err()
+}
+
+// 构造命令之前拿锁，defer 持有到 CombinedOutput 结束
+unlock := LockLinuxPackageOperation()
+defer unlock()
+cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
+```
