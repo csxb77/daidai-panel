@@ -68,6 +68,7 @@ import { isChunkLoadError, reloadOnce } from "./utils/chunkReload";
 import {
   applyMotionPreference,
   applyPanelShapeStyle,
+  applyThemeMode,
   fetchAndApplyPanelAppearance,
 } from "./utils/panelAppearance";
 import "./styles/global.scss";
@@ -203,6 +204,12 @@ async function bootstrap() {
   // dd-motion-force / dd-motion-off 必须在首帧之前挂好，挂晚了首屏动画会先按系统设置跑一遍。
   // 同样必须早于下面 demo 的 await。
   applyMotionPreference();
+  // 首屏防闪色（v3.3.2，issue #145）：主题三档（明亮 / 暗夜 / 跟随系统）存在 localStorage 的
+  // 裸 `theme` 键里，而 <html class="dark"> 原本只由 stores/theme.ts 的 watch 在 store 首次
+  // 实例化（MainLayout / 登录页 setup）时才挂上，那已经在 app.mount 之后 —— 暗色用户每次刷新
+  // 都会先闪一帧白底。这里同步重放一遍缓存值，跟随系统档会现读一次 matchMedia。
+  // 同样必须早于下面 demo 的 await。
+  applyThemeMode();
 
   // 这段刻意写成「编译期常量守卫 + 动态 import()」：
   // VITE_DEMO 在发布版构建里被 define 成 ''（见 vite.config.ts），条件恒假，

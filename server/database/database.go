@@ -261,6 +261,11 @@ func EnsureColumns() {
 		{"timeout", "INTEGER DEFAULT 0"},
 		{"success_exit_codes", "VARCHAR(128) NOT NULL DEFAULT '0'"},
 		{"random_delay_seconds", "INTEGER"},
+		// 任务级日志保留天数（issue #144 / v3.3.2）。
+		// 🔴 刻意可空、且刻意不给 DEFAULT：存量行补列后全是 NULL，也就是「跟随全局」，
+		// 升级后的清理行为与升级前逐字节一致。写成 NOT NULL DEFAULT 0 会让存量行全变 0，
+		// 而 0 一旦被解读成「保留 0 天」，第一次清理就会清空全站日志。
+		{"log_retention_days", "INTEGER"},
 		{"max_retries", "INTEGER DEFAULT 0"},
 		{"retry_interval", "INTEGER DEFAULT 60"},
 		{"notify_on_failure", "BOOLEAN DEFAULT 0"},

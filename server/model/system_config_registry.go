@@ -73,6 +73,22 @@ const (
 	MCPAllowMutationsConfigKey = "mcp_allow_mutations"
 )
 
+// 企业微信拉起任务（issue #145，v3.3.2）的两级开关，与上面 MCP 那两项一一对应：
+// 总开关关着时回调路由直接 403（连验签都不做），总开关开着但不允许触发执行时，
+// 企业微信那边配回调 URL 能配通、指令却不会真的跑任务 —— 用来分两步上线。
+const (
+	WecomTriggerEnabledConfigKey  = "wecom_trigger_enabled"
+	WecomTriggerAllowRunConfigKey = "wecom_trigger_allow_run"
+)
+
+// WecomTriggerLinkGenerationConfigKey 是菜单触发链接的「代次」，管理员点「作废全部链接」时 +1。
+//
+// 它**刻意不进注册表**：这是面板运行时自己写的状态（同 auto_update_pending_version 那一类），
+// 不是给人填的配置项。注册了反而有害 —— 它会出现在设置页的兜底区，用户随手改一个数字
+// 就把所有链接作废了，而且 GET /api/configs 只下发 registered=true 的项给设置页渲染，
+// 不注册就天然不会被误改（web/src/views/settings/systemConfigSchema.ts 的 parseSystemConfigItems）。
+const WecomTriggerLinkGenerationConfigKey = "wecom_trigger_link_generation"
+
 const (
 	// DefaultRepoFileExtensions 是订阅扫描任务候选时认的脚本后缀。
 	// LegacyRepoFileExtensions 是 v3.0.5 及之前的默认值，它漏了 mjs。
@@ -107,6 +123,7 @@ var systemConfigGroupLabels = map[string]string{
 	"alerts":       "告警通知",
 	"subscription": "订阅拉取",
 	"mcp":          "MCP 服务",
+	"wecom":        "企业微信触发",
 }
 
 // finalizeSystemConfigSpecs 补齐无法在单条声明里写死的元信息：注册顺序和分组中文名。
@@ -308,6 +325,23 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 		"false",
 		"开启后，AI 可以运行、停止、启用或禁用任务，增删改环境变量，保存与运行脚本，拉取订阅；关闭时只提供查询类工具。注意：应用拥有 scripts 权限就等于可以执行任意代码",
 		"mcp",
+	),
+	// 企业微信拉起任务（issue #145），两项都默认关闭，口径与上面 MCP 的两级开关完全一致：
+	// 路由本身是公开的，但总开关关着时 handler 第一行就 403，连验签都不做。
+	// 服务端每次 HTTP 请求都现读数据库，管理员改完立即生效，不需要重启。
+	newBoolConfig(
+		WecomTriggerEnabledConfigKey,
+		"启用企业微信触发",
+		"false",
+		"开启后，企业微信自建应用可以通过回调（/api/v1/wecom/callback/:id）或菜单链接（/api/v1/open-api/trigger）拉起面板任务。需要面板公网可达并走 80/443，且在企业微信后台配好回调 URL、Token、EncodingAESKey 与可信 IP",
+		"wecom",
+	),
+	newBoolConfig(
+		WecomTriggerAllowRunConfigKey,
+		"允许企业微信触发执行",
+		"false",
+		"开启后，企业微信侧的指令与菜单链接才会真的运行任务；关闭时回调仍可验签联通（方便先在企业微信后台把配置保存成功），但不会执行任何任务。可触发的任务范围还受每条接入配置的任务白名单限制",
+		"wecom",
 	),
 })
 

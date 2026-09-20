@@ -7,13 +7,15 @@ import (
 
 // 下面三条是从 handler/deps_package_manager_test.go 原样搬来的（实现 v3.3.1 搬到了 service），断言一字未改。
 
+// 后半段断言的是「已经是默认加速源时不再改写」，所以前半段显式传的这个源必须跟着默认源一起走。
+// v3.3.2 默认源从阿里云换成腾讯云（issue #146），这里只改期望值，断言本身一字未动。
 func TestRewriteAPTListLine(t *testing.T) {
 	line := "deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main restricted"
-	updated, changed := rewriteAPTListLine(line, "ubuntu", "https://mirrors.aliyun.com/ubuntu")
+	updated, changed := rewriteAPTListLine(line, "ubuntu", "https://mirrors.cloud.tencent.com/ubuntu")
 	if !changed {
 		t.Fatalf("expected apt list line to change")
 	}
-	if updated != "deb [arch=amd64] https://mirrors.aliyun.com/ubuntu jammy main restricted" {
+	if updated != "deb [arch=amd64] https://mirrors.cloud.tencent.com/ubuntu jammy main restricted" {
 		t.Fatalf("unexpected updated line: %s", updated)
 	}
 
@@ -21,7 +23,7 @@ func TestRewriteAPTListLine(t *testing.T) {
 	if changed {
 		t.Fatalf("expected apt list line already using default accelerated mirror to remain unchanged")
 	}
-	if defaulted != "deb [arch=amd64] https://mirrors.aliyun.com/ubuntu jammy main restricted" {
+	if defaulted != "deb [arch=amd64] https://mirrors.cloud.tencent.com/ubuntu jammy main restricted" {
 		t.Fatalf("unexpected defaulted line: %s", defaulted)
 	}
 }
@@ -37,20 +39,23 @@ func TestRewriteAPTSourcesContent(t *testing.T) {
 	}
 }
 
+// v3.3.2 默认源换成腾讯云（issue #146）：下面四处只改期望值。
+// 最后一条刻意仍用阿里云 —— EffectiveLinuxMirror 不参与旧默认源迁移，
+// 用户显式选的阿里云必须被原样保留（迁移只发生在 EnsureDefaultLinuxMirror 那一侧）。
 func TestEffectiveLinuxMirrorFallsBackToDefaultAcceleratedMirror(t *testing.T) {
 	apkManager := LinuxPackageManager{Name: "apk", Binary: "apk"}
-	if got := EffectiveLinuxMirror(apkManager, "", ""); got != "https://mirrors.aliyun.com/alpine" {
+	if got := EffectiveLinuxMirror(apkManager, "", ""); got != "https://mirrors.cloud.tencent.com/alpine" {
 		t.Fatalf("expected apk default mirror, got %q", got)
 	}
-	if got := EffectiveLinuxMirror(apkManager, "", "https://dl-cdn.alpinelinux.org/alpine"); got != "https://mirrors.aliyun.com/alpine" {
+	if got := EffectiveLinuxMirror(apkManager, "", "https://dl-cdn.alpinelinux.org/alpine"); got != "https://mirrors.cloud.tencent.com/alpine" {
 		t.Fatalf("expected apk official mirror to fall back to accelerated mirror, got %q", got)
 	}
 
 	aptManager := LinuxPackageManager{Name: "apt", Binary: "apt-get"}
-	if got := EffectiveLinuxMirror(aptManager, "ubuntu", ""); got != "https://mirrors.aliyun.com/ubuntu" {
+	if got := EffectiveLinuxMirror(aptManager, "ubuntu", ""); got != "https://mirrors.cloud.tencent.com/ubuntu" {
 		t.Fatalf("expected ubuntu default mirror, got %q", got)
 	}
-	if got := EffectiveLinuxMirror(aptManager, "debian", "http://deb.debian.org/debian"); got != "https://mirrors.aliyun.com/debian" {
+	if got := EffectiveLinuxMirror(aptManager, "debian", "http://deb.debian.org/debian"); got != "https://mirrors.cloud.tencent.com/debian" {
 		t.Fatalf("expected debian official mirror to fall back to accelerated mirror, got %q", got)
 	}
 	if got := EffectiveLinuxMirror(aptManager, "ubuntu", "https://mirrors.aliyun.com/ubuntu"); got != "https://mirrors.aliyun.com/ubuntu" {
@@ -81,11 +86,11 @@ func TestRewriteAPTSourcesKeepsDebianSecuritySuffix(t *testing.T) {
 	if !changed {
 		t.Fatal("官方源应被改写成默认加速源")
 	}
-	if !strings.Contains(updated, "URIs: https://mirrors.aliyun.com/debian\n") {
-		t.Fatalf("主仓库应改到 aliyun/debian，实际：\n%s", updated)
+	if !strings.Contains(updated, "URIs: https://mirrors.cloud.tencent.com/debian\n") {
+		t.Fatalf("主仓库应改到默认加速源的 /debian，实际：\n%s", updated)
 	}
-	if !strings.Contains(updated, "URIs: https://mirrors.aliyun.com/debian-security\n") {
-		t.Fatalf("security 段应改到 aliyun/debian-security，实际：\n%s", updated)
+	if !strings.Contains(updated, "URIs: https://mirrors.cloud.tencent.com/debian-security\n") {
+		t.Fatalf("security 段应改到默认加速源的 /debian-security，实际：\n%s", updated)
 	}
 	// 其余行（注释、Suites、Signed-By、段间空行）一个字节都不能动。
 	for _, keep := range []string{
@@ -99,7 +104,8 @@ func TestRewriteAPTSourcesKeepsDebianSecuritySuffix(t *testing.T) {
 	}
 
 	// 幂等：再跑一遍不应再有改动（EnsureDefaultLinuxMirror 每装一个包都会走一次）。
-	if again, changedAgain := rewriteAPTSourcesContent(updated, "debian", "https://mirrors.aliyun.com/debian"); changedAgain || again != updated {
+	// 这里显式传的必须与上一步用默认源改出来的结果一致，v3.3.2 起是腾讯云（issue #146）。
+	if again, changedAgain := rewriteAPTSourcesContent(updated, "debian", "https://mirrors.cloud.tencent.com/debian"); changedAgain || again != updated {
 		t.Fatalf("已是目标镜像时不应再改写，实际：\n%s", again)
 	}
 }
@@ -125,18 +131,18 @@ func TestRewriteAPTListLineKeepsDebianSecuritySuffix(t *testing.T) {
 		{
 			name: "路径以 -security 结尾",
 			line: "deb http://security.debian.org/debian-security bullseye-security main",
-			want: "deb https://mirrors.aliyun.com/debian-security bullseye-security main",
+			want: "deb https://mirrors.cloud.tencent.com/debian-security bullseye-security main",
 		},
 		{
 			// buster 及更早的写法：路径不带 -security，靠 Suites 的 /updates 认出来。
 			name: "buster 的 /updates 写法",
 			line: "deb http://security.debian.org buster/updates main",
-			want: "deb https://mirrors.aliyun.com/debian-security buster/updates main",
+			want: "deb https://mirrors.cloud.tencent.com/debian-security buster/updates main",
 		},
 		{
 			name: "普通主仓库不加后缀",
 			line: "deb http://deb.debian.org/debian bullseye-updates main",
-			want: "deb https://mirrors.aliyun.com/debian bullseye-updates main",
+			want: "deb https://mirrors.cloud.tencent.com/debian bullseye-updates main",
 		},
 	}
 	for _, tc := range cases {
@@ -157,7 +163,7 @@ func TestRewriteAPTSourcesLeavesUbuntuSecurityUnderUbuntu(t *testing.T) {
 	if !changed {
 		t.Fatal("官方 security 源应被改写成默认加速源")
 	}
-	if !strings.Contains(updated, "URIs: https://mirrors.aliyun.com/ubuntu\n") {
+	if !strings.Contains(updated, "URIs: https://mirrors.cloud.tencent.com/ubuntu\n") {
 		t.Fatalf("Ubuntu 的 security 段应仍指向 /ubuntu，实际：\n%s", updated)
 	}
 	if strings.Contains(updated, "ubuntu-security") {

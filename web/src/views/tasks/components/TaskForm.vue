@@ -14,6 +14,9 @@ const props = withDefaults(defineProps<{
   defaultPythonVersion?: string
   pythonRuntimes?: PythonRuntimeInfo[]
   notificationChannels?: { id: number; name: string; type: string; enabled: boolean; push_scope?: string }[]
+  // 系统设置里「日志保留天数」的当前值，只用于「跟随全局」那一档的提示文案。
+  // 父组件没传就不显示数字——宁可少说一句，也不能写死一个 7 骗用户（issue #144 / v3.3.2）。
+  globalLogRetentionDays?: number
   // 提交在途标记：父组件创建/更新请求期间置位。
   // 弹窗要等请求成功才关，不锁按钮的话连点就会建出多条重复任务。
   submitting?: boolean
@@ -47,6 +50,8 @@ const form = ref({
   task_before: '',
   task_after: '',
   allow_multiple_instances: false,
+  // null = 跟随全局 log_retention_days，>0 = 这个任务单独保留这么多天
+  log_retention_days: null as number | null,
   stop_schedule: '',
   notify_on_abort: false,
   group_name: '',
@@ -56,6 +61,9 @@ const labelInput = ref('')
 const activeTab = ref('basic')
 const internalLabels = ref<string[]>([])
 const randomDelayMode = ref<'inherit' | 'disabled' | 'custom'>('inherit')
+// 日志保留天数只有两态：跟随全局（提交 null）/ 自定义天数。
+// 刻意不做「永久保留」第三态——那需要哨兵值，清理侧的分组 SQL 会再复杂一档（issue #144 / v3.3.2）。
+const logRetentionMode = ref<'inherit' | 'custom'>('inherit')
 const { dialogFullscreen } = useResponsive()
 const allPythonVersions = ['3.10', '3.11', '3.12']
 
@@ -69,6 +77,12 @@ const pythonVersionOptions = computed(() => {
   return runtimes.length > 0
     ? runtimes
     : allPythonVersions.map(version => ({ version, available: true, message: '' }))
+})
+
+// 全局保留天数的展示文案：父组件没传（或传了非法值）时返回空串，模板里据此整段不显示数字。
+const globalLogRetentionText = computed(() => {
+  const days = props.globalLogRetentionDays
+  return days && days > 0 ? String(days) : ''
 })
 
 // 当前选中版本若未安装，展示后端给的提示，让用户知道该版本不可用及如何处理
@@ -106,6 +120,14 @@ watch(() => props.visible, (val) => {
     } else {
       randomDelayMode.value = 'custom'
     }
+    // 后端下发的是 *int：null / 缺字段都表示跟随全局，只有 >0 才是任务自己设的天数。
+    const taskLogRetention = typeof props.task.log_retention_days === 'number'
+      ? props.task.log_retention_days
+      : props.task.log_retention_days == null
+        ? null
+        : Number(props.task.log_retention_days)
+    const hasCustomLogRetention = taskLogRetention != null && taskLogRetention > 0
+    logRetentionMode.value = hasCustomLogRetention ? 'custom' : 'inherit'
     form.value = {
       name: props.task.name || '',
       command: props.task.command || '',
@@ -126,6 +148,7 @@ watch(() => props.visible, (val) => {
       task_before: props.task.task_before || '',
       task_after: props.task.task_after || '',
       allow_multiple_instances: props.task.allow_multiple_instances ?? false,
+      log_retention_days: hasCustomLogRetention ? taskLogRetention : null,
       stop_schedule: props.task.stop_schedule || '',
       notify_on_abort: props.task.notify_on_abort ?? false,
     }
@@ -133,6 +156,7 @@ watch(() => props.visible, (val) => {
     const p = props.prefill
     internalLabels.value = []
     randomDelayMode.value = 'inherit'
+    logRetentionMode.value = 'inherit'
     form.value = {
       name: p?.name || '', command: p?.command || '',
       python_version: p?.python_version || getDefaultPythonVersion(),
@@ -142,6 +166,7 @@ watch(() => props.visible, (val) => {
       timeout: 0, success_exit_codes: '0', random_delay_seconds: null, max_retries: 0, retry_interval: 60,
       notify_on_failure: false, notify_on_success: false, notification_channel_id: null, labels: [], depends_on: null,
       task_before: '', task_after: '', allow_multiple_instances: false, group_name: '', stop_schedule: '', notify_on_abort: false,
+      log_retention_days: null,
     }
   }
   activeTab.value = 'basic'
@@ -177,6 +202,24 @@ watch(randomDelayMode, (mode) => {
   }
 })
 
+watch(logRetentionMode, (mode) => {
+  // 切回「跟随全局」必须显式写 null：提交走的是 { ...form.value } 全量对象，
+  // 不置空就会把上次填的天数一起发出去，用户以为改回跟随全局了、其实没有。
+  // 反过来切到「自定义」也要给个初值，否则 el-input-number 空着时提交出来是 undefined，
+  // JSON.stringify 会把整个键丢掉，后端压根收不到这次修改（issue #144 / v3.3.2）。
+  if (mode === 'inherit') {
+    form.value.log_retention_days = null
+    return
+  }
+  if (form.value.log_retention_days == null || form.value.log_retention_days <= 0) {
+    // 没拿到全局值时退回 7，与后端 log_retention_days 的注册默认值一致；
+    // 这只是表单的起手值，用户改不改都不影响「跟随全局」的语义。
+    form.value.log_retention_days = props.globalLogRetentionDays && props.globalLogRetentionDays > 0
+      ? props.globalLogRetentionDays
+      : 7
+  }
+})
+
 function addLabel() {
   const val = labelInput.value.trim()
   if (val && !form.value.labels.includes(val)) {
@@ -201,6 +244,12 @@ function handleSubmit() {
   if (randomDelayMode.value === 'custom') {
     if (form.value.random_delay_seconds == null || form.value.random_delay_seconds <= 0) {
       ElMessage.warning('请输入大于 0 的随机延迟秒数')
+      return
+    }
+  }
+  if (logRetentionMode.value === 'custom') {
+    if (form.value.log_retention_days == null || form.value.log_retention_days <= 0) {
+      ElMessage.warning('请输入 1-3650 之间的日志保留天数')
       return
     }
   }
@@ -388,6 +437,29 @@ function handleSubmit() {
           </el-form-item>
           <el-form-item label="允许多实例">
             <el-switch v-model="form.allow_multiple_instances" />
+          </el-form-item>
+          <el-form-item label="日志保留天数">
+            <div class="advanced-field-block">
+              <el-radio-group v-model="logRetentionMode">
+                <el-radio value="inherit">
+                  跟随全局<template v-if="globalLogRetentionText">（当前 {{ globalLogRetentionText }} 天）</template>
+                </el-radio>
+                <el-radio value="custom">任务单独设置</el-radio>
+              </el-radio-group>
+              <div v-if="logRetentionMode === 'custom'" class="advanced-inline-input">
+                <el-input-number
+                  v-model="form.log_retention_days"
+                  :min="1"
+                  :max="3650"
+                  :placeholder="globalLogRetentionText || '天数'"
+                />
+                <span>天</span>
+              </div>
+              <div class="advanced-field-hint">
+                只影响这个任务的日志清理。每分钟执行一次的任务建议单独调短，否则几天就能堆出上万个日志文件；
+                清理会连磁盘上的 .log 文件一起删，删掉找不回来。
+              </div>
+            </div>
           </el-form-item>
         </el-form>
       </el-tab-pane>

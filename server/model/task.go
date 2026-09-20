@@ -41,14 +41,21 @@ type Task struct {
 	Timeout                int        `gorm:"default:0" json:"timeout"`
 	SuccessExitCodes       string     `gorm:"size:128;not null;default:'0'" json:"success_exit_codes"`
 	RandomDelaySeconds     *int       `json:"random_delay_seconds"`
-	MaxRetries             int        `json:"max_retries"`
-	RetryInterval          int        `json:"retry_interval"`
-	NotifyOnFailure        bool       `json:"notify_on_failure"`
-	NotifyOnSuccess        bool       `json:"notify_on_success"`
-	NotifyOnAbort          bool       `gorm:"default:0" json:"notify_on_abort"`
-	NotificationChannelID  *uint      `gorm:"index" json:"notification_channel_id"`
-	DependsOn              *uint      `gorm:"index" json:"depends_on"`
-	SortOrder              int        `json:"sort_order"`
+	// LogRetentionDays 任务级日志保留天数：nil = 跟随全局 log_retention_days，>0 = 只保留这么多天。
+	// 每分钟跑一次的任务几天就能堆出上万个日志文件，全局天数对它来说太长（issue #144 / v3.3.2）。
+	//
+	// 🔴 刻意用指针而不是 int + 0 表示「跟随全局」：SQLite 给存量行补列后的取值就是 0/NULL，
+	// 一旦用 0 承载「跟随全局」，就和「用户真的填了 0」撞车——而把 0 解读成「保留 0 天」，
+	// 升级后第一次清理 tick 就会把全站日志清空。所以补列必须可空、这里必须是 *int。
+	LogRetentionDays      *int  `json:"log_retention_days"`
+	MaxRetries            int   `json:"max_retries"`
+	RetryInterval         int   `json:"retry_interval"`
+	NotifyOnFailure       bool  `json:"notify_on_failure"`
+	NotifyOnSuccess       bool  `json:"notify_on_success"`
+	NotifyOnAbort         bool  `gorm:"default:0" json:"notify_on_abort"`
+	NotificationChannelID *uint `gorm:"index" json:"notification_channel_id"`
+	DependsOn             *uint `gorm:"index" json:"depends_on"`
+	SortOrder             int   `json:"sort_order"`
 	// ListOrder 只管任务列表里拖拽出来的展示顺序，刻意不复用上面的 SortOrder：
 	// SortOrder 是「开机任务串行执行顺序」的契约（service/scheduler_v2.go 按它排队跑），
 	// 拿它承载列表拖拽会在用户毫无察觉的情况下改写开机编排。
@@ -100,6 +107,7 @@ func (t *Task) ToDict() map[string]interface{} {
 		"timeout":                  t.Timeout,
 		"success_exit_codes":       t.GetSuccessExitCodes(),
 		"random_delay_seconds":     t.RandomDelaySeconds,
+		"log_retention_days":       t.LogRetentionDays,
 		"max_retries":              t.MaxRetries,
 		"retry_interval":           t.RetryInterval,
 		"notify_on_failure":        t.NotifyOnFailure,

@@ -717,6 +717,8 @@ func loadQingLongTasks(db *sql.DB) ([]model.Task, error) {
 			NotifyOnFailure:        true,
 			NotifyOnSuccess:        false,
 			AllowMultipleInstances: sqliteRowBool(row, "allow_multiple_instances"),
+			// 这里刻意不填 LogRetentionDays：青龙没有「任务级日志保留天数」这个概念，
+			// 留空即 NULL，也就是跟随面板的全局设置（issue #144 / v3.3.2）。
 		}
 		if task.Name == "" {
 			task.Name = deriveTaskNameFromCommand(task.Command)

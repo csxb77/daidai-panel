@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"daidai-panel/config"
 	"daidai-panel/database"
 	"daidai-panel/model"
 	panelcron "daidai-panel/pkg/cron"
@@ -41,6 +42,45 @@ func normalizeTaskRandomDelaySecondsValue(value interface{}) (*int, error) {
 	}
 }
 
+// normalizeTaskLogRetentionDaysValue 把任务级日志保留天数统一成两态：nil = 跟随全局、>0 = 自定义天数。
+// 结构照抄上面的 normalizeTaskRandomDelaySecondsValue：Create 解引用后传的是 int，
+// Update 与导入走 JSON、数字一律是 float64，两条路共用这一个函数（issue #144 / v3.3.2）。
+//
+// 0 与负数刻意归成 nil 而不是报错：前端「跟随全局」那一档提交的是 null，但 el-input-number
+// 被清空、旧客户端、导入的旧文件都可能送来 0，把它们当「不自定义」处理用户才存得上。
+// 上下限与全局 log_retention_days（system_config_registry.go 里登记的 1-3650）对齐。
+func normalizeTaskLogRetentionDaysValue(value interface{}) (*int, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	switch typed := value.(type) {
+	case float64:
+		days := int(typed)
+		if float64(days) != typed {
+			return nil, fmt.Errorf("日志保留天数必须为整数")
+		}
+		if days <= 0 {
+			return nil, nil
+		}
+		if days > 3650 {
+			return nil, fmt.Errorf("日志保留天数需在 1-3650 之间")
+		}
+		return &days, nil
+	case int:
+		if typed <= 0 {
+			return nil, nil
+		}
+		if typed > 3650 {
+			return nil, fmt.Errorf("日志保留天数需在 1-3650 之间")
+		}
+		days := typed
+		return &days, nil
+	default:
+		return nil, fmt.Errorf("日志保留天数无效")
+	}
+}
+
 func (h *TaskHandler) Create(c *gin.Context) {
 	var req struct {
 		Name                   string   `json:"name" binding:"required"`
@@ -51,6 +91,7 @@ func (h *TaskHandler) Create(c *gin.Context) {
 		Timeout                *int     `json:"timeout"`
 		SuccessExitCodes       *string  `json:"success_exit_codes"`
 		RandomDelaySeconds     *int     `json:"random_delay_seconds"`
+		LogRetentionDays       *int     `json:"log_retention_days"`
 		MaxRetries             *int     `json:"max_retries"`
 		RetryInterval          *int     `json:"retry_interval"`
 		NotifyOnFailure        *bool    `json:"notify_on_failure"`
@@ -124,6 +165,14 @@ func (h *TaskHandler) Create(c *gin.Context) {
 			return
 		}
 		task.RandomDelaySeconds = randomDelayValue
+	}
+	if req.LogRetentionDays != nil {
+		logRetentionValue, err := normalizeTaskLogRetentionDaysValue(*req.LogRetentionDays)
+		if err != nil {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		task.LogRetentionDays = logRetentionValue
 	}
 	if req.MaxRetries != nil {
 		task.MaxRetries = *req.MaxRetries
@@ -285,7 +334,7 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		"timeout":   true, "success_exit_codes": true, "random_delay_seconds": true, "max_retries": true, "retry_interval": true,
 		"notify_on_failure": true, "notify_on_success": true, "notify_on_abort": true, "notification_channel_id": true, "labels": true, "depends_on": true,
 		"sort_order": true, "task_before": true, "task_after": true,
-		"allow_multiple_instances": true, "stop_schedule": true,
+		"allow_multiple_instances": true, "stop_schedule": true, "log_retention_days": true,
 	}
 
 	updates := make(map[string]interface{})
@@ -297,6 +346,17 @@ func (h *TaskHandler) Update(c *gin.Context) {
 				return
 			}
 			updates[key] = randomDelayValue
+			continue
+		}
+		if key == "log_retention_days" {
+			logRetentionValue, err := normalizeTaskLogRetentionDaysValue(value)
+			if err != nil {
+				response.BadRequest(c, err.Error())
+				return
+			}
+			// 这里刻意把 nil 也写进 updates：map 形式的 Updates 不会跳过 nil，
+			// 所以「从自定义天数改回跟随全局」全靠这一句把列写回 NULL（issue #144 / v3.3.2）。
+			updates[key] = logRetentionValue
 			continue
 		}
 		if key == "notification_channel_id" {
@@ -355,6 +415,9 @@ func (h *TaskHandler) Delete(c *gin.Context) {
 		scheduler.RemoveJob(uint(taskID))
 	}
 	database.DB.Where("task_id = ?", taskID).Delete(&model.TaskLog{})
+	// 任务都删了，logs/task_<ID>_* 留着只会变成永远没人认领的垃圾目录（issue #144 / v3.3.2）。
+	// 必须在删行之后调：日志行还在的时候清理目录，会让「记录还在、文件没了」更难排查。
+	service.RemoveTaskLogDirs(uint(taskID), config.C.Data.LogDir)
 	database.DB.Delete(&task)
 
 	resp := gin.H{"message": "删除成功"}
@@ -396,6 +459,7 @@ func (h *TaskHandler) Copy(c *gin.Context) {
 		Timeout:                task.Timeout,
 		SuccessExitCodes:       task.GetSuccessExitCodes(),
 		RandomDelaySeconds:     task.RandomDelaySeconds,
+		LogRetentionDays:       task.LogRetentionDays,
 		MaxRetries:             task.MaxRetries,
 		RetryInterval:          task.RetryInterval,
 		NotifyOnFailure:        task.NotifyOnFailure,

@@ -232,6 +232,24 @@ export interface DemoOpenApp {
   updated_at: string
 }
 
+/**
+ * 企业微信接入配置（issue #145，v3.3.2）。
+ *
+ * 少了 callback_token / encoding_aes_key 两个字段不是漏写：服务端标了 `json:"-"`，
+ * 任何接口都不回显，演示站要是把它们摆出来反而和真面板对不上。
+ */
+export interface DemoWecomTrigger {
+  id: number
+  name: string
+  corp_id: string
+  agent_id: string
+  open_app_id: number
+  task_whitelist: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
 export interface DemoApiCallLog {
   id: number
   app_id: number
@@ -357,6 +375,7 @@ export interface DemoDbState {
   channels: DemoNotifyChannel[]
   openApps: DemoOpenApp[]
   apiCallLogs: DemoApiCallLog[]
+  wecomTriggers: DemoWecomTrigger[]
   users: DemoUser[]
   deps: DemoDependency[]
   loginLogs: DemoLoginLog[]

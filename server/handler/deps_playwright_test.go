@@ -669,7 +669,9 @@ func TestNewPlaywrightBrowserDownloadStepUsesInjectedCommand(t *testing.T) {
 	if askedVersion != "3.11" {
 		t.Fatalf("应按依赖记录的 Python 版本构造下载命令，实际 %q", askedVersion)
 	}
-	if startLine != service.PlaywrightDownloadStartPrefix+"/data/deps/ms-playwright" || step.doneLine != service.PlaywrightDownloadReadyLine {
+	// 期望值改用 PlaywrightDownloadStartLine 组装：v3.3.2 起这一行后面还跟着体量与耗时说明（issue #146），
+	// 断言的意思不变 —— startLine 必须就是那条下载开始行。
+	if startLine != service.PlaywrightDownloadStartLine("/data/deps/ms-playwright") || step.doneLine != service.PlaywrightDownloadReadyLine {
 		t.Fatalf("前后日志行不对：start=%q done=%q", startLine, step.doneLine)
 	}
 }

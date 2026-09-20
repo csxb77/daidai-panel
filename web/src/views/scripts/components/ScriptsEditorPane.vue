@@ -426,31 +426,44 @@ watch(
           </div>
         </div>
 
+        <!-- issue #144 / v3.3.2：窄屏这排按钮全部收成纯图标，写法照 config-file/index.vue 的既有范式。
+             不能只删 `:size` 绑定 —— EP default 档的横向 padding 是 15px，纯图标按钮实宽约 48px，
+             编辑态这排最多 7 颗（保存/退出编辑/调试/添加任务/Wrap/齿轮/更多），48px 档要 384px，
+             而 360px 屏这里可用宽只有约 312px，必折行；挂共享类 .dd-icon-only-btn 才是真正的 32×32，
+             7×32 + 6×8 = 272px 放得下，且 16px 圆角配 32px 高刚好是正圆。
+             aria-label / title 只给「桌面有可见文字、窄屏才退化成图标」的那几颗按上移动端条件：
+             桌面读屏直接念可见文字，再挂一个不同的 aria-label 会违反「可见标签须包含在可访问名称里」；
+             齿轮与「更多」本来就永远是纯图标，它们的 aria-label 无条件常驻。
+             注意本组件收到的 isMobile 其实是 ≤1024 的 isCompactLayout（见 index.vue 的 :is-mobile），
+             所以 769~1024 一档同样收成 32×32 图标、但圆角仍是桌面档，属已知且可接受的降级。 -->
         <div class="hero-actions">
           <el-button
             v-if="!isEditing"
-            class="action-btn"
-            :size="isMobile ? 'small' : 'default'"
+            :class="['action-btn', { 'dd-icon-only-btn': isMobile }]"
             :disabled="isBinary"
+            :aria-label="isMobile ? '编辑' : undefined"
+            :title="isMobile ? '编辑' : undefined"
             @click="startEdit"
           >
             <el-icon><Edit /></el-icon><span v-if="!isMobile">编辑</span>
           </el-button>
           <template v-else>
             <el-button
-              class="action-btn action-btn--primary"
+              :class="['action-btn', 'action-btn--primary', { 'dd-icon-only-btn': isMobile }]"
               type="primary"
-              :size="isMobile ? 'small' : 'default'"
               :loading="saving"
               :disabled="!hasChanges || isBinary"
+              :aria-label="isMobile ? '保存' : undefined"
+              :title="isMobile ? '保存' : undefined"
               @click="onSave"
             >
               <el-icon><Check /></el-icon><span v-if="!isMobile">保存</span>
             </el-button>
             <el-button
-              class="action-btn action-btn--cancel"
-              :size="isMobile ? 'small' : 'default'"
+              :class="['action-btn', 'action-btn--cancel', { 'dd-icon-only-btn': isMobile }]"
               :disabled="saving"
+              :aria-label="isMobile ? '退出编辑' : undefined"
+              :title="isMobile ? '退出编辑' : undefined"
               @click="onCancelEdit"
             >
               <el-icon><Close /></el-icon><span v-if="!isMobile">退出编辑</span>
@@ -458,18 +471,20 @@ watch(
           </template>
 
           <el-button
-            class="action-btn action-btn--run"
-            :size="isMobile ? 'small' : 'default'"
+            :class="['action-btn', 'action-btn--run', { 'dd-icon-only-btn': isMobile }]"
             :disabled="isBinary"
+            :aria-label="isMobile ? '调试' : undefined"
+            :title="isMobile ? '调试' : undefined"
             @click="onDebugRun"
           >
             <el-icon><VideoPlay /></el-icon><span v-if="!isMobile">调试</span>
           </el-button>
 
           <el-button
-            class="action-btn action-btn--task"
-            :size="isMobile ? 'small' : 'default'"
+            :class="['action-btn', 'action-btn--task', { 'dd-icon-only-btn': isMobile }]"
             :disabled="isBinary"
+            :aria-label="isMobile ? '添加任务' : undefined"
+            :title="isMobile ? '添加任务' : undefined"
             @click="onAddToTask"
           >
             <el-icon><Plus /></el-icon><span v-if="!isMobile">添加任务</span>
@@ -485,8 +500,7 @@ watch(
             placement="bottom"
           >
             <el-button
-              class="action-btn"
-              :size="isMobile ? 'small' : 'default'"
+              :class="['action-btn', { 'dd-icon-only-btn': isMobile }]"
               :type="prefs.word_wrap === 'on' ? 'primary' : 'default'"
               :plain="prefs.word_wrap === 'on'"
               @click="toggleWordWrap"
@@ -508,8 +522,7 @@ watch(
             :hide-on-click="false"
           >
             <el-button
-              class="action-btn"
-              :size="isMobile ? 'small' : 'default'"
+              :class="['action-btn', { 'dd-icon-only-btn': isMobile }]"
               aria-label="编辑器选项"
             >
               <el-icon><Setting /></el-icon>
@@ -628,8 +641,7 @@ watch(
 
           <el-dropdown trigger="click" placement="bottom-end">
             <el-button
-              class="action-btn"
-              :size="isMobile ? 'small' : 'default'"
+              :class="['action-btn', { 'dd-icon-only-btn': isMobile }]"
               aria-label="更多操作"
             >
               <el-icon><MoreFilled /></el-icon>
@@ -874,7 +886,7 @@ watch(
 }
 
 /* 展开把手：与 ScriptsSidebar.vue 里那个收起按钮（.icon-btn）同一副长相——
-   30×30、透明底、1px 描边，hover 只改颜色不做位移；圆角统一吃 --dd-radius-control。
+   30×30、透明底、1px 描边，hover 只改颜色不做位移；圆角统一吃 --dd-radius-button。
    两处相隔一个组件边界、scoped 样式互相够不到，只能各写一份；
    数值要改的话两边一起改。 */
 .sidebar-expand-btn {
@@ -884,8 +896,9 @@ watch(
   flex-shrink: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
-  // 图标按钮属控件类表面 → control 档
-  border-radius: var(--dd-radius-control);
+  // issue #144 / v3.3.2：改吃「按钮」角色令牌 —— 手机上 rounded 面板放大到 16px，与同屏其它按钮拉齐；
+  // 桌面与 square 面板下该令牌恒等于 control 档，零变化。孪生体 ScriptsSidebar 的 .icon-btn 同档
+  border-radius: var(--dd-radius-button);
   color: var(--el-text-color-secondary);
   cursor: pointer;
   display: inline-flex;
@@ -1069,20 +1082,26 @@ watch(
   }
 }
 
+// issue #144 / v3.3.2：这里原来是一块灰底圆角槽（padding + border-radius + color-mix 底色），
+// 已收成纯排布容器，与侧栏 ScriptsSidebar 的 .sidebar-toolbar-actions 同一口径
 .hero-actions {
   display: inline-flex;
-  padding: 4px;
-  // 按钮组的灰底槽 → control 档（和槽内 .action-btn 同档，圆角一致才不会露出内外错位的角）
-  border-radius: var(--dd-radius-control);
-  background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+
+  // EP 自带 `.el-button + .el-button { margin-left: 12px }` 会叠加在 gap 上，而齿轮和「更多」外层是
+  // div.el-dropdown、选择器不命中，同排间距就会一宽一窄（相邻 el-button 20px、下拉前只有 8px）。
+  // 清掉之后间距只由 gap 决定，与全仓另外 15 处工具栏写法一致
+  .el-button + .el-button {
+    margin-left: 0;
+  }
 }
 
 .action-btn {
-  // 按钮属控件类表面 → control 档
-  border-radius: var(--dd-radius-control);
+  // issue #144 / v3.3.2：改吃「按钮」角色令牌 —— 桌面恒等于 control 档，
+  // 手机上 rounded 面板是 16px，配 .dd-icon-only-btn 的 32px 高正好是正圆
+  border-radius: var(--dd-radius-button);
   font-weight: 500;
   transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
@@ -1355,7 +1374,8 @@ watch(
     .hero-actions {
       width: 100%;
       justify-content: flex-end;
-      gap: 6px;
+      // issue #144 / v3.3.2：刻意不再单独压 gap —— 清掉 EP 叠加的 12px margin 后同排间距已经均匀，
+      // 直接继承 .hero-actions 的 8px，与全仓移动端 8px 刻度对齐
       flex-wrap: wrap;
     }
   }

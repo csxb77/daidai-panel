@@ -93,6 +93,12 @@ func Setup(engine *gin.Engine) {
 	mcpHandler.RegisterRoutes(v1)
 	mcpHandler.RegisterRoutes(legacy)
 
+	// 企业微信拉起任务的回调（issue #145）。和 MCP 是同一个形态：路由公开、鉴权在 handler 内，
+	// 触发执行时在进程内回放到上面那些 /api/v1 接口，所以同样要把 engine 本身交给它。
+	wecomCallbackHandler := handler.NewWecomCallbackHandler(engine)
+	wecomCallbackHandler.RegisterRoutes(v1)
+	wecomCallbackHandler.RegisterRoutes(legacy)
+
 	engine.GET("/robots.txt", func(c *gin.Context) {
 		c.Data(200, "text/plain; charset=utf-8", []byte("User-agent: *\nDisallow: /\n"))
 	})

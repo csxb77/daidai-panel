@@ -237,10 +237,10 @@ body {
   --dd-header-height: 56px;
   --dd-page-padding: 20px;
   // 内容区（.layout-main）的横向内边距：桌面 20px、≤768px 为 12px（见移动端媒体查询）。
-  // 抽成令牌是为了让「贴屏幕边缘」的元素（.dd-mobile-bleed）用等量负外边距抵消它：
-  // 两边各写各的像素，改了一边另一边就会错位，露出一条缝或顶出横向滚动。
   // 目前只有移动端的 .layout-main padding 引用它（MainLayout.vue）；桌面端 padding 仍是原来的
-  // 20px / 矮屏 16px 字面值（本版不动桌面），.dd-mobile-bleed 也只在 ≤768px 生效，两者不会对不上。
+  // 20px / 矮屏 16px 字面值（本版不动桌面）。
+  // v3.3.2 / issue #144 起 .dd-mobile-bleed 不再用等量负外边距抵消它（那会把横栏顶到屏幕边缘、吃掉侧滑返回），
+  // 改成跟着这条留白走，所以这个令牌现在是单一消费方，不再有「两边像素必须对齐」的耦合。
   --dd-page-gutter-x: 20px;
   --dd-transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   // ===== 表面质感令牌 =====
@@ -430,6 +430,10 @@ a {
   }
 }
 
+// 🔴 遮罩只有 24% 暗度 + 1.5px 模糊，压不住底下的内容（v3.3.2 / issue #144）：
+// 任何没铺满视口的弹窗，移动端那条 sticky 顶栏都会从遮罩后面清晰透出来，观感上就是「顶栏还在占地方」。
+// 所以移动端不能指望遮罩去挡顶栏，必须靠弹窗自己铺满——见文件末尾 ≤768 媒体查询里的 `.el-dialog` 整屏规则。
+// 同理，`.layout-main { z-index: 21 }` 只解决「谁在上面」，解决不了「弹窗没盖到那块区域」。
 .el-overlay {
   background-color: rgba(15, 23, 42, 0.24) !important;
   backdrop-filter: blur(1.5px);
@@ -924,13 +928,18 @@ a {
   }
 }
 
-// 菜单里「可撤销的正向操作」（v3.3.1，issue #143 D2：任务的「启用」，与「禁用」的红色对称）。
-// 只在 hover / focus 时换绿字 + 淡绿底；常态【刻意不写颜色】，沿用上面 popper 根节点改指的
-// primary 字色，与同菜单其它项一致（#133 约定「菜单项字色统一」，常态就变绿会比旁边的项抢眼一档）。
-// 特异性 (0,4,0) 高于 EP 的 `.el-dropdown-menu__item:not(.is-disabled):hover`(0,3,0)，不需要 !important。
-// 取值只用令牌：暗色下 --el-color-success-light-9 由 EP 的 dark css-vars 换成深绿底，写死 #f0f9eb 会出亮斑。
+// 菜单里「可撤销的正向操作」（任务的「启用」，与「禁用」的红色对称）。
+// v3.3.2（issue #144）把 #143 D2 的口径翻了过来：常态就写绿字，与上面 danger 的常态红字完全对称。
+// 原先【刻意不写常态色】是怕它比同菜单中性项抢眼一档（#133「菜单项字色统一」），
+// 但用户反馈常态看不出这是正向操作，现按用户要求常驻着色；桌面操作列 ▾ 与移动端卡片「···」一起变。
+// 特异性：常态这条 (0,2,0) 压得过 EP 的 `.el-dropdown-menu__item`(0,1,0)；
+// hover 那两条 (0,4,0) 高于 EP 的 `.el-dropdown-menu__item:not(.is-disabled):hover`(0,3,0)，都不需要 !important。
+// 取值只用令牌：暗色下 --el-color-success / --el-color-success-light-9 由 EP 的 dark css-vars 换值，
+// 写死 #67c23a / #f0f9eb 会在暗色下失真（EP 的 --el-color-success 明色恰好就是 #67C23A）。
 // 使用方：DdSplitButton / DdMoreMenu 菜单项的 success 字段（目前是任务页桌面操作列与移动端卡片「···」）。
 .dd-split-button__popper .dd-split-button__item--success {
+  color: var(--el-color-success);
+
   &:not(.is-disabled):hover,
   &:not(.is-disabled):focus {
     color: var(--el-color-success);
@@ -2508,7 +2517,9 @@ html.dark {
 //    （含本期不改的设置页卡片、users、notifications、open-api），新布局一律用这里的新类。
 // 🔴 横向滚动行一律不要加 -webkit-overflow-scrolling: touch（iOS 上弹窗被顶栏盖住的根因，见 MainLayout.vue）。
 // 圆角只吃角色令牌 --dd-radius-button / --dd-radius-card，不写死像素。
-// 贴屏幕边缘的 .dd-mobile-bleed（批量栏 .dd-mobile-batch-bar 与它共用）只在 ≤768 生效，写在文件后部的移动端媒体查询里。
+// .dd-mobile-bleed（批量栏 .dd-mobile-batch-bar 与它共用几何）只在 ≤768 生效，写在文件后部的移动端媒体查询里。
+// 🔴 类名里的 bleed（出血/贴边）在 v3.3.2 / issue #144 之后已经名不副实：这几条横栏改回了跟随页面 12px 留白，
+//    屏幕最边上那 12px 要让给系统侧滑返回手势。改名要动 4 处模板 + 规范 6 处，本轮不改，看到类名别按字面理解。
 // ============================================================================
 
 // 移动端工具栏第一行：搜索框占满剩余宽度，后面跟 32px 图标按钮，单行不换行。
@@ -2548,7 +2559,8 @@ html.dark {
 // 横向滑动、隐藏滚动条的一行，子项不换行也不被压缩。
 // 使用方：tasks 视图分组栏、subscriptions / logs 的 status-tabs 第二行，以及五页的 .dd-mobile-batch-bar。
 // 与页面 scoped 的 .status-tabs 同挂时，display / gap 以页面那条 (0,2,0) 为准；
-// 单挂本类（不贴边）时页面要保留自己的 width: 100%，否则 inline-flex 会按内容收宽、滚不起来。
+// 宽度一律要有 width: 100%（同挂 .dd-mobile-bleed 时由那条规则给，单挂本类时页面自己给），
+// 否则页面 scoped 那句 inline-flex(0,2,0) 会压过这里的 flex(0,1,0)，整条按内容收宽、根本滚不起来。
 // 滚动条两种写法都要：Chrome 121+ 设了 scrollbar-width 就忽略 ::-webkit-scrollbar，Safari 只认后者。
 .dd-scroll-row {
   display: flex;
@@ -2556,7 +2568,10 @@ html.dark {
   gap: 8px;
   overflow-x: auto;
   overflow-y: hidden;
-  overscroll-behavior-x: contain;
+  // 🔴 必须是 auto，不要改回 contain（v3.3.2 / issue #144）：contain 会把横滑到尽头后的滚动链断在这一行，
+  //    iOS 的系统边缘返回手势热区比 12px 留白宽，落在横栏上的那一段会被它整个吃掉，用户表现为「这里划不回上一页」。
+  //    代价是横滑到尽头再继续滑会带动页面 / 触发系统返回——这正是本次想要的行为。
+  overscroll-behavior-x: auto;
   scrollbar-width: none;
 
   &::-webkit-scrollbar {
@@ -2576,7 +2591,8 @@ html.dark {
 
 // 移动端批量栏：与 .dd-scroll-row 同挂，批量态时整行替换 .dd-mobile-toolbar。
 // 上下外边距与高度下限都与 .dd-mobile-toolbar 一致（上 0、下 10px、32px 高），两支切换时下面的内容不跳。
-// 左右贴屏幕边缘（横滑时是一整条干净的横排）：几何与 .dd-mobile-bleed 共用一条规则，写在文件后部的移动端媒体查询里。
+// 左右跟随页面 12px 留白（v3.3.2 / issue #144 改回，此前是贴屏幕边缘）：几何与 .dd-mobile-bleed 共用一条规则，
+// 写在文件后部的移动端媒体查询里。但它刻意【不】吃圆角，理由见那条规则旁的说明。
 // 内容顺序固定：全选/取消全选 → 批量按钮（图标 + 短文字，default 尺寸）→ 取消（最后）；不显示「已选 N 项」。
 // 使用方：tasks / subscriptions / envs / logs / deps。
 .dd-mobile-batch-bar {
@@ -2624,8 +2640,11 @@ html.dark {
 
 // 卡片右上角「···」触发器（原生 <button>），由 DdMoreMenu 渲染，页面不要自己再写一份。
 // 只换字色、不加底色：卡片末行已经有「运行 / 日志」这类实体按钮，这里再铺一块底会抢视觉。
-// margin-right:-6px 让图标贴近卡角，同时保住 32×32 的点击热区。
-// 使用方：DdMoreMenu（tasks / subscriptions / envs / logs / deps 的卡片首行）。
+// margin-right:5px 是按「最右那个圆点到卡角的距离两边相等」倒推的（v3.3.2 / issue #144，原先是 -6px 贴角）：
+// 卡片内边距 12px + 这里 5px + 图标自带 8px 留白 + 圆点比图标框内缩 1px = 最右圆点距卡片右边 26px，
+// 与它距卡片上边的 12 + 8 + 6.5 = 26.5px 视觉等距（严格等距是 5.5px，差半像素 DPR≥2 看不出，不引小数）。
+// 按钮本身仍是 32×32 的点击热区，正外边距只是把它整体往左推，不缩热区。
+// 使用方：DdMoreMenu（tasks / subscriptions / envs / logs / deps 的卡片首行，五页一起变）。
 .dd-mobile-card__more {
   display: inline-flex;
   align-items: center;
@@ -2634,7 +2653,7 @@ html.dark {
   width: 32px;
   height: 32px;
   margin-left: auto;
-  margin-right: -6px;
+  margin-right: 5px;
   padding: 0;
   border: 0;
   border-radius: var(--dd-radius-button);
@@ -2781,26 +2800,36 @@ html.dark {
     border-radius: var(--dd-radius-button);
   }
 
-  // 贴屏幕左右边缘：用等量负外边距抵消 .layout-main 的横向内边距，再用同值内边距把内容缩回对齐线。
+  // 跟随页面 12px 留白（v3.3.2 / issue #144 对 #143 的纠正：上一版是用负外边距抵消 .layout-main 的横向内边距、
+  //   把整条顶到屏幕左右边缘）。改回来的理由：屏幕最边上那 12px 要让给系统侧滑返回手势，横滑行盖到屏幕边缘时
+  //   那一整段都划不回上一页。⚠️ 留白只是让开热区，真正吃掉手势的是 .dd-scroll-row 的 overscroll-behavior-x，
+  //   已一并改成 auto，两处缺一不可。
   // 只在 ≤768 生效，所以与桌面共用同一个元素时（如某页的 status-tabs）可以无条件挂这个类，桌面零影响。
-  // !important：它要接管同一元素上页面 scoped 规则写的横向几何（.status-tabs 的 padding / width:100% / 圆角，
-  //   特异性 (0,2,0) 且随页面 chunk 注入在后），不加就被静默顶掉，右侧差一截贴不到边。
-  // width 必须显式撑到「容器 + 两侧留白」：块级元素定了宽时右侧负外边距不起作用，inline-flex 又会按内容收宽。
-  // .dd-mobile-batch-bar 直接并进来、不要求页面再挂 .dd-mobile-bleed：批量栏横滑时两端若停在页面留白处，
-  //   按钮会在离屏幕 12px 的地方被硬生生切断，贴边后才是一整条干净的横排。它的上下外边距仍由自己那条规则给。
-  // ⚠️ 前提是它到 .layout-main 之间的祖先在移动端都不做 overflow 裁剪（hidden / auto 都算）：负外边距伸出去的那一截
-  //   会被裁掉、看起来不贴边。页面给根节点或外层容器加横向裁剪时，要么限定在桌面，要么别让贴边元素落在它里面。
-  // 使用方：tasks 视图分组栏、subscriptions / logs 的 status-tabs 第二行，以及五页的批量栏。
+  // !important：它要接管同一元素上页面 scoped 规则写的横向几何（.view-seg / .status-tabs 的宽度与外边距，
+  //   特异性 (0,2,0) 且随页面 chunk 注入在后），不加就被静默顶掉。
+  // 🔴 width: 100% 不能删：这几条槽的 scoped 样式都是 display: inline-flex (0,2,0)，压过全局 .dd-scroll-row 的
+  //   display: flex (0,1,0)，没有显式宽度就会按内容收宽、横滑整个失效。文件开头的 * { box-sizing: border-box }
+  //   保证槽自己那 3px 内边距算进 100% 里，不会溢出。
+  // 左右内边距不再由这里接管，交还给各自的槽（.view-seg / .status-tabs 的 padding: 3px），与桌面口径一致。
+  // .dd-mobile-batch-bar 直接并进来、不要求页面再挂 .dd-mobile-bleed；它的上下外边距仍由自己那条规则给。
+  // 使用方：tasks 视图分组栏、subscriptions / logs / deps 的 status-tabs 第二行，以及五页的批量栏。
   .dd-mobile-bleed,
   .dd-mobile-batch-bar {
-    width: calc(100% + 2 * var(--dd-page-gutter-x)) !important;
+    width: 100% !important;
     max-width: none !important;
-    margin-left: calc(-1 * var(--dd-page-gutter-x)) !important;
-    margin-right: calc(-1 * var(--dd-page-gutter-x)) !important;
-    padding-left: var(--dd-page-gutter-x) !important;
-    padding-right: var(--dd-page-gutter-x) !important;
-    // 贴边例外①：整条已经顶到屏幕左右边缘，圆角只会在四角露出页面底色的缺口，所以保持直角、不吃令牌
-    border-radius: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+
+  // 两条灰底槽（视图分组栏 / 状态筛选栏）吃「按钮」角色令牌（v3.3.2 / issue #144）：与移动端按钮、卡片右上角
+  //   「···」、工具栏搜索框同一档（rounded 16px / square 0），所以只吃令牌、不写死 16px。
+  // 槽内分段项必须同步抬到 calc(var(--dd-radius-button) - 3px) 与槽同心，四周灰边才恒为 3px；那一条按本仓惯例
+  //   落在各页自己的移动端媒体查询里（ViewManager / subscriptions / logs / deps），不在这里再加一条全局 !important。
+  // 🔴 .dd-mobile-batch-bar 刻意【不】并进来：它同挂 .dd-scroll-row 是滚动容器，给它圆角等于加了一层圆角裁剪蒙版，
+  //    而它高 32px、圆角 16px 正好是左右两个半圆帽，横滑时经过两端的按钮会被削成月牙——它又没有底色，
+  //    削掉的部分没有任何视觉补偿。两条灰底槽有底色，内容被槽的圆角裁住反而正是想要的效果。
+  .dd-mobile-bleed {
+    border-radius: var(--dd-radius-button) !important;
   }
 
   .dd-page-header {
@@ -2849,27 +2878,30 @@ html.dark {
     gap: 10px;
   }
 
+  // 移动端一律铺满整屏，不再区分 is-fullscreen（v3.3.2 / issue #144）。原先这里只管宽度（92vw）不管高度，
+  //   于是那 6 个没绑 :fullscreen 的弹窗在手机上是「92vw 悬浮小窗」，顶栏整条露在它上面。
+  // 为什么光靠层级不够：遮罩只有 24% 暗度 + 1.5px 模糊（见 .el-overlay），没铺满的弹窗背后那条 54px sticky 顶栏
+  //   会清清楚楚透出来；.layout-main 的 z-index:21 只解决「谁在上面」，解决不了「弹窗没盖到那块区域」。
+  // 为什么不再留 .el-dialog:not(.is-fullscreen) 分支：两支取值现在完全一样，分支没有意义。原先那条推理
+  //   （非全屏弹窗会回落到组件自己写死的 600px / 1100px 而在窄屏溢出）依然成立，只是改由这条无差别的 100% 兜住。
+  // 🔴 高度用 100% 不用 100dvh：包含块是 EP 原生的 .el-overlay-dialog（position:fixed + 四边 0），100% 即视口高。
+  //    这正是 EP `.el-dialog.is-fullscreen{height:100%}` 的取值，52 个已全屏的弹窗一直跑在它上面；换成 100dvh
+  //    等于凭空给这批本来正常的弹窗引入 iOS 地址栏收放这个新变量，属于自找回归。
+  // 🔴 border-radius: 0 必须显式写：.el-dialog 的圆角来源 --dd-radius-surface 在移动端【没有】被重映射
+  //    （上面 :root 里重映射的只有 --dd-radius-card / --dd-radius-button），不归零的话拉满屏后四角会露遮罩底色。
+  // margin / max-height 都带 !important：要压掉通用块里按 --el-dialog-margin-top 算的上下外边距与 max-height，
+  //   否则整屏之后又会冒出「弹窗能上下挪一点」的无意义滚动条。
+  // 配套：ProxyConfigCard ×3 与 OverviewHeroCard 仍要各自补 :fullscreen="dialogFullscreen"——这条规则只管几何，
+  //   :fullscreen 管 EP 自己的 border-radius / overflow 与组件内 `dialogFullscreen ? 'top' : 'right'` 这类布局分支，
+  //   两者不能互相替代。登录页 2FA 与动效演示页若不想整屏，在各自的移动端块里覆写回去，别在这里写 :not()。
   .el-dialog {
-    --el-dialog-width: 92vw !important;
-    width: 92vw !important;
-    // 必须复用 --el-dialog-margin-top，不能写死 4vh：max-height 是用这个变量算的，
-    // 而 4vh 在高视口下会超过 clamp 的 40px 上限，上下边距（4vh × 2）就会大于
-    // max-height 预留的（clamp 值 × 2），又冒出跟 50px 同源的那种溢出滚动。
-    // 另外全屏态下 .is-fullscreen 已把该变量置 0，这里跟着解析成 0，不会把全屏顶下来。
-    margin: var(--el-dialog-margin-top) auto !important;
-
-    // 全屏态必须在这里显式抢回 100%，否则上面那条 92vw 会把它压住。
-    // EP 实现全屏靠的是 .el-dialog.is-fullscreen { --el-dialog-width: 100% }（不带 !important），
-    // 而上面两行带了 !important —— 层叠里 important 声明无条件胜过普通声明，与特异性、
-    // 源码顺序都无关，所以 EP 那条根本没机会参与计算，移动端「全屏」实际只有 92vw。
-    // 两条都要写：只补 width 的话渲染宽度对了，但 --el-dialog-width 仍是 92vw，
-    // 留下「变量值与实际宽度不一致」的状态，将来谁按变量去算尺寸就会算错。
-    // 不能改成 .el-dialog:not(.is-fullscreen) 来规避：那样非全屏弹窗会回落到组件自己的
-    // width prop（600px / 1100px 这类写死值），在窄屏上溢出——92vw 这条兜底正是防它的。
-    &.is-fullscreen {
-      --el-dialog-width: 100% !important;
-      width: 100% !important;
-    }
+    --el-dialog-width: 100% !important;
+    width: 100% !important;
+    max-width: 100vw !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    margin: 0 !important;
+    border-radius: 0 !important;
 
     .el-dialog__body {
       padding: 16px;

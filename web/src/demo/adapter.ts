@@ -45,7 +45,7 @@ import {
 import type { DemoTaskScriptDeleteResult } from './db'
 import { DEMO_PANEL_VERSION, demoPanelSettings } from './shortcuts'
 import { cancelDemoTaskRun, startDemoTaskRun } from './taskRuns'
-import type { DemoEnvVar, DemoOpenApp, DemoTask, DemoTaskLog, DemoUser } from './types'
+import type { DemoEnvVar, DemoOpenApp, DemoTask, DemoTaskLog, DemoUser, DemoWecomTrigger } from './types'
 import {
   LOG_STATUS_ABORTED,
   LOG_STATUS_RUNNING,
@@ -2487,6 +2487,42 @@ route('POST', '/open-api/apps/:id/view-secret', (ctx) => ({
   data: { app_secret: requireOpenApp(ctx).app_secret },
 }))
 
+// 触发链接的「代次」：真面板存在系统配置里，演示站放模块级变量即可 ——
+// 它只影响新签发的票据长什么样，而演示站的票据本来就不会被任何地方校验。
+let demoTriggerLinkGeneration = 0
+
+/**
+ * 企业微信菜单触发链接（issue #145）。
+ *
+ * 票据在真面板里是 HMAC-SHA256 签出来的，演示站没有服务端密钥，也不需要真能触发 ——
+ * 这里只造一个形状一致的假串，让「生成 → 复制」这条交互跑通。
+ * url 用当前 origin 拼，和真面板 buildPanelAbsoluteURL 的效果一致。
+ */
+route('POST', '/open-api/apps/:id/task-trigger-link', (ctx) => {
+  const app = requireOpenApp(ctx)
+  const taskID = Number(bodyObject(ctx)['task_id'] ?? 0)
+  const task = findTask(taskID)
+  if (!task) return notFound('任务不存在')
+
+  const ticket = `v1.ZGVtbw.${demoTriggerLinkGeneration}.0.${Math.random().toString(36).slice(2, 14)}demo`
+  const relative = `/api/v1/open-api/trigger?task_id=${task.id}&ticket=${ticket}`
+  return {
+    data: {
+      url: `${window.location.origin}${relative}`,
+      path: relative,
+      task_id: task.id,
+      task_name: task.name,
+      app_name: app.name,
+      notice: '该链接长期有效且无需登录，请只配置到企业微信应用菜单里；需要作废时调用「作废全部触发链接」',
+    },
+  }
+})
+
+route('POST', '/open-api/task-trigger-links/revoke', () => {
+  demoTriggerLinkGeneration += 1
+  return { message: '已作废全部企业微信触发链接', data: { generation: demoTriggerLinkGeneration } }
+})
+
 route('PUT', '/open-api/apps/:id', (ctx) => {
   const app = requireOpenApp(ctx)
   const body = bodyObject(ctx)
@@ -2502,6 +2538,125 @@ route('DELETE', '/open-api/apps/:id', (ctx) => {
   const current = db()
   current.openApps = current.openApps.filter((app) => app.id !== id)
   current.apiCallLogs = current.apiCallLogs.filter((log) => log.app_id !== id)
+  return { message: '删除成功' }
+})
+
+// ===========================================================================
+// 企业微信接入配置（issue #145）
+//
+// 只 mock 管理接口这一组。回调路由（/wecom/callback/:id）不 mock：
+// 那是企业微信服务器来敲的，演示站没有任何东西会去调它。
+// ===========================================================================
+
+/** EncodingAESKey 固定 43 位，与服务端 validateWecomTriggerInput 同口径 */
+const DEMO_WECOM_AES_KEY_LENGTH = 43
+
+function wecomTriggerDict(trigger: DemoWecomTrigger): Record<string, unknown> {
+  return {
+    id: trigger.id,
+    name: trigger.name,
+    corp_id: trigger.corp_id,
+    agent_id: trigger.agent_id,
+    open_app_id: trigger.open_app_id,
+    task_whitelist: trigger.task_whitelist,
+    enabled: trigger.enabled,
+    created_at: trigger.created_at,
+    updated_at: trigger.updated_at,
+    // 服务端会把回调路径拼好一起下发（设置页直接拿它拼完整 URL 给用户复制），这里照做
+    callback_path: `/api/v1/wecom/callback/${trigger.id}`,
+  }
+}
+
+/**
+ * 这两条校验文案逐字抄服务端（validateWecomTriggerInput）。
+ * 演示站也校验，是为了让「填错了会被拦下」这件事能被看到，而不是随便填都保存成功。
+ *
+ * 拆成两个函数是因为更新时的口径不一样：凭据传了空串一律当「不改」，
+ * 此时只需要校验绑定的应用，不该拿一个根本没填的 AES Key 去判长度。
+ */
+function validateWecomAesKey(aesKey: string): string {
+  if (Array.from(aesKey.trim()).length !== DEMO_WECOM_AES_KEY_LENGTH) {
+    return `EncodingAESKey 必须是企业微信后台给出的 ${DEMO_WECOM_AES_KEY_LENGTH} 位字符串`
+  }
+  return ''
+}
+
+function validateWecomOpenApp(openAppID: number): string {
+  const app = db().openApps.find((row) => row.id === openAppID)
+  if (!app) return '绑定的开放 API 应用不存在'
+  // 判定口径照抄服务端：逗号切分、去空格、认 `*`
+  const allowed = app.scopes.split(',').some((item) => {
+    const scope = item.trim()
+    return scope === '*' || scope === 'tasks'
+  })
+  if (!allowed) return '绑定的开放 API 应用需要勾选「tasks」权限范围'
+  return ''
+}
+
+route('GET', '/wecom/triggers', () => ({
+  data: db().wecomTriggers.map((trigger) => wecomTriggerDict(trigger)),
+}))
+
+route('POST', '/wecom/triggers', (ctx) => {
+  const body = bodyObject(ctx)
+  const name = String(body['name'] ?? '').trim()
+  const corpID = String(body['corp_id'] ?? '').trim()
+  const token = String(body['callback_token'] ?? '').trim()
+  const aesKey = String(body['encoding_aes_key'] ?? '').trim()
+  const openAppID = Number(body['open_app_id'] ?? 0)
+  if (!name || !corpID || !token || !aesKey || !openAppID) return badRequest('请求参数错误')
+
+  const keyMessage = validateWecomAesKey(aesKey)
+  if (keyMessage) return badRequest(keyMessage)
+  const appMessage = validateWecomOpenApp(openAppID)
+  if (appMessage) return badRequest(appMessage)
+
+  const now = nowIso()
+  const trigger: DemoWecomTrigger = {
+    id: nextId('wecomTrigger'),
+    name,
+    corp_id: corpID,
+    agent_id: String(body['agent_id'] ?? '').trim(),
+    open_app_id: openAppID,
+    task_whitelist: String(body['task_whitelist'] ?? '').trim(),
+    enabled: typeof body['enabled'] === 'boolean' ? body['enabled'] : true,
+    created_at: now,
+    updated_at: now,
+  }
+  db().wecomTriggers.push(trigger)
+  return { message: '创建成功', data: wecomTriggerDict(trigger) }
+})
+
+route('PUT', '/wecom/triggers/:id', (ctx) => {
+  const trigger = db().wecomTriggers.find((row) => row.id === intVar(ctx))
+  if (!trigger) return notFound('企业微信接入配置不存在')
+
+  const body = bodyObject(ctx)
+  // 与服务端一样按键更新：请求里没出现的键一概不动已有值
+  if (body['name'] !== undefined) trigger.name = String(body['name']).trim()
+  if (body['corp_id'] !== undefined) trigger.corp_id = String(body['corp_id']).trim()
+  if (body['agent_id'] !== undefined) trigger.agent_id = String(body['agent_id']).trim()
+  if (body['task_whitelist'] !== undefined) trigger.task_whitelist = String(body['task_whitelist']).trim()
+  if (typeof body['enabled'] === 'boolean') trigger.enabled = body['enabled']
+
+  const openAppID = body['open_app_id'] === undefined ? trigger.open_app_id : Number(body['open_app_id'])
+  // 凭据传了空串一律当「不改」，所以只有真填了新值时才校验长度
+  const aesKey = String(body['encoding_aes_key'] ?? '').trim()
+  if (aesKey) {
+    const keyMessage = validateWecomAesKey(aesKey)
+    if (keyMessage) return badRequest(keyMessage)
+  }
+  const appMessage = validateWecomOpenApp(openAppID)
+  if (appMessage) return badRequest(appMessage)
+  trigger.open_app_id = openAppID
+
+  trigger.updated_at = nowIso()
+  return { message: '更新成功', data: wecomTriggerDict(trigger) }
+})
+
+route('DELETE', '/wecom/triggers/:id', (ctx) => {
+  const current = db()
+  current.wecomTriggers = current.wecomTriggers.filter((row) => row.id !== intVar(ctx))
   return { message: '删除成功' }
 })
 
@@ -2648,10 +2803,12 @@ route('PUT', '/deps/python-runtime-default', (ctx) => ({
   default_version: String(bodyObject(ctx)['version'] ?? '3.12'),
 }))
 
+// 演示值跟真实默认源走（v3.3.2 / issue #146 起默认源从阿里云换成腾讯云）：
+// 对不上的话演示站会出现「下拉里腾讯云标着 (默认)、输入框里却是清华」这种自相矛盾的画面。
 route('GET', '/deps/mirrors', () => ({
-  pip_mirror: 'https://pypi.tuna.tsinghua.edu.cn/simple',
+  pip_mirror: 'https://mirrors.cloud.tencent.com/pypi/simple',
   npm_mirror: 'https://registry.npmmirror.com',
-  linux_mirror: 'https://mirrors.tuna.tsinghua.edu.cn/debian',
+  linux_mirror: 'https://mirrors.cloud.tencent.com/debian',
   linux_package_manager: 'apt',
   linux_distribution: 'debian',
   linux_mirror_supported: true,

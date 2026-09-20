@@ -221,13 +221,20 @@ const (
 	PlaywrightDownloadReadyLine   = "[Playwright] 浏览器已就绪"
 )
 
+// playwrightDownloadSizeNote 跟在下载开始行后面，讲清楚这一步为什么会长时间「没反应」（issue #146）。
+//
+// Playwright 的进度条靠 \r 原地刷新，而面板的日志采集用 bufio.Scanner 按 \n 切行，
+// 非 TTY 下整个下载期间一行都不会输出 —— 用户看到的就是日志停在下载开始行不动。
+// 与其改 Scanner 的切分规则（会把所有依赖的进度条撑成很多行），不如把预期先说清楚。
+const playwrightDownloadSizeNote = "（约 150-300MB，国内网络下可能需要十几分钟；下载期间日志不刷新属正常现象）"
+
 // PlaywrightDownloadStartLine 生成下载开始那一行。目录为空说明用户在面板里把变量设成了空串，
 // 此时 Playwright 用它自己的默认目录，照实写出来，免得日志里出现一个看不懂的空路径。
 func PlaywrightDownloadStartLine(browsersPath string) string {
 	if strings.TrimSpace(browsersPath) == "" {
-		return PlaywrightDownloadStartPrefix + "Playwright 默认目录（PLAYWRIGHT_BROWSERS_PATH 为空）"
+		return PlaywrightDownloadStartPrefix + "Playwright 默认目录（PLAYWRIGHT_BROWSERS_PATH 为空）" + playwrightDownloadSizeNote
 	}
-	return PlaywrightDownloadStartPrefix + browsersPath
+	return PlaywrightDownloadStartPrefix + browsersPath + playwrightDownloadSizeNote
 }
 
 var playwrightManagedPythonFunc = ResolveManagedPythonBinaryForPythonVersion
@@ -269,7 +276,13 @@ func NewPlaywrightBrowserInstallCommand(pythonVersion string) (*exec.Cmd, string
 	cmd := exec.Command(pythonBin, "-m", "playwright", "install", "chromium")
 	// SanitizePipEnv 顺带剥掉 PYTHONPATH / PYTHONHOME：它们会污染 venv 解释器的模块搜索路径。
 	env := WritableHomeEnv(SanitizePipEnv(AppendProxyEnv(os.Environ())))
-	env = withEnvEntries(env, panelUserEnvValues(PlaywrightDownloadHostEnv))
+	// 顺序契约：先写面板默认镜像，再叠用户值（issue #146）。
+	// withEnvEntry 是「先剔同名再追加」，两次调用的先后天然实现「用户值优先」。
+	// 用户值要先滤掉空串，否则一条 enabled 但 Value 为空的记录会把默认镜像覆盖成空串、静默失效。
+	if defaultHost := DefaultPlaywrightDownloadHost(); defaultHost != "" {
+		env = withEnvEntry(env, PlaywrightDownloadHostEnv, defaultHost)
+	}
+	env = withEnvEntries(env, nonEmptyEnvValues(panelUserEnvValues(PlaywrightDownloadHostEnv)))
 	cmd.Env = withEnvEntry(env, PlaywrightBrowsersPathEnv, browsersPath)
 	return cmd, browsersPath, nil
 }

@@ -9,6 +9,7 @@ import {
   Hide,
   Key,
   Lock,
+  Monitor,
   Moon,
   Sunny,
   User,
@@ -494,17 +495,30 @@ const btnText = computed(() => {
   // 演示站把主按钮文案换成「进入演示环境」，让访客一眼看懂这里不需要真的注册账号
   return isDemoBuild ? "进入演示环境" : "登 录";
 });
-const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon));
+// 主题三档（v3.3.2，issue #145）：与顶栏那颗按钮同一套口径，跟随系统时显示显示器图标。
+// Monitor 必须在本文件【局部 import】：themeIcon 是返回组件对象的 computed，
+// main.ts 的全局注册只对模板里直接写 <Monitor /> 生效，漏了这行登录页会直接报 Monitor is not defined。
+const themeIcon = computed(() =>
+  themeStore.mode === "system" ? Monitor : themeStore.isDark ? Sunny : Moon,
+);
+const themeTitle = computed(() => {
+  if (themeStore.mode === "system") return "跟随系统 · 点击切换明暗";
+  return themeStore.isDark ? "暗夜 · 点击切换明暗" : "明亮 · 点击切换明暗";
+});
 </script>
 
 <template>
   <div class="login-page" @mousemove="handleMouseMove">
     <div class="theme-toggle">
+      <!-- 只改 :icon / :title，别动这里的 DOM 结构：暗色样式挂在下方【非 scoped】style 块的
+           `html.dark .theme-toggle .theme-toggle-btn` 上，换成原生 button 会让那段选择器失配 -->
       <el-button
         :icon="themeIcon"
         text
         size="large"
         class="theme-toggle-btn"
+        :title="themeTitle"
+        :aria-label="themeTitle"
         @click="themeStore.toggleTheme"
       />
     </div>

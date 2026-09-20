@@ -1169,8 +1169,10 @@ function rerunLog(log: any) {
   position: relative;
   // 扁平风格下靠 1px 边框与背景色分层，不再使用阴影与上浮
   border: 1px solid var(--el-border-color-lighter);
-  // 统计卡片是容器类表面 → surface 档（与 global.scss 的 .dd-stat-card 同档）
-  border-radius: var(--dd-radius-surface);
+  // 统计卡片是容器类表面 →「卡片」角色令牌（issue #144 / v3.3.2 起与 global.scss 的 .dd-stat-card 同档）。
+  // 走角色令牌而不是 surface 档：桌面 --dd-radius-card 恒等于 surface（10px，零变化），
+  // ≤768 被重指到 --dd-radius-surface-mobile 自动抬到 20px，直角模式下两边都是 0。
+  border-radius: var(--dd-radius-card);
   padding: 16px 18px;
   display: flex;
   align-items: center;
@@ -1302,9 +1304,10 @@ function rerunLog(log: any) {
   animation: dd-panel-rise-in 420ms var(--dd-ease-emphasized) both;
   // 面板与页面底色的分隔完全由 1px 边框承担，不再叠加阴影
   border: 1px solid var(--el-border-color-lighter);
-  // 面板外壳是容器类表面 → surface 档；下面的 overflow:hidden 会把贴边内嵌的
+  // 面板外壳是容器类表面 →「卡片」角色令牌（issue #144 / v3.3.2，与 .stat-card 同档：
+  // 桌面仍是 10px，≤768 自动抬到 20px，直角模式为 0）；下面的 overflow:hidden 会把贴边内嵌的
   // .panel-header / 表格 / 移动端列表自动裁掉四角，所以那些子块刻意不写圆角
-  border-radius: var(--dd-radius-surface);
+  border-radius: var(--dd-radius-card);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1411,7 +1414,8 @@ function rerunLog(log: any) {
 
 .trend-chart-placeholder {
   height: 300px;
-  // 图表骨架屏是面板内的独立区块 → surface 档
+  // 图表骨架屏是面板内的独立区块 → surface 档。
+  // 面板内嵌块，刻意低父级一档：.panel 已抬到 card 档（移动端 20px），这里不跟（issue #144 / v3.3.2）。
   border-radius: var(--dd-radius-surface);
   padding: 18px;
   // 骨架屏用纯色底，不再用渐变
@@ -1469,7 +1473,8 @@ function rerunLog(log: any) {
 
 .resource-row {
   display: flex;
-  // 资源列表的每一行是独立内容块（hover 换底色），归容器类表面 → surface 档；
+  // 资源列表的每一行是独立内容块（hover 换底色），归容器类表面 → surface 档。
+  // 面板内嵌块，刻意低父级一档：.panel 已抬到 card 档（移动端 20px），这里不跟（issue #144 / v3.3.2）。
   // 父级 .resource-list 有 16px 18px 内边距，行不贴边，可以安全吃圆角
   border-radius: var(--dd-radius-surface);
   padding: 8px 10px;
@@ -1791,7 +1796,8 @@ function rerunLog(log: any) {
 
 .log-mobile-card {
   border: 1px solid var(--el-border-color-lighter);
-  // 移动端卡片是容器类表面 → surface 档（与 global.scss 的 .dd-mobile-card 同档）；
+  // 面板内嵌的小卡片，刻意低父级一档 → surface 档（issue #144 / v3.3.2：.panel 与 global.scss 的
+  // .dd-mobile-card 都已改吃 card 档、移动端 20px，这里不跟，嵌套圆角本就该逐层递减）；
   // 父级 .log-mobile-list 有内边距，卡片不贴边，可以安全吃圆角
   border-radius: var(--dd-radius-surface);
   padding: 10px 12px;
@@ -1987,6 +1993,21 @@ function rerunLog(log: any) {
 }
 
 @media (max-width: 768px) {
+  // issue #144 / v3.3.2：卡片（.stat-card / .panel）在移动端抬到 card 档 20px 后，
+  // 按钮跟着从 control 档 6px 抬到 surface 档（圆角模式 10px），免得圆角落差太大。
+  // 不写死 10px：直角模式下 --dd-radius-surface 是 0，写死会把方形面板破掉。
+  // --dd-radius-surface 在 ≤768 没有被重指，手机上仍解析为 10px，所以这里直接吃它即可。
+  // 本页没有一个 el-button，全是原生 button，global.scss 那条移动端 `html .el-button` 规则够不着它们。
+  // 槽与槽内项必须同值（.seg-btn-group/.seg-btn、.log-cell-actions/.icon-btn），否则会露出内外错位的角。
+  .dash-pill,
+  .text-link,
+  .seg-btn-group,
+  .seg-btn,
+  .log-cell-actions,
+  .icon-btn {
+    border-radius: var(--dd-radius-surface);
+  }
+
   // 窄屏：问候条竖排，actions 占满宽度、按钮换行不溢出
   .dash-welcome {
     flex-direction: column;

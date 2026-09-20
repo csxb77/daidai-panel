@@ -814,6 +814,32 @@
       "updated_at": null,
       "value": "",
       "value_type": "string"
+    },
+    "wecom_trigger_allow_run": {
+      "default_value": "false",
+      "description": "开启后，企业微信侧的指令与菜单链接才会真的运行任务；关闭时回调仍可验签联通（方便先在企业微信后台把配置保存成功），但不会执行任何任务。可触发的任务范围还受每条接入配置的任务白名单限制",
+      "group": "wecom",
+      "group_label": "企业微信触发",
+      "label": "允许企业微信触发执行",
+      "order": 54,
+      "registered": true,
+      "secret": false,
+      "updated_at": null,
+      "value": "false",
+      "value_type": "bool"
+    },
+    "wecom_trigger_enabled": {
+      "default_value": "false",
+      "description": "开启后，企业微信自建应用可以通过回调（/api/v1/wecom/callback/:id）或菜单链接（/api/v1/open-api/trigger）拉起面板任务。需要面板公网可达并走 80/443，且在企业微信后台配好回调 URL、Token、EncodingAESKey 与可信 IP",
+      "group": "wecom",
+      "group_label": "企业微信触发",
+      "label": "启用企业微信触发",
+      "order": 53,
+      "registered": true,
+      "secret": false,
+      "updated_at": null,
+      "value": "false",
+      "value_type": "bool"
     }
   }
 }

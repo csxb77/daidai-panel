@@ -99,7 +99,20 @@ export interface McpConfigFields {
   mcp_allow_mutations: boolean
 }
 
-export type SettingsConfigFormState = SettingsConfigForm & McpConfigFields
+/**
+ * 「企业微信触发」卡片（components/WecomTriggerCard.vue）的两个开关（issue #145，v3.3.2），
+ * 对应服务端注册项 wecom_trigger_enabled / wecom_trigger_allow_run，默认都关。
+ *
+ * 与 MCP 那两项是同一套形态：总开关关着时回调路由直接 403（连验签都不做），
+ * 总开关开着但不允许触发执行时，企业微信那边配回调 URL 能配通、指令却不会真的跑任务——
+ * 用来分两步上线。并进 configForm 之后，这两个键按差集规则自动从兜底区（ExtraConfigCard）消失。
+ */
+export interface WecomTriggerConfigFields {
+  wecom_trigger_enabled: boolean
+  wecom_trigger_allow_run: boolean
+}
+
+export type SettingsConfigFormState = SettingsConfigForm & McpConfigFields & WecomTriggerConfigFields
 
 export function useSettingsConfig() {
   // 此开关原为功能上线门控，当前已全量启用（保留常量以兼容消费方）
@@ -158,7 +171,9 @@ export function useSettingsConfig() {
     max_web_sessions: 1,
     max_app_sessions: 1,
     mcp_enabled: false,
-    mcp_allow_mutations: false
+    mcp_allow_mutations: false,
+    wecom_trigger_enabled: false,
+    wecom_trigger_allow_run: false
   })
 
   // 服务端下发的原始 schema + 当前值。两个用途：
@@ -295,7 +310,9 @@ export function useSettingsConfig() {
         max_web_sessions: readConfigNumber(cfgs, 'max_web_sessions', 1),
         max_app_sessions: readConfigNumber(cfgs, 'max_app_sessions', 1),
         mcp_enabled: readConfigBool(cfgs, 'mcp_enabled', false),
-        mcp_allow_mutations: readConfigBool(cfgs, 'mcp_allow_mutations', false)
+        mcp_allow_mutations: readConfigBool(cfgs, 'mcp_allow_mutations', false),
+        wecom_trigger_enabled: readConfigBool(cfgs, 'wecom_trigger_enabled', false),
+        wecom_trigger_allow_run: readConfigBool(cfgs, 'wecom_trigger_allow_run', false)
       }
 
       // 兜底区草稿整体重建，以服务端当前值为准（丢弃上一次未保存的编辑）。
@@ -473,6 +490,10 @@ export function useSettingsConfig() {
     void saveConfigKeys(['mcp_enabled', 'mcp_allow_mutations'])
   }
 
+  function handleSaveWecomTriggerConfig() {
+    void saveConfigKeys(['wecom_trigger_enabled', 'wecom_trigger_allow_run'])
+  }
+
   function handleSaveBackupSchedule(selectionCSV?: string) {
     const normalizedSelection = selectionCSV?.trim() || configForm.value.backup_schedule_selection
     configForm.value.backup_schedule_selection = normalizedSelection
@@ -523,6 +544,7 @@ export function useSettingsConfig() {
     handleSaveCaptcha,
     handleSaveSessionConfig,
     handleSaveMcpConfig,
+    handleSaveWecomTriggerConfig,
     handleSaveBackupSchedule
   }
 }

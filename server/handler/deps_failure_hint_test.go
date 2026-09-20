@@ -15,6 +15,8 @@ const (
 	hintMirrorMarker  = "镜像源不可达"
 	hintLockMarker    = "锁冲突"
 	hintMirrorKeyword = "镜像源"
+	// apt 索引与当前镜像源对不上（issue #146）。它必须排在网络两条之后，理由见下面的用例。
+	hintStaleIndexMarker = "索引与当前镜像源对不上"
 )
 
 func TestBuildDependencyFailureHintClassifiesFailureCause(t *testing.T) {
@@ -85,6 +87,38 @@ func TestBuildDependencyFailureHintClassifiesFailureCause(t *testing.T) {
 			log:         "E: Failed to fetch http://mirrors.nju.edu.cn/debian/pool/main/c/curl/curl_8.5.0-1_amd64.deb  404  Not Found",
 			contains:    []string{hintMirrorMarker},
 			notContains: []string{hintDNSMarker},
+		},
+
+		// ---------- apt 索引过期 / 与镜像源对不上（必须排在上面两类网络故障之后）----------
+		{
+			// issue #146 报告人贴的那份日志：换了 apt 源、索引还是旧源那批，找不到包。
+			name: "只有 Unable to locate package 时归到索引过期",
+			log: "Reading package lists...\nBuilding dependency tree...\n" +
+				"Reading state information...\nE: Unable to locate package libxdamage1",
+			contains:    []string{hintStaleIndexMarker, "apt-get update"},
+			notContains: []string{hintDNSMarker, hintMirrorMarker},
+		},
+		{
+			// 这条是新分支唯一的误诊风险，必须钉死：安装脚本用 ; 串联 apt-get update 与 apt-get install，
+			// update 因网络失败后 install 照跑，于是一次【纯网络故障】的日志里会同时出现
+			// Failed to fetch 与 E: Unable to locate package。索引分支一旦排到网络分支前面，
+			// 就会让用户去刷索引、换源，而真正坏掉的是网。
+			name: "同时出现 Failed to fetch 与 Unable to locate package 时按网络归类",
+			log: "Err:1 https://mirrors.cloud.tencent.com/debian bookworm InRelease\n" +
+				"  Connection timed out [IP: 203.0.113.10 443]\n" +
+				"E: Failed to fetch https://mirrors.cloud.tencent.com/debian/dists/bookworm/InRelease\n" +
+				"E: Some index files failed to download.\n" +
+				"E: Unable to locate package libxdamage1",
+			contains:    []string{hintMirrorMarker},
+			notContains: []string{hintStaleIndexMarker},
+		},
+		{
+			// DNS 也一样：解析不出来时 update 失败、install 照跑，两段报错会并存。
+			name: "同时出现解析失败与 Unable to locate package 时按 DNS 归类",
+			log: "Temporary failure resolving 'mirrors.cloud.tencent.com'\n" +
+				"E: Unable to locate package libxdamage1",
+			contains:    []string{hintDNSMarker},
+			notContains: []string{hintStaleIndexMarker},
 		},
 
 		// ---------- 包管理器锁冲突（必须优先于上面两类）----------

@@ -27,13 +27,38 @@ const PlaywrightBrowsersPathEnv = "PLAYWRIGHT_BROWSERS_PATH"
 // 国内直连官方 CDN 常常很慢或失败，浏览器下载失败的提示里会让用户设它。
 const PlaywrightDownloadHostEnv = "PLAYWRIGHT_DOWNLOAD_HOST"
 
+// DefaultPlaywrightDownloadHostARM64 是 arm64 上默认使用的 Chromium 下载镜像（v3.3.2 / issue #146）。
+//
+// 2026-09-20 用 curl 实测的结论，写下来是因为它推翻了几个看起来更顺手的选择：
+//   - registry.npmmirror.com 这条是【真镜像】：/-/binary/playwright/builds/chromium/ 下能列出目录，
+//     下载回来是 application/zip、文件头是 PK，实测 2.2MB/s。
+//   - 但它【只有 arm64】：最近 4 个 revision（1228 / 1234 / 1237 / 1243）下只有
+//     chromium-linux-arm64.zip 与 chromium-headless-shell-linux-arm64.zip，没有 x64 的 chromium-linux.zip。
+//     所以 amd64 强推这个镜像会把「慢」变成「直接 404 失败」，比现状更糟 —— amd64 一律不设默认。
+//   - 华为云的 mirrors.huaweicloud.com/playwright/ 是【假镜像】：任何路径都回 200，但 content-type 是
+//     text/html、内容是门户页的 <!DOCTYPE html>（SPA 全路径回首页）。验证镜像不能只看状态码，
+//     必须看 content-type 和文件头。
+//
+// 面板的 Magisk / Android 部署全是 arm64，正好被这条默认值全覆盖。
+const DefaultPlaywrightDownloadHostARM64 = "https://registry.npmmirror.com/-/binary/playwright"
+
 // 以下几项抽成包级变量只为一件事：让测试能在 Windows 开发机上模拟「Linux 容器」，
 // 否则默认目录这条逻辑在开发机上零覆盖。生产代码不会改它们。
 var (
 	playwrightGOOS            = runtime.GOOS
+	playwrightGOARCH          = runtime.GOARCH
 	playwrightInContainerFunc = runningInContainer
 	playwrightMagiskFunc      = playwrightMagiskRuntime
 )
+
+// DefaultPlaywrightDownloadHost 按运行架构给出 Chromium 下载镜像的默认值；不该设默认的架构返回空串。
+// 只有 arm64 有可用的国内镜像，理由见 DefaultPlaywrightDownloadHostARM64 的注释。
+func DefaultPlaywrightDownloadHost() string {
+	if playwrightGOARCH == "arm64" {
+		return DefaultPlaywrightDownloadHostARM64
+	}
+	return ""
+}
 
 // containerMarkerFiles / containerCgroupFile 是 runningInContainer 的判据来源，
 // 同样只为测试能换成临时文件。
@@ -281,6 +306,26 @@ func withEnvEntry(env []string, key, value string) []string {
 		result = append(result, entry)
 	}
 	return append(result, prefix+value)
+}
+
+// nonEmptyEnvValues 滤掉值为空串的项。
+//
+// 只给「面板先写了默认值、再叠用户值」这种场景用（目前是 PLAYWRIGHT_DOWNLOAD_HOST，issue #146）：
+// 用户若在环境变量页建了一条 enabled 但 Value 为空的同名记录，panelUserEnvValues 会原样返回空串，
+// withEnvEntries 随即把默认镜像覆盖成空串，镜像静默失效、用户完全看不出原因。
+//
+// ⚠️ 刻意不在 panelUserEnvValues 里过滤：PLAYWRIGHT_BROWSERS_PATH 那边「设成空串」是有意义的
+//（表示让 Playwright 用它自己的默认目录，PlaywrightDownloadStartLine 专门为此写了一个分支），
+// 在公共函数里滤空会把那条语义一并改掉。
+func nonEmptyEnvValues(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		result[key] = value
+	}
+	return result
 }
 
 // withEnvEntries 按 key 排序依次写入，结果与 map 的遍历顺序无关，便于测试断言。

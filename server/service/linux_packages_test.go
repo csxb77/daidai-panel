@@ -56,9 +56,10 @@ func TestBuildLinuxPackageCommandChecksPrivilegeBeforeTouchingMirror(t *testing.
 	}
 
 	mirrorCalled := false
-	ensureMirror := func(LinuxPackageManager, string) error {
+	// 签名跟着 v3.3.2 的 ensureMirror 一起多了「源是否真被改写」这个返回值（issue #146）。
+	ensureMirror := func(LinuxPackageManager, string) (bool, error) {
 		mirrorCalled = true
-		return nil
+		return false, nil
 	}
 
 	for _, action := range []string{"install", "remove"} {
@@ -139,9 +140,9 @@ func TestRestartLinuxReinstallEnsuresMirror(t *testing.T) {
 		return "", os.ErrNotExist
 	}
 	var ensuredManager string
-	linuxDependencyEnsureMirrorFunc = func(manager LinuxPackageManager, distribution string) error {
+	linuxDependencyEnsureMirrorFunc = func(manager LinuxPackageManager, distribution string) (bool, error) {
 		ensuredManager = manager.Name
-		return nil
+		return false, nil
 	}
 
 	cmd, err := buildLinuxDependencyInstallCommand("libnss3")

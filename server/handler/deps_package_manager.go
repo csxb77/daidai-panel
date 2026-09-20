@@ -44,10 +44,6 @@ func detectLinuxPackageManagerWithLookPath(lookPath func(string) (string, error)
 	return linuxPackageManager{Name: manager.Name, Binary: manager.Binary}, nil
 }
 
-func shouldRefreshAptPackageLists() bool {
-	return shouldRefreshAptPackageListsFromDir("/var/lib/apt/lists", time.Now(), service.AptPackageListTTL)
-}
-
 func shouldRefreshAptPackageListsFromDir(dir string, now time.Time, ttl time.Duration) bool {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -105,31 +101,6 @@ func linuxInstallCommandSpec(manager linuxPackageManager, packageName string, re
 	}
 }
 
-func linuxRemoveCommandSpec(manager linuxPackageManager, packageName string, force bool) (string, []string, error) {
-	switch manager.Name {
-	case "apk":
-		args := []string{"del"}
-		if force {
-			args = append(args, "--force-broken-world")
-		}
-		args = append(args, packageName)
-		return manager.Binary, args, nil
-	case "apt":
-		args := []string{"remove", "-y"}
-		if force {
-			args = append(args, "--allow-remove-essential", "--purge")
-		}
-		args = append(args, packageName)
-		return manager.Binary, args, nil
-	case "dnf", "yum", "microdnf":
-		return manager.Binary, []string{"remove", "-y", packageName}, nil
-	case "zypper":
-		return manager.Binary, []string{"--non-interactive", "remove", packageName}, nil
-	default:
-		return "", nil, errors.New("不支持的 Linux 包管理器")
-	}
-}
-
 func buildLinuxPackageCommand(manager linuxPackageManager, action, packageName string, force bool) (*exec.Cmd, error) {
 	return service.BuildLinuxPackageCommand(
 		service.LinuxPackageManager{Name: manager.Name, Binary: manager.Binary},
@@ -180,6 +151,7 @@ func getLinuxMirrorInfo() linuxMirrorInfo {
 
 // setLinuxMirror 是 service.SetLinuxMirror 的薄封装。镜像源的读写与默认加速逻辑 v3.3.1 起搬到了
 // service/linux_mirror.go，让容器重建后的自动重装（service 层）也能用上同一套镜像策略（#142）。
-func setLinuxMirror(manager linuxPackageManager, distribution, mirror string) error {
+// 第一个返回值表示源文件真被改写了，调用方据此决定要不要作废 apt 索引（v3.3.2 / issue #146）。
+func setLinuxMirror(manager linuxPackageManager, distribution, mirror string) (bool, error) {
 	return service.SetLinuxMirror(service.LinuxPackageManager{Name: manager.Name, Binary: manager.Binary}, distribution, mirror)
 }

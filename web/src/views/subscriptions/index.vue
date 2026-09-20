@@ -1381,7 +1381,9 @@ function viewLogDetail(log: any) {
       第一行：常态是「搜索框 + 新建订阅 + 设置」；勾选卡片后整行换成批量栏。
         移动端是普通文档流，两支直接 v-if 互换，不走桌面 §4.2 的 visibility 叠放；
         两支高度都是 32px、外边距相同，切换时下面的内容不跳。
-      第二行：类型分段控件，贴屏幕左右边缘、放不下时横向滑动。它是「已禁用」唯一的筛选入口，所以保留。
+      第二行：类型分段控件，与页面内容同宽（左右各留 12px 页面留白）、放不下时横向滑动。
+        v3.3.2 起不再贴屏幕边缘：贴边时横滑到尽头会吃掉 iOS 的边缘返回手势，留白后才让得开。
+        它是「已禁用」唯一的筛选入口，所以保留。
     -->
     <div v-if="isMobile" class="subscription-mobile-toolbar">
       <div v-if="selectedIds.length === 0" class="dd-mobile-toolbar">
@@ -1607,7 +1609,10 @@ function viewLogDetail(log: any) {
           </div>
           <div class="dd-mobile-card__row">
             <span class="dd-mobile-card__row-label">最后拉取</span>
-            <span class="dd-mobile-card__row-value">{{
+            <!-- issue #144 / v3.3.2：补 dd-mono，与上一行「定时拉取」及定时任务卡的时间值统一成等宽。
+                 不改用本页的 .time-text（12px，且它还服务 SSH 密钥弹窗）；dd-mono 只给 font-family，
+                 字号仍继承 .dd-mobile-card__row 的 13px。空值时 formatDateTime 回落 '-'，等宽渲染无副作用。 -->
+            <span class="dd-mobile-card__row-value dd-mono">{{
               formatDateTime(row.last_pull_at)
             }}</span>
           </div>
@@ -1620,7 +1625,7 @@ function viewLogDetail(log: any) {
           按钮用 default 尺寸（32px），与工具栏图标按钮等高。
         -->
         <div class="dd-mobile-card__footer">
-          <div class="dd-mobile-card__footer-main">
+          <div class="dd-mobile-card__footer-main subscription-card__status">
             <span class="dd-mobile-card__row-label">状态</span>
             <!-- 与桌面状态列同一套过渡，key 同样绑状态值 -->
             <Transition name="dd-status-switch" mode="out-in">
@@ -2790,6 +2795,12 @@ function viewLogDetail(log: any) {
   color: var(--el-text-color-primary);
 }
 
+// 末行「状态」（issue #144 / v3.3.2）：gap 取与 .dd-mobile-card__row 相同的 10px（全局 footer-main 是 8px），
+// 标签左缘才能和上面「定时拉取 / 最后拉取」两行的值对齐成一条竖线。同 tasks 的 .task-card__result。
+.subscription-card__status {
+  gap: 10px;
+}
+
 // 类型标签（Git / 文件）：放在可选标签组外、不收缩，保证每张卡至少露一枚标签。
 // 它只有两三个字宽，名称被挤到省略时它也照样紧跟在名称后面。
 .subscription-card__type-tag {
@@ -3085,6 +3096,14 @@ function viewLogDetail(log: any) {
     h2 {
       font-size: 18px;
     }
+  }
+
+  // issue #144 / v3.3.2：横栏改回 12px 留白后，槽（.dd-mobile-bleed）在移动端吃 --dd-radius-button（16px），
+  // 槽内的分段项必须跟着抬上去，否则槽圆了、项还是 control 档 6px，四角的灰边几乎看不见。
+  // 减 3px 是槽自己的 padding，让内外两圈圆角同心；square 模式下 calc(0px - 3px) 会被 CSS 夹到 0，不会破直角。
+  // 选择器必须带 .dd-mobile-bleed 限定：桌面工具栏里那组 .status-tabs 没挂它，不能被一起抬。
+  .status-tabs.dd-mobile-bleed .status-tab {
+    border-radius: calc(var(--dd-radius-button) - 3px);
   }
 }
 

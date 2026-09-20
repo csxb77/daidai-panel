@@ -440,8 +440,12 @@ watch(sidebarHidden, async (hidden, wasHidden) => {
 
 .sidebar-search-input {
   :deep(.el-input__wrapper) {
-    // 输入框属控件类表面 → control 档
-    border-radius: var(--dd-radius-control);
+    // issue #144 / v3.3.2：搜索框跟同排按钮同吃「按钮」角色令牌 —— 手机上 rounded 面板放大到 16px，
+    // 配 EP default 输入框的 32px 高正好是胶囊形，与其它五页移动端工具栏搜索框（global.scss 的
+    // .dd-mobile-toolbar 一节）口径一致；桌面与 square 面板下该令牌恒等于 control 档，零变化。
+    // 这里刻意不改挂 .dd-mobile-toolbar 去蹭那条共享规则：该类自带 display:flex / gap 与对 > .el-input
+    // 的 flex:1，会和 .sidebar-top 的 flex-direction: column 打架（侧栏是搜索框、工具条各占一行的结构）
+    border-radius: var(--dd-radius-button);
     padding: 4px 12px;
     box-shadow: 0 0 0 1px var(--el-border-color-lighter) inset;
     transition: box-shadow 0.2s, background 0.2s;
@@ -481,12 +485,12 @@ watch(sidebarHidden, async (hidden, wasHidden) => {
   }
 }
 
+// issue #144 / v3.3.2：这里原来是一块灰底圆角槽（padding + border-radius + color-mix 底色），
+// 实测槽底色把刷新按钮衬得像被额外「框」了一层，已收成纯排布容器（槽没底色后圆角只是死声明，一并删）。
+// 暗色那份底色覆盖在文件末尾的 html.dark 块里，删这里就必须一起删，否则是「浅色干净、暗色还留着」的半主题 bug。
+// 编辑器侧的同构槽 ScriptsEditorPane 的 .hero-actions 同口径处理
 .sidebar-toolbar-actions {
   display: flex;
-  padding: 2px;
-  // 工具条按钮组的灰底槽 → control 档（与槽内按钮同档，圆角一致才不会露出内外错位的角）
-  border-radius: var(--dd-radius-control);
-  background: color-mix(in srgb, var(--el-fill-color-light) 84%, transparent);
   align-items: center;
   gap: 6px;
 }
@@ -514,8 +518,12 @@ watch(sidebarHidden, async (hidden, wasHidden) => {
   padding: 0;
   border: 1px solid var(--el-border-color-lighter);
   background: transparent;
-  // 图标按钮属控件类表面 → control 档（与 ScriptsEditorPane 的 .sidebar-expand-btn 同档）
-  border-radius: var(--dd-radius-control);
+  // issue #144 / v3.3.2：30×30 图标按钮改吃「按钮」角色令牌 —— 手机上 rounded 面板放大到 16px，
+  // 与同排早就是 16px 的 DdSplitButton 外角拉齐（EP 的 button-group 只归零首尾项的内侧两角，
+  // 外侧四角一直走 .el-button 的 shorthand，移动端那条 `html .el-button` 压得过）；
+  // 桌面与 square 面板下该令牌恒等于 control 档，零变化。
+  // 孪生体 ScriptsEditorPane 的 .sidebar-expand-btn 必须同档，改这里就要一起改
+  border-radius: var(--dd-radius-button);
   color: var(--el-text-color-secondary);
   cursor: pointer;
   display: inline-flex;
@@ -712,13 +720,14 @@ watch(sidebarHidden, async (hidden, wasHidden) => {
 <style lang="scss">
 html.dark {
   /* 暗色卡面/边框由 --el-bg-color 与 index.vue 的卡片样式自动适配，
-     此处仅保留内部分区线与控件底色的暗色覆盖 */
+     此处仅保留内部分区线与执行器卡片底色的暗色覆盖。
+     issue #144 / v3.3.2：工具条按钮组 .sidebar-toolbar-actions 的槽底色已在浅色侧删掉，
+     这里的暗色覆盖同步移除，别再往回加 */
   .scripts-sidebar .sidebar-top,
   .scripts-sidebar .sidebar-footer {
     border-color: rgba(255,255,255,0.08);
   }
 
-  .scripts-sidebar .sidebar-toolbar-actions,
   .scripts-sidebar .runner-card {
     background: color-mix(in srgb, var(--el-bg-color-overlay) 92%, black);
   }

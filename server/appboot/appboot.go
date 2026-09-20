@@ -109,5 +109,8 @@ func allModels() []interface{} {
 		&model.PlatformTokenLog{},
 		&model.Dependency{},
 		&model.TaskView{},
+		// 企业微信回调接入配置（issue #145，v3.3.2）。新表，存量库 AutoMigrate 时建出来即可，
+		// 一行都没有时所有企业微信入口都查不到配置直接 404，行为与升级前一致。
+		&model.WecomTrigger{},
 	}
 }

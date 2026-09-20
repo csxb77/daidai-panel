@@ -390,11 +390,17 @@ func buildPlaywrightDownloadLockHint() string {
 		"与网络、代理无关，不需要配置代理或下载镜像。等那个进程结束（或手动结束它）后重装本依赖即可]"
 }
 
-// buildPlaywrightDownloadFailureHint 要讲清楚两件事：失败的是浏览器下载、不是 pip；
-// 以及两条出路。与其它归因一样是单行方括号文案，会被整行写进依赖日志。
+// buildPlaywrightDownloadFailureHint 要讲清楚两件事：失败的是浏览器下载、不是 pip；以及三条出路。
+// 与其它归因一样是单行方括号文案，会被整行写进依赖日志。
+//
+// v3.3.2 补了「调大超时」这条（issue #146）：Chromium 有 150-300MB，而整条记录的超时默认只有 20 分钟
+//（pip 安装 + 排队等待 + 下载共用），倒推下来平均速度要 ≥125-250KB/s 才下得完 ——
+// 慢网下最常见的失败形态其实是撞超时，而原文案只讲了代理和下载镜像两条，把最常见的那条漏了。
+// 「走官方下载源」也改成「走 Playwright 自己的下载源」：arm64 上面板已经默认走 npmmirror 镜像了。
 func buildPlaywrightDownloadFailureHint() string {
 	return "[Playwright 浏览器下载失败：pip 包 playwright 已经装好，失败的是随后下载 Chromium 这一步" +
-		"（走 Playwright 官方下载源，与 pip 镜像源无关）。" +
+		"（走 Playwright 自己的下载源，与 pip 镜像源无关，约 150-300MB）。" +
 		"出路一：到「系统设置 → 代理设置」配置代理后重装本依赖；" +
-		"出路二：在「环境变量」页添加 PLAYWRIGHT_DOWNLOAD_HOST，指向可用的 Playwright 下载镜像后重装本依赖]"
+		"出路二：在「环境变量」页添加 PLAYWRIGHT_DOWNLOAD_HOST，指向可用的 Playwright 下载镜像后重装本依赖；" +
+		"出路三：若日志停在下载阶段被判超时，到「系统设置 → 任务运行 → 依赖安装超时(分钟)」调大后重装本依赖]"
 }

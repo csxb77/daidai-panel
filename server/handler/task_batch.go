@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"daidai-panel/config"
 	"daidai-panel/database"
 	"daidai-panel/model"
 	"daidai-panel/pkg/response"
@@ -59,6 +60,8 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 				scheduler.RemoveJob(id)
 			}
 			database.DB.Where("task_id = ?", id).Delete(&model.TaskLog{})
+			// 同单个删除：任务没了，logs/task_<ID>_* 目录也要一起收走（issue #144 / v3.3.2）。
+			service.RemoveTaskLogDirs(id, config.C.Data.LogDir)
 			database.DB.Delete(&task)
 		case "run":
 			if task.Status != model.TaskStatusRunning {
@@ -197,6 +200,9 @@ func (h *TaskHandler) BatchDelete(c *gin.Context) {
 			scheduler.RemoveJob(id)
 		}
 		database.DB.Where("task_id = ?", id).Delete(&model.TaskLog{})
+		// 同单个删除：任务没了，logs/task_<ID>_* 目录也要一起收走（issue #144 / v3.3.2）。
+		// 这里连不存在的 id 也会走一遭，listTaskLogDirs 匹配不到目录时是空转，没有副作用。
+		service.RemoveTaskLogDirs(id, config.C.Data.LogDir)
 		database.DB.Where("id = ?", id).Delete(&model.Task{})
 		count++
 	}

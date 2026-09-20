@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { Connection, Document, InfoFilled } from '@element-plus/icons-vue'
+import { useResponsive } from '@/composables/useResponsive'
 import { formatDateTime } from '@/utils/datetime'
 import type { SettingsConfigForm } from '../types'
 
@@ -12,6 +13,11 @@ const props = defineProps<{
   autoUpdateLastCheckedAt: string
   onSave: () => void
 }>()
+
+// issue #144 / v3.3.2：下面三个说明弹窗在移动端必须整屏。
+// 遮罩只有 24% 暗度，弹窗不铺满视口的话，sticky 顶栏会从遮罩后面透出来；
+// 而它的层级又低于遮罩、点了没反应，观感就是「顶栏卡住了」。
+const { dialogFullscreen } = useResponsive()
 
 // 空值文案用「从未检查」而不是 "-"：说明是一次都没查过，而不是查了没记下来
 const lastCheckedDisplay = computed(() => formatDateTime(props.autoUpdateLastCheckedAt, '从未检查'))
@@ -131,7 +137,7 @@ const binaryProxyOptions = [
       </span>
     </div>
 
-    <el-dialog v-model="proxyHelpDialogVisible" title="代理地址说明" width="560px">
+    <el-dialog v-model="proxyHelpDialogVisible" title="代理地址说明" width="560px" :fullscreen="dialogFullscreen">
       <div class="proxy-help">
         <p>
           这里配置的是面板服务器的出站代理。填写后，面板后台访问外部网络时会优先经过这个代理，例如拉取订阅仓库、下载脚本、安装 Python / Node / 系统依赖、健康检查以及部分通知请求。
@@ -160,7 +166,7 @@ const binaryProxyOptions = [
       </template>
     </el-dialog>
 
-    <el-dialog v-model="dockerMirrorDialogVisible" title="系统更新镜像源" width="520px">
+    <el-dialog v-model="dockerMirrorDialogVisible" title="系统更新镜像源" width="520px" :fullscreen="dialogFullscreen">
       <div class="mirror-source-tip">
         可到
         <a href="https://status.anye.xyz/" target="_blank" rel="noopener noreferrer">
@@ -185,7 +191,7 @@ const binaryProxyOptions = [
       </template>
     </el-dialog>
 
-    <el-dialog v-model="binaryProxyDialogVisible" title="二进制更新加速源" width="520px">
+    <el-dialog v-model="binaryProxyDialogVisible" title="二进制更新加速源" width="520px" :fullscreen="dialogFullscreen">
       <div class="mirror-option-list">
         <button
           v-for="url in binaryProxyOptions"

@@ -576,7 +576,9 @@ async function handleClean() {
   }
   let daysInput: string
   try {
-    const res = await ElMessageBox.prompt('请输入保留天数（将清理该天数之前的日志）', '清理日志', {
+    // 文案要写明「连文件一起删」（issue #144 / v3.3.2）：后端本轮起清理日志记录的同时会删掉对应的
+    // 日志文件、并顺手清空空掉的任务日志目录，不提前说清楚会让人以为只是从列表里移除。
+    const res = await ElMessageBox.prompt('请输入保留天数（将清理该天数之前的日志记录与日志文件）', '清理日志', {
       inputValue: '7',
       inputPattern: /^[1-9]\d*$/,
       inputErrorMessage: '请输入正整数',
@@ -797,7 +799,7 @@ onBeforeUnmount(() => {
     <!-- 移动端单独一支（v3.3.1，issue #143 LG1）；桌面那条 .toolbar 原样挪到 v-else，DOM 与样式都没动。
          第一行：非批量态是「搜索框 + 自动刷新开关 + 清理日志」，后两颗是 32px 纯图标按钮；
          批量态整行换成批量栏：全选/取消全选 → 删除 → 取消，不显示「已选 N 项」（删除确认框里有条数）。
-         第二行：状态分段，贴屏幕左右边缘、横向滑动。
+         第二行：状态分段，左右各留 12px、横向滑动（v3.3.2 起由贴边改回留白，issue #144）。
          日期范围筛选在移动端不渲染，进入移动端时的清空见 watch(isMobile)。
          这一支用不着桌面那套「左槽叠放」：移动端是普通文档流，工具栏高度变了也不会挤压列表，
          而第一行两种形态同为 32px 高、外边距相同，切换批量态时下面的内容也不会跳。 -->
@@ -943,15 +945,18 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 字段区：「标签 值」横排。结束时间恒显示（运行中时 formatDateTime 回落成「-」），
-             运行中 → 已结束时卡片不会凭空多长一行、把下面的卡片往下推。 -->
+             运行中 → 已结束时卡片不会凭空多长一行、把下面的卡片往下推。
+             时间值挂全局 .dd-mono 而不是本页 .time-text（issue #144 / v3.3.2）：
+             .time-text 是桌面表格那份私有样式、字号写死 12px，挂在移动卡上会比定时任务卡的 13px 小一号；
+             .dd-mono 只给 font-family，字号自然继承 .dd-mobile-card__row 的 13px，三页移动卡就此对齐。 -->
         <div class="dd-mobile-card__rows">
           <div class="dd-mobile-card__row">
             <span class="dd-mobile-card__row-label">开始时间</span>
-            <span class="dd-mobile-card__row-value time-text">{{ formatDateTime(row.started_at) }}</span>
+            <span class="dd-mobile-card__row-value dd-mono">{{ formatDateTime(row.started_at) }}</span>
           </div>
           <div class="dd-mobile-card__row">
             <span class="dd-mobile-card__row-label">结束时间</span>
-            <span class="dd-mobile-card__row-value time-text">{{ formatDateTime(row.ended_at) }}</span>
+            <span class="dd-mobile-card__row-value dd-mono">{{ formatDateTime(row.ended_at) }}</span>
           </div>
         </div>
 
@@ -961,7 +966,7 @@ onBeforeUnmount(() => {
           <div class="dd-mobile-card__footer-main">
             <div class="dd-mobile-card__row">
               <span class="dd-mobile-card__row-label">耗时</span>
-              <span class="dd-mobile-card__row-value time-text">{{ formatDuration(row.duration) }}</span>
+              <span class="dd-mobile-card__row-value dd-mono">{{ formatDuration(row.duration) }}</span>
             </div>
           </div>
           <div class="dd-mobile-card__footer-actions">
@@ -1479,6 +1484,8 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-placeholder);
 }
 
+// 只服务桌面表格（耗时 / 开始时间两列）。移动卡从 v3.3.2 起改挂全局 .dd-mono 继承 13px，
+// 这里的 12px 不要再动，也不要再往移动卡上挂这个类（issue #144）。
 .time-text {
   font-family: var(--dd-font-mono);
   font-size: 12px;
@@ -1613,6 +1620,27 @@ onBeforeUnmount(() => {
   height: clamp(680px, 85dvh, 920px);
   max-height: calc(100dvh - 64px);
   margin: auto;
+
+  // issue #144 / v3.3.2：移动端（≤768，dialogFullscreen）点「查看」后弹窗底部空出一截。
+  // 病根不在 :fullscreen prop —— 那个一直挂着 .is-fullscreen —— 而在特异性平局：
+  // EP 自带的 .el-dialog.is-fullscreen{height:100%} 与上面那条 [data-v-x] .log-detail-dialog
+  // 同为 (0,2,0)，而 EP 的 el-dialog.css 由 ElementPlusResolver 按需注入到本 SFC 模块头部、
+  // 在同一个路由 chunk 里必然排在本 scoped 样式之前，同特异性后来者赢，于是上面的 clamp 压住了 EP。
+  // 这里靠 :deep() + & 编译出的 [data-v-x] .log-detail-dialog.is-fullscreen 是 (0,3,0)，
+  // 比 EP 和上面自己那条都高一级，能稳定抢回全屏，所以不需要 !important。
+  // 为什么不去改 global.scss 移动端那条 .el-dialog.is-fullscreen：它仍是 (0,2,0)，
+  // 而 global.scss 在入口 CSS 里比路由 chunk 更早，平局照样输给上面那条；要压住只能加 !important，
+  // 那等于把全站所有全屏弹窗的高度一并锁死，影响面远超这一个弹窗。
+  &.is-fullscreen {
+    width: 100%;
+    height: 100%;
+    // 不可省：上面的 max-height: calc(100dvh - 64px) 与 global.scss 里 .el-dialog.is-fullscreen 的
+    // max-height: 100dvh 都是 (0,2,0)，不显式压回 100%，height:100% 会被它们裁掉 64px，底部仍留一条
+    max-height: 100%;
+    // 铺满视口后圆角会在四角露出遮罩底色，压回 0（全屏态下 EP 自己也是 0）
+    border-radius: 0;
+    margin: 0;
+  }
 
   .el-dialog__header {
     padding: 0;
@@ -1915,6 +1943,16 @@ onBeforeUnmount(() => {
   // 与其它弹窗统一成「关闭只在右下角」，自定义头部右上角这颗 × 收起，标题行也多出一点宽度
   .detail-hero-close {
     display: none;
+  }
+
+  // 状态分段的槽在 v3.3.2 由直角改成「按钮」角色令牌的圆角（global.scss 的 .dd-mobile-bleed 那条，
+  // issue #144），槽内的项必须跟着抬，否则槽圆了、项还是方的，四角那圈灰边几乎看不见。
+  // 减的 3px 正是槽自己的 padding（见上面 .status-tabs），内外弧才同心。
+  // square 模式下 calc(0px - 3px) 会被 CSS 夹到 0，不会出现负圆角。
+  // 必须带 .dd-mobile-bleed 限定：桌面那组 .status-tabs（v-else 工具栏里那个）没挂这个类，
+  // 不能被这条规则带着一起改档。
+  .status-tabs.dd-mobile-bleed .status-tab {
+    border-radius: calc(var(--dd-radius-button) - 3px);
   }
 }
 

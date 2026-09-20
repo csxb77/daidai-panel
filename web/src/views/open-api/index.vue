@@ -75,6 +75,16 @@
         <el-button type="primary" @click="showCreateDialog">
           <el-icon><Plus /></el-icon> 创建令牌
         </el-button>
+        <!-- 作废是全局的、不可逐条撤销，所以不放进某个应用的行内菜单，而是单独摆在工具条上 -->
+        <el-button
+          type="danger"
+          plain
+          :loading="revokingTriggerLinks"
+          title="作废全部企业微信触发链接（不影响 App Key / App Secret）"
+          @click="revokeTriggerLinks"
+        >
+          作废触发链接
+        </el-button>
         <el-button @click="loadApps" title="刷新列表">
           <el-icon><Refresh /></el-icon>
         </el-button>
@@ -177,6 +187,11 @@
               >重置密钥</el-button
             >
             <el-button size="small" @click="showLogs(row)">日志</el-button>
+            <!-- 企业微信菜单触发链接（issue #145）：移动端也要能生成，
+                 因为配企业微信后台这件事本身经常是在手机上做的 -->
+            <el-button size="small" @click="openTriggerLinkDialog(row)"
+              >触发链接</el-button
+            >
             <el-button size="small" type="danger" plain @click="deleteApp(row)"
               >删除</el-button
             >
@@ -485,6 +500,88 @@
       </template>
     </el-dialog>
 
+    <!-- 生成企业微信触发链接（issue #145 方案 B）。
+         链接是「点一下就执行某个任务」的长期地址，配到企业微信自建应用的菜单里用。 -->
+    <el-dialog
+      v-model="triggerLinkDialogVisible"
+      title="生成企业微信触发链接"
+      width="600px"
+      :fullscreen="dialogFullscreen"
+    >
+      <el-alert type="warning" :closable="false" show-icon style="margin-bottom: 16px">
+        <template #title>这条链接长期有效，且打开时不需要登录</template>
+        <div class="trigger-link-notice">
+          等同于这一个任务的永久触发权：只应配置到企业微信应用菜单里，不要贴进聊天、工单或文档——
+          它会留在企业微信服务器、内置浏览器历史与反向代理的访问日志里。需要止血时用工具条上的「作废触发链接」。
+        </div>
+      </el-alert>
+
+      <el-form label-position="top">
+        <el-form-item label="以哪个应用的名义签发">
+          <el-input :model-value="triggerLinkApp?.name || ''" readonly />
+          <div class="trigger-link-hint">
+            只用于记录「这条链接是谁发的」，真正的执行权限来自这个应用勾选的权限范围，需要含「任务管理（tasks）」。
+          </div>
+        </el-form-item>
+
+        <el-form-item label="要触发的任务" required>
+          <el-select
+            v-model="triggerLinkTaskId"
+            filterable
+            clearable
+            placeholder="搜索并选择一个任务"
+            style="width: 100%"
+            :loading="triggerLinkTasksLoading"
+          >
+            <el-option
+              v-for="task in triggerLinkTasks"
+              :key="task.id"
+              :label="`#${task.id} ${task.name}`"
+              :value="task.id"
+            />
+          </el-select>
+          <div class="trigger-link-hint">
+            票据只绑这一个任务：改 URL 上的 task_id 一定验签失败，一张票挪不到别的任务上。
+          </div>
+        </el-form-item>
+      </el-form>
+
+      <div v-if="triggerLinkResult" class="secret-display-card">
+        <div class="secret-row">
+          <span class="secret-label"
+            >触发链接（任务：{{ triggerLinkResult.task_name }}）</span
+          >
+          <div class="secret-value-box">
+            <code class="secret-value-text">{{ triggerLinkResult.url }}</code>
+            <el-button
+              class="copy-btn"
+              size="small"
+              @click="copyText(triggerLinkResult.url)"
+            >
+              <el-icon><DocumentCopy /></el-icon> 复制
+            </el-button>
+          </div>
+        </div>
+      </div>
+
+      <div class="trigger-link-hint trigger-link-hint--block">
+        前置条件：面板必须<strong>公网可达</strong>（企业微信内置浏览器要能打开这条地址），
+        并在「系统设置 → 企业微信触发」里打开「启用企业微信触发」与「允许企业微信触发执行」两个开关，
+        否则点开链接只会看到一句「未开启」。
+      </div>
+
+      <template #footer>
+        <el-button @click="triggerLinkDialogVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          :loading="triggerLinkGenerating"
+          :disabled="triggerLinkGenerating"
+          @click="generateTriggerLink"
+          >生成链接</el-button
+        >
+      </template>
+    </el-dialog>
+
     <el-dialog
       v-model="logsDialogVisible"
       title="调用日志"
@@ -538,6 +635,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, nextTick } from "vue";
 import { openApiApi } from "@/api/open-api";
+import { taskApi } from "@/api/task";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
   Connection,
@@ -571,6 +669,22 @@ const logTotal = ref(0);
 const logPage = ref(1);
 const currentLogAppId = ref(0);
 const revealedSecrets = reactive<Record<number, string>>({});
+
+// ---------------------------------------------------------------------------
+// 企业微信菜单触发链接（issue #145，v3.3.2）
+//
+// 换票接口挂在应用下（POST /open-api/apps/:id/task-trigger-link），所以入口做成行内操作；
+// 作废是代次 +1、一次作废全部，没有「只废这一条」，所以单独放在工具条上。
+// ---------------------------------------------------------------------------
+const triggerLinkDialogVisible = ref(false);
+const triggerLinkApp = ref<any>(null);
+const triggerLinkTasks = ref<any[]>([]);
+const triggerLinkTasksLoading = ref(false);
+const triggerLinkTaskId = ref<number | undefined>(undefined);
+const triggerLinkGenerating = ref(false);
+// 生成结果：{ url, task_name, notice }。换任务重新生成时先清掉，免得旧链接还挂在那儿被误复制
+const triggerLinkResult = ref<{ url: string; task_name: string } | null>(null);
+const revokingTriggerLinks = ref(false);
 const { isMobile, dialogFullscreen } = useResponsive();
 // 页面根：翻页回顶的锚点。本页是 dd-scroll-page，桌面由页面根自己滚，移动端由外层 .layout-main 滚，
 // scrollListToTop 会沿锚点及其祖先链把两者都覆盖到。
@@ -668,12 +782,14 @@ const maskKey = (key: string): string => {
 const appActionItems: SplitButtonItem[] = [
   { key: "reset", label: "重置密钥" },
   { key: "logs", label: "调用日志" },
+  { key: "trigger-link", label: "生成企业微信触发链接" },
   { key: "delete", label: "删除", danger: true, divided: true },
 ];
 
 function onAppAction(key: string, row: any) {
   if (key === "reset") resetSecret(row);
   else if (key === "logs") showLogs(row);
+  else if (key === "trigger-link") openTriggerLinkDialog(row);
   else if (key === "delete") deleteApp(row);
 }
 
@@ -887,6 +1003,74 @@ const deleteApp = async (app: any) => {
     loadApps();
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || "删除失败");
+  }
+};
+
+const openTriggerLinkDialog = (app: any) => {
+  triggerLinkApp.value = app;
+  triggerLinkTaskId.value = undefined;
+  triggerLinkResult.value = null;
+  triggerLinkDialogVisible.value = true;
+  // 任务列表只在第一次打开时拉一次：一次性取全量（all=1），下拉自带前端搜索，不用每次输入都发请求
+  if (triggerLinkTasks.value.length === 0) void loadTriggerLinkTasks();
+};
+
+const loadTriggerLinkTasks = async () => {
+  triggerLinkTasksLoading.value = true;
+  try {
+    const res = await taskApi.list({ all: 1 });
+    triggerLinkTasks.value = res.data || [];
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || "加载任务列表失败");
+  } finally {
+    triggerLinkTasksLoading.value = false;
+  }
+};
+
+const generateTriggerLink = async () => {
+  if (!triggerLinkApp.value) return;
+  if (!triggerLinkTaskId.value) {
+    ElMessage.warning("请先选择要触发的任务");
+    return;
+  }
+  triggerLinkGenerating.value = true;
+  try {
+    const res = await openApiApi.issueTaskTriggerLink(
+      triggerLinkApp.value.id,
+      triggerLinkTaskId.value,
+    );
+    const data = res.data;
+    triggerLinkResult.value = { url: data.url, task_name: data.task_name };
+    ElMessage.success("链接已生成，请复制后填进企业微信应用菜单");
+  } catch (err: any) {
+    // 生成失败时把旧结果清掉：留着会让人以为这就是新任务的链接
+    triggerLinkResult.value = null;
+    ElMessage.error(err?.response?.data?.error || "生成触发链接失败");
+  } finally {
+    triggerLinkGenerating.value = false;
+  }
+};
+
+const revokeTriggerLinks = async () => {
+  try {
+    await ElMessageBox.confirm(
+      "确认作废全部企业微信触发链接？作废是全局的、不可逐条撤销：所有已经发出去的链接会立刻失效，企业微信菜单里配的那些也一样，需要重新生成并重新配置。",
+      "作废确认",
+      { type: "warning", confirmButtonText: "确认作废", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  revokingTriggerLinks.value = true;
+  try {
+    await openApiApi.revokeTaskTriggerLinks();
+    // 之前生成的那条也已经失效了，别继续摆在弹窗里给人复制
+    triggerLinkResult.value = null;
+    ElMessage.success("已作废全部企业微信触发链接");
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || "作废失败");
+  } finally {
+    revokingTriggerLinks.value = false;
   }
 };
 
@@ -1258,6 +1442,24 @@ onMounted(loadApps);
   font-family: var(--dd-font-mono);
   word-break: break-all;
   line-height: 1.5;
+}
+
+// 触发链接弹窗里的说明文字：警告条正文 + 各表单项下的补充说明
+.trigger-link-notice {
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.trigger-link-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+
+  // 独立成段的前置条件说明（不跟在某个表单项下面），上方留出与卡片的间距
+  &--block {
+    margin-top: 16px;
+  }
 }
 
 .open-api-card__actions > * {

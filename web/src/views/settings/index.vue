@@ -18,6 +18,7 @@ import SystemConfigCard from './components/SystemConfigCard.vue'
 import SystemHealthCard from './components/SystemHealthCard.vue'
 import SystemInfoCard from './components/SystemInfoCard.vue'
 import TaskExecutionCard from './components/TaskExecutionCard.vue'
+import WecomTriggerCard from './components/WecomTriggerCard.vue'
 import { useSettingsConfig } from './useSettingsConfig'
 import { useSettingsOverview } from './useSettingsOverview'
 import { usePanelLogViewer } from './usePanelLogViewer'
@@ -84,6 +85,7 @@ const {
   handleSaveCaptcha,
   handleSaveSessionConfig,
   handleSaveMcpConfig,
+  handleSaveWecomTriggerConfig,
   handleSaveBackupSchedule
 } = config
 
@@ -223,7 +225,7 @@ function handleTabChange(tab: string) {
     void loadVersion()
     void loadSystemStats()
     void loadSystemInfo()
-  } else if (tab === 'config' || tab === 'task-exec' || tab === 'proxy' || tab === 'captcha' || tab === 'alert' || tab === 'mcp') {
+  } else if (tab === 'config' || tab === 'task-exec' || tab === 'proxy' || tab === 'captcha' || tab === 'alert' || tab === 'mcp' || tab === 'wecom') {
     void loadSystemConfigs()
   } else if (tab === 'panel-log') {
     void loadPanelLogs()
@@ -409,6 +411,17 @@ watch(
           :configs-saving="configsSaving"
           :form="configForm"
           :on-save="handleSaveMcpConfig"
+        />
+      </el-tab-pane>
+
+      <!-- lazy：这张卡挂载时会自己去拉接入配置与开放 API 应用两份列表，
+           不加 lazy 的话设置页一打开（哪怕从不切到这个标签）就会白发两个请求 -->
+      <el-tab-pane v-if="isAdmin" label="企业微信触发" name="wecom" lazy>
+        <WecomTriggerCard
+          :configs-loading="configsLoading"
+          :configs-saving="configsSaving"
+          :form="configForm"
+          :on-save="handleSaveWecomTriggerConfig"
         />
       </el-tab-pane>
 

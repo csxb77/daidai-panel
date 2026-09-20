@@ -31,32 +31,40 @@ func ReadLinuxMirror(manager LinuxPackageManager) (string, error) {
 }
 
 // SetLinuxMirror 把系统包镜像源改成 mirror；mirror 为空或是官方源时改成默认加速源。
-func SetLinuxMirror(manager LinuxPackageManager, distribution, mirror string) error {
+//
+// 第一个返回值表示「磁盘上的源文件真的被改写了」。v3.3.2 起把它一路透出来（issue #146）：
+// 换完源必须让 apt 索引作废，否则下一次安装仍拿旧源的索引，报 E: Unable to locate package。
+func SetLinuxMirror(manager LinuxPackageManager, distribution, mirror string) (bool, error) {
 	switch manager.Name {
 	case "apk":
 		return writeAPKMirror(EffectiveLinuxMirror(manager, distribution, mirror))
 	case "apt":
 		return writeAPTMirror(distribution, EffectiveLinuxMirror(manager, distribution, mirror))
 	default:
-		return fmt.Errorf("当前系统使用 %s，暂不支持镜像设置", manager.Binary)
+		return false, fmt.Errorf("当前系统使用 %s，暂不支持镜像设置", manager.Binary)
 	}
 }
 
 // EnsureDefaultLinuxMirror 在装系统包之前调用：当前源为空或是官方源时换成默认加速源，
-// 用户自己设过的源一律不动。
-func EnsureDefaultLinuxMirror(manager LinuxPackageManager, distribution string) error {
+// 用户自己设过的源一律不动。返回值同 SetLinuxMirror，表示源文件是否真被改写。
+func EnsureDefaultLinuxMirror(manager LinuxPackageManager, distribution string) (bool, error) {
 	switch manager.Name {
 	case "apk", "apt":
 	default:
-		return nil
+		return false, nil
 	}
 
 	current, err := ReadLinuxMirror(manager)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if current != "" && !isOfficialLinuxMirror(manager, distribution, current) {
-		return nil
+	// 第三个条件是 v3.3.2 的旧默认源一次性迁移（issue #146）：存量用户的 sources.list 里存的是上一版
+	// 默认的阿里云，而阿里云不是官方源，原来的判定会把它当成「用户自己选的」而永远不动。
+	// 迁移由 legacyDefaultMirrorMigrationPending() 兜住一次性，用户显式保存过镜像源之后就整体失效。
+	if current != "" &&
+		!isOfficialLinuxMirror(manager, distribution, current) &&
+		!(isLegacyDefaultLinuxMirror(manager, distribution, current) && legacyDefaultMirrorMigrationPending()) {
+		return false, nil
 	}
 
 	return SetLinuxMirror(manager, distribution, "")
@@ -91,13 +99,15 @@ func readAPKMirror() (string, error) {
 	return "", nil
 }
 
-func writeAPKMirror(mirror string) error {
+// writeAPKMirror 的返回值与 writeAPTMirror 对齐（issue #146）：只有内容真变了才算 changed。
+// apk 这边原来是无条件整文件覆写，拿不到「有没有变」这个信号，对齐之后调用方不用区分包管理器。
+func writeAPKMirror(mirror string) (bool, error) {
 	mirror = strings.TrimSpace(mirror)
 	if mirror == "" {
 		mirror = defaultLinuxMirror(LinuxPackageManager{Name: "apk", Binary: "apk"}, "")
 	}
 	if !isHTTPMirror(mirror) {
-		return errors.New("Linux 镜像源必须以 http:// 或 https:// 开头")
+		return false, errors.New("Linux 镜像源必须以 http:// 或 https:// 开头")
 	}
 
 	mirror = strings.TrimRight(mirror, "/")
@@ -111,7 +121,13 @@ func writeAPKMirror(mirror string) error {
 	}
 
 	content := fmt.Sprintf("%s/v%s/main\n%s/v%s/community\n", mirror, ver, mirror, ver)
-	return os.WriteFile("/etc/apk/repositories", []byte(content), 0o644)
+	if existing, readErr := os.ReadFile("/etc/apk/repositories"); readErr == nil && string(existing) == content {
+		return false, nil
+	}
+	if err := os.WriteFile("/etc/apk/repositories", []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func readAPTMirror() (string, error) {
@@ -140,23 +156,29 @@ func readAPTMirror() (string, error) {
 	return "", nil
 }
 
-func writeAPTMirror(distribution, mirror string) error {
+// writeAPTMirror 把 apt 源改写成 mirror，返回「是否真的改写了文件」。
+//
+// v3.3.2 起把「一个条目都没识别出来」与「识别出来了但已经是目标源」分开（issue #146）：
+// 前者是真异常，后者是成功。原来两种情况统一报「未找到可更新的 apt 软件源条目」，
+// 于是用户只改 pip、Linux 那栏原样提交时必然拿到 400，而 pip / npm 其实已经写进去了。
+func writeAPTMirror(distribution, mirror string) (bool, error) {
 	files, err := listAPTSourceFiles()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(files) == 0 {
-		return errors.New("未找到 apt 软件源配置文件")
+		return false, errors.New("未找到 apt 软件源配置文件")
 	}
 	if mirror != "" && !isHTTPMirror(mirror) {
-		return errors.New("Linux 镜像源必须以 http:// 或 https:// 开头")
+		return false, errors.New("Linux 镜像源必须以 http:// 或 https:// 开头")
 	}
 
 	changedAny := false
+	matchedAny := false
 	for _, file := range files {
 		data, err := os.ReadFile(file)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		var (
@@ -164,8 +186,11 @@ func writeAPTMirror(distribution, mirror string) error {
 			changed bool
 		)
 		if strings.HasSuffix(file, ".sources") {
+			// 能提取出 URIs / deb 行就说明这个文件里有面板认得的条目，与它是否需要改写无关。
+			matchedAny = matchedAny || extractMirrorFromAPTSources(string(data)) != ""
 			updated, changed = rewriteAPTSourcesContent(string(data), distribution, mirror)
 		} else {
+			matchedAny = matchedAny || extractMirrorFromAPTList(string(data)) != ""
 			updated, changed = rewriteAPTListContent(string(data), distribution, mirror)
 		}
 
@@ -174,16 +199,16 @@ func writeAPTMirror(distribution, mirror string) error {
 		}
 
 		if err := os.WriteFile(file, []byte(updated), 0o644); err != nil {
-			return err
+			return false, err
 		}
 		changedAny = true
 	}
 
-	if !changedAny {
-		return errors.New("未找到可更新的 apt 软件源条目")
+	if !matchedAny {
+		return false, errors.New("未找到可更新的 apt 软件源条目")
 	}
 
-	return nil
+	return changedAny, nil
 }
 
 func listAPTSourceFiles() ([]string, error) {
@@ -417,19 +442,49 @@ func isHTTPMirror(value string) bool {
 	return strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://")
 }
 
+// defaultLinuxMirror v3.3.2 起从阿里云换成腾讯云（issue #146）：用户实测阿里云限速不到 100KB/s。
+// 三条路径形态与阿里云完全一致（<站点>/alpine、/debian、/ubuntu），security 段由 resolveAPTMirrorURI
+// 自动拼 -security，腾讯云的 mirrors.cloud.tencent.com/debian-security 是存在的。
+// 阿里云只是不再当默认，仍留在前端候选清单里。
 func defaultLinuxMirror(manager LinuxPackageManager, distribution string) string {
 	switch manager.Name {
 	case "apk":
-		return "https://mirrors.aliyun.com/alpine"
+		return "https://mirrors.cloud.tencent.com/alpine"
 	case "apt":
 		switch strings.ToLower(strings.TrimSpace(distribution)) {
 		case "debian":
-			return "https://mirrors.aliyun.com/debian"
+			return "https://mirrors.cloud.tencent.com/debian"
 		default:
-			return "https://mirrors.aliyun.com/ubuntu"
+			return "https://mirrors.cloud.tencent.com/ubuntu"
 		}
 	default:
 		return ""
+	}
+}
+
+// isLegacyDefaultLinuxMirror 判断当前源是不是 v3.3.2 之前的默认加速源（阿里云）。
+//
+// 只给 EnsureDefaultLinuxMirror 的一次性迁移用，不参与 EffectiveLinuxMirror：
+// 后者同时负责「页面上显示当前生效的源」与「存盘前归一化」，掺进迁移会出现
+// 「磁盘写着阿里云、页面显示腾讯云」这种读写不对称，也会让用户选不回阿里云。
+//
+// debian 档要把 debian-security 一并认上：readAPTMirror 返回的是第一个匹配到的条目，
+// 在只剩 security 段还指向阿里云的机器上，读出来的就是 <站点>/debian-security。
+func isLegacyDefaultLinuxMirror(manager LinuxPackageManager, distribution, current string) bool {
+	currentLower := strings.ToLower(strings.TrimRight(strings.TrimSpace(current), "/"))
+	switch manager.Name {
+	case "apk":
+		return currentLower == "https://mirrors.aliyun.com/alpine"
+	case "apt":
+		switch strings.ToLower(strings.TrimSpace(distribution)) {
+		case "debian":
+			return currentLower == "https://mirrors.aliyun.com/debian" ||
+				currentLower == "https://mirrors.aliyun.com/debian-security"
+		default:
+			return currentLower == "https://mirrors.aliyun.com/ubuntu"
+		}
+	default:
+		return false
 	}
 }
 

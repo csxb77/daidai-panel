@@ -20,6 +20,7 @@ import {
   Expand,
   Fold,
   Key,
+  Monitor,
   Moon,
   Odometer,
   Operation,
@@ -110,7 +111,18 @@ const breadcrumb = computed(() => {
   return { section, title }
 })
 
-const themeIcon = computed(() => (themeStore.isDark ? Sunny : Moon))
+// 主题三档（v3.3.2，issue #145）：跟随系统时显示显示器图标，与「明亮/暗夜」两个显式档区分开。
+// 这里的图标必须【局部 import】：themeIcon 是 JS computed 返回组件对象，
+// main.ts 里那份全局注册只对模板中直接写 <Monitor /> 生效，对这里完全无效。
+const themeIcon = computed(() =>
+  themeStore.mode === 'system' ? Monitor : themeStore.isDark ? Sunny : Moon
+)
+// 三档之后光看图标更难猜「现在是哪一档、点下去会怎样」，补一句悬浮提示。
+// 按钮本身仍是二态：点一下脱离跟随、落到显式明/暗，第三档回设置页选。
+const themeTitle = computed(() => {
+  if (themeStore.mode === 'system') return '跟随系统 · 点击切换明暗'
+  return themeStore.isDark ? '暗夜 · 点击切换明暗' : '明亮 · 点击切换明暗'
+})
 
 /**
  * 侧栏菜单角标。
@@ -479,7 +491,12 @@ async function loadVersion() {
         <div class="header-center"></div>
 
         <div class="header-right">
-          <button class="header-icon-btn theme-toggle" @click="themeStore.toggleTheme">
+          <button
+            class="header-icon-btn theme-toggle"
+            :title="themeTitle"
+            :aria-label="themeTitle"
+            @click="themeStore.toggleTheme"
+          >
             <el-icon :size="18"><component :is="themeIcon" /></el-icon>
           </button>
           <el-dropdown trigger="click">
@@ -1323,7 +1340,9 @@ async function loadVersion() {
     // 所以归零的是 .dd-mobile-toolbar / .dd-mobile-batch-bar 的上外边距（global.scss），不是这里 ——
     // 这里一归零，配置文件、仪表板、脚本、设置、用户、通知、OpenAPI、接口文档这些没有移动端工具栏的页面，
     // 内容就直接贴着顶栏（v3.3.1 开发中浏览器实测踩过）。页面不要再自己补「离顶栏」的上外边距，否则又会叠出双倍。
-    // 横向留白同样吃 --dd-page-gutter-x，页面里贴屏幕边缘的元素（.dd-mobile-bleed）用等量负外边距抵消它。
+    // 横向留白同样吃 --dd-page-gutter-x。v3.3.2 / issue #144 起它是这个令牌的唯一消费方：
+    // 横滑行（.dd-mobile-bleed / .dd-mobile-batch-bar）不再用等量负外边距抵消它贴到屏幕边，
+    // 改成跟着这条留白走，屏幕最边上那 12px 让给系统的侧滑返回手势。
     // 顶部安全区不在这里处理：index.html 没开 viewport-fit=cover，env() 恒为 0；
     // 将来要开，也应由顶栏承担顶部安全区，而不是内容区。
     padding: var(--dd-page-gutter-x) var(--dd-page-gutter-x) calc(16px + env(safe-area-inset-bottom));

@@ -859,9 +859,12 @@
                 <el-button>快捷选择</el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
+                    <!-- issue #146 / v3.3.2：阿里云 pip 限速到 100KB/s 以下，默认源改成腾讯云。
+                         阿里云不删、只摘掉「(默认)」—— 阿里云 ECS 内网走它反而最快，
+                         直接删会让这批用户的现有选择在下拉里凭空消失。 -->
                     <el-dropdown-item
                       command="https://mirrors.aliyun.com/pypi/simple"
-                      >阿里云 (默认)</el-dropdown-item
+                      >阿里云</el-dropdown-item
                     >
                     <el-dropdown-item
                       command="https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -872,11 +875,15 @@
                     >
                     <el-dropdown-item
                       command="https://mirrors.cloud.tencent.com/pypi/simple"
-                      >腾讯云</el-dropdown-item
+                      >腾讯云 (默认)</el-dropdown-item
                     >
                     <el-dropdown-item
                       command="https://repo.huaweicloud.com/repository/pypi/simple"
                       >华为云</el-dropdown-item
+                    >
+                    <el-dropdown-item
+                      command="https://mirrors.ctyun.cn/pypi/simple"
+                      >天翼云</el-dropdown-item
                     >
                     <el-dropdown-item command=""
                       >恢复默认加速源</el-dropdown-item
@@ -1382,6 +1389,13 @@ const showMirrorDialog = ref(false);
 const mirrorLoading = ref(false);
 const mirrorSaving = ref(false);
 const mirrorForm = ref({ pip_mirror: "", npm_mirror: "", linux_mirror: "" });
+// 打开弹窗那一刻的表单原始值快照。保存时逐字段与它比对，只把真改过的字段放进 payload。
+// issue #146：以前三个字段恒被提交，「只改 pip、Linux 栏不动」必然报 400（详见 handleSaveMirrors）。
+const mirrorFormSnapshot = ref({
+  pip_mirror: "",
+  npm_mirror: "",
+  linux_mirror: "",
+});
 const mirrorMeta = ref<MirrorsResponse>({
   pip_mirror: "",
   npm_mirror: "",
@@ -1568,12 +1582,18 @@ const linuxMirrorOptions = computed(() => {
 
   if (manager === "apk") {
     return [
-      { label: "阿里云 (默认)", value: "https://mirrors.aliyun.com/alpine" },
+      // issue #146 / v3.3.2：默认源从阿里云换成腾讯云（阿里云限速）。
+      // 「(默认)」必须跟着后端的 defaultLinuxMirror 一起挪，否则 UI 会出现
+      // 「阿里云 (默认)」但实际默认是别家的自相矛盾。阿里云保留为普通候选。
+      { label: "阿里云", value: "https://mirrors.aliyun.com/alpine" },
       {
         label: "清华大学",
         value: "https://mirrors.tuna.tsinghua.edu.cn/alpine",
       },
-      { label: "腾讯云", value: "https://mirrors.cloud.tencent.com/alpine" },
+      {
+        label: "腾讯云 (默认)",
+        value: "https://mirrors.cloud.tencent.com/alpine",
+      },
       { label: "华为云", value: "https://repo.huaweicloud.com/alpine" },
       { label: "中科大", value: "https://mirrors.ustc.edu.cn/alpine" },
     ];
@@ -1582,8 +1602,14 @@ const linuxMirrorOptions = computed(() => {
   if (manager === "apt") {
     if (distro === "debian") {
       return [
+        // issue #146 / v3.3.2：默认源换腾讯云，阿里云降为普通候选；
+        // 另按 issue 建议补上华为云与天翼云。
+        // 天翼云标「实验性」的原因：Debian 的 security 段由后端 resolveAPTMirrorURI
+        // 自动拼成 <源>-security，而 https://mirrors.ctyun.cn/debian-security
+        // 是否存在至今没能实测（开发机 DNS 被劫持，解析到 fake-ip），
+        // 路径不存在会让 apt-get update 报 E:。等哪天实测过了再把标注去掉。
         {
-          label: "阿里云 Debian (默认)",
+          label: "阿里云 Debian",
           value: "https://mirrors.aliyun.com/debian",
         },
         {
@@ -1591,14 +1617,22 @@ const linuxMirrorOptions = computed(() => {
           value: "https://mirrors.tuna.tsinghua.edu.cn/debian",
         },
         {
-          label: "腾讯云 Debian",
+          label: "腾讯云 Debian (默认)",
           value: "https://mirrors.cloud.tencent.com/debian",
+        },
+        {
+          label: "华为云 Debian",
+          value: "https://repo.huaweicloud.com/debian",
+        },
+        {
+          label: "天翼云 Debian (实验性)",
+          value: "https://mirrors.ctyun.cn/debian",
         },
       ];
     }
     return [
       {
-        label: "阿里云 Ubuntu (默认)",
+        label: "阿里云 Ubuntu",
         value: "https://mirrors.aliyun.com/ubuntu",
       },
       {
@@ -1606,10 +1640,15 @@ const linuxMirrorOptions = computed(() => {
         value: "https://mirrors.tuna.tsinghua.edu.cn/ubuntu",
       },
       {
-        label: "腾讯云 Ubuntu",
+        label: "腾讯云 Ubuntu (默认)",
         value: "https://mirrors.cloud.tencent.com/ubuntu",
       },
       { label: "华为云 Ubuntu", value: "https://repo.huaweicloud.com/ubuntu" },
+      // 天翼云 Ubuntu 只为与 Debian 档保持对称；同样没实测过可达性，标「实验性」
+      {
+        label: "天翼云 Ubuntu (实验性)",
+        value: "https://mirrors.ctyun.cn/ubuntu",
+      },
     ];
   }
 
@@ -2457,25 +2496,71 @@ async function openMirrorDialog() {
   showMirrorDialog.value = true;
   mirrorLoading.value = true;
   if (await loadMirrorMeta()) {
+    // 这里回填的是后端返回的「生效值」：GET /deps/mirrors 目前只给 effective，
+    // 区分不了「用户真存过这个值」还是「只是内置默认」。所以保存时不能拿回填值当用户意图，
+    // 一律以下面这份快照做逐字段 diff（issue #146）。
+    // 真要区分 configured / effective 得改后端 GET 的返回结构，本轮不动后端。
     mirrorForm.value.pip_mirror = mirrorMeta.value.pip_mirror || "";
     mirrorForm.value.npm_mirror = mirrorMeta.value.npm_mirror || "";
     mirrorForm.value.linux_mirror = mirrorMeta.value.linux_mirror || "";
   } else {
     ElMessage.error("获取镜像源配置失败");
   }
+  // 快照必须在回填之后取，失败分支也要取：拉取失败时表单沿用上一次的值，
+  // 这时同样只该把用户这次动过的字段提交上去。
+  mirrorFormSnapshot.value = { ...mirrorForm.value };
   mirrorLoading.value = false;
 }
 
 async function handleSaveMirrors() {
-  if (!linuxMirrorSupported.value && mirrorForm.value.linux_mirror.trim()) {
+  // 只提交「这次真改过」的字段。后端 SetMirrors 用 *string 区分「没传」和「传空串」，
+  // 键不在 payload 里指针就是 nil，对应那条写盘分支整个不会执行。
+  // 这样一次修掉两个用户必踩的 400（issue #146）：
+  // 1. 只改 pip、Linux 那栏原样不动 —— 旧代码恒提交三个字段，后端 writeAPTMirror
+  //    发现一个条目都没变会直接报「未找到可更新的 apt 软件源条目」，
+  //    而此时 pip/npm 其实已经先写进去了，用户看到报错却以为没保存上；
+  // 2. dnf/zypper 这类不支持镜像设置的系统上，空串照样被 PUT，触发「暂不支持镜像设置」。
+  // 先把当前值拷一份定死：下面有 await，期间用户还能继续改输入框，
+  // 拿快照比对、提交、回写快照必须始终用同一组值，否则会漏提交那次改动。
+  const form = { ...mirrorForm.value };
+  const snapshot = mirrorFormSnapshot.value;
+  const payload: {
+    pip_mirror?: string;
+    npm_mirror?: string;
+    linux_mirror?: string;
+  } = {};
+  if (form.pip_mirror !== snapshot.pip_mirror) {
+    payload.pip_mirror = form.pip_mirror;
+  }
+  if (form.npm_mirror !== snapshot.npm_mirror) {
+    payload.npm_mirror = form.npm_mirror;
+  }
+  const linuxChanged = form.linux_mirror !== snapshot.linux_mirror;
+  if (linuxChanged) {
+    payload.linux_mirror = form.linux_mirror;
+  }
+
+  // 拦截条件从「值非空」改成「值被改过」：不支持镜像设置的系统上输入框本来就是禁用的，
+  // 值不会变，也就不会再拿一个没人动过的空串去撞后端那条报错。
+  if (linuxChanged && !linuxMirrorSupported.value) {
     ElMessage.warning(
       linuxMirrorMessage.value || "当前系统暂不支持 Linux 镜像设置",
     );
     return;
   }
+
+  if (Object.keys(payload).length === 0) {
+    // 一个字段都没改就别发请求了：空 payload 后端虽然也回成功，但纯属白跑一趟
+    ElMessage.info("镜像源未变更");
+    showMirrorDialog.value = false;
+    return;
+  }
+
   mirrorSaving.value = true;
   try {
-    await depsApi.setMirrors(mirrorForm.value);
+    await depsApi.setMirrors(payload);
+    // 保存成功后把快照推到新值，弹窗即使不关也能继续正确 diff
+    mirrorFormSnapshot.value = { ...form };
     ElMessage.success("镜像源设置成功");
     showMirrorDialog.value = false;
   } catch (e: any) {
@@ -2868,9 +2953,10 @@ onBeforeUnmount(() => {
   margin-bottom: 12px;
 }
 
-// 类型页签：灰底槽贴屏幕左右边缘（模板挂 .dd-mobile-bleed，与订阅 / 日志的状态分段、任务的视图分组栏一致），
-// 三个页签在槽内三等分，保留失败角标。贴边的宽度、左右内边距、直角由 .dd-mobile-bleed 用 !important 接管；
-// 移动端页面根不做横向裁剪（见文件开头 .deps-page），负外边距那一截不会被切。
+// 类型页签：灰底槽跟随页面 12px 留白（模板挂 .dd-mobile-bleed，与订阅 / 日志的状态分段、任务的视图分组栏一致），
+// 三个页签在槽内三等分，保留失败角标。宽度与圆角由 .dd-mobile-bleed 用 !important 接管：
+// v3.3.2 / issue #144 起它不再贴边、也不再固定直角，改成吃 --dd-radius-button（rounded 16px / square 0），
+// 槽内项在下面的移动端媒体查询里跟到 calc(-3px) 与槽同心。
 // 同挂 .dd-scroll-row 只是 320px 这类窄屏的兜底：带两位数角标时放不下就横滑。
 // 灰底槽、上下内边距、gap 沿用 .status-tabs；它的 inline-flex（scoped，压过全局 .dd-scroll-row 的 flex）
 // 会按内容收宽，本条改回占满整行的 flex。
@@ -3032,6 +3118,16 @@ onBeforeUnmount(() => {
     flex-direction: column;
     gap: 10px;
     align-items: center;
+  }
+
+  // 槽内项跟着槽一起圆（v3.3.2 / issue #144）：槽吃 --dd-radius-button（16px），
+  // 项减 3px 与槽同心，四周灰边才是均匀的 3px；不减的话项的直角会把槽的圆角顶掉、
+  // 四角灰边几乎归零，看着像被戳破。square 模式下 calc(0px - 3px) 会被 CSS 夹到 0
+  // （global.scss:219 的 .el-button--small 已有同款写法并写明实测结论）。
+  // 选择器带 .dd-mobile-bleed 限定：本页 265 / 284 行还有两组桌面才渲染的 .status-tabs，
+  // 它们共用 2823 的基类，不能被一起圆掉。
+  .status-tabs.dd-mobile-bleed .status-tab {
+    border-radius: calc(var(--dd-radius-button) - 3px);
   }
 }
 

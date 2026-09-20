@@ -383,11 +383,19 @@ func (h *LogHandler) Delete(c *gin.Context) {
 		response.BadRequest(c, "无效的日志ID")
 		return
 	}
+	// 先把 log_path 捞出来再删行：行一删路径就查不回来了，磁盘上的 .log 会变成没人认领的垃圾
+	// （issue #144 / v3.3.2）。这里是按 id 删单条，用户点的就是这一条，不需要 status 条件。
+	var paths []string
+	database.DB.Model(&model.TaskLog{}).
+		Where("id = ? AND log_path IS NOT NULL AND log_path <> ''", logID).
+		Pluck("log_path", &paths)
+
 	result := database.DB.Where("id = ?", logID).Delete(&model.TaskLog{})
 	if result.RowsAffected == 0 {
 		response.NotFound(c, "日志不存在")
 		return
 	}
+	service.DeleteLogFilesForRecords(paths, config.C.Data.LogDir)
 	response.Success(c, gin.H{"message": "日志已删除"})
 }
 
@@ -400,7 +408,14 @@ func (h *LogHandler) BatchDelete(c *gin.Context) {
 		return
 	}
 
+	// 同 Delete：先 Pluck 出这批行的 log_path，删完行再按路径删磁盘文件（issue #144 / v3.3.2）。
+	var paths []string
+	database.DB.Model(&model.TaskLog{}).
+		Where("id IN ? AND log_path IS NOT NULL AND log_path <> ''", req.IDs).
+		Pluck("log_path", &paths)
+
 	result := database.DB.Where("id IN ?", req.IDs).Delete(&model.TaskLog{})
+	service.DeleteLogFilesForRecords(paths, config.C.Data.LogDir)
 	response.Success(c, gin.H{
 		"message": fmt.Sprintf("已删除 %d 条日志", result.RowsAffected),
 	})
@@ -414,10 +429,12 @@ func (h *LogHandler) Clean(c *gin.Context) {
 		days = defaultDays
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -days)
-	result := database.DB.Where("started_at < ?", cutoff).Delete(&model.TaskLog{})
+	// 删记录 + 删磁盘文件 + 清空目录统一交给 service，与自动清理、定时任务页「清理日志」
+	// 走完全同一条路径（issue #144 / v3.3.2）。这里原来零文件操作，就是 issue 里
+	// 「清理完日志文件还在」的现象。
+	records, files := service.CleanLogsOlderThan(days)
 	response.Success(c, gin.H{
-		"message": fmt.Sprintf("已清理 %d 条日志（保留最近 %d 天）", result.RowsAffected, days),
+		"message": fmt.Sprintf("已清理 %d 条日志记录、%d 个日志文件（保留最近 %d 天）", records, files, days),
 	})
 }
 

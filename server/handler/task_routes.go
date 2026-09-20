@@ -38,6 +38,10 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.PUT("/:id", middleware.RequireRole("operator"), h.Update)
 		tasks.DELETE("/:id", middleware.RequireRole("operator"), h.Delete)
 		tasks.PUT("/:id/run", middleware.RequireRole("operator"), h.Run)
+		// 按任务名运行（issue #145，给企业微信「运行 <任务名>」这类指令用）。
+		// 静态段 run-by-name 与同层的 /:id/run 共存，和已有的 /batch/run、/delete-preview 是同一个形态；
+		// 复用组上已挂的 OpenAPIAccess("tasks")，不新开 scope。
+		tasks.POST("/run-by-name", middleware.RequireRole("operator"), h.RunByName)
 		tasks.PUT("/:id/stop", middleware.RequireRole("operator"), h.Stop)
 		tasks.PUT("/:id/enable", middleware.RequireRole("operator"), h.Enable)
 		tasks.PUT("/:id/disable", middleware.RequireRole("operator"), h.Disable)

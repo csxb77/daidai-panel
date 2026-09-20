@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"daidai-panel/database"
@@ -99,25 +102,115 @@ func disableTaskAndRemoveSchedule(task *model.Task) string {
 	return "已禁用"
 }
 
-func (h *TaskHandler) Run(c *gin.Context) {
-	taskID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+// 「立即执行一个任务」现在有两个入口（PUT /tasks/:id/run 与 POST /tasks/run-by-name，
+// 后者是 issue #145 给企业微信指令用的），所以把「查任务 → 判重 → 入队」抽成 runTaskByID 共用。
+// 失败原因用这三个哨兵值表达，由 respondRunTaskError 统一映射回 HTTP 语义 ——
+// 两个入口的状态码与文案必须完全一致，不然同一件事在两条路径上表现不同。
+var (
+	errRunTaskNotFound = errors.New("任务不存在")
+	errRunTaskRunning  = errors.New("任务正在运行中")
+	errRunTaskEnqueue  = errors.New("任务入队失败")
+)
 
+// runTaskByID 立即把任务送进执行队列。返回的 task 即使在出错时也尽量给出来，
+// 方便调用方在响应里带上任务名。
+func runTaskByID(taskID uint) (*model.Task, error) {
 	var task model.Task
 	if err := database.DB.First(&task, taskID).Error; err != nil {
-		response.NotFound(c, "任务不存在")
-		return
+		return nil, errRunTaskNotFound
 	}
 
 	if task.Status == model.TaskStatusRunning {
-		response.BadRequest(c, "任务正在运行中")
-		return
+		return &task, errRunTaskRunning
 	}
 
-	if err := service.GetSchedulerV2().RunNow(uint(taskID)); err != nil {
-		response.Error(c, http.StatusServiceUnavailable, "任务入队失败: "+err.Error())
+	scheduler := service.GetSchedulerV2()
+	if scheduler == nil {
+		// 面板还没启动完（或测试环境没装调度器）时别让这里裸着崩：
+		// 原来是 service.GetSchedulerV2().RunNow(...) 直接调，调度器为 nil 会空指针 panic。
+		// 同文件 task_batch.go 的 BatchRun 一直是先判 nil 再用，这里对齐它。
+		return &task, fmt.Errorf("%w: 调度器尚未就绪", errRunTaskEnqueue)
+	}
+	if err := scheduler.RunNow(task.ID); err != nil {
+		return &task, fmt.Errorf("%w: %s", errRunTaskEnqueue, err.Error())
+	}
+	return &task, nil
+}
+
+// respondRunTaskError 把 runTaskByID 的错误映射成 HTTP 响应。
+// 状态码与文案与 v3.3.1 的 PUT /tasks/:id/run 逐字一致，属于既有接口契约，不要顺手改。
+func respondRunTaskError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, errRunTaskNotFound):
+		response.NotFound(c, "任务不存在")
+	case errors.Is(err, errRunTaskRunning):
+		response.BadRequest(c, "任务正在运行中")
+	default:
+		response.Error(c, http.StatusServiceUnavailable, err.Error())
+	}
+}
+
+func (h *TaskHandler) Run(c *gin.Context) {
+	taskID, _ := strconv.ParseUint(c.Param("id"), 10, 32)
+
+	if _, err := runTaskByID(uint(taskID)); err != nil {
+		respondRunTaskError(c, err)
 		return
 	}
 	response.Success(c, gin.H{"message": "任务已启动"})
+}
+
+// RunByName 按任务名立即执行（issue #145）。
+//
+// 存在的理由：企业微信里回一句「运行 签到任务」时，用户手上只有名字没有 ID。
+// tasks.name 没有唯一索引，重名任务是真实存在的，所以这里不能「取第一条」蒙混过去：
+//   - 0 条  → 404
+//   - 多条  → 409，并把候选的 id / name 列回去，让调用方改用 PUT /tasks/:id/run
+//   - 恰 1 条 → 与 PUT /tasks/:id/run 走同一个 runTaskByID
+func (h *TaskHandler) RunByName(c *gin.Context) {
+	var req struct {
+		Name string `json:"name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		response.BadRequest(c, "任务名不能为空")
+		return
+	}
+
+	// 精确匹配，不用 LIKE：模糊匹配会让「签到」把「签到备份」也扫进来，
+	// 在「回一句话就执行」的场景里这种意外命中的代价太大。
+	var tasks []model.Task
+	database.DB.Where("name = ?", name).Order("id ASC").Find(&tasks)
+
+	if len(tasks) == 0 {
+		response.NotFound(c, "任务不存在")
+		return
+	}
+	if len(tasks) > 1 {
+		candidates := make([]gin.H, 0, len(tasks))
+		for i := range tasks {
+			candidates = append(candidates, gin.H{"id": tasks[i].ID, "name": tasks[i].Name})
+		}
+		// 响应体沿用 response.Error 的 {"error": ...} 形状，额外多带一个 candidates，
+		// 好让调用方（以及企业微信侧的提示文案）能直接把候选列给用户看。
+		c.JSON(http.StatusConflict, gin.H{
+			"error":      fmt.Sprintf("有 %d 个任务都叫「%s」，请改用任务 ID 触发", len(tasks), name),
+			"candidates": candidates,
+		})
+		return
+	}
+
+	task, err := runTaskByID(tasks[0].ID)
+	if err != nil {
+		respondRunTaskError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"message": "任务已启动", "data": gin.H{"id": task.ID, "name": task.Name}})
 }
 
 func (h *TaskHandler) Stop(c *gin.Context) {

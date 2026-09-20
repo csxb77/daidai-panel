@@ -294,8 +294,13 @@ func TestNewPlaywrightBrowserInstallCommand(t *testing.T) {
 }
 
 func TestPlaywrightDownloadStartLine(t *testing.T) {
-	if got := PlaywrightDownloadStartLine("/data/deps/ms-playwright"); got != PlaywrightDownloadStartPrefix+"/data/deps/ms-playwright" {
+	// v3.3.2 起开始行后面跟着体量与耗时说明（issue #146）：日志停在这一行不动是 Playwright 的进度条
+	// 靠 \r 原地刷新、面板按行采集导致的，说明必须写在这条日志里才有人看见。
+	if got := PlaywrightDownloadStartLine("/data/deps/ms-playwright"); got != PlaywrightDownloadStartPrefix+"/data/deps/ms-playwright"+playwrightDownloadSizeNote {
 		t.Fatalf("开始行不对：%q", got)
+	}
+	if got := PlaywrightDownloadStartLine("/data/deps/ms-playwright"); !strings.Contains(got, "150-300MB") {
+		t.Fatalf("开始行应写明下载体量，实际 %q", got)
 	}
 	// 变量被设成空串时 Playwright 用它自己的默认目录，日志里不能出现一个空路径。
 	if got := PlaywrightDownloadStartLine(""); !strings.HasPrefix(got, PlaywrightDownloadStartPrefix) || !strings.Contains(got, "默认目录") {

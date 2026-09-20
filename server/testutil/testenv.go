@@ -94,6 +94,7 @@ func SetupTestEnv(t *testing.T) string {
 		&model.PlatformTokenLog{},
 		&model.Dependency{},
 		&model.TaskView{},
+		&model.WecomTrigger{},
 	)
 	model.InitDefaultConfigs()
 

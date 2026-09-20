@@ -39,6 +39,7 @@ func (h *TaskHandler) Export(c *gin.Context) {
 			"timeout":                   task.Timeout,
 			"success_exit_codes":        task.GetSuccessExitCodes(),
 			"random_delay_seconds":      task.RandomDelaySeconds,
+			"log_retention_days":        task.LogRetentionDays,
 			"max_retries":               task.MaxRetries,
 			"retry_interval":            task.RetryInterval,
 			"notify_on_failure":         task.NotifyOnFailure,
@@ -186,6 +187,16 @@ func (h *TaskHandler) Import(c *gin.Context) {
 				continue
 			}
 			task.RandomDelaySeconds = randomDelayValue
+		}
+		// 任务级日志保留天数（issue #144 / v3.3.2）。导出里多带一个键对旧版本面板是安全的：
+		// 导入侧就是这样按键逐个取值的，认不出的键会被静默忽略。
+		if value, exists := taskData["log_retention_days"]; exists {
+			logRetentionValue, err := normalizeTaskLogRetentionDaysValue(value)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("任务 %d: %s", i+1, err.Error()))
+				continue
+			}
+			task.LogRetentionDays = logRetentionValue
 		}
 		if value, ok := taskData["max_retries"].(float64); ok {
 			task.MaxRetries = int(value)

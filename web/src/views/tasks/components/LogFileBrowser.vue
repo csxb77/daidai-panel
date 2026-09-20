@@ -241,6 +241,7 @@ function handleClose() {
     :model-value="visible"
     :title="`日志文件 - ${taskName}`"
     width="1200px"
+    class="task-log-files-dialog"
     :fullscreen="dialogFullscreen"
     :lock-scroll="false"
     @close="handleClose"
@@ -325,7 +326,12 @@ function handleClose() {
 .log-files-browser {
   display: flex;
   gap: 16px;
-  height: 700px;
+  // 高度全权交给弹窗算（定值 810px 写在文件末尾的非 scoped 块里），这里只负责吃满。
+  // 原来写死的 700px 是三条滚动条的根因（v3.3.2，issue #144 桌面端评论条）：
+  // .el-dialog__body 不是 flex 容器，这块就不是 flex item、矮窗口下压不回去，
+  // 于是把 body 的 overflow:auto 顶出第三条滚动条，两个子窗自己的滚动条还被推到视窗外。
+  height: 100%;
+  min-height: 0;
 }
 
 // 左侧改成「汇总 + 打包入口」与列表上下叠的一列，宽度沿用原来 .file-list 的 340px
@@ -459,10 +465,10 @@ function handleClose() {
 @media (max-width: 768px) {
   .log-files-browser {
     flex-direction: column;
-    // 140 = 全屏弹窗的上下「框」：标题栏约 49（14 + 24 + 10 + 1px 分隔线）+ body 上下内边距 32
-    // + 底部「关闭」那一栏约 57（1px 分隔线 + 10 + 32 + 14），以 global.scss 移动端弹窗内边距为准。
-    // 改那几处内边距或去掉 footer 时这里要跟着算，否则 body 会多出一条滚动条或在底部留一截空白。
-    height: calc(100dvh - 140px);
+    // 这里刻意不再写高度（v3.3.2，issue #144）：原来那条 calc(100dvh - 140px) 是把全屏弹窗的
+    // header / body padding / footer 三段内边距手算出来的魔数，global.scss 一改移动端弹窗内边距就得回来重算。
+    // 现在 is-fullscreen 下 EP 给 .el-dialog 设了 height:100%，加上末尾非 scoped 块的 body 规则，
+    // 上面的 height:100% 会顺着 flex 链自动吃满整屏，不需要任何魔数。
     gap: 12px;
   }
 
@@ -473,6 +479,40 @@ function handleClose() {
 
   .file-list {
     max-height: 220px;
+  }
+}
+</style>
+
+<!--
+  独立的非 scoped style：专门处理 el-dialog 渲染出来的 .el-dialog 元素（class="task-log-files-dialog" 落在它上面）。
+  原因同 LogViewer.vue 末尾那一块：本组件 template 的根就是 el-dialog 组件自身，.el-dialog / .el-dialog__body
+  都由 Element Plus 在组件内部渲染、带不上本组件的 scopeId，外面也没有任何带 data-v 属性的祖先包着它，
+  所以 :deep(.task-log-files-dialog) 编译出的 [data-v-xxx] .task-log-files-dialog 在真实 DOM 里命不中。
+  这【不是】teleport 的问题：EP 2.13.5 的 el-dialog 默认原地渲染，本项目也不要为层级问题加 append-to-body。
+  🔴 因为是全局规则，类名必须唯一：不能叫 log-files-dialog —— 那个名字已经挂在 views/logs/index.vue
+  的「日志文件」弹窗上，撞名会把那个 900px 宽、内含 max-height 420px 表格的小弹窗一起拉成 810px 高并截断。
+-->
+<style lang="scss">
+.task-log-files-dialog {
+  // 810 = 内容区 700 + 弹窗的框 109（header 61 + body 上下 padding 48）。
+  // global.scss 的 .el-dialog 已有 max-height: calc(100dvh - margin*2) 按视口封顶，
+  // 所以这里写定值就够，不用再包一层 min()。视口够高 → 内容区仍是原来的 700px；
+  // 视口一矮 → 整窗等比缩小、左右两个小窗一起变矮，而不是把 body 撑出第三条滚动条。
+  height: 810px;
+
+  .el-dialog__body {
+    // global.scss 给全站弹窗的 body 默认 overflow:auto（别的弹窗正靠它滚），这里定点改成 hidden：
+    // 高度只由左右两个小窗各自的 overflow-y:auto 消化，父级永远不出现第三条滚动条
+    // （v3.3.2，issue #144 桌面端评论条）。绝不能去改 global.scss 里那条公共规则。
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  // 移动端 :fullscreen 时高度交还给 EP 的 .el-dialog.is-fullscreen{height:100%}，
+  // 顺手把上面的定值和 global.scss 的视口封顶一起放开，内容区才能顺着 flex 链吃满整屏。
+  &.is-fullscreen {
+    height: 100%;
+    max-height: 100%;
   }
 }
 </style>

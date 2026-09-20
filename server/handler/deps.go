@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -754,8 +755,23 @@ func (h *DepsHandler) SetMirrors(c *gin.Context) {
 			errors = append(errors, err.Error())
 		} else {
 			distribution := detectLinuxDistribution()
-			if err := setLinuxMirror(manager, distribution, mirror); err != nil {
+			changed, err := setLinuxMirror(manager, distribution, mirror)
+			if err != nil {
 				errors = append(errors, "设置 Linux 镜像源失败: "+err.Error())
+			} else if changed {
+				// 换完源必须让 apt 索引作废，否则 6 小时 TTL 内装包仍拿旧源的索引，
+				// 报 E: Unable to locate package（issue #146）。
+				//
+				// 这里刻意【不】同步跑 apt-get update：SetMirrors 是同步 HTTP handler、前端只等 30 秒，
+				// 换到慢源跑一次 update 轻松超时；而且这条路不拿 LockLinuxPackageOperation，
+				// 同步跑会与后台安装抢 /var/lib/apt/lists/lock（那把锁不等待），把别人的安装搞 failed。
+				// 作废索引之后，由下一次安装在包锁保护下顺带跑 update。
+				//
+				// 删索引要 root，而这条路没有权限闸，降权部署下会 EACCES：
+				// 只记日志不阻断，不能让「镜像源设置成功」变成失败。
+				if err := service.InvalidateAptPackageIndex(); err != nil {
+					log.Printf("warn: 换源后作废 apt 索引失败（下次安装仍按 6 小时 TTL 判断是否刷新）: %v", err)
+				}
 			}
 		}
 	}
@@ -763,6 +779,12 @@ func (h *DepsHandler) SetMirrors(c *gin.Context) {
 	if len(errors) > 0 {
 		response.BadRequest(c, strings.Join(errors, "; "))
 		return
+	}
+
+	// 用户显式保存过镜像源之后，旧默认源（阿里云）就只是一个普通的用户选择，
+	// v3.3.2 的一次性迁移整体失效，免得他主动选回阿里云又被静默改走（issue #146）。
+	if req.PipMirror != nil || req.LinuxMirror != nil {
+		service.MarkDependencyMirrorChoiceSaved()
 	}
 
 	response.Success(c, gin.H{"message": "镜像源设置成功"})
@@ -1082,6 +1104,14 @@ func buildDependencyFailureHint(logText string) string {
 		strings.Contains(lower, "failed to fetch"):
 		return "[检测到镜像源不可达或网络中断（域名能解析但连不上/下载失败），" +
 			"请检查 Linux 镜像源配置、代理设置和网络连通性，必要时更换镜像源后重试]"
+	// 顺序契约：apt 索引过期这条必须排在上面 DNS 与「Failed to fetch」两条【之后】。
+	//   - 安装脚本用 ; 串联 apt-get update 与 apt-get install（见 linux_packages.go 的 LinuxInstallCommandSpec），
+	//     update 因网络失败后 install 照跑、照样报 E: Unable to locate package；
+	//     也就是说一次纯网络故障的日志里会【同时】出现 Failed to fetch 和 Unable to locate package。
+	//   - 排在网络分支前面，就会把「网都不通」误诊成「索引过期」，让用户去换源、刷索引，白折腾一圈。
+	//   - 反过来排在后面不会漏报：索引是真过期时日志里只有 Unable to locate package，网络分支不命中。
+	case strings.Contains(lower, "e: unable to locate package"):
+		return buildAptStaleIndexHint()
 	// 顺序契约：这条必须夹在「镜像源」与「Alpine glibc 不兼容」之间。
 	//   - 排在锁冲突 / DNS / 镜像源之后：那三类是更靠前的次生故障，先解决它们才对；
 	//   - 排在 isAlpineGlibcIncompatible 之前：后者的关键词（failed to build installable wheels、
@@ -1095,6 +1125,19 @@ func buildDependencyFailureHint(logText string) string {
 	default:
 		return ""
 	}
+}
+
+// buildAptStaleIndexHint 是「apt 索引与当前镜像源对不上」这条归因的结论文案（issue #146）。
+//
+// 典型成因：换了 apt 源，但索引还是旧源那一批 —— 索引文件名按仓库 URL 编码，换源后 apt 在新源的索引里
+// 一个包都找不到。v3.3.2 起面板自己的换源路径已经会作废索引，这条提示主要覆盖面板管不到的换源
+// （系统控制台里手敲 sed / apt edit-sources，或直接改 /etc/apt 下的文件）。
+func buildAptStaleIndexHint() string {
+	return "[检测到 apt 找不到软件包（E: Unable to locate package）：多半是软件包索引与当前镜像源对不上 —— " +
+		"索引按仓库地址缓存，换过源却没刷新索引就会在新源里一个包都找不到。" +
+		"出路一：在容器内执行 apt-get update 后重装本依赖；" +
+		"出路二：到「依赖管理 → 镜像源设置」重新保存一次 Linux 镜像源，面板会自动作废旧索引；" +
+		"若包名本身就不在当前发行版的软件源里（例如 Debian 换代后包名带了 t64 后缀），则需要改用新包名]"
 }
 
 // buildAlpineGlibcHint 是「musl 上没有预编译包」这条归因的结论文案。

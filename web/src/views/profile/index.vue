@@ -14,13 +14,16 @@ import {
   Camera,
   Delete,
   MagicStick,
+  Sunny,
 } from "@element-plus/icons-vue";
 import { authApi } from "@/api/auth";
 import {
   applyMotionPreference,
   readMotionPreference,
   type MotionPreference,
+  type ThemeMode,
 } from "@/utils/panelAppearance";
+import { useThemeStore } from "@/stores/theme";
 import { securityApi } from "@/api/security";
 import {
   sponsorApi,
@@ -430,17 +433,40 @@ function syncSystemReducedMotion() {
   systemReducedMotion.value = Boolean(reducedMotionQuery?.matches);
 }
 
+// ===== 界面主题（v3.3.2 / issue #145，同为本机偏好，三档含义见 utils/panelAppearance.ts）=====
+// 顶栏那颗图标按钮只在明/暗之间二态切换，第三档「跟随系统」只有这张卡能选回来。
+const themeStore = useThemeStore();
+const themeOptions: Array<{ value: ThemeMode; label: string }> = [
+  { value: "light", label: "明亮" },
+  { value: "dark", label: "暗夜" },
+  { value: "system", label: "跟随系统" },
+];
+// 系统当前是不是深色：只用来在说明里告诉用户「跟随系统此刻会落到哪一档」，
+// 真正生效的是 applyThemeMode 写在 <html> 上的 class，这里读不读都不影响效果。
+const systemDarkTheme = ref(false);
+let darkThemeQuery: MediaQueryList | null = null;
+
+function syncSystemDarkTheme() {
+  systemDarkTheme.value = Boolean(darkThemeQuery?.matches);
+}
+
+// 两个 MediaQueryList 共用这一对生命周期钩子：本文件已经有两个 onMounted 了，不再往上加第三对
 onMounted(() => {
   // 老 WebView 可能没有 matchMedia：拿不到就当系统没开，只影响那一行提示文字
   reducedMotionQuery = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
   syncSystemReducedMotion();
+  darkThemeQuery = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
+  syncSystemDarkTheme();
   // 页面开着时用户也可能去改系统设置，跟着刷新提示
   reducedMotionQuery?.addEventListener("change", syncSystemReducedMotion);
+  darkThemeQuery?.addEventListener("change", syncSystemDarkTheme);
 });
 
 onUnmounted(() => {
   reducedMotionQuery?.removeEventListener("change", syncSystemReducedMotion);
   reducedMotionQuery = null;
+  darkThemeQuery?.removeEventListener("change", syncSystemDarkTheme);
+  darkThemeQuery = null;
 });
 
 onMounted(async () => {
@@ -681,6 +707,40 @@ onUnmounted(() => {
             </div>
           </section>
 
+          <!-- 界面主题（v3.3.2，issue #145）：与界面动效同为纯本机偏好，不进服务端配置
+               （理由见 utils/panelAppearance.ts）。顶栏那颗图标按钮点一下只在明/暗之间切，
+               第三档「跟随系统」只有这里能选回来。 -->
+          <section class="profile-card">
+            <header class="profile-card-header">
+              <span class="card-title">
+                <el-icon :size="15"><Sunny /></el-icon>
+                <span>界面主题</span>
+              </span>
+              <span class="pref-scope">仅对当前浏览器生效</span>
+            </header>
+            <div class="dd-seg-group" role="radiogroup" aria-label="界面主题">
+              <button
+                v-for="option in themeOptions"
+                :key="option.value"
+                type="button"
+                role="radio"
+                class="dd-seg-btn"
+                :class="{ 'is-active': themeStore.mode === option.value }"
+                :aria-checked="themeStore.mode === option.value"
+                @click="themeStore.setThemeMode(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <p class="pref-desc">
+              选「跟随系统」后，面板会跟着操作系统的深色模式自动切换；
+              点顶栏那颗图标按钮则会脱离跟随，落到固定的明亮或暗夜。
+            </p>
+            <p class="pref-desc pref-desc--muted">
+              当前系统：{{ systemDarkTheme ? "深色模式" : "浅色模式" }}
+            </p>
+          </section>
+
           <!-- 界面动效：纯本机偏好，不进服务端配置（理由见 utils/panelAppearance.ts）。
                分段控件用全局的 .dd-seg-group / .dd-seg-btn，与全站「多选一」的控件同一套观感。 -->
           <section class="profile-card">
@@ -689,7 +749,7 @@ onUnmounted(() => {
                 <el-icon :size="15"><MagicStick /></el-icon>
                 <span>界面动效</span>
               </span>
-              <span class="motion-pref-scope">仅对当前浏览器生效</span>
+              <span class="pref-scope">仅对当前浏览器生效</span>
             </header>
             <div class="dd-seg-group" role="radiogroup" aria-label="界面动效">
               <button
@@ -705,11 +765,11 @@ onUnmounted(() => {
                 {{ option.label }}
               </button>
             </div>
-            <p class="motion-pref-desc">
+            <p class="pref-desc">
               系统开了「减少动态效果」时浏览器默认不播动画，选「始终开启」可覆盖；
               选「减少动效」则无论系统怎么设，动画都压到几乎不可见。
             </p>
-            <p class="motion-pref-desc motion-pref-desc--muted">
+            <p class="pref-desc pref-desc--muted">
               当前系统：{{
                 systemReducedMotion ? "已开启减少动态效果" : "未开启减少动态效果"
               }}
@@ -1400,8 +1460,9 @@ onUnmounted(() => {
   color: var(--el-text-color-primary);
 }
 
-/* 界面动效卡片：标题右侧的作用范围说明 + 分段控件下方的说明文字 */
-.motion-pref-scope {
+/* 本机偏好卡片（界面主题 / 界面动效）共用：标题右侧的作用范围说明 + 分段控件下方的说明文字。
+   v3.3.2（issue #145）加主题卡时从 .motion-pref-* 改成通用命名，两张卡共用一份样式 */
+.pref-scope {
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
@@ -1412,14 +1473,14 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
-.motion-pref-desc {
+.pref-desc {
   margin: 12px 0 0;
   font-size: 12.5px;
   line-height: 1.7;
   color: var(--el-text-color-regular);
 }
 
-.motion-pref-desc--muted {
+.pref-desc--muted {
   margin-top: 4px;
   color: var(--el-text-color-secondary);
 }

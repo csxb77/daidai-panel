@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { MAGISK_STOP_SUPPORTED_SHELL_VERSION, type PanelUpdateStatus } from '@/api/system'
+import { useResponsive } from '@/composables/useResponsive'
 import { formatDateTime } from '@/utils/datetime'
 import { renderMarkdown } from '@/utils/markdown'
 import UpdateProgressDialog from './UpdateProgressDialog.vue'
@@ -28,6 +29,10 @@ const props = defineProps<{
   onOpenGitHub: () => void
   onCloseUpdateProgress: () => void | Promise<void>
 }>()
+
+// issue #144 / v3.3.2：更新日志弹窗在移动端必须整屏。
+// 它带 append-to-body、遮罩直接铺满视口，不铺满就会出现「顶栏看得见却点不动」的观感。
+const { dialogFullscreen } = useResponsive()
 
 // 只有明确是容器部署时才展示镜像源、渠道和 docker compose 相关文案。
 // 后端即使在构建更新方案失败时也会回填 deployment_type（见 handler 的
@@ -192,7 +197,7 @@ const releaseNotesHtml = computed(() => {
     :on-close="onCloseUpdateProgress"
   />
 
-  <el-dialog :model-value="releaseNotesVisible" title="发现新版本" width="720px" append-to-body @close="onCloseReleaseNotes">
+  <el-dialog :model-value="releaseNotesVisible" title="发现新版本" width="720px" :fullscreen="dialogFullscreen" append-to-body @close="onCloseReleaseNotes">
     <div v-if="updateInfo" class="release-notes-shell">
       <div class="release-notes-meta">
         <strong>版本：v{{ updateInfo.latest }}</strong>

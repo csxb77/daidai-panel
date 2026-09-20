@@ -320,3 +320,85 @@ export function applyMotionPreference(raw?: string | null): MotionPreference {
   classList.toggle(MOTION_OFF_CLASS, next === 'reduce')
   return next
 }
+
+/**
+ * 面板主题档位（个人设置页「界面主题」，v3.3.2 / issue #145）。
+ *
+ * - light：显式明亮，不看系统；
+ * - dark：显式暗夜，不看系统；
+ * - system（缺键默认）：跟随操作系统的 prefers-color-scheme，系统日落转暗面板跟着转暗。
+ *
+ * 生效机制是给 <html> 加/去 class `dark`（不是 data-theme）：
+ * element-plus/theme-chalk/dark/css-vars.css 与 global.scss、各页 <style> 里那些 `html.dark`
+ * 段认的都是这一个 class，换成别的写法等于整套暗色样式全部失配。
+ *
+ * 与界面动效同理，刻意做成本机偏好（localStorage）、不进服务端：
+ * 它回答的是「这块屏幕前的人现在想看亮的还是暗的」，笔记本和手机本就该各存各的；
+ * 而且登录页也要能切主题，一旦挪进用户偏好表，未登录时根本读不到。
+ *
+ * ⚠️ 存储键沿用历史的裸 `theme`，不要改成 `dd:appearance:theme`：
+ *    v3.3.2 之前的二态主题就写在这个键上，改键名等于把所有老用户的暗色偏好清零。
+ * ⚠️ 缺键默认是 'system' 而不是 'light'：「跟随系统」这个功能要开箱即用，
+ *    不能等用户先进一次设置页才生效。代价是「从没手动切过主题 + 系统是深色」的老用户
+ *    升级后会被动变暗一次，这一点在发布说明里写明即可。
+ */
+export type ThemeMode = 'light' | 'dark' | 'system'
+
+const THEME_MODE_STORAGE_KEY = 'theme'
+
+function normalizeThemeMode(raw?: string | null): ThemeMode | null {
+  const value = String(raw ?? '').trim().toLowerCase()
+  if (value === 'light' || value === 'dark' || value === 'system') return value
+  return null
+}
+
+/**
+ * 系统此刻是不是深色。
+ * 老 WebView 可能没有 matchMedia，可选链兜底成「不是深色」—— 拿不到就当系统永远是亮的，
+ * 比整个启动流程抛异常白屏强。
+ */
+export function systemPrefersDark(): boolean {
+  if (typeof window === 'undefined') return false
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
+}
+
+export function readThemeMode(): ThemeMode {
+  // 隐私模式 / 禁用站点存储时读 localStorage 会直接抛错；这里在 createApp 之前执行，不兜住会白屏
+  try {
+    if (typeof window === 'undefined') return 'system'
+    return normalizeThemeMode(window.localStorage.getItem(THEME_MODE_STORAGE_KEY)) ?? 'system'
+  } catch {
+    return 'system'
+  }
+}
+
+/**
+ * 把主题档位落到 <html> 的 class `dark` 上，返回最终生效的档位。
+ *
+ * 传了合法值：以它为准并写进本机缓存（个人设置页、顶栏按钮切换时走这条，即时生效、无需刷新）；
+ * 不传或值不认识：按本机缓存重放一遍（main.ts 在 createApp 之前走这条）。
+ *
+ * ⚠️ main.ts 里这一次必须在首帧之前同步执行：挂晚了，暗色（含跟随系统落到暗色）的用户
+ *    首屏会先闪一帧白底 —— 与 applyPanelShapeStyle 防闪形、applyMotionPreference 同理。
+ * ⚠️ 这里【只】管 class 与持久化，不碰编辑器/日志底色：那一发是 applyPanelAppearance()，
+ *    由 stores/theme.ts 的 watch(isDark) 触发，切明暗时两者缺一不可。
+ */
+export function applyThemeMode(raw?: string | null): ThemeMode {
+  const explicit = normalizeThemeMode(raw)
+  const next = explicit ?? readThemeMode()
+  if (explicit) {
+    try {
+      window.localStorage.setItem(THEME_MODE_STORAGE_KEY, explicit)
+    } catch {
+      // 写不进去（隐私模式）只是下次打开要重新选，不影响本次生效
+    }
+  }
+
+  if (typeof document === 'undefined') return next
+  // 跟随系统档在这里现读一次 matchMedia：首屏预热时 store 还没建起来，没别人能替它算这一下
+  document.documentElement.classList.toggle(
+    'dark',
+    next === 'dark' || (next === 'system' && systemPrefersDark()),
+  )
+  return next
+}

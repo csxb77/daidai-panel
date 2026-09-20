@@ -1346,8 +1346,12 @@ async function handlePin(task: any) {
  * 被手动运行的禁用任务 status 是 0.5 / 2，原来这里会显示成「禁用」。
  * 「禁用」项标红（danger）是 issue #133 要的配色，与删除同一套红字 + 悬停淡红底；
  * 但它可撤销、又是第一项，所以【不加】divided —— 分隔线只留给不可撤销的删除。
- * 「启用」项挂 success（issue #143 D2）：与「禁用」的红色对称，只在 hover / focus 时显示绿字淡绿底，
- * 常态沿用菜单统一字色。桌面 Split Button 与移动端卡片「···」用的是同一份数组，两边自动一致。
+ * 「启用」项挂 success（issue #143 D2 引入，v3.3.2 / issue #144 按用户反馈翻案）：
+ * 与「禁用」的红色完全对称 —— 常态就是绿字，hover / focus 再叠淡绿底。
+ * （#143 当初刻意只在 hover 才上色，怕它比同菜单的中性项抢眼一档；现在用户明确要常驻绿，
+ *   这是有意识的翻案，别照旧注释又把常态色去掉。常态绿字写在 global.scss 的
+ *   .dd-split-button__item--success 上，这里只管挂 success 字段。）
+ * 桌面 Split Button 与移动端卡片「···」用的是同一份数组，两边自动一致。
  *
  * alwaysShowDetail：移动端卡片没有 Split Button 的主体，观察者那一支「详情」没地方承担，
  * 只能留在「···」菜单里，否则观察者在手机上就看不到详情了（桌面仍按上面的规则由主体承担）。
@@ -1547,20 +1551,32 @@ async function handleCleanLogs() {
   if (!ensureCanOperate('当前账号没有清理日志权限')) return
   let daysStr: string
   try {
-    const { value } = await ElMessageBox.prompt('清理多少天前的日志？', '日志清理', {
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
-      inputPattern: /^\d+$/,
-      inputErrorMessage: '请输入有效的天数',
-      inputValue: '30',
-    })
+    // 默认值取 7，与系统设置里「日志保留天数」的注册默认值（system_config_registry.go）以及
+    // 执行日志页那颗清理按钮对齐。这里原本写死 30，和另一处的 7 对不上，同一件事两个默认值。
+    // 文案同样要写明「连文件一起删」（issue #144 / v3.3.2）：这颗按钮原先只删磁盘文件不删记录，
+    // 本轮起两边统一成「记录与文件一起清」，不说清楚会让人以为只是从列表里移除。
+    const { value } = await ElMessageBox.prompt(
+      '请输入保留天数（将清理该天数之前的日志记录与日志文件）',
+      '日志清理',
+      {
+        confirmButtonText: '确定',
+        cancelButtonText: '取消',
+        inputPattern: /^[1-9]\d*$/,
+        inputErrorMessage: '请输入正整数',
+        inputValue: '7',
+        type: 'warning',
+      },
+    )
     daysStr = value
   } catch {
     return
   }
   try {
-    await taskApi.cleanLogs(Number(daysStr))
-    ElMessage.success('日志清理成功')
+    // 文案必须透传后端返回（v3.3.2，issue #144 桌面端第 10 条）：清理现在连日志文件一起删，
+    // 后端会回「已清理 N 条日志记录、M 个日志文件」，写死成「日志清理成功」等于把战果吞了。
+    // 写法与 views/logs/index.vue 的 handleClean 保持一致。
+    const res = await taskApi.cleanLogs(Number(daysStr))
+    ElMessage.success(res.message)
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '日志清理失败')
   }

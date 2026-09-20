@@ -40,6 +40,7 @@ type taskFields struct {
 	TaskBefore             *string  `json:"task_before,omitempty" jsonschema:"每次运行前先执行的 shell 命令"`
 	TaskAfter              *string  `json:"task_after,omitempty" jsonschema:"每次运行后再执行的 shell 命令"`
 	AllowMultipleInstances *bool    `json:"allow_multiple_instances,omitempty" jsonschema:"上一次还没结束时，是否允许到点再启动一个实例"`
+	LogRetentionDays       *int     `json:"log_retention_days,omitempty" jsonschema:"这个任务的日志保留天数（1-3650）；不填就跟随面板全局设置，填 0 表示改回跟随全局"`
 }
 
 type createTaskInput struct {
@@ -93,6 +94,9 @@ func (f taskFields) addTo(body map[string]any) error {
 	setIfPresent(body, "task_before", f.TaskBefore)
 	setIfPresent(body, "task_after", f.TaskAfter)
 	setIfPresent(body, "allow_multiple_instances", f.AllowMultipleInstances)
+	// 面板侧把 0 和负数归成「跟随全局」，所以这里原样透传即可：
+	// 传 0 就是把任务级天数改回跟随全局，不像 random_delay_seconds 那样改不回去（issue #144 / v3.3.2）。
+	setIfPresent(body, "log_retention_days", f.LogRetentionDays)
 	return nil
 }
 

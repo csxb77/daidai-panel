@@ -394,8 +394,10 @@ defineExpose({ loadViews, loadGroups, openCreateDialog, openManagementDialog, ca
   <div class="view-manager">
     <!-- 槽内只放筛选项（全部 + 各视图 + 分组标签），动作按钮（新建 / 视图管理）放槽外：
          「选哪一个」与「做什么」语义分开，顺带消掉了原来「全部」24px、视图 32px 的高度不一致。
-         移动端（v3.3.1，issue #143）：槽独占一行、单行横滑、贴屏幕左右边缘（两个全局共享类只在移动端挂上，
-         桌面 DOM 与换行行为不变）；槽外两个动作按钮不渲染，入口挪进了任务页工具栏的「+」菜单。 -->
+         移动端（v3.3.1，issue #143；留白口径 v3.3.2 / issue #144 修正）：槽独占一行、单行横滑，
+         左右停在页面 12px 留白线上（#143 当初是贴满屏幕边缘，会吃掉系统侧滑返回手势，已改回留白）。
+         两个全局共享类只在移动端挂上，桌面 DOM 与换行行为不变；
+         槽外两个动作按钮不渲染，入口挪进了任务页工具栏的「+」菜单。 -->
     <div class="view-tabs">
       <div class="view-seg" :class="{ 'dd-scroll-row': isMobile, 'dd-mobile-bleed': isMobile }">
         <button
@@ -667,9 +669,10 @@ defineExpose({ loadViews, loadGroups, openCreateDialog, openManagementDialog, ca
     flex-wrap: wrap;
   }
 
-  // 移动端视图分组栏（issue #143 T7/T8）：灰底槽独占一行、单行左右滑动、隐藏滚动条，并贴屏幕左右边缘。
-  // 横滑与贴边由模板里只在移动端挂上的 .dd-scroll-row / .dd-mobile-bleed 两个全局类负责
-  // （滚动、隐藏滚动条、子项不收缩；负外边距抵消页面留白、左右内边距让首尾标签与页面内容对齐、贴边后直角）。
+  // 移动端视图分组栏（issue #143 T7/T8；留白与圆角口径 v3.3.2 / issue #144 修正）：
+  // 灰底槽独占一行、单行左右滑动、隐藏滚动条，左右停在页面 12px 留白线上并吃「按钮」档圆角。
+  // 横滑与这条留白由模板里只在移动端挂上的 .dd-scroll-row / .dd-mobile-bleed 两个全局类负责
+  // （滚动、隐藏滚动条、子项不收缩、宽度拉满一行、槽本身的圆角）。
   // 这里只补被本文件 .view-seg 那条（scoped 后 (0,2,0)，压过全局单类）盖掉的两项：
   // 块级 flex（inline-flex 会按内容收宽、滚不起来）与不换行。gap 仍用本文件的 2px，与桌面分段控件一致。
   // 为什么手机上改横滑：窄屏上换行会把灰底槽堆成好几行，工具栏与列表被一路推到屏幕下半截；
@@ -677,6 +680,16 @@ defineExpose({ loadViews, loadGroups, openCreateDialog, openManagementDialog, ca
   .view-seg.dd-scroll-row {
     display: flex;
     flex-wrap: nowrap;
+  }
+
+  // 槽圆了、项还是桌面的 control 档（6px）的话，四角那 3px 灰边会被白色选中项几乎戳没
+  // （槽 16 / 项 6 时，项的左上圆弧顶点到裁剪圆心只有 15.9px，离 16px 的边只剩 0.1px）。
+  // 减 3 正好是槽的 padding，项的圆弧与槽外圆弧同心，四周灰边恒为 3px。
+  // 必须限定 .dd-scroll-row：桌面那份 .view-tab 仍走本文件上面的 control 档，不受影响。
+  // square 模式下 calc(0px - 3px) 会被 CSS 的取值范围夹到 0，不会出负圆角 ——
+  // 这是实测结论，global.scss 的 .el-button--small{calc(var(--el-border-radius-base) - 1px)} 同款写法已验证过。
+  .view-seg.dd-scroll-row .view-tab {
+    border-radius: calc(var(--dd-radius-button) - 3px);
   }
 }
 </style>

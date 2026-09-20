@@ -156,6 +156,9 @@ func (h *TaskHandler) CleanLogs(c *gin.Context) {
 		days = defaultDays
 	}
 
-	count := service.CleanOldLogs(config.C.Data.LogDir, days)
-	response.Success(c, gin.H{"message": fmt.Sprintf("已清理 %d 个日志文件（保留最近 %d 天）", count, days)})
+	// 与 /logs/clean、后台自动清理统一成同一语义（issue #144 / v3.3.2）。
+	// 这颗按钮原来只删磁盘文件、不删日志记录，和执行日志页那颗正好相反，
+	// 而两页的菜单项都叫「清理日志」，用户根本分不出点下去会发生什么。
+	records, files := service.CleanLogsOlderThan(days)
+	response.Success(c, gin.H{"message": fmt.Sprintf("已清理 %d 条日志记录、%d 个日志文件（保留最近 %d 天）", records, files, days)})
 }

@@ -19,6 +19,7 @@ import type {
   DemoTaskLog,
   DemoTaskView,
   DemoUser,
+  DemoWecomTrigger,
 } from '../types'
 import {
   LOG_STATUS_ABORTED,
@@ -888,6 +889,30 @@ function buildOpenApps(now: number): DemoOpenApp[] {
   ]
 }
 
+/**
+ * 企业微信接入配置（issue #145）。
+ *
+ * 只播一条，并且刻意绑到「CI 触发器」那个应用上——它的权限范围是 tasks,scripts，
+ * 含 tasks，符合服务端 validateWecomTriggerInput 的要求；绑到别的应用上，
+ * 访客一点「编辑 → 确定」就会被 400 挡回来，看起来像演示站坏了。
+ * CorpID 用企业微信官方文档里的示例形状，不是真企业。
+ */
+function buildWecomTriggers(now: number): DemoWecomTrigger[] {
+  return [
+    {
+      id: 1,
+      name: '运维群自建应用',
+      corp_id: 'ww1a2b3c4d5e6f7g8h',
+      agent_id: '1000002',
+      open_app_id: 2,
+      task_whitelist: '',
+      enabled: true,
+      created_at: iso(now - 9 * DAY_MS),
+      updated_at: iso(now - 2 * DAY_MS),
+    },
+  ]
+}
+
 function buildApiCallLogs(now: number, apps: DemoOpenApp[]): DemoApiCallLog[] {
   const rows: DemoApiCallLog[] = []
   const endpoints: Array<[string, string, number]> = [
@@ -1123,6 +1148,7 @@ export function createSeedState(now: number = Date.now()): DemoDbState {
   const sshKeys = buildSSHKeys(now)
   const subLogs = buildSubLogs(now, subscriptions)
   const apiCallLogs = buildApiCallLogs(now, openApps)
+  const wecomTriggers = buildWecomTriggers(now)
   const loginLogs = buildLoginLogs(now)
   const sessions = buildSessions(now)
   const ipWhitelist = buildIPWhitelist(now)
@@ -1138,6 +1164,7 @@ export function createSeedState(now: number = Date.now()): DemoDbState {
     channels,
     openApps,
     apiCallLogs,
+    wecomTriggers,
     users,
     deps,
     loginLogs,
@@ -1159,6 +1186,7 @@ export function createSeedState(now: number = Date.now()): DemoDbState {
       channel: maxId(channels),
       openApp: maxId(openApps),
       apiCallLog: maxId(apiCallLogs),
+      wecomTrigger: maxId(wecomTriggers),
       user: maxId(users),
       dep: maxId(deps),
       loginLog: maxId(loginLogs),
