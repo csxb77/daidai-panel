@@ -3589,6 +3589,81 @@ go test ./...
 
 ---
 
+## 场景：企业微信拉起任务（issue #145，v3.3.2）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/wecom_callback.go`、`server/pkg/wxcrypt/`、`server/pkg/trigticket/`、
+  `server/model/wecom_trigger.go`，或新增任何一条「公开路由 + handler 内强鉴权」的入口时必须看本节。
+- 原因：这是**「路由公开 + handler 内强鉴权 + 系统设置总开关」这套形态的第二个实例**（第一个是上一节的 MCP）。
+  上一节此前是唯一实例，规范也只按 MCP 描述；从这一版起它是一套**可复用的形态**，
+  再加第三个入口时照这里抄，不要另发明一种鉴权。
+
+### 2. Signatures
+
+- HTTP：`GET /api/v1/wecom/callback/:id`（企业微信后台保存配置时的 URL 验签）、
+  `POST /api/v1/wecom/callback/:id`（用户回复文字 / 点菜单时的消息投递）
+- 配置键：`model.WecomTriggerEnabledConfigKey` = `wecom_trigger_enabled`、
+  `model.WecomTriggerAllowRunConfigKey` = `wecom_trigger_allow_run`（与 MCP 的两项一一对应）
+- 运行时状态键（**不进注册表**）：`model.WecomTriggerLinkGenerationConfigKey` = `wecom_trigger_link_generation`
+- 加解密：`wxcrypt.Signature` / `wxcrypt.VerifySignature` / `wxcrypt.Decrypt`
+- 菜单票据：`trigticket.Issue` / `trigticket.Verify`（资源标识是 `task-trigger:<任务 ID>`）
+
+### 3. Contracts
+
+- **安全基线四件套一件不能少**（与 MCP 逐条对应）：默认关 + **每请求现读开关** + 凭据强校验 + 全局 CORS 兜底。
+  现读开关意味着管理员在设置页关掉立即生效，不进 `reloadRuntimeConfigKeys`；
+  Origin 校验不在 handler 里重写——`router.Setup` 的全局 CORS 中间件已经挡在前面
+  （企业微信是 server-to-server、不带 Origin 而被放行，浏览器跨站请求带 Origin 会在进 handler 之前 403）。
+- **两级开关**：`wecom_trigger_enabled=false` → 403（连验签都不做）；
+  `wecom_trigger_allow_run=false` → 回调 URL 能在企业微信后台配通，指令却不会真的跑任务。
+  两级的用途是**分两步上线**，不是冗余。
+- 🔴 **`wxcrypt.Decrypt` 里「明文尾部的 receiveid 必须等于本企业 CorpID」是硬约束，不设跳过开关。**
+  漏了这一步，别人拿自己企业的 Token/AESKey 就能构造出一条签名合法的消息打进来 —— 等于任何人可触发任务。
+- 🔴 **签名比较一律用 `subtle.ConstantTimeCompare`。**
+  签名是这条公网入口上唯一的身份凭证，逐字节短路比较会从响应耗时泄漏「已经对上了几位」，把离线爆破变成在线爆破。
+  `handler/open_api.go` 里 `app.AppSecret != req.AppSecret` 那处裸 `!=` 是**历史遗留，不要照抄**；
+  新代码照 `handler/mcp_auth.go` 与 `wxcrypt.VerifySignature` 写。
+- 🔴 **触发一律走 `engineDispatcher` 在进程内回放 `/api/v1` 接口，不直调 `service.GetSchedulerV2().RunNow()`。**
+  直调会绕开 `OpenAPIAccess` 的 scope 校验、调用限流与 `ApiCallLog` 审计——
+  那三样正是「公网入口能触发执行」这件事的可追溯性来源。回放走的是和开放 API 客户端一模一样的路径
+  （`JWTAuth` → `OpenAPIAccess` → `RequireRole`），所以这条入口不比现有开放 API 多任何权限。
+- 🔴 **验签之后一律回 200 + 空串。** 企业微信要求 5 秒内响应，非 200 会被它当失败**重试三次**——
+  同一条「运行 xx」指令因此被执行三遍。执行结果走现有的 `wecom_app` 通知渠道异步推回，不占这次响应。
+  验签**之前**的失败照真实状态码回（401/403/404），这样管理员在企业微信后台配错时能立刻看到。
+- **菜单链接票据长期有效**，拿到链接就等于拿到这一个任务的永久触发权（链接会留在企业微信服务器、
+  内置浏览器历史和反代访问日志里）。三条配套约束绑在一起，缺一条这个取舍就不成立：
+  票据**只绑单个 `task_id`**（不是整个 tasks 权限）；必须提供一键作废——
+  止血手段是把 `system_config` 里的代次 `wecom_trigger_link_generation` **+1**，所有旧票据立刻验不过，
+  不需要逐条记录已签发的票；调用方那一侧还压着上面两级总开关。
+
+### 4. Validation & Error Matrix
+
+- `wecom_trigger_enabled=false` → 403，不验签、不落任何记录。
+- 接入配置不存在 / 自身被禁用 → 404 / 403（都在验签之前）。
+- `msg_signature` 对不上 → 401「企业微信回调验签失败」。
+- 解密后 receiveid 与 CorpID 不符 → 按验签失败处理，绝不放行。
+- 验签通过、`wecom_trigger_allow_run=false` → 200 空串，不跑任务。
+- 验签通过、指令解析失败 / 任务不存在 / scope 不足 → **仍然 200 空串**，原因通过通知渠道推回。
+- 代次已 +1 的旧菜单链接 → 票据验不过，按无效链接处理。
+
+### 5. Tests Required
+
+- 开关矩阵：总开关关 / 开+不允许触发 / 全开三档下的行为。
+- 验签：正确签名、错签名、receiveid 不匹配、时间戳与 nonce 参与排序的顺序。
+- 回包口径：验签前的失败回真实状态码；验签后的各种失败都回 200 空串（防重试三遍那条回归）。
+- 票据：绑 A 任务的票据拿去触发 B 任务必须失败；代次 +1 之后全部旧票据失效。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./pkg/wxcrypt ./pkg/trigticket -count=1
+go test ./handler -run "Wecom" -count=1
+go test ./...
+```
+
+---
+
 ## 场景：订阅过滤的正则片段与子目录范围（issue #129）
 
 ### 1. Scope / Trigger
@@ -3975,13 +4050,17 @@ columns = append(columns, "updated_at")
 
 - `service`（`playwright_env.go`）：
   - `PlaywrightBrowsersPathEnv = "PLAYWRIGHT_BROWSERS_PATH"`、`PlaywrightDownloadHostEnv = "PLAYWRIGHT_DOWNLOAD_HOST"`；
+  - `DefaultPlaywrightDownloadHostARM64`、`DefaultPlaywrightDownloadHost() string`（v3.3.2 / #146）；
   - `DefaultPlaywrightBrowsersPath() string`、`ResolvePlaywrightBrowsersPath() string`、`ApplyPlaywrightBrowsersPathProcessEnv()`；
-  - 包内：`runningInContainer()`、`applyPlaywrightBrowsersPathDefault(envMap)`、`migrateLegacyPlaywrightBrowsers(legacy, target)`。
+  - 包内：`runningInContainer()`、`applyPlaywrightBrowsersPathDefault(envMap)`、`migrateLegacyPlaywrightBrowsers(legacy, target)`、
+    `nonEmptyEnvValues(map[string]string) map[string]string`。
 - `service`（`playwright_runtime.go`）：
   - `DetectLinuxOSRelease() LinuxOSRelease{ID, VersionID, VersionCodename}`；
   - `PlanPlaywrightRuntime() PlaywrightRuntimePlan`（`supported` / `reason` / `distribution` / `version_id` / `arch` / `packages` / `browsers_path`）、`PlaywrightDebian12Packages()`、`PlaywrightPythonPackage = "playwright"`；
   - `PlaywrightBrowserDownloadApplies(packageName) bool`、`NewPlaywrightBrowserInstallCommand(pythonVersion) (*exec.Cmd, browsersPath string, error)`；
   - `PlaywrightDownloadStartPrefix` / `PlaywrightDownloadStartLine(path)` / `PlaywrightDownloadReadyLine`；
+    v3.3.2 起 `PlaywrightDownloadStartLine` 的返回值**带上体量与耗时说明**（约 150-300MB、下载期间日志不刷新属正常），
+    两处测试按**精确相等**断言它，改文案必须同步改断言；
   - `BuildPlaywrightEnvironmentHint(output)`、`BuildRuntimeFailureHint(output)`。
 - `service`（`linux_packages.go`）：`LockLinuxPackageOperation() func()`、`aptLockTimeoutOption = "DPkg::Lock::Timeout=300"`。
 - `handler`（/deps 组，`JWTAuth()` + `RequireAdmin()`；/deps 不在开放 API 的 scope 里，MCP 不用同步）：
@@ -4012,6 +4091,19 @@ columns = append(columns, "updated_at")
   - **订阅钩子**：`subscription_hook.go` 键不存在时写 `ResolvePlaywrightBrowsersPath()`（钩子环境不含环境变量页的值，所以取 Resolve 而不是只补默认值），取到空串就不写。
   - **浏览器下载子进程**：显式设 `PLAYWRIGHT_BROWSERS_PATH=ResolvePlaywrightBrowsersPath()`，并带上环境变量页里的 `PLAYWRIGHT_DOWNLOAD_HOST`、面板代理和可写 HOME。
     依赖安装子进程只继承 `os.Environ`，看不到环境变量页，不显式传就会下到与任务不一样的目录。
+
+**`PLAYWRIGHT_DOWNLOAD_HOST` 的默认值按架构分流**（v3.3.2 / #146；这个变量在此之前是纯透传，全仓没有默认值）
+
+- `DefaultPlaywrightDownloadHost()` 只在 **arm64** 返回 `DefaultPlaywrightDownloadHostARM64`（npmmirror），其余架构一律返回空串、不设默认。
+  **amd64 刻意不设**：npmmirror 近期几个 revision 下只有 arm64 的包，没有 x64 的 `chromium-linux.zip`，
+  强推会把「慢」变成「直接 404」，比不设更糟。面板的 Magisk / Android 部署全是 arm64，正好被这条默认值覆盖。
+  想加新镜像时的验证口径：**不能只看状态码**——必须看 `content-type` 和文件头（有的站点任何路径都回 200，内容却是门户页 HTML）。
+- 🔴 **顺序契约：先写面板默认值，再叠用户值；用户值必须先滤空。**
+  `withEnvEntry` 是「先剔同名再追加」，两次调用的先后天然实现「用户值优先」；
+  用户值要过 `nonEmptyEnvValues`，否则环境变量页里一条 enabled 但 Value 为空的同名记录会把默认镜像覆盖成空串，**镜像静默失效**。
+- ⚠️ 滤空刻意**不**下沉到 `panelUserEnvValues`：`PLAYWRIGHT_BROWSERS_PATH` 那边「设成空串」是有意义的
+  （表示让 Playwright 用它自己的默认目录，`PlaywrightDownloadStartLine` 专门为此写了一个分支），
+  在公共函数里滤空会把那条语义一并改掉。
 - **PUID 存量搬迁**：降权部署的 HOME 被 entrypoint 钉成 `<data.dir>/.home`，老浏览器在 `<data.dir>/.home/.cache/ms-playwright`。
   用户没在面板里自己设这个变量、旧目录非空、新目录不存在或为空时，`os.Rename` 过去（同一个卷，瞬时完成）；
   新目录已有内容时不合并、不覆盖；失败只打日志，不阻塞启动。
@@ -4082,6 +4174,25 @@ columns = append(columns, "updated_at")
 
 **失败提示的顺序契约**（`buildDependencyFailureHint`）
 
+这是一条 `switch`，**分支顺序本身就是契约**：一次故障的日志里往往同时出现好几类关键词，排错位就是误诊。
+当前顺序（改动时整张表一起核对，不要只看自己那一条）：
+
+| 次序 | 分支 | 判据 | 为什么在这个位置 |
+|---|---|---|---|
+| 1 | Playwright 浏览器下载失败 | 结构性事实：有下载开始行、无就绪行 | 判据最硬，其余分支都在猜关键词；详见下一条 |
+| 2 | 包管理器锁冲突 | `could not get lock` / `unable to acquire the dpkg frontend lock` / `unable to lock database` / `another app is currently holding the yum lock` | 只要撞锁，本次结论一定是「稍后重试」 |
+| 3 | 容器内 DNS 解析失败 | `temporary failure resolving` / `temporary failure in name resolution` / `could not resolve` / `name or service not known` | 与下一条排查方向完全相反，必须分开报：解析失败时宿主机往往一切正常 |
+| 4 | 镜像源不可达 / 网络中断 | `connection timed out` / `connection refused` / `failed to fetch` | 域名能解析但连不上 |
+| 5 | **apt 索引与镜像源对不上** | `e: unable to locate package` | 🔴 **必须排在第 3、4 之后**，理由见下 |
+| 6 | 缺编译工具链 | `isMissingBuildToolchain` | 夹在镜像源与 Alpine 之间：前三类是更靠前的次生故障 |
+| 7 | Alpine glibc 不兼容 | `isAlpineGlibcIncompatible` | 关键词（`failed to build installable wheels`、`manylinux`）太宽，放最后才不会盖掉第 6 条那个更具体的真因 |
+
+- 🔴 **第 5 条（`e: unable to locate package` → apt 索引与镜像源对不上）必须排在 DNS 与 `Failed to fetch` 之后。**
+  安装脚本用 `;` 串联 `apt-get update` 与 `apt-get install`（见 `linux_packages.go` 的 `LinuxInstallCommandSpec`），
+  update 因网络失败后 install 照跑、照样报 `E: Unable to locate package`——
+  也就是说一次**纯网络故障**的日志里两者会**同时出现**。排在网络分支前面，就会把「网都不通」误诊成「索引过期」，
+  让用户去换源、刷索引，白折腾一圈。反过来排在后面不会漏报：索引真过期时日志里只有 `Unable to locate package`，网络分支不命中。
+  文案（`buildAptStaleIndexHint`）要给两条出路：容器内 `apt-get update` 后重装；或到「依赖管理 → 镜像源设置」重新保存一次 Linux 镜像源（面板会自动作废旧索引）。
 - **Playwright 浏览器下载失败的分支排在最前面，连 dpkg 锁冲突都要让它。** 它的判据是结构性事实：本次运行的日志段（最后一个 `dependencyRunStartMarker` 之后）
   里有下载开始行、没有就绪行，说明 pip 已经成功，失败只可能发生在下载阶段。其余分支都是在整段日志里猜关键词：
   pip 阶段中途重试成功时留下的 `Temporary failure in name resolution` 之类的行，会被 DNS / 镜像源分支抢走，把用户引去查一个没问题的 pip 镜像。
@@ -4106,15 +4217,55 @@ columns = append(columns, "updated_at")
 
 - `service.LockLinuxPackageOperation()`（v3.3.1 从 handler 的 `linuxPackageOperationMu` 搬到 service，写法同 `LockNodePackageOperation`），
   由网页端的 `installDependency` / `uninstallDependency` / `forceUninstallDependency` 与重启重装 `reinstallDependency` 的 Linux 分支**共用**。
-- 调用方要在**构造命令之前**拿锁，一直持有到命令结束：`BuildLinuxPackageCommand` 在构造时就会判断 apt 索引要不要刷新、写镜像源，这两步同样不能与另一条 apt 交错。
+- 调用方要在**构造命令之前**拿锁，一直持有到命令结束：`BuildLinuxPackageCommand` 在构造时**先写镜像源、再判断 apt 索引要不要刷新**，这两步同样不能与另一条 apt 交错。
   锁不可重入：拿着它的代码路径里不能再调用会拿它的函数。
+- 🔴 **顺序契约：`refreshApt` 必须在 `ensureMirror` 之后求值，并 OR 上「源是否被改写」**（v3.3.2 / issue #146 的根因）：
+
+  ```go
+  refreshApt := manager.Name == "apt" && (mirrorChanged || ShouldRefreshAptPackageLists())
+  ```
+
+  v3.3.2 之前是先算 `refreshApt` 再换源，于是「换源」这个动作**永远影响不到本次要不要 update**——
+  索引还在 6 小时 TTL 内时，换完源直接拿旧源的索引装包，报 `E: Unable to locate package`。
+  两步顺序一旦写反，症状是「换了源却还是装不上」，而日志里看不出任何异常。
 - 为什么：重建后 apt 索引是空的（`Dockerfile.debian` 构建时删了 `/var/lib/apt/lists/*`），两边都会先跑 `apt-get update`，
   而 **`apt-get update` 拿的 lists 锁不等待**，撞上立刻失败；安装脚本用 `;` 串联，update 失败后 install 照跑，读着空索引报 Unable to locate package。
 - `-o DPkg::Lock::Timeout=300` 加在 apt 的 install 与 remove 上（`LinuxInstallCommandSpec` / `LinuxRemoveCommandSpec`，网页端与重启路径都走它们）。
   它**只覆盖 dpkg 锁**，面板内部靠上面那把进程内锁串行，这个选项留着挡面板管不到的 apt（比如用户在系统命令行里手动装包）。apt 1.9.11 以下会忽略未知的 `-o`，不会报错。
 - 重启重装的 Linux 分支接上了与网页安装同一个换源（`EnsureDefaultLinuxMirror`，原来传 nil，重建后一律走 deb.debian.org）；权限检查仍排在换源之前。
+- **换源这一族函数统一返回 `(changed bool, err error)`**（v3.3.2 / #146）：
+  `SetLinuxMirror` / `EnsureDefaultLinuxMirror` / `writeAPKMirror` / `writeAPTMirror`，
+  以及 `BuildLinuxPackageCommand` 的 `ensureMirror` 形参 `func(LinuxPackageManager, string) (bool, error)`。
+  `changed` 表示**磁盘上的源文件真的被改写了**，一路透出来是为了让上面那条 `refreshApt` 契约成立；
+  `writeAPKMirror` 原来是无条件整文件覆写、拿不到这个信号，对齐之后调用方不用再区分包管理器。
+  新增换源函数照此签名写。`backup_runtime.go` 的 `linuxDependencyEnsureMirrorFunc` 没写显式类型、由类型推断跟随，加签名时不用动它。
 - apt 源改写的 security 段：URI 路径以 `-security` 结尾，或（仅 Debian）Suites 里有 `*-security` / `*/updates` 时，目标改为 `<mirror>-security`；
   Ubuntu 的 `noble-security` 就在 `/ubuntu` 下，加后缀反而指到不存在的路径。
+
+**依赖镜像源默认值与旧默认源迁移**（v3.3.2 / #146）
+
+- 默认源：pip、apk、debian、ubuntu **全部是腾讯云**（`DefaultPipMirror`、`defaultLinuxMirror`）。
+  阿里云没有从候选清单里删掉，只是不再是默认值（阿里云 ECS 内网走 aliyun 反而最快）。
+  改默认常量时前端的「(默认)」标记要一起改，见 `.trellis/spec/frontend/index.md`。
+- 用户在面板里换过 apt 源之后必须调 `service.InvalidateAptPackageIndex()` 作废索引：
+  索引文件名按仓库 URL 编码，`ShouldRefreshAptPackageLists` 只看 mtime 不看来源，6 小时内会判「索引还新」而跳过 update。
+  选「删文件」而不是内存脏标记，是因为它**跨进程有效**（二进制部署重启后内存标记就丢了）。
+  这条路没有权限闸，降权部署下会 EACCES：**只记日志不阻断**，不能让「镜像源设置成功」变成失败。
+  它跳过的文件（`lock` / `*.lock` / 子目录）必须与 `ShouldRefreshAptPackageListsFromDir` 认的是同一组，
+  否则会出现「删完了它还说索引是新的」。
+- 🔴 **旧默认源（阿里云）的一次性迁移，只作用于「读生效值」，不作用于「写盘与显示」。**
+  存量用户的 `pip.conf` / `sources.list` 里存的是上一版默认的阿里云，而阿里云不是官方源，
+  原来的判定会把它当成「用户自己选的」而永远不动——光改默认常量对这批人等于没改。
+  所以迁移只挂在 `EffectivePipMirror`（读生效值）与 `EnsureDefaultLinuxMirror` 上，
+  **不**挂 `SetPipMirror`（存盘）和 `EffectiveLinuxMirror`（存盘前归一化 + 页面显示）——
+  挂上去用户就**永远选不回阿里云**（存进去立刻被改成腾讯云），还会出现「磁盘写着阿里云、页面显示腾讯云」的读写不对称。
+- 迁移必须是**一次性**的，否则用户日后主动选回阿里云又会被静默改走。
+  一次性的标记是数据目录下的 `dependency-mirror-choice.saved`（`MarkDependencyMirrorChoiceSaved()`，
+  在 `PUT /deps/mirrors` 成功后落），语义是「用户已经在本面板里显式保存过依赖镜像源设置」；
+  落了标记之后阿里云就只是一个普通的用户选择，`legacyDefaultMirrorMigrationPending()` 整体返回 false。
+  ⚠️ 这个标记**刻意不进 `system_config_registry.go`**：那张表里每一条都是用户可见的设置项（带 label / 分组、会渲染到设置页），
+  塞一个 `dependency_mirror_migrated` 进去会冒出一个没人看得懂的条目；而镜像源本身就是磁盘态，标记放数据目录语义更一致。
+  数据目录还没就绪（启动早期）时宁可不搬——搬了却关不掉比不搬糟得多。
 
 **启动收口 queued**：`ReconcileDependenciesAfterRestart`（`main.go` 的 `verifyInstalledDeps()`）把 `queued` 与 installing / removing 一起纳入：
 
@@ -4170,6 +4321,13 @@ columns = append(columns, "updated_at")
 - 抽出 `findExistingDependency` / `createDependencyRecord` 的回归：`deps_duplicate_skip_test.go`（`TestNodeAndLinuxDependencyCreateSkipsExistingName`、
   `TestNodeDependencyCreateStillAddsDifferentName`）、`deps_regression_test.go`（`TestBatchReinstallRunsSequentially`、`TestPythonDependencyCreateInstallsAllPythonVersions` 等）。
 - `server/service/linux_packages_test.go`：`TestAptCommandsWaitForDpkgLock`、`TestRestartLinuxReinstallEnsuresMirror`、`TestBuildLinuxPackageCommandChecksPrivilegeBeforeTouchingMirror`。
+- apt 索引与网络的归因边界（v3.3.2 / #146）落在 `handler/deps_failure_hint_test.go` 已有的
+  `TestBuildDependencyFailureHintClassifiesFailureCause` 这张表里，共 3 条：
+  「只有 `Unable to locate package` → 索引过期」「同时出现 `Failed to fetch` → 按网络归类」「同时出现解析失败 → 按 DNS 归类」。
+  后两条正是顺序契约的守门人——把索引分支挪到网络分支前面，它们立刻变红。
+- ⚠️ 已知缺口：旧默认源的一次性迁移（`legacyDefaultMirrorMigrationPending` / `MarkDependencyMirrorChoiceSaved`）
+  与 `InvalidateAptPackageIndex` **目前没有直接用例**，下面那两条 run 过滤器也扫不到它们。
+  再动这两处时要顺手补上——「只搬一次」和「标记落盘后整体失效」是纯靠约定撑着的，回归了不会有任何红灯。
 - `server/service/linux_mirror_test.go`：`TestRewriteAPTSourcesKeepsDebianSecuritySuffix`、`TestRewriteAPTSourcesSecurityFollowsRequestedMirror`、
   `TestRewriteAPTListLineKeepsDebianSecuritySuffix`、`TestRewriteAPTSourcesLeavesUbuntuSecurityUnderUbuntu`。
 - `server/service/backup_restore_regression_test.go`：`TestReconcileDependenciesAfterRestartSettlesQueuedRecords`、`TestReinstallDependencyLinuxWaitsForSharedPackageLock`。

@@ -90,6 +90,13 @@ Vue 单文件组件通常按下面顺序组织：
 
 > 记录日期 2026-08-08（基线 v3.0.1 发现），**v3.0.2 已修复**。
 > 保留本节是为了防止有人「顺手清理冗余」把修复删掉。
+>
+> 🔴 **现状（v3.3.2 / issue #144）**：global.scss 的 `≤768` 块已改成**无差别整屏**——
+> `.el-dialog` 直接写 `width / max-width / height / max-height: 100%` + `margin: 0` + `border-radius: 0`（全部 `!important`），
+> 不再有 `92vw`，也不再区分 `&.is-fullscreen` / `:not(.is-fullscreen)`（两支取值一样，分支没有意义）。
+> **所以不要再往那个 media 块里补 `&.is-fullscreen`**。下面这段层叠分析仍然成立、也仍是本节的价值所在
+> （它解释了为什么这类覆盖只能靠「特异性 + `!important`」，以及为什么组件侧的 `:fullscreen` 不能被全局规则替代），
+> 移动端弹窗几何的现行契约见 `design-system.md` §5。
 
 **曾经的现象**：`≤768px` 下所有全屏弹窗高度是满的，左右各短 4vw，露出两条遮罩边。
 
@@ -127,7 +134,8 @@ EP 是**通过改变量**实现全屏的，而这里是**直接写 width 且带 
 （`ScriptExecutionDialogs.vue:47` 与 `:110`，桌面端也全屏），合计 **48 个全屏弹窗 / 27 个文件**。
 改 `global.scss` 一处即可覆盖全部，**调用点一个都不用动**。
 
-**⚠️ 下面两处曾被误记为「局部绕过宽度」，实际都不是**（2026-08-10 逐行核实推翻）：
+**⚠️ 页面侧只有下面这几处值得逐个交代**——前两处曾被误记为「局部绕过宽度」，实际都不是（2026-08-10 逐行核实推翻）；
+第三处是 v3.3.2 新增的、**必须留着**的页面级重声明：
 
 - `ScriptExecutionDialogs.vue:316-322`——注释里的「用双 class 提高特异性」讲的是
   **覆盖全局进场动画**，块体只有 `animation` 与 `transform-origin`，**没有 width**。
@@ -138,8 +146,18 @@ EP 是**通过改变量**实现全屏的，而这里是**直接写 width 且带 
 - `LogViewer.vue:1088-1094`——确实重声明了 `&.is-fullscreen`，但**五条全部没有 `!important`**，
   所以其中的 `width: 100%` 一直是死代码，压不过 global 那条。它真正生效的是
   `height` / `max-height` / `border-radius`（用来压住本组件自己的桌面端尺寸）。
+- 🔴 `logs/index.vue` 的 `:deep(.log-detail-dialog)` 里那条 `&.is-fullscreen`（v3.3.2 / issue #144 新增）——
+  这条是**真·必要**，不是冗余：该弹窗自己写了 `height: clamp(680px, 85dvh, 920px)` 与 `max-height: calc(100dvh - 64px)`，
+  必须在 `.is-fullscreen` 下把 `height` / `max-height` 一起显式压回 `100%`，否则移动端底部会空出一截。
+  它靠 `:deep()` + `&` 编译出的 `[data-v-x] .log-detail-dialog.is-fullscreen` (0,3,0) 生效，刻意不写 `!important`
+  （改 global.scss 那条 (0,2,0) 去压它，就得给全站所有全屏弹窗的高度加 `!important`）。「顺手清理冗余」时不要删。
+  同理 `LogFileBrowser.vue` 的 `.task-log-files-dialog.is-fullscreen` 也不能删——它负责放开本组件写死的 810px，见下方
+  「Scenario: 日志查看器中的 `\r` 单行覆盖刷新」里日志文件预览那条。
 
-全库 `is-fullscreen` 仅 5 处命中，已确认**没有第三、第四处绕过点**，不必再全站找一遍。
+**凡是页面自己给 `.el-dialog` 写过 `height` / `max-height` 的，都要配一条 `&.is-fullscreen` 把它放开**，
+否则移动端整屏规则会被页面自己的定值压住。全库 `is-fullscreen` 共 6 处命中（v3.3.2 起 `logs/index.vue` 与
+`LogFileBrowser.vue` 各多一条，global.scss 移动端块里原来那条 `&.is-fullscreen` 分支则随之删除），
+已确认**没有别的绕过点**，不必再全站找一遍。
 
 **为什么必须走「特异性 + !important」而不是靠后写覆盖**：`vite.config.ts` 用的是
 `ElementPlusResolver({ importStyle: 'css' })`，EP 组件样式随各 `.vue` 按需导入注入，
@@ -155,6 +173,11 @@ EP 是**通过改变量**实现全屏的，而这里是**直接写 width 且带 
 - 任务实时日志组件: `web/src/views/tasks/components/LogViewer.vue`
 - 执行日志详情页: `web/src/views/logs/index.vue`
 - 日志文件预览: `web/src/views/tasks/components/LogFileBrowser.vue`
+  - 高度契约（v3.3.2 / issue #144）：它的 `el-dialog` 挂**全仓唯一**的非 scoped 类 `task-log-files-dialog`，
+    整窗高度由该类下的定值 `810px` 推导（= 内容区 700 + 弹窗的框 109：global.scss 的弹窗 header 61 + body 上下 padding 48），
+    内容区 `.log-files-browser` 只写 `height: 100%` 跟着吃满，移动端 `:fullscreen` 再由 `&.is-fullscreen` 把定值放开。
+    🔴 **改 global.scss 的弹窗 header / body 内边距时要回来核对这个 810**；类名也不能改成 `log-files-dialog`
+    （那个名字已被 `logs/index.vue` 那个 900px 宽的弹窗占着，撞名会把它一起拉成 810px 并截断）。
 
 ### 3. Contracts
 - 渲染规则必须区分三类边界:
@@ -1380,22 +1403,25 @@ function handlePageSizeChange() {
   - deps：`depCardMenuItems(row)`，即 `depActionItems(row)` 去掉 `delete` 项（卡片末行已有「卸载」按钮），并把分隔线挂到 `force-delete` 上；
   - logs：`logCardMenuItems`（只有「日志文件」一项，所有角色可见）。
 - **`success`**：标记可撤销的正向操作。目前只有任务的「启用」：`success: !switchOn`，与「禁用」的 `danger: switchOn` 对称。
-  - 只在 hover / focus 时显示绿字加 `--el-color-success-light-9` 淡绿底；**常态刻意不写颜色**，沿用 popper 统一的 primary 字色，
-    常态就变绿会比同菜单其它项抢眼一档。
+  - **常态即绿字**（`--el-color-success`），hover / focus 再叠 `--el-color-success-light-9` 淡绿底，与 `danger` 的「常态红字 + 悬停淡红底」完全同构。
+    v3.3.2 / issue #144 按用户反馈把 #143 D2 的「常态刻意不着色」翻了过来：原理由是怕它比同菜单的中性项抢眼一档，
+    现在这一档**就是想要的效果**——照旧口径把常态色去掉，等于把本轮改动回滚。
   - 与 `danger` 互斥，同一项不要两个都设。
-  - 样式在 global.scss 的 `.dd-split-button__popper .dd-split-button__item--success`，特异性 (0,4,0)，高于 EP 的 hover 规则 (0,3,0)，不需要 `!important`；
-    取值只用令牌，暗色下 `--el-color-success-light-9` 会由 EP 的 dark css-vars 换成深绿底。
+  - 样式在 global.scss 的 `.dd-split-button__popper .dd-split-button__item--success`：常态那条是 (0,2,0)，压得过 EP 的 `.el-dropdown-menu__item` (0,1,0)；
+    hover / focus 两条是 (0,4,0)，高于 EP 的 `.el-dropdown-menu__item:not(.is-disabled):hover` (0,3,0)。两条都不需要 `!important`；
+    取值只用令牌，暗色下 `--el-color-success` / `--el-color-success-light-9` 会由 EP 的 dark css-vars 换值（写死 `#67c23a` / `#f0f9eb` 在暗色下失真）。
   - `DdSplitButton` 与 `DdMoreMenu` 的模板都绑了这个 class。**页面自己手写 `el-dropdown` 渲染同一份 items 时，`--danger` / `--success` 两个 class 都要绑**
-    （deps 移动端工具栏的下拉就是这样写的），漏绑的话那个菜单里「启用」hover 不变绿。
+    （deps 移动端工具栏的下拉就是这样写的），漏绑的话那个菜单里「启用」既不是常态绿字、hover 也不变绿。
 - 样式全部写在 global.scss（`.dd-mobile-card__more`、`.dd-split-button__popper`）：菜单浮层 teleport 到 body，scoped 命中不到。
 
 ### 4. Validation & Error Matrix
 
 - DdMoreMenu 放在 `__head` 中间 -> 「···」不贴右，后面的元素被它的 `margin-left: auto` 推到最右
 - 移动端另写一份菜单数组 -> 与桌面漂移，某一项只在一端有
-- 同一项同时设 `danger` 和 `success` -> 两条 hover 规则打架
-- 手写 `el-dropdown` 只绑了 `--danger` -> 这个菜单里「启用」hover 不变绿
-- 给 `.dd-split-button__item--success` 写常态颜色 -> 与 #133「菜单项字色统一」冲突
+- 同一项同时设 `danger` 和 `success` -> 两条规则打架（常态字色与 hover 底色都会撞）
+- 手写 `el-dropdown` 只绑了 `--danger` -> 这个菜单里「启用」常态不是绿字、hover 也不变绿
+- 把 `.dd-split-button__item--success` 的常态色去掉、只留 hover -> 与 `danger` 不再对称，用户看不出这是正向操作
+  （v3.3.2 / issue #144 修的就是这个；#133「菜单项字色统一」只约束**中性项**，`danger` / `success` 是它明确的两个例外）
 
 ### 5. Good/Base/Bad Cases
 
@@ -1408,7 +1434,7 @@ function handlePageSizeChange() {
 - `cd web && npm run build`。
 - 浏览器实测：
   - 390 宽下五个列表页的「···」都贴在卡片右上角，菜单项与桌面操作列一致；观察者账号下任务卡片的菜单里有「详情」「日志文件」
-  - 任务菜单（桌面 Split Button 与移动端「···」）里「启用」hover / 键盘聚焦时是绿字淡绿底、常态与其它项同色；「禁用」仍是红字。明暗两种主题都看
+  - 任务菜单（桌面 Split Button 与移动端「···」）里「启用」常态就是绿字、hover / 键盘聚焦时再加淡绿底；「禁用」仍是常态红字 + 悬停淡红底，两者对称。明暗两种主题都看
 
 ### 7. Wrong vs Correct
 

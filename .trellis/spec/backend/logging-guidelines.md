@@ -140,3 +140,123 @@ for {
     data = rest
 }
 ```
+
+## Scenario: 日志清理的记录与文件一致性
+
+### 1. Scope / Trigger
+
+- Trigger: 修改 `server/service/log_cleanup.go`、`server/service/log_manager.go`、`server/handler/log.go`、
+  `server/handler/task_logs.go`、`server/cmd/ddp/commands.go` 的 `clean-logs`，或新增任何一处「清理日志」入口时必须看本节。
+- 原因: 「清理日志」在这个仓库里同时意味着**删 `task_logs` 行**和**删磁盘 `.log` 文件**两件事。
+  v3.3.2 / issue #144 之前三个入口各做各的（自动清理删行也删文件、`/logs/clean` 只删行、`/tasks/clean-logs` 只删文件），
+  同一句话在三个地方是三种结果，而这个不一致在规范里零记载——谁改都不知道另外两处存在。
+
+### 2. Signatures
+
+- 行 + 文件一起清（按天数）: `service.CleanLogsOlderThan(days int) (int64, int)`
+- 行 + 文件一起清（按任务分组）: `service.CleanLogsByRetentionPolicy(globalDays int) (int64, int)`
+- 只删文件（按 `log_path`）: `service.DeleteLogFilesForRecords(logPaths []string, logDir string) int`
+- 只删文件（按 ModTime 扫盘）: `service.CleanOldLogs(logDir string, days int) int`
+- 正在写入的文件判定: `(*LogStreamManager).IsStreamOpen(filePath string) bool`
+- 入口: 自动清理 worker（`cleanupOldLogs`）、`DELETE /api/v1/logs/clean`、`DELETE /api/v1/tasks/clean-logs`、`ddp clean-logs`
+
+### 3. Contracts
+
+**记录与文件的一致性**
+
+- **删 `task_logs` 行的代码路径必须同时按 `log_path` 删磁盘文件**，统一走 `CleanLogsOlderThan` /
+  `CleanLogsByRetentionPolicy` / `DeleteLogFilesForRecords`，**不要再起第四条清理路径**。
+- 顺序固定是「先 `Pluck` 出 `log_path` → 删 DB 行 → 删文件」：行一删，路径就再也查不回来了。
+- 🔴 **任何按 status 过滤 `task_logs` 的 WHERE 都必须写成 `(status IS NULL OR status <> ?)`**，
+  绝不能只写 `status <> ?`。`task_logs.status` 是可空列（`model.TaskLog.Status` 是 `*int`），
+  SQL 三值逻辑下 `NULL <> 2` 求值为 **NULL 而不是 TRUE**，只写后者会把所有 status 为 NULL 的历史行**整批静默漏掉**——
+  永远清不干净，而且接口照样返回成功，从响应里看不出任何异常。
+- 🔴 **删任何日志文件前必须先过 `LogStreamManager.IsStreamOpen`**，入参必须是
+  `filepath.Join(logDir, relPath)` 这个**未经 `EvalSymlinks`** 的路径——写入方（`task_executor.go` / `scheduler.go`）
+  就是拿它当 map key 的，做了归一化就跟写入方对不上，判定恒为 false，这道保护等于没有。
+  Linux 上 `os.Remove` 一个已 open 的文件**不报错**，随后的写入会全进被 unlink 的 inode，
+  任务跑完日志凭空消失、一句报错都没有；Windows 上则是 Remove 直接失败。跳过的文件留给下一轮清理收。
+- `CleanOldLogs` **刻意只管文件、不碰 DB 行**，不要「顺手」给它加上删行：
+  `ddp clean-logs` 这条 CLI 与 `README.md`、`cmd/ddp/help.go` 的语义都是「清理任务日志文件」，改它要连文档一起改。
+  它同时是「DB 行早没了、文件还在」这类存量垃圾的**唯一**清理手段（按 `log_path` 删根本找不到这些文件），
+  所以不能被按 `log_path` 删取代，两者是互补关系。
+
+**自动清理 vs 手动清理的分野**
+
+- 自动清理 worker 走 `CleanLogsByRetentionPolicy`：任务自己设了 `log_retention_days` 就按它的 cutoff，其余跟随全局。
+- 🔴 两个手动入口（`DELETE /logs/clean`、`DELETE /tasks/clean-logs`）**刻意仍走 `CleanLogsOlderThan`**，
+  不要「统一一下」改成走分组。手动清理是用户明确指定「保留最近 N 天」的一次性动作，
+  掺进任务级天数就会删掉用户刚说要留的日志（某任务设 1 天，用户点清理 30 天，结果它 1 天前的全没了）——
+  那是越权删除，不是功能。
+- **分组依据只认 `task_logs.task_id`，禁止从日志目录名解析 `task_<ID>`**：
+  恢复备份时 `backup_runtime.go` 的 `restoreTasks` 把 `item.ID` 置 0、任务重新分配 ID，
+  而 `log_path` 与磁盘目录是原样拷回的，按目录名取天数会把 A 任务的设置套到 B 任务头上。
+- **分组清理末尾那次 ModTime 扫盘的天数必须取 `max(全局, 所有任务级天数)`**，不能用全局天数：
+  扫盘只看文件时间、认不出文件属于哪个任务，某任务把天数调得比全局长时用全局天数扫，
+  会造出「DB 行还在、文件没了」，用户点开日志是一片空白。
+  代价是这种情况下孤儿垃圾要等更长天数才被扫走——可以接受；
+  把天数调短这个主用例完全不受影响（那时 `max` 就等于全局）。
+- 覆盖表只收 `log_retention_days IS NOT NULL AND log_retention_days > 0` 的任务，
+  顺带挡掉手工改库塞进来的 0 和负数。
+
+### 4. Validation & Error Matrix
+
+- 只删 DB 行、不删文件 -> 磁盘上堆出永远没人认领的孤儿 `.log`，用户看到「清理了却没释放空间」
+- 只删文件、不删 DB 行 -> 列表里还有记录，点开是空白
+- WHERE 只写 `status <> ?` -> status 为 NULL 的历史行一条都删不掉，**静默**，接口仍回成功
+- 删文件前不过 `IsStreamOpen` -> Linux 上正在跑的那次执行的日志写进被 unlink 的 inode，**静默丢失**
+- `IsStreamOpen` 传了 `EvalSymlinks` 之后的路径 -> 判定恒 false，等于没有这道保护
+- 手动入口改走 `CleanLogsByRetentionPolicy` -> 删掉用户在这次操作里明确说要留的日志
+- 分组按目录名 `task_<ID>` 取天数 -> 恢复备份后 A 任务的保留天数被套到 B 任务上
+- 扫盘用全局天数而非 `max` -> 「行还在、文件没了」
+
+### 5. Good/Base/Bad Cases
+
+- Good: 自动清理跑完，设了 1 天的高频任务只剩当天日志，其余任务按全局天数保留，正在跑的那次执行的日志文件完好
+- Base: 没有任何任务设过 `log_retention_days` 时，`CleanLogsByRetentionPolicy` 的行为与按全局天数一刀切逐字节一致
+- Bad: 新加一处「清理日志」按钮，自己写一段 `Delete(&model.TaskLog{})` 就收工，文件留在盘上
+- Bad: 为了「三个入口统一」把手动清理也改成按任务分组
+- Bad: 觉得 `CleanOldLogs` 不删记录是遗漏，给它补上删行——`ddp clean-logs` 的语义随之改变，且文档没跟
+
+### 6. Tests Required
+
+- 后端测试: `cd server && go test ./...`
+- 回归点:
+  - 存量行 `status` 为 NULL 时仍能被按天数清掉（把 WHERE 改回 `status <> ?` 必须变红）
+  - 文件仍被 `LogStreamManager` 持有时跳过删除、DB 行的处理不受影响
+  - 任务设了比全局短的天数 -> 只有该任务的日志按短天数清，其余按全局
+  - 任务设了比全局长的天数 -> 扫盘按 `max` 走，该任务在全局天数之前的文件没被扫走
+  - 手动清理入口在有任务级天数的库上，结论与「按全局天数一刀切」一致
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误一：NULL status 的历史行永远删不掉，且完全静默。
+db.Where("started_at < ? AND status <> ?", cutoff, model.LogStatusRunning).Delete(&model.TaskLog{})
+
+// 错误二：先删行再想去拿 log_path —— 路径已经没了。
+db.Where("started_at < ?", cutoff).Delete(&model.TaskLog{})
+db.Model(&model.TaskLog{}).Pluck("log_path", &paths)
+
+// 错误三：删文件前不问有没有人正在写它。
+os.Remove(filepath.Join(logDir, relPath))
+```
+
+#### Correct
+
+```go
+// 先 Pluck 再 Delete；WHERE 两处都要带上 (status IS NULL OR status <> ?)。
+pathQuery := db.Model(&model.TaskLog{}).
+    Where("started_at < ? AND (status IS NULL OR status <> ?)", cutoff, model.LogStatusRunning).
+    Where("log_path IS NOT NULL AND log_path <> ''")
+deleteQuery := db.
+    Where("started_at < ? AND (status IS NULL OR status <> ?)", cutoff, model.LogStatusRunning)
+
+var paths []string
+pathQuery.Pluck("log_path", &paths)
+result := deleteQuery.Delete(&model.TaskLog{})
+// 删文件统一走它：内部逐条过 IsStreamOpen + ResolveWithinBase，并清掉被删空的 task_ 目录。
+DeleteLogFilesForRecords(paths, logDir)
+```
