@@ -416,7 +416,7 @@ panel.add_or_update_env(
         method: 'GET',
         path: '/api/auth/preferences',
         title: '获取当前用户的界面偏好',
-        description: '读取当前登录用户自己的界面偏好，分两组：editor 是编辑器（脚本编辑 / 日志查看）的开关；list 是列表页偏好（定时任务页、环境变量页的每页条数，以及定时任务页视图栏「全部」「分组标签」的显隐）。⚠️ 这是【按用户】的偏好，不是全面板配置：每个账号各存一份、互不影响，也不在 /api/configs 里，换浏览器、换域名 / IP 登录都跟着账号走。鉴权只要求 JWTAuth、不限角色——operator / viewer 同样能读写自己那份，改自己的界面开关不该要管理员权限（对比 /api/configs 那组是管理员独占）。两组的存储口径不同：editor 从没存过时直接返回一整套默认值，不会 404，但会带上 stored=false（见响应字段，这是升级路径的关键）；list 是稀疏存储，只下发用户存过、且取值合法的键，从没存过就是 {}，服务端不替它补默认值。⚠️ 编辑器引擎（CodeMirror / Monaco）刻意【不在】这里：它带着设备自适应语义（触摸设备与窄屏硬回落 CodeMirror），只存在浏览器本地——引擎跟设备走，偏好跟人走。',
+        description: '读取当前登录用户自己的界面偏好，分两组：editor 是编辑器（脚本编辑 / 日志查看）的开关；list 是列表页 / 日志查看等界面偏好（定时任务页、环境变量页的每页条数，定时任务页视图栏「全部」「分组标签」的显隐，以及 v3.3.3 起的「打开已结束的日志时是否定位到底部」，这一项面板网页与 APP 共用）。⚠️ 这是【按用户】的偏好，不是全面板配置：每个账号各存一份、互不影响，也不在 /api/configs 里，换浏览器、换域名 / IP 登录都跟着账号走。鉴权只要求 JWTAuth、不限角色——operator / viewer 同样能读写自己那份，改自己的界面开关不该要管理员权限（对比 /api/configs 那组是管理员独占）。两组的存储口径不同：editor 从没存过时直接返回一整套默认值，不会 404，但会带上 stored=false（见响应字段，这是升级路径的关键）；list 是稀疏存储，只下发用户存过、且取值合法的键，从没存过就是 {}，服务端不替它补默认值。⚠️ 编辑器引擎（CodeMirror / Monaco）刻意【不在】这里：它带着设备自适应语义（触摸设备与窄屏硬回落 CodeMirror），只存在浏览器本地——引擎跟设备走，偏好跟人走。',
         auth: 'jwt',
         // 示例刻意取「只存过 list、没存过 editor」的用户：stored=false 与 list 非空同时出现，
         // 正好说明 stored 只管 editor 那一组，读文档的人不会把它当成「整份偏好存没存过」。
@@ -441,11 +441,12 @@ panel.add_or_update_env(
           { name: 'editor.whitespace', type: 'string', description: '空白符显示，取值 none（从不）/ selection（仅选中）/ all（始终），默认 selection' },
           { name: 'editor.indent_width', type: 'string', description: '缩进宽度，取值 auto / 2 / 4 / 6 / 8，默认 auto（按文件内容自动检测）。⚠️ 传输层是字符串，是 "4" 不是 4' },
           { name: 'stored', type: 'boolean', description: '服务端是否真的存过这个用户的编辑器偏好（只看 editor 这一组）。判定口径：有这个用户的记录 且 记录里的编辑器偏好非空、能解析成 JSON 对象 → true；没有记录 / 空串 / 脏 JSON 一律 false（后两种当成「没存过」）。⚠️ 它是给客户端做升级路径判断用的：stored=false 说明服务端还没存过这个用户的编辑器偏好，此时客户端应当把【本机】那份偏好一次性 PUT 上去做上行迁移，而不是拿下面 editor 里这套默认值去覆盖本机——照着覆盖的话，老用户升级到有服务端偏好的版本时，本机调好的开关会在首屏被静默冲掉。stored=true 才允许拿 editor 的值写回本地。注意 editor 字段本身不受 stored 影响：无论 stored 是什么都下发一整套可用的值，不认得 stored 的老客户端行为与加这个字段之前逐字一致。⚠️ stored 只描述 editor 这一组，与 list 无关：只存过列表页偏好、没碰过编辑器开关的用户，stored 仍是 false' },
-          { name: 'list', type: 'object', description: '列表页偏好，稀疏存储：只含用户存过、且取值合法的键，从没存过就是 {}。list 没有 stored 标记——某个键在不在就说明它存没存过；缺的键客户端按下面各项写的默认值处理，服务端不下发默认值。库里存了脏值的键会被丢弃、不下发，不影响其余键。老版本服务端（v3.3.1 之前）的响应里没有这个字段' },
+          { name: 'list', type: 'object', description: '列表页 / 日志查看等界面偏好，稀疏存储：只含用户存过、且取值合法的键，从没存过就是 {}。list 没有 stored 标记——某个键在不在就说明它存没存过；缺的键客户端按下面各项写的默认值处理，服务端不下发默认值。库里存了脏值的键会被丢弃、不下发，不影响其余键。老版本服务端（v3.3.1 之前）的响应里没有这个字段' },
           { name: 'list.tasks_page_size', type: 'number', description: '定时任务页每页条数，JSON 数字，取值 10 / 20 / 50 / 100。未设置时不下发，客户端按 20 处理。手机与电脑共用这一个值' },
           { name: 'list.envs_page_size', type: 'string', description: '环境变量页每页条数，取值 "20" / "50" / "100" / "all"（all 表示一页显示全部）。⚠️ 传输层是字符串（因为有 all），是 "50" 不是 50。未设置时不下发，客户端按 "20" 处理' },
           { name: 'list.tasks_view_all_hidden', type: 'boolean', description: '定时任务页视图栏是否隐藏内置的「全部」标签，JSON 布尔。未设置时不下发，客户端按 false（显示）处理。自定义视图全部隐藏时，标签栏仍会保底显示「全部」' },
           { name: 'list.tasks_view_groups_hidden', type: 'boolean', description: '定时任务页视图栏是否整体隐藏分组标签（来自任务的「分组:」标签），JSON 布尔。未设置时不下发，客户端按 false（显示）处理。⚠️ 各个自定义视图自己的显隐不在这里，那是全面板共用的，走视图管理接口' },
+          { name: 'list.log_open_at_bottom', type: 'boolean', description: '打开【已结束】的日志时是否直接定位到底部，JSON 布尔，面板网页与 APP 共用。未设置时不下发，各客户端按自己的现状处理：面板网页按 false（停在开头），APP 按 true（底部）。运行中的日志一律自动跟随最新输出，不看这一项。v3.3.3 起才有：v3.3.1 / v3.3.2 的服务端会把它当成白名单外的键丢掉，PUT 回 200 但响应的 list 里没有它' },
         ],
       },
       {
@@ -462,11 +463,12 @@ panel.add_or_update_env(
           { name: 'editor.indent_guides', type: 'boolean', description: '缩进参考线开关。写入时是 JSON 布尔（面板前端提交的就是布尔），同样兼容 "on" / "off" / "true" / "false" 字符串以照顾 APP 与历史客户端。读出来统一是 JSON 布尔', example: 'true' },
           { name: 'editor.whitespace', type: 'string', description: '空白符显示，字符串，取值 none / selection / all', example: 'all' },
           { name: 'editor.indent_width', type: 'string', description: '缩进宽度，字符串，取值 auto / 2 / 4 / 6 / 8。⚠️ 传输层是字符串，要传 "4" 不是 4', example: 'auto' },
-          { name: 'list', type: 'object', required: false, description: '列表页偏好，取下面 4 个键的任意子集，只存你传了的键（稀疏存储）。不带这一项时列表页偏好保持原样。⚠️ 每个键的 JSON 类型是固定的，类型不对（比如把 tasks_page_size 传成 "50"）同样回 400', example: '{ "tasks_page_size": 50 }' },
+          { name: 'list', type: 'object', required: false, description: '列表页 / 日志查看等界面偏好，取下面 5 个键的任意子集，只存你传了的键（稀疏存储）。不带这一项时这一组保持原样。⚠️ 每个键的 JSON 类型是固定的，类型不对（比如把 tasks_page_size 传成 "50"）同样回 400', example: '{ "tasks_page_size": 50 }' },
           { name: 'list.tasks_page_size', type: 'number', description: '定时任务页每页条数，JSON 数字，取值 10 / 20 / 50 / 100', example: '50' },
           { name: 'list.envs_page_size', type: 'string', description: '环境变量页每页条数，字符串，取值 "20" / "50" / "100" / "all"。⚠️ 传输层是字符串（因为有 all），要传 "50" 不是 50', example: 'all' },
           { name: 'list.tasks_view_all_hidden', type: 'boolean', description: '定时任务页视图栏是否隐藏「全部」标签，只收 JSON 布尔（这是新接口，不兼容 "on" / "off" 字符串）', example: 'true' },
           { name: 'list.tasks_view_groups_hidden', type: 'boolean', description: '定时任务页视图栏是否整体隐藏分组标签，只收 JSON 布尔', example: 'false' },
+          { name: 'list.log_open_at_bottom', type: 'boolean', description: '打开已结束的日志时是否直接定位到底部，只收 JSON 布尔（传 "on" 或 1 回 400）。面板网页与 APP 共用这一个值', example: 'true' },
         ],
         responseExample: JSON.stringify({
           editor: {
@@ -484,7 +486,7 @@ panel.add_or_update_env(
         responseFields: [
           { name: 'editor', type: 'object', description: '合并之后的完整编辑器偏好，字段说明见「获取当前用户的界面偏好」' },
           { name: 'stored', type: 'boolean', description: '与 GET 的 stored 同一口径，只描述 editor 这一组，按实际情况判定：本次写入了 editor、或者此前就存过编辑器偏好时为 true；这次只写了 list（或发的是 {}）、而编辑器偏好从没存过时仍为 false。⚠️ 它不是「这次 PUT 成功了」的标志，成功与否看 HTTP 状态码；客户端照旧据它判断要不要把本机的编辑器偏好上行迁移' },
-          { name: 'list', type: 'object', description: '合并之后的列表页偏好，仍是稀疏的：只含存过的键，字段说明见「获取当前用户的界面偏好」' },
+          { name: 'list', type: 'object', description: '合并之后的 list 组偏好，仍是稀疏的：只含存过的键，字段说明见「获取当前用户的界面偏好」' },
         ],
       },
       {

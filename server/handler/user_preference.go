@@ -21,7 +21,7 @@ import (
 //
 // 目前有两组，各占 user_preferences 的一列 JSON：
 //   - editor：编辑器开关（Editor 列），整套默认值 + 组级 stored；
-//   - list：列表页偏好（List 列，issue #143），稀疏存储、服务端不维护默认值。
+//   - list：列表页 / 日志查看等界面偏好（List 列，issue #143 起，#147 加了日志查看），稀疏存储、服务端不维护默认值。
 //
 // GET / PUT 的响应同形：{editor: 整套值, stored: editor 组存过没有, list: 只含存过的键}。
 // PUT 按组可选写入：请求里带了哪组才写哪组的列，**没带的那组一个字节都不碰**。
@@ -170,8 +170,10 @@ func mergeEditorPreferences(base editorPreferences, patch *editorPreferencesPatc
 	return base
 }
 
-// listPreferences 是「列表页偏好」那一组（issue #143 桌面端第 1 条：
-// 任务页 / 环境变量页的每页条数、视图栏「全部」「分组标签」显隐跟随账户）。
+// listPreferences 是「列表页 / 日志查看等界面偏好」那一组（稀疏）。组名沿用 v3.3.1 的 list，
+// 但它早已不只装列表页：issue #143 桌面端第 1 条放进来任务页 / 环境变量页的每页条数、视图栏「全部」「分组标签」显隐，
+// #147 又放进来「打开已结束的日志时定位到底部」。以后再有跟账户走的零散界面开关，照样往这里加键，
+// 不要按组名字面另开一组 —— 否则同一类偏好会出现两处真源。
 // 键名与取值范围必须与 web/src/utils/listPreferences.ts 的 ListPreferences 逐键对齐。
 //
 // 这一组刻意**不**照抄 editor 的「整套默认值 + 组级 stored」，而是稀疏存储 —— 只存用户显式设过的键：
@@ -186,17 +188,21 @@ func mergeEditorPreferences(base editorPreferences, patch *editorPreferencesPatc
 // 所以「用户显式设成不隐藏」与「从没设过」下发时是两种形态，前端能分清。
 //
 // ⚠️ 类型是契约：tasks_page_size 是 JSON number；envs_page_size 是 JSON string（它有 "all" 这个值，只能走字符串）；
-// 两个 hidden 是 JSON bool，且不像 editorFlag 那样兼容 "on"/"off" —— 这是新接口，没有要照顾的历史客户端。
+// 两个 hidden 与 log_open_at_bottom 是 JSON bool，且不像 editorFlag 那样兼容 "on"/"off" —— 这是新接口，没有要照顾的历史客户端。
 // 类型不对的入参由 ShouldBindJSON 直接回 400。
 type listPreferences struct {
 	TasksPageSize         *int    `json:"tasks_page_size,omitempty"`
 	EnvsPageSize          *string `json:"envs_page_size,omitempty"`
 	TasksViewAllHidden    *bool   `json:"tasks_view_all_hidden,omitempty"`
 	TasksViewGroupsHidden *bool   `json:"tasks_view_groups_hidden,omitempty"`
+	// #147：打开【已结束】的日志时是否直接定位到底部，面板网页与 APP 共用这一个键。
+	// 没存过时服务端不下发，各端按自己的现状处理（网页停在顶部，与 v3.2.8 / #133 起一致）。
+	// 运行中的日志一律自动跟随，与它无关。
+	LogOpenAtBottom *bool `json:"log_open_at_bottom,omitempty"`
 }
 
 // List 列的长度兜底，口径同 editorPreferenceMaxBytes。
-// 现在白名单里只有 4 个键，编码后撑死一百来字节，这条上限实际碰不到；
+// 现在白名单里只有 5 个键，编码后撑死一百来字节，这条上限实际碰不到；
 // 留着是为了将来加键时仍有一道「挡住异常大值」的闸，而不是依赖白名单永远这么短。
 const listPreferenceMaxBytes = 4 * 1024
 
@@ -216,14 +222,16 @@ func listValueAllowed[T comparable](allowed []T, value T) bool {
 }
 
 // empty 回答「这一组里一个键都没有」。PUT 里用它判定 list 组是否需要落库。
+// ⚠️ 加键时这里必须同步加：漏了，只带新键的 PUT 会被判成空补丁，200 静默 no-op。
 func (p listPreferences) empty() bool {
 	return p.TasksPageSize == nil && p.EnvsPageSize == nil &&
-		p.TasksViewAllHidden == nil && p.TasksViewGroupsHidden == nil
+		p.TasksViewAllHidden == nil && p.TasksViewGroupsHidden == nil &&
+		p.LogOpenAtBottom == nil
 }
 
 // validateListPreferencesPatch 逐键校验 PUT 入参里的 list 组，返回给用户看的报错文案；全部合法时返回空串。
 // 文案按字段分开写（与 editor 组一致），调用方才知道是哪一项、该填什么。
-// 两个 hidden 是 bool，类型对了就没有非法值可言，不用在这里校验。
+// 两个 hidden 与 log_open_at_bottom 是 bool，类型对了就没有非法值可言，不用在这里校验。
 func validateListPreferencesPatch(patch *listPreferences) string {
 	if patch.TasksPageSize != nil && !listValueAllowed(listTasksPageSizeValues, *patch.TasksPageSize) {
 		return "tasks_page_size 取值需为 10、20、50 或 100"
@@ -247,6 +255,9 @@ func mergeListPreferences(base listPreferences, patch *listPreferences) listPref
 	}
 	if patch.TasksViewGroupsHidden != nil {
 		base.TasksViewGroupsHidden = patch.TasksViewGroupsHidden
+	}
+	if patch.LogOpenAtBottom != nil {
+		base.LogOpenAtBottom = patch.LogOpenAtBottom
 	}
 	return base
 }
@@ -295,6 +306,7 @@ func decodeListPreferences(raw string) listPreferences {
 	}
 	result.TasksViewAllHidden = decodeListKey[bool](object, "tasks_view_all_hidden")
 	result.TasksViewGroupsHidden = decodeListKey[bool](object, "tasks_view_groups_hidden")
+	result.LogOpenAtBottom = decodeListKey[bool](object, "log_open_at_bottom")
 	return result
 }
 

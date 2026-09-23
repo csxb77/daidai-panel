@@ -15,6 +15,7 @@ import {
   Delete,
   MagicStick,
   Sunny,
+  Document,
 } from "@element-plus/icons-vue";
 import { authApi } from "@/api/auth";
 import {
@@ -24,6 +25,11 @@ import {
   type ThemeMode,
 } from "@/utils/panelAppearance";
 import { useThemeStore } from "@/stores/theme";
+import {
+  ensureListPreferencesLoaded,
+  readListPreference,
+  setListPreference,
+} from "@/utils/listPreferences";
 import { securityApi } from "@/api/security";
 import {
   sponsorApi,
@@ -450,6 +456,24 @@ function syncSystemDarkTheme() {
   systemDarkTheme.value = Boolean(darkThemeQuery?.matches);
 }
 
+// ===== 日志查看（#147）：跟上面两张不同，这是【账户偏好】，走 /auth/preferences 的 list 组，
+// 换浏览器、换设备、APP 里都生效。没设过时网页停在开头（与 v3.2.8 / #133 起一致）。=====
+const logOpenOptions: Array<{ value: boolean; label: string }> = [
+  { value: false, label: "停在开头（默认）" },
+  { value: true, label: "定位到底部" },
+];
+const logOpenAtBottom = ref(readListPreference("log_open_at_bottom"));
+
+// 点击就写，点的是当前已选中的那一档也写：点击是用户的明确意图，点哪一档就把哪一档写进账户。
+// 账户没设过时网页按 false 显示「停在开头」，APP 却按它自己的默认值打开在底部；
+// 这时点「停在开头」要是不写，APP 会继续停在底部，用户只能先切到底部再切回来。
+// 「占坑」的顾虑只针对挂载 / watch 这类没人动过也自动写默认值的程序化写入，所以写入仍然只放在点击里。
+// 🔴 写入只在点击里做，不要改成 watch(logOpenAtBottom)：挂载时按服务端值重读也会触发 watch，多发一次 PUT。
+function setLogOpenAtBottom(value: boolean) {
+  logOpenAtBottom.value = value;
+  setListPreference("log_open_at_bottom", value);
+}
+
 // 两个 MediaQueryList 共用这一对生命周期钩子：本文件已经有两个 onMounted 了，不再往上加第三对
 onMounted(() => {
   // 老 WebView 可能没有 matchMedia：拿不到就当系统没开，只影响那一行提示文字
@@ -470,6 +494,11 @@ onUnmounted(() => {
 });
 
 onMounted(async () => {
+  // 日志查看卡：setup 时读的是本机缓存，账户里的值拉回来后重读一遍。
+  // 用户在 GET 回来之前就点了的话，这一键被记成本地改过、不会被旧值写回，重读拿到的就是他刚选的。
+  void ensureListPreferencesLoaded().then(() => {
+    logOpenAtBottom.value = readListPreference("log_open_at_bottom");
+  });
   if (!authStore.user) {
     try {
       await authStore.fetchUser();
@@ -773,6 +802,37 @@ onUnmounted(() => {
               当前系统：{{
                 systemReducedMotion ? "已开启减少动态效果" : "未开启减少动态效果"
               }}
+            </p>
+          </section>
+
+          <!-- 日志查看（#147）：与上面两张不同，这是账户偏好（/auth/preferences 的 list 组），APP 读写的也是这一份。 -->
+          <section class="profile-card">
+            <header class="profile-card-header">
+              <span class="card-title">
+                <el-icon :size="15"><Document /></el-icon>
+                <span>日志查看</span>
+              </span>
+              <span class="pref-scope">跟随账户，换浏览器、换设备、APP 里都生效</span>
+            </header>
+            <div class="dd-seg-group" role="radiogroup" aria-label="打开已结束的日志时">
+              <button
+                v-for="option in logOpenOptions"
+                :key="String(option.value)"
+                type="button"
+                role="radio"
+                class="dd-seg-btn"
+                :class="{ 'is-active': logOpenAtBottom === option.value }"
+                :aria-checked="logOpenAtBottom === option.value"
+                @click="setLogOpenAtBottom(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+            <p class="pref-desc">
+              打开已经运行结束的任务日志时停在哪里：选「定位到底部」会直接显示最后一行，
+              对定时任务的「日志」「日志文件」和执行日志页的「查看」「日志文件」生效。
+              运行中的日志始终自动跟随最新输出，不受这项影响。
+              没设置过时，APP 仍按原来的习惯打开在底部；在这里选一次后，网页和 APP 就按同一个设置走。
             </p>
           </section>
 
@@ -1460,11 +1520,18 @@ onUnmounted(() => {
   color: var(--el-text-color-primary);
 }
 
-/* 本机偏好卡片（界面主题 / 界面动效）共用：标题右侧的作用范围说明 + 分段控件下方的说明文字。
-   v3.3.2（issue #145）加主题卡时从 .motion-pref-* 改成通用命名，两张卡共用一份样式 */
+/* 偏好卡片（界面主题 / 界面动效 / 日志查看）共用：标题右侧的作用范围说明 + 分段控件下方的说明文字。
+   v3.3.2（issue #145）加主题卡时从 .motion-pref-* 改成通用命名，几张卡共用一份样式 */
 .pref-scope {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+  /* 日志查看卡（#147）的范围说明较长，窄屏会折成两行：靠右对齐，别让第二行缩回左边贴着标题 */
+  text-align: right;
+}
+
+/* 标题不参与收缩：中文可在任意字间断行，范围说明一长，标题会被挤成「日志查 / 看」两行 */
+.profile-card-header .card-title {
+  flex-shrink: 0;
 }
 
 /* 320px 宽时三个分段项刚好放得下（约 256px / 可用约 260px），留一手换行兜底，不许撑破卡片 */

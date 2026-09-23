@@ -371,7 +371,8 @@ func TestEditorPreferencesStoredFlagTracksPersistence(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 列表页偏好（list 组，issue #143 桌面端第 1 条：每页条数、视图栏显隐跟随账户）。
+// 列表页 / 日志查看等界面偏好（list 组，issue #143 桌面端第 1 条：每页条数、视图栏显隐跟随账户；
+// #147：打开已结束的日志时定位到底部，见 ⑨）。
 //
 // 这一组与 editor 共用同一个接口、同一行记录，但各占一列、按组可选写入。
 // 下面这些用例里最要紧的是第一条：只写 list 时绝不能碰 editor 列、不能把 editor 的 stored 翻成 true。
@@ -623,6 +624,9 @@ func TestUpdateListPreferencesRejectsInvalidValues(t *testing.T) {
 		{name: "envs_page_size as number", body: `{"list":{"envs_page_size":50}}`},
 		{name: "hidden as string", body: `{"list":{"tasks_view_all_hidden":"1"}}`},
 		{name: "hidden as number", body: `{"list":{"tasks_view_groups_hidden":1}}`},
+		// #147 的键同样只收 JSON bool：APP 等客户端照 editor 组发 "on" 或 1 都要 400，不能被悄悄吞掉。
+		{name: "log_open_at_bottom as on", body: `{"list":{"log_open_at_bottom":"on"}}`},
+		{name: "log_open_at_bottom as number", body: `{"list":{"log_open_at_bottom":1}}`},
 		{name: "list is not an object", body: `{"list":"tasks_page_size=50"}`},
 		// 同组里一个合法一个非法：合法的那个也不能落。
 		{name: "one valid one invalid key", body: `{"list":{"envs_page_size":"50","tasks_page_size":30}}`, wantMessage: "tasks_page_size"},
@@ -707,6 +711,9 @@ func TestGetListPreferencesDropsCorruptedValues(t *testing.T) {
 		{list: `{"tasks_page_size":50.5}`, want: map[string]any{}},                     // 小数
 		// null 必须当「没有这个键」：解到 bool 值上不报错，一不小心就成了显式的 false。
 		{list: `{"tasks_view_all_hidden":null,"tasks_page_size":20}`, want: map[string]any{"tasks_page_size": float64(20)}},
+		// #147 的键同理：类型不对只丢它自己，null 当没有。
+		{list: `{"log_open_at_bottom":"1","tasks_page_size":20}`, want: map[string]any{"tasks_page_size": float64(20)}},
+		{list: `{"log_open_at_bottom":null}`, want: map[string]any{}},
 		// 白名单外的键不下发。
 		{list: `{"tasks_page_size":50,"unknown_key":1}`, want: map[string]any{"tasks_page_size": float64(50)}},
 	}
@@ -847,5 +854,54 @@ func TestUpdateListPreferencesConcurrentDifferentKeysDoNotOverwrite(t *testing.T
 		if list["tasks_view_all_hidden"] != true || list["tasks_view_groups_hidden"] != true {
 			t.Fatalf("round %d: 两个并发 PUT 各写一个键，两个键最后都应为 true，实际 %#v", round, list)
 		}
+	}
+}
+
+// ⑨ #147「打开已结束的日志时定位到底部」挂在 list 组上的往返。
+// 最要紧的是第一次 PUT：empty() 漏加这个键时，只带它的请求会被判成空补丁、200 静默 no-op，
+// 网页和 APP 上表现为「点了开关、刷新又回去了」，不报任何错。
+func TestListPreferencesLogOpenAtBottom(t *testing.T) {
+	setupEditorPrefsEnv(t)
+	engine := newProtectedRouter()
+
+	user := testutil.MustCreateUser(t, "list-log-bottom", "operator")
+	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	// 没存过：服务端不下发这个键，各端按自己的默认处理。
+	if list := listPrefsDecode(t, editorPrefsRequest(t, engine, http.MethodGet, token, "")); len(list) != 0 {
+		t.Fatalf("新用户的 list 必须为 {}，got %#v", list)
+	}
+
+	// 先存一个别的键，再只带新键 PUT：两个键要共存，editor 组一个字节都不能动。
+	listPrefsDecode(t, editorPrefsRequest(t, engine, http.MethodPut, token, `{"list":{"tasks_page_size":50}}`))
+	putRec := editorPrefsRequest(t, engine, http.MethodPut, token, `{"list":{"log_open_at_bottom":true}}`)
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"PUT": putRec,
+		"GET": editorPrefsRequest(t, engine, http.MethodGet, token, ""),
+	} {
+		list := listPrefsDecode(t, rec)
+		if value, ok := list["log_open_at_bottom"].(bool); !ok || !value {
+			t.Fatalf("%s: log_open_at_bottom must be JSON bool true, got %T %#v", name, list["log_open_at_bottom"], list["log_open_at_bottom"])
+		}
+		if list["tasks_page_size"] != float64(50) {
+			t.Fatalf("%s: tasks_page_size should stay 50, got %#v", name, list)
+		}
+		if editorPrefsDecodeStored(t, rec) {
+			t.Fatalf("%s: 只写 list 时 editor 的 stored 必须仍为 false: %s", name, rec.Body.String())
+		}
+	}
+	raw, _ := readPreferenceRawColumns(t, user.ID)
+	if raw.Editor != "" {
+		t.Fatalf("只写 list 时 editor 列必须保持空串，got %q", raw.Editor)
+	}
+
+	// 改回 false：显式存的 false 照常下发，不能被省略成「没存过」——
+	// APP 在账户没设过时按自己的默认（底部）走，省略掉等于把用户关掉的开关又打开。
+	list := listPrefsDecode(t, editorPrefsRequest(t, engine, http.MethodPut, token, `{"list":{"log_open_at_bottom":false}}`))
+	if value, ok := list["log_open_at_bottom"].(bool); !ok || value {
+		t.Fatalf("log_open_at_bottom must be JSON bool false, got %T %#v", list["log_open_at_bottom"], list["log_open_at_bottom"])
+	}
+	if len(list) != 2 {
+		t.Fatalf("expected tasks_page_size + log_open_at_bottom, got %#v", list)
 	}
 }

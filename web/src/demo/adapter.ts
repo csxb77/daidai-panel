@@ -476,7 +476,7 @@ function writeDemoEditorPreferences(value: DemoEditorPreferences) {
 }
 
 /**
- * 列表页偏好（issue #143）的「服务端真源」，同样落在 localStorage。
+ * 列表页 / 日志查看等界面偏好（issue #143、#147，服务端 list 组）的「服务端真源」，同样落在 localStorage。
  *
  * 形状照真实服务端：【稀疏存储】，只存访客显式设过的键，不存、也不下发默认值。
  * 这是前端迁移逻辑的前提 —— ensureListPreferencesLoaded 只在「服务端没有这个键、本机老缓存里确实有值」
@@ -500,7 +500,8 @@ function isDemoEnvsPageSize(value: unknown): value is ListPreferences['envs_page
 /**
  * 按白名单挑出合法的键，其余丢弃。
  *
- * JSON 类型照真实服务端卡死：tasks_page_size 只认数字、envs_page_size 只认字符串、两个开关只认布尔。
+ * JSON 类型照真实服务端卡死：tasks_page_size 只认数字、envs_page_size 只认字符串、
+ * 其余开关（两个视图栏显隐、#147 的 log_open_at_bottom）只认布尔。
  * 前端上行发的就是这三种类型；mock 放宽成「"50" 也认」反而会把前端发错类型的问题藏起来，
  * 到了真面板上才变成一次静默失败（setListPreference 的 catch 是空的）。
  * 非法值这里是【忽略】而不是回 400，理由同 mergeDemoEditorPreferences：mock 绝不让访客撞上 4xx。
@@ -514,7 +515,8 @@ function pickDemoListPreferences(source: Record<string, unknown>): DemoListPrefe
   const envsPageSize = source['envs_page_size']
   if (isDemoEnvsPageSize(envsPageSize)) picked.envs_page_size = envsPageSize
 
-  for (const key of ['tasks_view_all_hidden', 'tasks_view_groups_hidden'] as const) {
+  // 漏掉 log_open_at_bottom 的话，演示站里「日志查看」的设置只剩本机缓存那一份，mock 这份真源会静默丢掉它
+  for (const key of ['tasks_view_all_hidden', 'tasks_view_groups_hidden', 'log_open_at_bottom'] as const) {
     const value = source[key]
     if (typeof value === 'boolean') picked[key] = value
   }

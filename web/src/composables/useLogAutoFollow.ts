@@ -1,4 +1,5 @@
 import { nextTick, onScopeDispose, readonly, ref, watch, type Ref } from 'vue'
+import { readListPreference } from '@/utils/listPreferences'
 
 /**
  * 日志自动跟随（issue #133 功能 1）。
@@ -40,6 +41,12 @@ export interface LogAutoFollowController {
   setScrollTop(top: number): void
   /** 结束会话：冻结跟随态，此后滚动不再改变它，也不再自动贴底。 */
   end(): void
+  /**
+   * 打开一份【已结束】的日志、正文一次性写进去之后调用（#147）。
+   * 账户偏好「打开已结束的日志时定位到底部」开着就贴底一次；关着什么都不做，保持 #133 起「停在顶部」。
+   * 只贴这一次、不进入跟随：live / following 都不动（调用前已 end() 冻结），之后怎么滚全由用户。
+   */
+  revealFinished(): void
 }
 
 const DEFAULT_THRESHOLD = 40
@@ -170,6 +177,12 @@ export function useLogAutoFollow(
     live = false
   }
 
+  function revealFinished() {
+    // 走 scheduleStickToBottom：nextTick 等正文 patch 完，容器还没挂上时再用 rAF 兜底（destroy-on-close 弹窗）。
+    // stickToBottom 会打程序标记，而且此时 live=false，handleScroll 不会借这次 scroll 改跟随态。
+    if (readListPreference('log_open_at_bottom')) scheduleStickToBottom()
+  }
+
   onScopeDispose(() => {
     detach()
   })
@@ -181,5 +194,6 @@ export function useLogAutoFollow(
     jumpToLatest,
     setScrollTop,
     end,
+    revealFinished,
   }
 }

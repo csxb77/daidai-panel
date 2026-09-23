@@ -1,10 +1,14 @@
 import { authApi } from '@/api/auth'
 
 /**
- * 列表页的「个人偏好」：定时任务页 / 环境变量页的每页条数，任务页视图栏「全部」「分组标签」的显隐。
+ * 列表页 / 日志查看等界面的「个人偏好」（服务端 list 组，稀疏存储）：
+ * 定时任务页 / 环境变量页的每页条数，任务页视图栏「全部」「分组标签」的显隐，
+ * 以及「打开已结束的日志时定位到底部」（#147）。
  *
  * v3.3.1（issue #143 桌面端第 1 条）起跟随账户：换浏览器、换域名 / IP 都还在。
- * 此前这 4 项散在三个页面里各自读写 localStorage，而 localStorage 按 origin 隔离，换个地址打开就全没了。
+ * 此前前 4 项散在三个页面里各自读写 localStorage，而 localStorage 按 origin 隔离，换个地址打开就全没了。
+ * v3.3.3 的 log_open_at_bottom 是新键，没有历史本地值；APP 读写的也是它这一份。
+ * 组名还叫 list，但以后再有跟账户走的零散界面开关，照样往这里加键，别按字面另开一组（两处真源）。
  *
  * 存储模型与 utils/editorPreferences.ts 同构（两层，顺序不能反）：
  *   - localStorage 是首屏 / 离线 / 隐私模式下的同步缓存（页面 setup 时必须立刻拿到条数，不能等网络）；
@@ -16,10 +20,12 @@ import { authApi } from '@/api/auth'
  *    没有 → 本机老键里真有值才上行迁移。迁移精确到每一个键，本机什么都没有时一个请求都不发。
  *    这样做是因为 issue 的报告者正是多域名 / 多 IP 在用：组级 stored 下，第一个被打开的 origin
  *    哪怕从没改过设置，也会把默认值「占坑」写上去，其它 origin 的自定义值随后被全部冲掉。
- * ② 不派发变更事件：消费方只有任务页、视图栏、环境变量页三处，都在挂载时调 ensure，
- *    等它 resolve 之后自己重读一遍并应用即可。
+ * ② 不派发变更事件：任务页、视图栏、环境变量页、个人设置页在挂载时调 ensure，
+ *    等它 resolve 之后自己重读一遍并应用即可；执行日志页挂载时也 ensure，
+ *    而 log_open_at_bottom 的消费方（useLogAutoFollow.revealFinished、任务日志 LogViewer、两处日志文件查看）
+ *    都是「打开日志那一刻」同步读缓存，用不着事件。
  *
- * 🔴 验收口径：四个老键名在 web/src 里只允许出现在本文件。任何一处页面代码绕过 setListPreference(s)
+ * 🔴 验收口径：五个本地缓存键名（STORAGE_KEYS）在 web/src 里只允许出现在本文件。任何一处页面代码绕过 setListPreference(s)
  *    直接写 localStorage，用户的改动就只留在本机，下次加载时被服务端旧值静默改回去 —— 不报错、构建全绿。
  */
 
@@ -32,6 +38,8 @@ export interface ListPreferences {
   tasks_view_all_hidden: boolean
   /** 任务页视图栏里的分组标签（来自任务 labels 的 `分组:` 标签）是否整体隐藏 */
   tasks_view_groups_hidden: boolean
+  /** 打开【已结束】的日志时是否定位到底部（#147）；运行中的日志始终自动跟随，不看它 */
+  log_open_at_bottom: boolean
 }
 
 type ListPreferenceKey = keyof ListPreferences
@@ -50,12 +58,15 @@ export const ENVS_PAGE_SIZE_OPTIONS: readonly ListPreferences['envs_page_size'][
 /**
  * 默认值与改造前三个页面各自的回落值逐字相同（20 条 / '20' / 都显示），
  * 老用户升级后、服务端拉回来之前的第一眼观感不变。服务端不存默认值，只有这一份。
+ * log_open_at_bottom 默认 false：保持 v3.2.8（#133）起「打开已结束的日志停在顶部」的行为。
+ * APP 在账户没设过这个键时按它自己的现状（底部）处理，两端默认值不同是刻意的，别来「对齐」。
  */
 export const LIST_PREFERENCES_DEFAULTS: Readonly<ListPreferences> = Object.freeze({
   tasks_page_size: 20,
   envs_page_size: '20',
   tasks_view_all_hidden: false,
-  tasks_view_groups_hidden: false
+  tasks_view_groups_hidden: false,
+  log_open_at_bottom: false
 })
 
 /** 全部键，顺序无意义。供遍历与演示站 mock 的白名单校验使用。 */
@@ -63,20 +74,24 @@ export const LIST_PREFERENCE_KEYS: readonly ListPreferenceKey[] = [
   'tasks_page_size',
   'envs_page_size',
   'tasks_view_all_hidden',
-  'tasks_view_groups_hidden'
+  'tasks_view_groups_hidden',
+  'log_open_at_bottom'
 ]
 
 /**
- * localStorage 键与取值格式都沿用改造前各页面的老写法（条数存字符串，开关存 '1' / '0'）：
+ * 前 4 个 localStorage 键与取值格式都沿用改造前各页面的老写法（条数存字符串，开关存 '1' / '0'）：
  *   - 老值天然就是上行迁移的数据源，不需要另做一次搬家；
  *   - 回退到 v3.3.0 时老版本照样读得懂。
- * 🔴 这四个键名只允许出现在本文件（见文件头的验收口径）。
+ * log_open_at_bottom 是新键，取值格式同其它开关。
+ * 🔴 它【绝不能】复用 v3.2.8 前的 dd:tasks:log_follow：LogViewer 每次 setup 都会删那个老键，复用了等于每开一次日志就丢一次设置。
+ * 🔴 这五个键名只允许出现在本文件（见文件头的验收口径）。
  */
 const STORAGE_KEYS: Record<ListPreferenceKey, string> = {
   tasks_page_size: 'dd:tasks:page_size',
   envs_page_size: 'daidai-env-page-size',
   tasks_view_all_hidden: 'dd:tasks:view_all_hidden',
-  tasks_view_groups_hidden: 'dd:tasks:view_groups_hidden'
+  tasks_view_groups_hidden: 'dd:tasks:view_groups_hidden',
+  log_open_at_bottom: 'dd:log:open_at_bottom'
 }
 
 /**
@@ -118,7 +133,7 @@ function writeRaw(key: ListPreferenceKey, value: string): void {
 
 /**
  * 校验「接口上的值」（服务端下发的 / 准备 PUT 上去的），不合法返回 undefined。
- * 口径与服务端白名单一致：条数是 JSON number，环境变量条数是 JSON string，两个开关是 JSON bool。
+ * 口径与服务端白名单一致：条数是 JSON number，环境变量条数是 JSON string，其余开关都是 JSON bool。
  * 类型不对（比如条数传了字符串 "50"）一律视为不合法，不做宽松转换 —— 服务端对它同样回 400。
  * 导出给演示站 mock 复用，免得手抄一份白名单。
  */
@@ -154,7 +169,8 @@ function parseStored(key: ListPreferenceKey, raw: string | null): ListPreference
   if (key === 'envs_page_size') {
     return parseWire(key, raw)
   }
-  // 两个开关：老代码只写 '1' / '0'。'0' 也算「真的存过」（用户在视图管理里保存过「显示」）
+  // 开关：老代码只写 '1' / '0'（新键 log_open_at_bottom 沿用同一格式）。
+  // '0' 也算「真的存过」（用户在视图管理里保存过「显示」、在个人设置里选过「停在开头」）
   if (raw === '1') return true
   if (raw === '0') return false
   return undefined
@@ -236,7 +252,7 @@ let loadPromise: Promise<void> | null = null
 /**
  * 从服务端拉一次偏好并与本地缓存对齐（进程内只拉一次，重复调用复用同一个 Promise）。
  *
- * 由任务页、视图栏、环境变量页在挂载时调用；刻意不放进 main.ts 的 bootstrap，不给其它页面加请求。
+ * 由任务页、视图栏、环境变量页、执行日志页、个人设置页在挂载时调用；刻意不放进 main.ts 的 bootstrap，不给其它页面加请求。
  * 失败（未登录、离线）就继续用本地缓存；刻意不把 loadPromise 置回 null 重试：
  * 这类失败是稳定的，反复重试只会在每次切页时白发一轮请求。
  *

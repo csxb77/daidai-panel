@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { taskApi } from '@/api/task'
+import { readListPreference } from '@/utils/listPreferences'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useResponsive } from '@/composables/useResponsive'
@@ -33,6 +34,8 @@ const loading = ref(false)
 const selectedFile = ref<string | null>(null)
 const fileContent = ref('')
 const contentLoading = ref(false)
+// 右侧正文 <pre>，它自己就是滚动容器（.content-text 的 overflow-y:auto）
+const contentTextRef = ref<HTMLElement>()
 // 正在换取下载票据的文件 key，避免连点重复请求
 const downloadingKey = ref<string | null>(null)
 // 打包下载同样只允许一个在飞，写法与 downloadingKey 一致
@@ -139,6 +142,14 @@ async function viewFile(file: any) {
   try {
     const res = await taskApi.logFileContent(props.taskId!, filename, file.path)
     fileContent.value = res.content || ''
+    // #147：账户偏好「打开已结束的日志时定位到底部」对日志文件同样生效（任务页挂载时已 ensure 过，这里同步读缓存）。
+    // 关着什么都不做，保持原样：沿用上一个文件的滚动位置。
+    if (readListPreference('log_open_at_bottom')) {
+      void nextTick(() => {
+        const el = contentTextRef.value
+        if (el) el.scrollTop = el.scrollHeight
+      })
+    }
   } catch {
     ElMessage.error('加载文件内容失败')
     fileContent.value = ''
@@ -310,7 +321,7 @@ function handleClose() {
           <el-icon :size="48" color="var(--el-text-color-placeholder)"><Document /></el-icon>
           <span>选择文件查看内容</span>
         </div>
-        <pre v-else class="content-text dd-log-surface" v-html="renderedFileHtml || '(空文件)'"></pre>
+        <pre v-else ref="contentTextRef" class="content-text dd-log-surface" v-html="renderedFileHtml || '(空文件)'"></pre>
       </div>
     </div>
     <!-- 移动端全屏时关闭入口放右下角（v3.3.1，issue #143 F2）：右上角 × 离拇指最远，iOS 上还曾被顶栏整块盖住。

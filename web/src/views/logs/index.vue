@@ -10,6 +10,7 @@ import { openAuthorizedEventStream, type EventStreamConnection } from '@/utils/s
 import { usePageActivity } from '@/composables/usePageActivity'
 import { useResponsive } from '@/composables/useResponsive'
 import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
+import { ensureListPreferencesLoaded, readListPreference } from '@/utils/listPreferences'
 import { extractError } from '@/utils/error'
 import { canOperate } from '@/utils/roles'
 import { formatDuration } from '@/utils/duration'
@@ -63,7 +64,8 @@ const LOG_STATUS_TABS = [
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 let logEventSource: EventStreamConnection | null = null
 const logContentRef = ref<HTMLElement>()
-// 执行日志详情弹窗的自动跟随：运行中日志上翻即暂停，滚回底部恢复；已结束记录停在顶部不跟随
+// 执行日志详情弹窗的自动跟随：运行中日志上翻即暂停，滚回底部恢复；
+// 已结束记录不跟随，默认停在顶部，账户偏好开着时贴底一次（#147）
 const detailFollow = useLogAutoFollow(logContentRef)
 let sseBuffer: string[] = []
 let sseFlushRaf = 0
@@ -73,6 +75,9 @@ const currentTaskId = ref<number>(0)
 const logFiles = ref<any[]>([])
 const logFilesLoading = ref(false)
 const showFileContent = ref(false)
+// 日志文件内容弹窗里的正文。它自己不滚：这个弹窗的 body 不是 flex 容器，正文按内容撑高，
+// 真正滚动的是它的父元素 .el-dialog__body（全局样式给了 overflow:auto）
+const fileContentRef = ref<HTMLElement>()
 const fileContentName = ref('')
 // 当前预览的日志文件，换「下载原始文件」票据时要用它的定位参数
 const fileContentSource = ref<{ filename: string; path?: string } | null>(null)
@@ -277,6 +282,9 @@ onMounted(async () => {
   syncTaskIdFromRoute(true)
   // 进页即把侧栏的「失败日志」角标标记为已读——用户已经站在这一页上了，再红着没有意义
   badgesStore.ackLogsFailed()
+  // 拉一次账户偏好（记忆化，去过任务页就不再发请求）：「查看」已结束日志时要读 log_open_at_bottom（#147）。
+  // 不 await：列表不依赖它；新浏览器首次进页就被深链自动打开的那一条，可能还按本机默认停在顶部一次，可以接受。
+  void ensureListPreferencesLoaded()
   await loadLogs()
 })
 
@@ -389,7 +397,8 @@ async function viewDetail(log: any) {
       }
     })
   } else {
-    // 已结束记录：一次性加载、停在顶部，不跟随（与现状一致）
+    // 已结束记录：一次性加载、不跟随。默认停在顶部（#133 起）；
+    // 账户偏好「打开已结束的日志时定位到底部」开着时，正文写进去之后贴底一次（#147，revealFinished 自己读偏好）
     detailFollow.end()
     try {
       const res = await logApi.detail(log.id)
@@ -397,6 +406,7 @@ async function viewDetail(log: any) {
       resetDetailBuffer()
       detailBuffer.append(res.content || '(无日志内容)')
       detailRevision.value++
+      detailFollow.revealFinished()
     } catch (err) {
       ElMessage.error(extractError(err, '获取日志详情失败'))
     }
@@ -692,6 +702,14 @@ async function viewLogFile(file: any) {
     fileContentName.value = file.filename
     fileContentSource.value = { filename: file.filename, path: file.path }
     showFileContent.value = true
+    // #147：账户偏好「打开已结束的日志时定位到底部」对日志文件同样生效。
+    // 关着什么都不做，保持原样（弹窗不销毁，沿用上一次的滚动位置）。
+    if (readListPreference('log_open_at_bottom')) {
+      void nextTick(() => {
+        const body = fileContentRef.value?.parentElement
+        if (body) body.scrollTop = body.scrollHeight
+      })
+    }
   } catch (err) {
     ElMessage.error(extractError(err, '读取日志文件失败'))
   }
@@ -1214,7 +1232,7 @@ onBeforeUnmount(() => {
     </el-dialog>
 
     <el-dialog v-model="showFileContent" :title="fileContentName" width="1100px" :fullscreen="dialogFullscreen">
-      <div class="detail-log dd-log-surface">
+      <div ref="fileContentRef" class="detail-log dd-log-surface">
         <template v-if="fileHasContent">
           <button
             v-if="fileOmittedLines > 0"

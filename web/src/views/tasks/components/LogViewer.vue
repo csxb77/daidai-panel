@@ -16,6 +16,7 @@ import { taskApi } from '@/api/task'
 import { openAuthorizedEventStream, type EventStreamConnection } from '@/utils/sse'
 import { useResponsive } from '@/composables/useResponsive'
 import { useLogAutoFollow } from '@/composables/useLogAutoFollow'
+import { readListPreference } from '@/utils/listPreferences'
 import { createTerminalLineBuffer, TERMINAL_RENDER_CHUNK_SIZE } from '@/utils/ansi'
 
 const props = defineProps<{
@@ -699,7 +700,15 @@ async function fetchLatestLog(retryCount = 0, scrollMode: 'top' | 'bottom' | 'pr
       waitingForLog.value = false
       resetLogOutput()
       appendLogChunk(String(res.content))
-      if (scrollMode === 'bottom') {
+      // #147：这一轮流里一条实时数据都没收到（runStateDecided 仍为 false）= 打开的是一份已经结束的日志，
+      // 账户偏好「打开已结束的日志时定位到底部」开着就贴底，关着维持原来的顶部 / 原位。
+      // 运行中看着它跑完的（已判定），仍按跟随态 bottom / preserve 走，暂停的人不会被拽到底。
+      // 放在这里而不是 begin(false) 处：静态正文的所有收口路径（done:finished、finished-late 等待链收口、
+      // 出错恢复、404 重试、#115 等待链）都汇到这一处，begin(false) 那一刻正文还是空的。
+      // 🔴 隐式不变式：runStateDecided 为 false 时，走到这里之前正文一定是空的——实时数据都要先经 markRunning 才会渲染，
+      // 静态正文每个会话也只在这里写一次（切回前台补拉只在正文为空时才发），所以贴底不会把正在读的人拽走。
+      // 以后谁在实时会话里绕过 markRunning 渲染正文、或给已渲染的静态正文加刷新，就会打破它。
+      if (scrollMode === 'bottom' || (!runStateDecided.value && readListPreference('log_open_at_bottom'))) {
         scheduleScrollToBottom()
       } else if (scrollMode === 'preserve') {
         void nextTick(() => {
