@@ -1237,11 +1237,12 @@ export interface ListPreferences {
   envs_page_size: '20' | '50' | '100' | 'all'
   tasks_view_all_hidden: boolean
   tasks_view_groups_hidden: boolean
+  log_open_at_bottom: boolean   // v3.3.3，#147：打开已结束的日志时是否定位到底部
 }
 export const TASKS_PAGE_SIZE_OPTIONS    // [10, 20, 50, 100]
 export const ENVS_PAGE_SIZE_OPTIONS     // ['20', '50', '100', 'all']
-export const LIST_PREFERENCES_DEFAULTS  // { tasks_page_size: 20, envs_page_size: '20', 两个 hidden: false }，Object.freeze
-export const LIST_PREFERENCE_KEYS       // 四个键，供遍历
+export const LIST_PREFERENCES_DEFAULTS  // { tasks_page_size: 20, envs_page_size: '20', 两个 hidden: false, log_open_at_bottom: false }，Object.freeze
+export const LIST_PREFERENCE_KEYS       // 五个键，供遍历
 export function parseListPreferenceWire(key, raw)                  // 校验「接口上的值」，口径与服务端白名单一致（类型不对也算非法）
 export function readListPreference(key): ListPreferences[K]        // 同步读本地缓存
 export function setListPreferences(patch: Partial<ListPreferences>): void  // 一次改多项，只发一次 PUT
@@ -1253,7 +1254,10 @@ export function resetListPreferencesCache(): void
 - `api/auth.ts`：`getPreferences()` 的返回类型多了 `list?: Record<string, unknown>`；新增 `updateListPreferences(list)`，
   发 `PUT /auth/preferences`，body 只有 `{ list }`。editor 那条 `updatePreferences(editor)` 不动。
 - 消费方：`tasks/index.vue`（`tasks_page_size`）、`tasks/components/ViewManager.vue`（两个 hidden）、`envs/index.vue`（`envs_page_size`）；
+  `log_open_at_bottom` 的消费方见下面「打开已结束的日志」；
   `stores/auth.ts` 的 `clearAuth` 调 `resetListPreferencesCache()`。
+- 组名还叫 `list`，但 v3.3.3 起它装的是「列表页 / 日志查看等跟账户走的零散界面开关」。以后再有这类开关照样往里加键，
+  **不要**按组名字面另开一组（同一类偏好会出现两处真源）。
 - 服务端契约（按组写入、稀疏白名单、400 文案、写锁）：backend `quality-guidelines.md`「场景：用户界面偏好按组写入」。
 
 ### 3. Contracts
@@ -1263,7 +1267,8 @@ export function resetListPreferencesCache(): void
 
 1. **稀疏存储、逐键迁移**，没有 editor 那种组级 `stored`：服务端有这个键就下行，没有这个键、本机老键里真有值才上行，精确到每一个键。
    组级 `stored` 在多 origin 下会出事：第一个被打开的 origin 哪怕从没改过设置，也会把默认值「占坑」写上去，其它 origin 的自定义值随后被全部冲掉。
-2. **不派发变更事件**：消费方只有三处，都在挂载时调 `ensure`，等它 resolve 之后自己重读一遍并应用。
+2. **不派发变更事件**：列表页的消费方与个人设置页都在挂载时调 `ensure`，等它 resolve 之后自己重读一遍并应用；
+   `log_open_at_bottom` 的消费方都是「打开日志那一刻」同步读缓存，同样用不着事件。
 
 **本地缓存**
 - **沿用老键和老格式**：`dd:tasks:page_size`（数字字符串）、`daidai-env-page-size`（`'20'|'50'|'100'|'all'`）、
@@ -1284,7 +1289,7 @@ export function resetListPreferencesCache(): void
 
 **写入**
 - 🔴 **所有写入必须经 `setListPreference(s)`**。验收 grep：
-  `dd:tasks:page_size|daidai-env-page-size|dd:tasks:view_(all|groups)_hidden` 在 `web/src` 里只允许出现在 `listPreferences.ts`（v3.3.1 时零违例）。
+  `dd:tasks:page_size|daidai-env-page-size|dd:tasks:view_(all|groups)_hidden|dd:log:open_at_bottom` 在 `web/src` 里只允许出现在 `listPreferences.ts`（v3.3.1 时零违例）。
   绕过它直接写 localStorage 的后果：改动只留在本机，下次加载被服务端的旧值静默改回去，不报错、构建全绿。
 - `setListPreferences(patch)` 的顺序：按白名单键遍历 → `parseWire` 逐键校验（非法或缺失的那一键单独丢弃，其余照发）→ 记脏 → 写本地缓存 →
   后台发**一次** `updateListPreferences(accepted)`；一个合法键都没有就不发；同步失败静默（本机已经生效了）。
@@ -1313,9 +1318,30 @@ export function resetListPreferencesCache(): void
   不清 localStorage 里的值，它同时是本机的离线缓存，下次登录会被服务端值覆盖。
 - 已知且接受的边界：共用一个浏览器时，上一个账号留在本机的老值，会在下一个账号的服务端没有该键时被迁上去。影响只是观感，PRD 接受。
 
+**打开已结束的日志（v3.3.3，#147，键 `log_open_at_bottom`）**
+- 默认 `false`：保持 v3.2.8（#133）起「打开已结束的日志停在顶部」。APP 在账户没设过时按它自己的现状（底部）走，两端默认不同是刻意的，别「对齐」。
+- 本地缓存键 `dd:log:open_at_bottom`。🔴 **绝不能**复用老的 `dd:tasks:log_follow`：`LogViewer.vue` 每次 setup 都会删它。
+- 生效点（运行中的日志一律自动跟随，不看这一项）：
+  - 执行日志页「查看」已结束记录：`end()` → 正文写进去 → `detailFollow.revealFinished()`。`revealFinished()` 是 `useLogAutoFollow` 的一次性方法：
+    开关开着就 `scheduleStickToBottom()` 一次，**不改 `live` / `following`、不进入跟随**。
+  - 定时任务「日志」：不走 `begin(false)`（那一刻正文还空），而是 `fetchLatestLog` 正文分支的条件
+    `scrollMode === 'bottom' || (!runStateDecided && 开关)`。它依赖一条隐式不变式：`runStateDecided` 为 false 时，走到这里之前正文一定是空的
+    （实时数据都先经 `markRunning`；静态正文每个会话只写这一次，切回前台补拉只在正文为空时才发），所以不会把正在读的人拽走。
+    以后在实时会话里绕过 `markRunning` 渲染正文、或给已渲染的静态正文加刷新，就会打破它。
+  - 两处「日志文件」查看（`LogFileBrowser.vue` 的右侧 `<pre>`、执行日志页的日志文件弹窗）：内容写入后 `nextTick` 里按开关贴底。
+    执行日志页那个弹窗的正文不自己滚，滚动的是它的父元素 `.el-dialog__body`。
+  - 依赖、订阅的日志不接。
+- 执行日志页、个人设置页挂载时都 `ensure`；任务页本来就 ensure，`LogViewer` / `LogFileBrowser` 同步读缓存即可。
+- 个人设置「日志查看」卡**点击就写**：点的是已选中的那一档也 `setListPreference`；仍不挂 watch（理由同上面的「只在用户动作里 set」）。
+  这与 ViewManager「什么都没改就不发」刻意不同：账户没设过时网页按 `false` 显示「停在开头」、APP 按它自己的默认值在底部，
+  点已选中的「停在开头」要是不写，APP 会一直停在底部，用户只能先切到底部再切回来。
+  点击是用户的明确意图，不算「占坑」；「占坑」只针对挂载 / watch / ensure 这类没人动过也写默认值的程序化写入。
+
 **白名单要三处一起改**：`listPreferences.ts` 的类型与两个 OPTIONS、`server/handler/user_preference.go` 的
 `listTasksPageSizeValues` / `listEnvsPageSizeValues` 与 `listPreferences` 结构体。演示站 mock（`demo/adapter.ts`）从 `listPreferences.ts` 导入，不手抄。
 两边对不上的表现：多出来的档位 PUT 上去被 400、只在本机生效，换个浏览器就回到默认值。
+加一个新键时的清单：前端类型 / DEFAULTS / KEYS / STORAGE_KEYS；后端结构体字段与 `empty()` / merge / decode 各一行（**漏了 `empty()`，只带新键的 PUT 会 200 静默 no-op**）；
+`demo/adapter.ts` 的 `pickDemoListPreferences`（布尔键在那个循环里）；`api-docs/apiData.ts` 的 GET / PUT 条目（手写副本，没有测试守着）。
 
 ### 4. Validation & Error Matrix
 

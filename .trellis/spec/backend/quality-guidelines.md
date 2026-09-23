@@ -3924,7 +3924,11 @@ sample := defaultLinuxResourceSampler.current() // 有后台采样缓存直接�
 - `list` 白名单（`listPreferences` 结构体，全是指针 + `omitempty`）：
   - `tasks_page_size`：JSON number，取 10 / 20 / 50 / 100；
   - `envs_page_size`：JSON string，取 `"20"` / `"50"` / `"100"` / `"all"`（有 `"all"`，只能走字符串）；
-  - `tasks_view_all_hidden` / `tasks_view_groups_hidden`：JSON bool，**不**兼容 `"on"` / `"off"`（新接口，没有历史客户端要照顾）。
+  - `tasks_view_all_hidden` / `tasks_view_groups_hidden`：JSON bool，**不**兼容 `"on"` / `"off"`（新接口，没有历史客户端要照顾）；
+  - `log_open_at_bottom`（v3.3.3，#147）：JSON bool，同上只收布尔。打开已结束的日志时是否定位到底部，面板网页与 APP 共用；
+    没存过不下发，各端按自己的现状（网页顶部、APP 底部）。
+  - 组名还叫 `list`，但它装的是「列表页 / 日志查看等跟账户走的零散界面开关」。再有这类开关照样往这里加键，不另开组、不加列、不改备份。
+    加键清单：结构体字段、`empty()`、`mergeListPreferences`、`decodeListPreferences` 各一处。🔴 漏了 `empty()`，只带新键的 PUT 会被判成空补丁、200 静默 no-op。
 - 常量：`editorPreferenceMaxBytes` / `listPreferenceMaxBytes`（都是 4KB）；包级锁 `preferenceWriteMu sync.Mutex`。
 - 备份：`BackupUserPreference` 新增 `List string json:"list,omitempty"`，导出（`backup_runtime.go` 的 snapshot）与 `restoreUserPreferences` 成对带上。
   ⚠️ `restoreUserPreferences` 目前没有调用点（用户、2FA、偏好都只导出不恢复），补字段不代表恢复会生效。
@@ -3963,7 +3967,7 @@ sample := defaultLinuxResourceSampler.current() // 有后台采样缓存直接�
 
 | 输入 / 情形 | 结果 |
 |---|---|
-| body 不是 JSON；editor 或 list 不是对象；list 某键类型不对（`"50"`、`50.5`、`1`、`"1"`） | 400「请求参数错误」 |
+| body 不是 JSON；editor 或 list 不是对象；list 某键类型不对（`"50"`、`50.5`、`1`、`"1"`、布尔键传 `"on"`） | 400「请求参数错误」 |
 | minimap / indent_guides 取值不认识 | 400「minimap / indent_guides 取值需为 true、false、on 或 off」 |
 | `tasks_page_size` 不在白名单（如 30） | 400「tasks_page_size 取值需为 10、20、50 或 100」 |
 | `envs_page_size` 不在白名单（如 `"ALL"`、`"1"`） | 400「envs_page_size 取值需为 20、50、100 或 all」 |
