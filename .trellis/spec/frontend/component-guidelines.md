@@ -593,8 +593,10 @@ if (commitBoundary && !endedWithLineBreak && !sawCarriageReturn) {
 #### 只在 CodeMirror 侧成立的两条（Monaco 侧写了是死代码）
 - **移动端三件套不能少**：`spellcheck="false"` / `autocapitalize="off"` / `autocorrect="off"`。
   手机输入法默认句首大写 + 自动纠错，会**静默改坏脚本内容**。
-- **≤768px 内容区字号提到 16px**：`index.html` 的 viewport 没有 `maximum-scale`（也不该加），
-  14px 输入区在 iOS 上聚焦会自动放大整页。
+- **≤768px 内容区字号提到 16px**：14px 输入区在 iOS 上聚焦会自动放大整页。
+  `index.html` 的 viewport 不写 `maximum-scale`（安卓上会真的禁掉双指缩放）；v3.3.3 起 `main.ts` 只对 iOS 运行时追加
+  `maximum-scale=1.0` 挡住全站的聚焦放大（iOS 10 起用户仍能双指缩放，见 `design-system.md` §5「iOS 聚焦输入框自动放大」）。
+  这条 16px 照留：它不依赖 UA 判定，也更易读，别因为有了 `maximum-scale` 就删掉。
 - 这两条不必往 Monaco 侧补：它是自绘编辑器，正文字号来自 JS 的 `fontSize`、不吃容器 CSS `font-size`；
   而且它**永远不会被发到触摸设备上**（`auto` 硬回落，显式选 `monaco` 的用户是自己做的选择）。
 
@@ -1147,7 +1149,8 @@ const currentChannelFields = computed(() =>
 - 可滚动祖先由 `findScrollContainer` 从行往上找第一个 `overflow-y: auto|scroll` 且 `scrollHeight > clientHeight` 的元素，
   找到一个就停：≥769 是 `.sidebar-tree`；**≤768 是外层 `.layout-main`**（`.dd-fixed-page` 只在 ≥769 定高，
   手机上侧栏随内容撑高、`.sidebar-tree` 根本不滚）。可见区取容器与 `window.innerHeight` 的交集
-  （演示站顶部横幅把 `.layout-main` 底边推出了窗口）。
+  （不能假定外壳恰好等于视口。v3.3.3 之前演示站横幅没让出高度，`.layout-main` 底边落在窗口外 34px；
+  `banner.ts` 的补丁加上 `!important` 后已修，交集照留，代码不用动）。
 - `behavior: smooth && !shouldReduceMotion() ? 'smooth' : 'auto'`：`global.scss` 的减少动效只压得住 CSS `scroll-behavior`，
   管不到 JS 显式传的 `smooth`。侧栏「重新可见」那次固定瞬时滚动（卡片刚播完动画，再接平滑滚动显得拖沓）。
 - 量位置前等布局落定：`nextTick` + 一个宏任务；再每 16ms 查树里还有没有 `.el-collapse-transition-enter-active / -leave-active`

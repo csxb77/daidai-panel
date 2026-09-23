@@ -3762,14 +3762,16 @@ go test ./service -run "^TestSchedulerV2AddJobSkipsTasksPendingDisable$" -count=
 
 ### 1. Scope / Trigger
 
-- 触发：修改 `server/service/node_abi_rebuild.go`、`server/service/python_runtime.go` 的模块版迁移、`Magisk/service.sh` 的 deps 快照回填、`Magisk/customize.sh` 的运行时版本，或调整启动钩子顺序时必须看本节。
-- 原因：模块刷新版 / Docker 换镜像会换掉容器里的 Python 与 Node，但 `deps/` 原样保留。旧记录指向已不存在的解释器、旧 ABI 的原生扩展加载失败，用户看到的都是「定时任务突然报 ModuleNotFoundError / NODE_MODULE_VERSION 不匹配」。
+- 触发：修改 `server/service/node_abi_rebuild.go`、`server/service/python_libc_repair.go`、`server/service/python_runtime.go` 的模块版迁移、`Magisk/service.sh` 的 deps 快照回填、`Magisk/customize.sh` 的运行时版本、`server/handler/deps.go` 的卸载命令，或调整启动钩子顺序时必须看本节。
+- 原因：模块刷新版 / Docker 换镜像会换掉容器里的 Python 与 Node，但 `deps/` 原样保留。旧记录指向已不存在的解释器、旧 ABI 的原生扩展加载失败、按另一种 C 库编译的扩展加载失败，用户看到的都是「定时任务突然报 ModuleNotFoundError / NODE_MODULE_VERSION 不匹配 / `libc.musl-x86_64.so.1: cannot open shared object file`」（#150）。
 
 ### 2. Signatures
 
 - `service.ApplyMagiskPythonRuntimeMigrationOnStartup()`：`appboot.go` 中挂在 `ApplySinglePythonRuntimePolicyOnStartup()` 之后、`MergeDuplicatePythonDependencies()` 之前。
 - `service.RebuildNodeDependenciesIfABIChanged()`：`main.go` 中挂在 `verifyInstalledDeps()` 之后。
 - 标记文件：`<Data.Dir>/deps/nodejs/.daidai-node-abi`，内容为 `process.versions.modules`（常量 `nodeABIMarkerFileName`）。
+- `service.RepairPythonPackagesForLibcChange()`（v3.3.3，#150）：`main.go` 中挂在 `RebuildNodeDependenciesIfABIChanged()` 之后，只在 Linux 执行，整个过程放后台 goroutine。
+- 标记文件：`<venv>/.daidai-python-libc`（即 `<Data.Dir>/deps/python/<版本>/.daidai-python-libc`），内容为 `musl` 或 `glibc`（常量 `pythonLibcMarkerFileName`）。
 
 ### 3. Contracts
 
@@ -3781,6 +3783,12 @@ go test ./service -run "^TestSchedulerV2AddJobSkipsTasksPendingDisable$" -count=
 - 只在 Linux 执行：换 Node 大版本只发生在 Magisk 模块与 Docker 镜像；Windows / 二进制版用户自己管理 Node。
 - **标记必须与它描述的二进制同源**：`Magisk/service.sh` 开机用 `cp -rf` 回填宿主 deps 快照（不删多余文件，快照每 10 分钟才刷新），回填后若快照里没有该标记，就要删掉容器里的标记。否则「重建完写了新标记 → 10 分钟内重启 → 旧二进制被盖回、新标记还在」会让面板再也不重建。`magisk_assets_test.go` 有静态断言锁这段位置与写法。
 - 状态一律不改：无论重建成败都不碰依赖记录的 `status`。
+- **Python 跨 C 库（musl ↔ glibc）只修 RECORD 归属得到的发行包**：Alpine 与 Debian 镜像的 Python 装在同一路径、同一版本，数据卷里的 venv 照样能跑，venv 健康检查（版本号 + `pip --version`）与启动校验（`pip show` 在不在）都看不出问题，`pip install` 对「已安装」的包直接跳过，所以必须由面板在「知道 C 库变了」时主动 `pip install --force-reinstall --no-deps <name>==<version>`（这里的 `--no-deps` 是 pip install 的合法选项）。
+  - 判**当前** C 库看 venv 背后真实解释器（`filepath.EvalSymlinks`）的 ELF `PT_INTERP`：含 `ld-musl-` 为 musl、含 `ld-linux` 为 glibc，判不出就跳过。**不要**看解释器的 `DT_NEEDED`（musl 版 python-build-standalone 解释器 NEEDED 的是 `libc.so` 而不是 `libc.musl-*`），也不要看 `/lib/ld-musl-*` 在不在（Debian 装了 musl 包就会误判，把所有 glibc 扩展当成外来的反复重装）。
+  - 判**外来**扩展看 site-packages 下 `*.so` 的 `DT_NEEDED`（`debug/elf` 的 `ImportedLibraries`）：当前 glibc 时找 `libc.musl-*` 或 `libc.so`，当前 musl 时找 `libc.so.6`。
+  - 用 `encoding/csv` 解析 `*.dist-info/RECORD` 归属到发行包，名字与版本取自 dist-info 目录名（按最后一个 `-` 切）；不属于任何 RECORD 的孤儿文件只记日志、不处理（面板不知道该装什么）。逐包执行 pip：一条命令里任何一个包失败会整批不装。不整个重建 venv：面板没登记的包（终端手动装的、传递依赖）会全丢，重装窗口里任务大面积 `ModuleNotFoundError`。
+  - 标记放 venv 目录里：venv 被隔离重建时标记跟着消失，与它描述的 site-packages 同源，不需要像 Node 那样改 `Magisk/service.sh`。**全部成功才写标记**，有失败就不写、下次启动再试 —— 与 Node「重建失败也写标记」相反，因为 pip 失败多半是开机时网络未通这类暂时问题，而面板的重装按钮对这种包是空操作，不自动重试用户就没有出路。依赖记录的 `status` 一律不改。
+- **pip uninstall 没有 `--no-deps`**：它本来就不删依赖，带上这个选项 pip 在参数解析阶段就以退出码 2 退出、一个包都不卸。`BuildPipUninstallArgs` / `NewPipUninstallCommandForPythonVersion` 刻意不留「额外选项」参数；强制 / 批量卸载（先删记录、后台卸载）失败时必须把输出末尾写进面板日志，不能无声失败。
 
 ### 4. Validation & Error Matrix
 
@@ -3791,24 +3799,30 @@ go test ./service -run "^TestSchedulerV2AddJobSkipsTasksPendingDisable$" -count=
 - 找不到 npm → warn 日志、**不写标记**（根本没尝试过重建）。
 - 重建失败 / 重建后仍加载失败 → 写标记 + warn 日志提示到依赖管理里重装（同一 ABI 不再自动重试，避免没有编译链的精简镜像每次开机重跑）。
 - 迁移侧：非模块运行态、`DAIDAI_PYTHON_VERSION` 为空或不在 3.10–3.12、当前版本探测不到解释器 → 一律不动任何记录。
+- Python C 库侧：非 Linux / venv 不存在 / 解释器 C 库判不出 → 不做事、不写标记；标记与当前 C 库相同 → 不扫描；没有外来 `.so`（或外来的全是孤儿文件）→ 写标记、不跑 pip；有包重装失败 → warn 日志（提示删除 `deps/python/<版本>` 后重启可重建）、**不写标记**。
 
 ### 5. Good/Base/Bad Cases
 
 - Good：Alpine 模块从 3.18（Python 3.11）刷到 3.23（Python 3.12），3.11 的依赖与任务被迁到 3.12 并由启动校验重装；带原生扩展的包里只有加载失败的那个被 `npm rebuild`。
 - Base：Docker 换镜像后 ABI 变了，但所有原生扩展都是 N-API、照常加载 → 只写标记，不动任何包。
 - Bad：把「比当前新的版本」也迁走（Debian flavor 上把用户选的 3.12 降成 3.11）；对全部包无差别 `npm rebuild`；重建失败后仍宣称已修复；标记写在 `deps/` 下却不处理快照回填。
+- Good：Docker 从 `latest`（Alpine）换到 `debian`，数据卷里 musl 版 `pycryptodome` 报 `libc.musl-x86_64.so.1` 找不到 → 下次启动只重装 `pycryptodome==3.23.0` 这一个包，纯 Python 包一个不碰。
+- Bad：只按 ABI 号 / 解释器版本判断运行时变了没有，漏掉 musl ↔ glibc（两个镜像 Python 同版本同路径、Node 同为 24，ABI 号都不变）。
+- Bad：`pip uninstall -y --no-deps <name>` —— 选项不存在，退出码 2、什么都没卸；强制 / 批量卸载又是先删记录，v1.3.0 起多年「只删了记录」没人发现。当年的单测还把 `--no-deps` 断言成必须存在，把 bug 钉成了契约（#150 反转）。
 
 ### 6. Tests Required
 
 - 迁移：3.11 缺失 → 依赖 / 任务 / 默认值迁到 3.12 并与既有同名依赖合并；3.11 仍可用 → 不动；比当前新的版本 → 不动；非模块态 → 不动；连续执行两次结果一致且 `updated_at` 不变。
 - Node：ABI 一致不做事；无包 / 无原生扩展 → 写标记且不探测；都能加载 → 不重建；部分失败 → 只把失败包的 name 传给 rebuild（覆盖 `@scope`、嵌套 `node_modules`、同名去重）；找不到 npm → 不写标记；重建失败 → 写标记且依赖表逐字段不变；软链接包不被收集；`nodeABIRebuildSupported` 的平台判定。测试注入探测与命令构造，不真跑 node / npm。
 - 静态门禁：`magisk_assets_test.go` 断言 `service.sh` 的标记删除位于快照回填之后，且文件名与 Go 常量一致。
+- Python C 库（`python_libc_repair_test.go`，注入平台、解释器 C 库判定、`.so` 的 NEEDED 读取与 pip 命令构造，不读真 ELF、不真跑 pip）：标记相同不扫描；无外来 `.so` 写标记不跑 pip；同一发行包多个外来 `.so` 只修一次；两个包各修一次且健康包不动；当前 musl 时 glibc 扩展算外来；一个包失败其余照跑且不写标记；孤儿文件只记日志；RECORD 路径带逗号被加引号；C 库判不出 / venv 不存在 / 非 Linux 什么都不做。`startup_wiring_test.go` 钉住接线顺序。
+- 卸载参数：`TestBuildPipUninstallArgsDropsUserFlag` 逐项断言完整参数 `uninstall -y --break-system-packages requests`，多塞任何选项都会变红。
 - 修改后至少运行：
 
 ```bash
 cd server
-go test ./service -run "MagiskPython|NodeABI|NodeDependencies|NpmRebuild|StartupWiring" -count=1
-go test ./handler -run "Magisk|NodeVersion" -count=1
+go test ./service -run "MagiskPython|NodeABI|NodeDependencies|NpmRebuild|PythonLibc|PipUninstall|MainWires" -count=1
+go test ./handler -run "Magisk|NodeVersion|Dependency" -count=1
 ```
 
 ### 7. Wrong vs Correct
