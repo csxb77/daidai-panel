@@ -433,7 +433,8 @@ a {
 // 🔴 遮罩只有 24% 暗度 + 1.5px 模糊，压不住底下的内容（v3.3.2 / issue #144）：
 // 任何没铺满视口的弹窗，移动端那条 sticky 顶栏都会从遮罩后面清晰透出来，观感上就是「顶栏还在占地方」。
 // 所以移动端不能指望遮罩去挡顶栏，必须靠弹窗自己铺满——见文件末尾 ≤768 媒体查询里的 `.el-dialog` 整屏规则。
-// 同理，`.layout-main { z-index: 21 }` 只解决「谁在上面」，解决不了「弹窗没盖到那块区域」。
+// 层级不归这里管：v3.3.3（issue #148）起移动端 .layout-main 不再自成层叠上下文（见 MainLayout.vue），
+// 原地渲染的遮罩直接在根上下文里用 EP 的 2000+ 压过顶栏；整屏规则只管几何，解决的是「弹窗没盖到那块区域」。
 .el-overlay {
   background-color: rgba(15, 23, 42, 0.24) !important;
   backdrop-filter: blur(1.5px);
@@ -2515,7 +2516,8 @@ html.dark {
 // 页面 scoped 里不要再各写一份同类样式。类名与规格是跨页面的契约，改之前先全仓 grep 使用方。
 // 🔴 只新增、不改上面的旧类：.dd-mobile-card__field / __title / __actions / __grid 被 13 个文件共用
 //    （含本期不改的设置页卡片、users、notifications、open-api），新布局一律用这里的新类。
-// 🔴 横向滚动行一律不要加 -webkit-overflow-scrolling: touch（iOS 上弹窗被顶栏盖住的根因，见 MainLayout.vue）。
+// 🔴 横向滚动行一律不要加 -webkit-overflow-scrolling: touch（WebKit 会把它强制成层叠上下文，
+//    v3.3.0 iOS 上弹窗被顶栏盖住就是它挂在 .layout-main 上造成的，见 MainLayout.vue 的 F1）。
 // 圆角只吃角色令牌 --dd-radius-button / --dd-radius-card，不写死像素。
 // .dd-mobile-bleed（批量栏 .dd-mobile-batch-bar 与它共用几何）只在 ≤768 生效，写在文件后部的移动端媒体查询里。
 // 🔴 类名里的 bleed（出血/贴边）在 v3.3.2 / issue #144 之后已经名不副实：这几条横栏改回了跟随页面 12px 留白，
@@ -2881,7 +2883,8 @@ html.dark {
   // 移动端一律铺满整屏，不再区分 is-fullscreen（v3.3.2 / issue #144）。原先这里只管宽度（92vw）不管高度，
   //   于是那 6 个没绑 :fullscreen 的弹窗在手机上是「92vw 悬浮小窗」，顶栏整条露在它上面。
   // 为什么光靠层级不够：遮罩只有 24% 暗度 + 1.5px 模糊（见 .el-overlay），没铺满的弹窗背后那条 54px sticky 顶栏
-  //   会清清楚楚透出来；.layout-main 的 z-index:21 只解决「谁在上面」，解决不了「弹窗没盖到那块区域」。
+  //   会清清楚楚透出来。层级由遮罩在根上下文里的 2000+ 压过顶栏（20）保证（v3.3.3 起 .layout-main 不再自成
+  //   层叠上下文，见 MainLayout.vue），这条规则只管几何，解决的是「弹窗没盖到那块区域」。
   // 为什么不再留 .el-dialog:not(.is-fullscreen) 分支：两支取值现在完全一样，分支没有意义。原先那条推理
   //   （非全屏弹窗会回落到组件自己写死的 600px / 1100px 而在窄屏溢出）依然成立，只是改由这条无差别的 100% 兜住。
   // 🔴 高度用 100% 不用 100dvh：包含块是 EP 原生的 .el-overlay-dialog（position:fixed + 四边 0），100% 即视口高。
@@ -2914,6 +2917,26 @@ html.dark {
     .el-dialog__footer {
       padding: 10px 16px 14px;
     }
+  }
+
+  // 🔴 弹窗 / 抽屉开着时锁住真正在滚的 .layout-main（v3.3.3 / issue #148 下半「滑的是背后的页面」）。
+  // 移动端整页滚的是 .layout-main（MainLayout.vue），不是 body；EP 的 lock-scroll 只给 body 加 overflow:hidden，锁不到它。
+  //   弹窗原地渲染在 .layout-main 里，iOS 上手指落在弹窗不可滚的区域（标题栏、表单标签、底栏，或弹窗 body 已滚到头）时，
+  //   手势会交给背后的列表：弹窗纹丝不动、列表在滚。Chromium 按包含块链分派滚动，模拟器里复现不了。
+  // 为什么用 :has 而不挂在 body 的 el-popup-parent--hidden 类上：
+  //   ① tasks 页一批弹窗是 :lock-scroll="false"（v3.3.3 时 9 个，v2.1.6 为修桌面日志弹层打开时表格右移而关掉），
+  //      它们根本不给 body 加类；
+  //   ② 弹窗开着时切路由（手机上就是侧滑返回），keep-alive 停用旧页后这个类会残留在 body 上（实测），
+  //      挂在它上面会把新页面的列表锁死。:has 只看当前 DOM 里有没有显示中的遮罩，没有残留问题。
+  // 为什么用 hidden 不用 clip：hidden 在 CSS 上仍算滚动容器，scrollTop 原样保留，关弹窗后列表停在原位置；
+  //   clip 不再是滚动容器，位置会丢。
+  // 顺带的第三重保险：hidden 之后用户滚不动它，WebKit 也不再把它当可触摸滚动的容器，弹窗开着期间又少了一个
+  //   bug 160953（「可滚动 + 层叠上下文」的容器裁剪 fixed 后代，见 MainLayout.vue）的触发条件——
+  //   前两重是 .layout-main 去掉 z-index、手机上撤掉 body 的 transform（public/assets/optimization.css）。
+  // [style*="display: none"] 对的是 EP 遮罩关闭后的 v-show；teleport 到 body 的弹窗与确认框不在这里面，由 EP 的 body 锁管。
+  // 特异性 (0,3,0) 高于 MainLayout 的 scoped `.layout-main[data-v]`（(0,2,0)），不需要 !important。
+  .layout-main:has(.el-overlay:not([style*="display: none"])) {
+    overflow-y: hidden;
   }
 
   // F2（v3.3.1，issue #143）：移动端弹窗的关闭入口统一放到右下角 footer，有 footer 的弹窗隐藏右上角 ×。

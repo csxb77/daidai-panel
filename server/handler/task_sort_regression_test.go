@@ -774,7 +774,7 @@ func TestTaskListSortsByStatusWithoutStatusGrouping(t *testing.T) {
 }
 
 // 豁免的判据是「**第一条**规则是 status」，不是「任意一条规则里有 status」。
-// status 当次级 tie-break 时（先按 cron 表达式、表达式相同再按状态），
+// status 当次级 tie-break 时（先按定时规则、每天时刻相同再按状态），
 // 先分区、再在区内 tie-break 才是对的：这时禁用任务仍然要整体沉到最后。
 // 三条任务的 cron 完全相同，所以第一条规则一定打平、必然落到 status 这条 ——
 // 判据要是写成「任意一条含 status」，这里就会变成全局按状态升序、禁用任务冒到第一行。
@@ -863,6 +863,75 @@ func TestTaskListKeepsPinnedTasksFirstWhenSortingByStatus(t *testing.T) {
 			if gotNames[i] != want {
 				t.Fatalf("%s：expected order %v, got %v", tc.direction, tc.want, gotNames)
 			}
+		}
+	}
+}
+
+// 「定时规则」（cron_expression）排序按一天之内最早一次执行的时刻排（issue #151），不再按表达式字符串排。
+// 按字符串排时 `0 0 15 * * *` 会排在 `0 0 8,20 * * *` 前面（'1' < '8'），
+// 同是 09:00 的 5 段 `0 9 * * *` 与 6 段 `0 0 9 * * *` 也被拆到两头 —— 这两处都是本用例要钉住的。
+//
+// 时刻只取决于规则、与「现在」无关，所以可以写死完整顺序（不像 next_run_at 那条只能断言非递减）。
+// 同时钉住排序的通用契约：置顶区在最前、禁用分区在最后（禁用任务照样按时刻排）；
+// 手动任务没有时刻，沉到启用区末尾且不随 asc/desc 翻转；时刻相同交给默认序（list_order），也不随方向翻转。
+func TestTaskListSortsByCronTimeOfDay(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "task-cron-time-operator", "operator")
+	accessToken := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	tasks := []*model.Task{
+		{Name: "pinned-2000", Command: "task p.py", CronExpression: "0 0 20 * * *", Status: model.TaskStatusEnabled, IsPinned: true},
+		{Name: "at-1500", Command: "task a.py", CronExpression: "0 0 15 * * *", Status: model.TaskStatusEnabled},
+		{Name: "at-0800-2000", Command: "task b.py", CronExpression: "0 0 8,20 * * *", Status: model.TaskStatusEnabled},
+		// 两条 09:00 用 list_order 定好先后：时刻相同返回 0、回落默认序，所以升序降序里都是 6 段在前。
+		{Name: "at-0900-5seg", Command: "task c.py", CronExpression: "0 9 * * *", Status: model.TaskStatusEnabled, ListOrder: 20},
+		{Name: "at-0900-6seg", Command: "task d.py", CronExpression: "0 0 9 * * *", Status: model.TaskStatusEnabled, ListOrder: 10},
+		// 每 5 分钟：0 点整也会跑，时刻算 00:00。
+		{Name: "every-5min", Command: "task e.py", CronExpression: "0 */5 * * * *", Status: model.TaskStatusEnabled},
+		{Name: "manual", Command: "task f.py", CronExpression: "", TaskType: model.TaskTypeManual, Status: model.TaskStatusEnabled},
+		{Name: "disabled-0600", Command: "task g.py", CronExpression: "0 0 6 * * *", Status: model.TaskStatusDisabled},
+		{Name: "disabled-2200", Command: "task h.py", CronExpression: "0 0 22 * * *", Status: model.TaskStatusDisabled},
+	}
+	for _, task := range tasks {
+		if err := database.DB.Create(task).Error; err != nil {
+			t.Fatalf("create task %q: %v", task.Name, err)
+		}
+	}
+
+	cases := []struct {
+		direction string
+		want      []string
+	}{
+		{direction: "asc", want: []string{
+			"pinned-2000",
+			"every-5min", "at-0800-2000", "at-0900-6seg", "at-0900-5seg", "at-1500", "manual",
+			"disabled-0600", "disabled-2200",
+		}},
+		{direction: "desc", want: []string{
+			"pinned-2000",
+			"at-1500", "at-0900-6seg", "at-0900-5seg", "at-0800-2000", "every-5min", "manual",
+			"disabled-2200", "disabled-0600",
+		}},
+	}
+	for _, tc := range cases {
+		sortJSON := fmt.Sprintf(`[{"field":"cron_expression","direction":"%s"}]`, tc.direction)
+
+		// 按页取、再拼起来：排序是全表排好再切片，第 2 页必须紧接第 1 页，不能每页各排各的。
+		gotNames := make([]string, 0, len(tc.want))
+		for page := 1; page <= 3; page++ {
+			rec := performRequest(engine, http.MethodGet,
+				fmt.Sprintf("/api/v1/tasks?page=%d&page_size=4&sort_rules=%s", page, url.QueryEscape(sortJSON)),
+				map[string]string{"Authorization": "Bearer " + accessToken})
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s 第 %d 页：expected status 200, got %d: %s", tc.direction, page, rec.Code, rec.Body.String())
+			}
+			gotNames = append(gotNames, taskListNamesInOrder(t, rec)...)
+		}
+
+		if strings.Join(gotNames, ",") != strings.Join(tc.want, ",") {
+			t.Fatalf("%s：expected order %v, got %v", tc.direction, tc.want, gotNames)
 		}
 	}
 }

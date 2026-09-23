@@ -28,7 +28,7 @@ MCP 默认关闭。在面板 **系统设置 → MCP 服务** 里：
 
 | 权限范围 | 对应的工具 |
 |---|---|
-| `tasks` | list_tasks、get_task、get_task_log、run_task、stop_task、set_task_enabled、batch_task_action、create_task、update_task |
+| `tasks` | list_tasks、get_task、get_task_log、run_task、stop_task、set_task_enabled、batch_task_action、create_task、update_task、batch_set_task_notify |
 | `logs` | list_logs、get_log |
 | `envs` | list_envs、export_envs、create_env、update_env、delete_env、batch_env_action、import_envs |
 | `scripts` | list_scripts、get_script_tree、read_script、list_script_versions、save_script、run_script、run_code、delete_script、rename_script、move_script、copy_script、batch_delete_scripts、rollback_script |
@@ -188,6 +188,7 @@ stdout 只输出 MCP 协议消息，就绪提示与错误都写到 stderr。
 | `batch_task_action` ⚠️ | 批量 enable / disable / run / stop / pin / unpin / delete（delete 不删脚本文件） |
 | `create_task` | 新建任务（名称、命令、定时规则、类型、超时、标签、重试、通知等），建好即启用 |
 | `update_task` ⚠️ | 按 ID 修改任务，只改传入的字段；脚本改名 / 移动后用它同步任务命令 |
+| `batch_set_task_notify` ⚠️ | 批量打开 / 关闭失败、成功、终止通知，只改传入的开关、不改通知渠道；`ids` 指定任务，或 `all: true` 改全部任务；已在排队的那一次执行仍用旧设置 |
 | `create_env` / `update_env` ⚠️ / `delete_env` ⚠️ | 新建、修改、删除环境变量 |
 | `batch_env_action` ⚠️ | 批量 enable / disable / delete 环境变量 |
 | `import_envs` ⚠️ | 批量导入：`merge`（默认）覆盖「名称 + 备注」相同的变量、其余新增；`replace` 先删除全部现有变量再导入。导入前先校验变量名，并拒绝遮蔽后的值 |

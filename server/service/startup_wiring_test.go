@@ -114,3 +114,15 @@ func TestMainWiresNodeABIRebuildAfterDependencyVerification(t *testing.T) {
 		"service.RebuildNodeDependenciesIfABIChanged",
 	)
 }
+
+// main：Python 跨 C 库修复（#150）接在 Node ABI 重建之后。删掉它，从 Alpine 换到 Debian 镜像后，
+// 数据卷里按 musl 编译的原生扩展会一直加载不了，面板上的重装按钮也修不好（pip 对已安装的包直接跳过）。
+func TestMainWiresPythonLibcRepairAfterNodeABIRebuild(t *testing.T) {
+	calls := collectCallNamesInFunc(t, "../main.go", "main")
+	assertStartupCallOrder(t, "main", calls,
+		"appboot.InitWithConfig",
+		"verifyInstalledDeps",
+		"service.RebuildNodeDependenciesIfABIChanged",
+		"service.RepairPythonPackagesForLibcChange",
+	)
+}

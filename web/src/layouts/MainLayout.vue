@@ -1320,21 +1320,28 @@ async function loadVersion() {
 
   .layout-main {
     overflow-y: auto;
-    // 🔴 F1（v3.3.1，issue #143）：这里原来还有一条 -webkit-overflow-scrolling: touch，已删，不要加回来。
-    // 本项目的 el-dialog / el-drawer 默认【不 teleport】（EP 2.13.5 appendToBody 默认 false），
-    // 都原地渲染在 .layout-main 里面。iOS WebKit 会把「可滚动 + touch 滚动」的元素强制变成
-    // z-index:0 的层叠上下文，于是弹窗遮罩的 z-index 2000+ 只在这个上下文内部有效；
-    // 在根上下文里 .layout-main 排在 z-index 20 的 sticky 顶栏之下，全屏弹窗的标题栏和右上角 ×
-    // 被顶栏整块盖住、点不到。Chromium 不认这条属性，所以 DevTools 模拟复现不了。
-    // iOS 13 起 overflow 滚动默认就带惯性，构建目标 Safari 16，删掉没有任何损失。
+    // 🔴 F1（v3.3.1 #143 → v3.3.3 #148）：这个滚动容器在移动端【禁止】带任何会形成层叠上下文的属性——
+    //   z-index、transform、filter、opacity 动画、will-change、contain、isolation 一律不许加，
+    //   也不许加回 -webkit-overflow-scrolling: touch。
+    // 原因：本项目的 el-dialog / el-drawer 默认【不 teleport】（EP 2.13.5 appendToBody 默认 false），
+    //   遮罩（position:fixed）原地渲染在 .layout-main 里面。iOS WebKit 有个至今未修的缺陷（bug 160953）：
+    //   「可滚动 + 自成层叠上下文」的容器会把 fixed 后代的合成层一起裁进自己的矩形，而命中测试不受影响。
+    //   iPhone 上表现为：弹窗顶部被横幅 + 顶栏「挡住」一截，点那一截却点不到顶栏（点击已经落在弹窗上）。
+    //   这不是 z-index 谁大谁小的问题，是弹窗在那块区域根本没被画出来。
+    //   Chromium 按包含块链裁剪，DevTools 设备模拟用的也是 Blink，所以桌面上怎么都复现不出来。
+    // 三版都在往这个触发条件上撞，别再踩第四次：
+    //   - v3.3.0：这里有 -webkit-overflow-scrolling: touch，WebKit 把它强制成 z-index:0 的层叠上下文，
+    //     遮罩被困在里面、整体排在顶栏之下，× 点不到（#143）；
+    //   - v3.3.1：删掉了它（对），又加了 position: relative; z-index: 21 当「第二道保险」（错）：
+    //     点击层级对了，画面仍被裁进内容区（#144）；
+    //   - v3.3.2：只在 global.scss 加了弹窗整屏的几何规则，对裁剪没有作用，所有原地弹窗照旧被裁（#148）。
+    // v3.3.3 起这里不成层叠上下文：遮罩直接在根上下文里用 EP 的 2000+ 和顶栏（20）、演示横幅（20）比，天然在上面。
+    //   position: relative 一起删了：它只是为了让 z-index 生效才加的；页面里绝对定位元素的包含块是 .route-shell
+    //   （自带 position: relative），不受影响。
+    // 同一件事的另两处：global.scss 在弹窗开着时把这里切成 overflow-y: hidden（锁住背后的列表）；
+    //   public/assets/optimization.css 在手机上撤掉 body 的 transform。
+    // iOS 13 起 overflow 滚动默认就带惯性，构建目标 Safari 16，用不着 -webkit-overflow-scrolling。
     //
-    // 下面 position + z-index 是第二道保险：显式把内容区整体排在顶栏（20）之上，
-    // 不再依赖「WebKit 会不会把它当层叠上下文」这个推断。正常文档流里两者不重叠，
-    // 只有内联弹窗 / 抽屉的 fixed 遮罩会越过顶栏，这正是想要的。
-    // 顶栏自己的下拉菜单、ElMessage / ElMessageBox 都 teleport 到 body（z 2000+），不受影响；
-    // position:relative 也不改变后代 fixed 元素的包含块（没有引入 transform / filter / contain）。
-    position: relative;
-    z-index: 21;
     // R1：所有页面第一行离顶栏 12px，统一由这里的上内边距（= --dd-page-gutter-x）提供。
     // issue 说的「上边距改 0」本意是去掉工具栏上外边距与这里的上内边距叠出来的双倍空隙，
     // 所以归零的是 .dd-mobile-toolbar / .dd-mobile-batch-bar 的上外边距（global.scss），不是这里 ——

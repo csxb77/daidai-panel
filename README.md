@@ -380,6 +380,8 @@ docker compose -f docker-compose.debian.yml up -d
 docker build --build-arg VERSION=dev -f Dockerfile.debian -t daidai-panel:debian-local .
 ```
 
+Alpine 与 Debian 镜像的 C 库不同（musl / glibc）。沿用同一个数据卷切换镜像时，之前装好的 Python 原生扩展（如 `pycryptodome`）在新镜像上会加载失败，报 `libc.musl-x86_64.so.1: cannot open shared object file` 之类的错误，而且在面板里重装也修不好。`v3.3.3` 起面板启动时会自动找出链接到另一种 C 库的 Python 包，在后台按原版本重装，面板日志里能看到处理结果。更早的版本请删除数据目录下的 `deps/python/<版本>`（Docker 默认是 `/app/Dumb-Panel/deps/python/3.12`）后重启容器，面板会重建 Python 环境，启动校验会自动重装已登记的依赖。
+
 本地构建时，`PYTHON_RUNTIME_MODE` 决定单版本或三版本，`PYTHON_RUNTIME_VERSION` 决定单版本镜像的 Python 版本，`INSTALL_FULL_TOOLS=true` 决定是否安装完整开发工具。下面的命令可以直接运行：
 
 ```bash

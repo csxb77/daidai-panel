@@ -10,8 +10,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// 任务的新建与修改（#139）：对应 POST /tasks、PUT /tasks/:id。
-// 运行、停止、启停与批量操作仍在 tools_write.go。
+// 任务的新建与修改（#139）：对应 POST /tasks、PUT /tasks/:id；
+// 批量设置通知开关（#149）：对应 PUT /tasks/batch/notify。
+// 运行、停止、启停与 PUT /tasks/batch 那组批量操作仍在 tools_write.go。
 func (t *toolset) registerTaskWriteTools(s *mcp.Server) {
 	addWriteTool(s, "create_task", "新建任务",
 		"新建一个任务，建好即启用：task_type 为 cron（默认）时按 cron_expression 定时运行。command 与面板任务的「命令」一样，例如 task demo/sign.py。"+
@@ -20,6 +21,11 @@ func (t *toolset) registerTaskWriteTools(s *mcp.Server) {
 	addWriteTool(s, "update_task", "修改任务",
 		"按 ID 修改任务配置，只改传入的字段（名称、命令、定时规则、类型、超时、标签等），原值被覆盖。脚本改名或移动后，可以用它同步任务的 command。",
 		writeHints{destructive: true, idempotent: true}, t.updateTask)
+	// 会覆盖已有的开关设置，按 quality-guidelines「会覆盖已有数据的也算破坏性」标 destructive。
+	addWriteTool(s, "batch_set_task_notify", "批量设置任务通知",
+		"批量打开或关闭任务的失败 / 成功 / 终止通知，只改传入的开关，不改任务绑定的通知渠道（没绑渠道的任务发到「默认推送」渠道）。"+
+			"用 ids 指定任务，或 all: true 改全部任务（此时忽略 ids）。已经在排队的那一次执行仍用旧设置，下一次执行生效。",
+		writeHints{destructive: true, idempotent: true}, t.batchSetTaskNotify)
 }
 
 // taskFields 是新建与修改共用的可选字段。指针为 nil、切片为 nil 表示没传：
@@ -154,6 +160,45 @@ func (t *toolset) updateTask(ctx context.Context, in updateTaskInput) (any, erro
 		return nil, err
 	}
 	return taskMutationOutput(result), nil
+}
+
+type batchSetTaskNotifyInput struct {
+	IDs             []int64 `json:"ids,omitempty" jsonschema:"任务 ID 列表（1 到 100 个），可从 list_tasks 获得；all 为 true 时不用传"`
+	All             bool    `json:"all,omitempty" jsonschema:"true 表示改全部任务（不受任何筛选影响），此时忽略 ids"`
+	NotifyOnFailure *bool   `json:"notify_on_failure,omitempty" jsonschema:"失败时通知：true 打开、false 关闭，不传则不修改"`
+	NotifyOnSuccess *bool   `json:"notify_on_success,omitempty" jsonschema:"成功时通知：true 打开、false 关闭，不传则不修改"`
+	NotifyOnAbort   *bool   `json:"notify_on_abort,omitempty" jsonschema:"被终止时通知：true 打开、false 关闭，不传则不修改"`
+}
+
+// batchSetTaskNotify 转发到 PUT /tasks/batch/notify（#149）。参数名沿用本包其它批量工具的 ids，
+// 发给面板时换成接口的 task_ids；三个开关用指针，false 也要原样发出去（那是「批量关闭」）。
+// 面板一个任务都没命中时回 404，call 会把它翻成工具错误，不会当成功转述给 Agent。
+func (t *toolset) batchSetTaskNotify(ctx context.Context, in batchSetTaskNotifyInput) (any, error) {
+	body := map[string]any{}
+	setIfPresent(body, "notify_on_failure", in.NotifyOnFailure)
+	setIfPresent(body, "notify_on_success", in.NotifyOnSuccess)
+	setIfPresent(body, "notify_on_abort", in.NotifyOnAbort)
+	if len(body) == 0 {
+		return nil, errors.New("请至少传 notify_on_failure、notify_on_success、notify_on_abort 其中一个")
+	}
+	if in.All {
+		body["all"] = true
+	} else {
+		if len(in.IDs) == 0 || len(in.IDs) > maxBatchTaskIDs {
+			return nil, fmt.Errorf("ids 需要 1 到 %d 个任务 ID；要改全部任务请传 all: true", maxBatchTaskIDs)
+		}
+		for _, id := range in.IDs {
+			if err := requireID("ids 中的任务 ID", id); err != nil {
+				return nil, err
+			}
+		}
+		body["task_ids"] = in.IDs
+	}
+	result, err := t.call(ctx, http.MethodPut, "/tasks/batch/notify", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	return pickFields(result, "message", "success_count"), nil
 }
 
 func taskMutationOutput(result map[string]any) map[string]any {

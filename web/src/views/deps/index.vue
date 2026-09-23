@@ -1576,6 +1576,9 @@ const linuxMirrorManagerText = computed(
 const linuxMirrorDistributionText = computed(
   () => mirrorMeta.value.linux_distribution || "",
 );
+// 这份 Linux 清单连同模板里 pip / npm 两个「快捷选择」下拉，在 APP 的
+// lib/features/deps/views/dep_list_page.dart 里有一份手写副本。增删候选源或挪「(默认)」时两边一起改：
+// APP 那份从首版起半年没同步过，直到 issue #150 才补齐。
 const linuxMirrorOptions = computed(() => {
   const manager = mirrorMeta.value.linux_package_manager;
   const distro = mirrorMeta.value.linux_distribution;
@@ -1604,10 +1607,13 @@ const linuxMirrorOptions = computed(() => {
       return [
         // issue #146 / v3.3.2：默认源换腾讯云，阿里云降为普通候选；
         // 另按 issue 建议补上华为云与天翼云。
-        // 天翼云标「实验性」的原因：Debian 的 security 段由后端 resolveAPTMirrorURI
-        // 自动拼成 <源>-security，而 https://mirrors.ctyun.cn/debian-security
-        // 是否存在至今没能实测（开发机 DNS 被劫持，解析到 fake-ip），
-        // 路径不存在会让 apt-get update 报 E:。等哪天实测过了再把标注去掉。
+        // v3.3.3 / issue #150：天翼云去掉 v3.3.2 加的未验证标注。当初标它，是因为 Debian 的 security 段
+        // 由后端 resolveAPTMirrorURI 自动拼成 <源>-security，而 mirrors.ctyun.cn/debian-security
+        // 在开发机上一直测不通（后来查明是本机 HTTP 代理断连，不是源的问题）。现在的依据：
+        // 用户在 bookworm 容器里用天翼云 apt-get update 与装包全程成功，日志里有
+        // debian-security 的 bookworm-security InRelease；本机绕过代理后也验过 debian、
+        // debian-security、ubuntu 的 InRelease 是真实签名正文，pip 下拉里的天翼云 pypi 能 pip download。
+        // 天翼云没有 Alpine 与 npm 镜像（alpine 路径回的是镜像站首页），apk 档和 npm 下拉都不要加。
         {
           label: "阿里云 Debian",
           value: "https://mirrors.aliyun.com/debian",
@@ -1625,7 +1631,7 @@ const linuxMirrorOptions = computed(() => {
           value: "https://repo.huaweicloud.com/debian",
         },
         {
-          label: "天翼云 Debian (实验性)",
+          label: "天翼云 Debian",
           value: "https://mirrors.ctyun.cn/debian",
         },
       ];
@@ -1644,9 +1650,10 @@ const linuxMirrorOptions = computed(() => {
         value: "https://mirrors.cloud.tencent.com/ubuntu",
       },
       { label: "华为云 Ubuntu", value: "https://repo.huaweicloud.com/ubuntu" },
-      // 天翼云 Ubuntu 只为与 Debian 档保持对称；同样没实测过可达性，标「实验性」
+      // 天翼云 Ubuntu 与 Debian 档对称，#150 起同样去掉未验证标注：本机实测 noble、noble-security、
+      // noble-updates、jammy 的 InRelease 均为真实签名正文（只验到这一步，没在 Ubuntu 容器里实装过包）。
       {
-        label: "天翼云 Ubuntu (实验性)",
+        label: "天翼云 Ubuntu",
         value: "https://mirrors.ctyun.cn/ubuntu",
       },
     ];
@@ -2323,7 +2330,11 @@ async function handleExport() {
     anchor.click();
     document.body.removeChild(anchor);
     window.URL.revokeObjectURL(url);
-    ElMessage.success("依赖清单已导出");
+    // v3.3.3 / issue #150：后端改为按安装时填写的原样导出（不再附带「==>已装版本」），
+    // 提示里点明能直接粘回「新建依赖」，免得用户再手动把版本号补上、把原本没钉版本的依赖钉死。
+    ElMessage.success(
+      "依赖清单已导出（与安装时填写的一致，可直接粘贴回「新建依赖」）",
+    );
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || "导出失败");
   } finally {

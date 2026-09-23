@@ -3,6 +3,7 @@ package service
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -153,31 +154,14 @@ func TestBuildPipInstallArgsKeepsOrder(t *testing.T) {
 
 func TestBuildPipUninstallArgsDropsUserFlag(t *testing.T) {
 	// --user 在 uninstall 时是非法的，必须被剥离；--break-system-packages 仍要保留。
-	got := BuildPipUninstallArgs([]string{"--break-system-packages", "--user"}, "requests", "--no-deps")
-	for _, arg := range got {
-		if arg == "--user" {
-			t.Fatalf("--user should be stripped from uninstall args, got %v", got)
-		}
-	}
-	if got[0] != "uninstall" || got[1] != "-y" {
-		t.Fatalf("uninstall args should start with `uninstall -y`, got %v", got)
-	}
-
-	hasBreak := false
-	hasNoDeps := false
-	hasPkg := false
-	for _, arg := range got {
-		switch arg {
-		case "--break-system-packages":
-			hasBreak = true
-		case "--no-deps":
-			hasNoDeps = true
-		case "requests":
-			hasPkg = true
-		}
-	}
-	if !hasBreak || !hasNoDeps || !hasPkg {
-		t.Fatalf("expected --break-system-packages, --no-deps, requests all present, got %v", got)
+	//
+	// 这条用例以前把 --no-deps 断言成「必须存在」，等于把 #150 的 bug 钉成了契约：pip uninstall 没有
+	// 这个选项（pip 24.0 与 26.1.2 实测都报 `no such option: --no-deps`、退出码 2、一个包都不卸），
+	// 强制 / 批量卸载因此多年只删了记录。本次有实测依据地反转：逐项断言完整参数，多塞任何选项都会变红。
+	got := BuildPipUninstallArgs([]string{"--break-system-packages", "--user"}, "requests")
+	want := []string{"uninstall", "-y", "--break-system-packages", "requests"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("uninstall args mismatch: got=%q want=%q", got, want)
 	}
 }
 

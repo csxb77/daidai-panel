@@ -191,6 +191,8 @@ func TestMutationServerAddsWriteToolsWithAnnotations(t *testing.T) {
 		"update_task", "delete_script", "rename_script", "move_script", "copy_script", "batch_delete_scripts",
 		"run_code", "rollback_script", "update_subscription", "delete_subscription", "batch_env_action",
 		"import_envs", "create_backup", "delete_backup", "restore_backup",
+		// #149：覆盖已有的通知开关设置
+		"batch_set_task_notify",
 	} {
 		if hint := tools[name].Annotations.DestructiveHint; hint == nil || !*hint {
 			t.Errorf("删除类工具 %s 必须标注 destructiveHint: true", name)
@@ -566,6 +568,66 @@ func TestBatchTaskActionValidatesAndForwards(t *testing.T) {
 	body, _ := call.body.(map[string]any)
 	if call.method != http.MethodPut || call.path != "/tasks/batch" || body["action"] != "delete" || !reflect.DeepEqual(body["ids"], []int64{1, 2}) {
 		t.Fatalf("应当以 PUT /tasks/batch 转发（动作小写），实际 %s %s %#v", call.method, call.path, call.body)
+	}
+}
+
+// batch_set_task_notify（#149）：参数不合法时不触达面板；ids 转成接口的 task_ids，
+// 只发送传了的开关（false 也要原样发出），all 为 true 时不带 task_ids；面板回 404 时工具报错。
+func TestBatchSetTaskNotifyValidatesAndForwards(t *testing.T) {
+	fake := &fakeDispatcher{respond: func(call recordedCall) (int, any, error) {
+		body, _ := call.body.(map[string]any)
+		if ids, _ := body["task_ids"].([]int64); len(ids) == 1 && ids[0] == 404 {
+			return http.StatusNotFound, map[string]any{"error": "没有找到要修改的任务"}, nil
+		}
+		return http.StatusOK, map[string]any{"message": "已更新 2 个任务的通知设置", "success_count": 2}, nil
+	}}
+	session := connectTestClient(t, fake, true)
+
+	for _, args := range []map[string]any{
+		{"ids": []int{1, 2}},                                 // 一个开关都没传
+		{"all": true},                                        // all 也要至少传一个开关
+		{"notify_on_failure": true},                          // 没有 ids 也没有 all
+		{"ids": []int{}, "notify_on_failure": true},          // ids 为空
+		{"ids": []int{0}, "notify_on_failure": true},         // 非法 ID
+		{"ids": make([]int, 101), "notify_on_failure": true}, // 超过 100 个
+	} {
+		if result, text := callTool(t, session, "batch_set_task_notify", args); !result.IsError {
+			t.Errorf("非法参数 %v 应当报错，实际 %s", args, text)
+		}
+	}
+	if len(fake.recorded()) != 0 {
+		t.Fatal("参数校验失败时不应调用面板接口")
+	}
+
+	result, text := callTool(t, session, "batch_set_task_notify", map[string]any{
+		"ids": []int{1, 2}, "notify_on_failure": true, "notify_on_abort": false,
+	})
+	if result.IsError {
+		t.Fatalf("合法的批量设置不应失败: %s", text)
+	}
+	call := fake.recorded()[0]
+	want := map[string]any{"task_ids": []int64{1, 2}, "notify_on_failure": true, "notify_on_abort": false}
+	if call.method != http.MethodPut || call.path != "/tasks/batch/notify" || !reflect.DeepEqual(call.body, want) {
+		t.Fatalf("应当以 PUT /tasks/batch/notify 转发、只带传了的开关，实际 %s %s %#v", call.method, call.path, call.body)
+	}
+	if out := decodeObject(t, text); out["message"] != "已更新 2 个任务的通知设置" || out["success_count"] != float64(2) {
+		t.Fatalf("应当返回面板的 message 与 success_count，实际 %v", out)
+	}
+
+	// all 为 true 时忽略 ids，请求体里不带 task_ids。
+	if result, text := callTool(t, session, "batch_set_task_notify", map[string]any{
+		"all": true, "ids": []int{9}, "notify_on_success": true,
+	}); result.IsError {
+		t.Fatalf("all 为 true 的批量设置不应失败: %s", text)
+	}
+	if got := fake.recorded()[1].body; !reflect.DeepEqual(got, map[string]any{"all": true, "notify_on_success": true}) {
+		t.Fatalf("all 为 true 时请求体应当只有 all 与开关，实际 %#v", got)
+	}
+
+	// 一个都没命中时面板回 404，工具必须报错，不能把失败当成功转述。
+	result, text = callTool(t, session, "batch_set_task_notify", map[string]any{"ids": []int{404}, "notify_on_failure": true})
+	if !result.IsError || !strings.Contains(text, "没有找到要修改的任务") {
+		t.Fatalf("面板回 404 时工具应当报错并带上原因，实际 isError=%v: %s", result.IsError, text)
 	}
 }
 

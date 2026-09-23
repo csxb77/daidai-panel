@@ -62,6 +62,9 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		tasks.DELETE("/batch/delete", middleware.RequireRole("operator"), h.BatchDelete)
 		tasks.POST("/batch/run", middleware.RequireRole("operator"), h.BatchRun)
 		tasks.PUT("/batch/add-labels", middleware.RequireRole("operator"), h.BatchAddLabels)
+		// 批量改通知开关（issue #149），支持「选中的任务」与 all=true「全部任务」两种范围。
+		// 复用组上已挂的 OpenAPIAccess("tasks")，不新开 scope；MCP 对应 batch_set_task_notify。
+		tasks.PUT("/batch/notify", middleware.RequireRole("operator"), h.BatchSetNotify)
 		tasks.DELETE("/clean-logs", middleware.RequireRole("operator"), h.CleanLogs)
 		tasks.POST("/import", middleware.RequireRole("operator"), h.Import)
 

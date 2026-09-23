@@ -243,3 +243,71 @@ func (h *TaskHandler) BatchRun(c *gin.Context) {
 	}
 	response.Success(c, gin.H{"message": fmt.Sprintf("已启动 %d 个任务", count), "count": count})
 }
+
+// BatchSetNotify 批量改任务的三个通知开关（issue #149）。
+// 只动 notify_on_failure / notify_on_success / notify_on_abort 三列，传了哪项改哪项；
+// 通知渠道不在这里改，各任务原来绑定的渠道照旧生效。
+// all=true 时忽略 task_ids、改全部任务：网页任务列表只能勾当前页，拿不到全部任务的 id。
+//
+// 刻意单开一个接口，不往 PUT /tasks/batch 里加 action：那个接口对不认识的 action 什么都不做、照样回 200 并计数，
+// 新客户端连老面板时会把「什么都没改」当成功展示。这里老面板没有路由，客户端拿到的是 404。
+//
+// 不用通知调度器：定时触发与手动运行都会现读任务（scheduler_v2.go 的 AddJob 回调与 RunNow），
+// 只有已经入队的那一次仍用入队时的快照，下一次执行就用上新开关，和单个 PUT /tasks/:id 一致。
+func (h *TaskHandler) BatchSetNotify(c *gin.Context) {
+	var req struct {
+		TaskIDs         []uint `json:"task_ids"`
+		All             bool   `json:"all"`
+		NotifyOnFailure *bool  `json:"notify_on_failure"`
+		NotifyOnSuccess *bool  `json:"notify_on_success"`
+		NotifyOnAbort   *bool  `json:"notify_on_abort"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "请求参数错误")
+		return
+	}
+
+	// 用指针区分「没传」和「传了 false」：false 也是一次有效的修改（批量关闭）。
+	updates := map[string]interface{}{}
+	if req.NotifyOnFailure != nil {
+		updates["notify_on_failure"] = *req.NotifyOnFailure
+	}
+	if req.NotifyOnSuccess != nil {
+		updates["notify_on_success"] = *req.NotifyOnSuccess
+	}
+	if req.NotifyOnAbort != nil {
+		updates["notify_on_abort"] = *req.NotifyOnAbort
+	}
+	if len(updates) == 0 {
+		response.BadRequest(c, "请至少设置一项通知开关")
+		return
+	}
+
+	query := database.DB.Model(&model.Task{})
+	if req.All {
+		// GORM 默认拒绝不带条件的整表更新，这里是有意改全部任务（写法同 handler/env.go 清空环境变量）。
+		query = query.Where("1 = 1")
+	} else {
+		if len(req.TaskIDs) == 0 {
+			response.BadRequest(c, "请先选择任务")
+			return
+		}
+		query = query.Where("id IN ?", req.TaskIDs)
+	}
+	// 只改三列布尔值，不用校验 cron、也不用重建调度，一条 UPDATE 就够，不像 Batch 那样逐个 First。
+	result := query.Updates(updates)
+	if result.Error != nil {
+		response.InternalError(c, "批量设置通知失败")
+		return
+	}
+	// RowsAffected 是命中的行数：值本来就相同的任务也算在内，所以它就是「选中 / 全部任务里实际存在的数量」。
+	// 一个都没命中时不回 200：批量接口用 200 表达「全军覆没」，客户端会当成成功。
+	if result.RowsAffected == 0 {
+		response.NotFound(c, "没有找到要修改的任务")
+		return
+	}
+	response.Success(c, gin.H{
+		"message":       fmt.Sprintf("已更新 %d 个任务的通知设置", result.RowsAffected),
+		"success_count": result.RowsAffected,
+	})
+}

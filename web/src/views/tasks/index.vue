@@ -9,7 +9,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 // 移动端工具栏 / 批量栏的按钮走 el-button 的 :icon prop，要的是组件对象而不是全局注册名；
 // PriceTag 全局也没注册（本期约定不改 main.ts）。与全局同名的几个在模板里解析到的是同一个组件，桌面端不受影响。
-import { Sort, Plus, CircleCheck, CircleClose, VideoPlay, VideoPause, PriceTag, Top, Delete, Close } from '@element-plus/icons-vue'
+// Bell 是移动端批量栏「通知」按钮用的（issue #149），同样按这个办法局部引入。
+import { Sort, Plus, CircleCheck, CircleClose, VideoPlay, VideoPause, PriceTag, Top, Delete, Close, Bell } from '@element-plus/icons-vue'
 import TaskForm from './components/TaskForm.vue'
 import LogViewer from './components/LogViewer.vue'
 import TaskDetail from './components/TaskDetail.vue'
@@ -18,6 +19,7 @@ import ViewManager from './components/ViewManager.vue'
 import TaskCronList from './components/TaskCronList.vue'
 import { DEFAULT_CRON_DAILY_MIDNIGHT } from './components/CronInput.vue'
 import BatchAddLabelDialog from './components/BatchAddLabelDialog.vue'
+import BatchNotifyDialog from './components/BatchNotifyDialog.vue'
 import TaskDeleteDialog from './components/TaskDeleteDialog.vue'
 import DdSplitButton from '@/components/ui/DdSplitButton.vue'
 import type { SplitButtonItem } from '@/components/ui/DdSplitButton.vue'
@@ -123,6 +125,8 @@ const pageRootRef = ref<HTMLElement | null>(null)
 const viewManagerRef = ref<InstanceType<typeof ViewManager> | null>(null)
 const nameLabelPrefs = ref<TaskNameLabelPrefs>(readStoredTaskNameLabelPrefs())
 const batchLabelVisible = ref(false)
+// 批量设置通知弹窗（issue #149）。它和添加标签一样直接绑 selectedIds：弹窗是模态的，开着时改不了勾选
+const batchNotifyVisible = ref(false)
 // 删除确认弹窗（单删与批量共用，issue #124）。taskIds 存打开那一刻的快照，而不是直接绑 selectedIds：
 // 弹窗里的预览和最终提交必须针对同一批任务，不能被中途的选中变化带偏。
 const deleteDialogVisible = ref(false)
@@ -152,7 +156,7 @@ const logFilesTaskName = ref('')
 const viewFilters = ref<TaskViewFilter[]>([])
 const viewSortRules = ref<TaskViewSortRule[]>([])
 // 工具栏快捷排序：null 表示走后端默认排序（置顶+状态分组），非空时优先于视图自带排序。
-// 「最后运行 / 下次运行」两列的表头点击排序也写在这一条状态上，不另起一份，
+// 「定时规则 / 最后运行 / 下次运行」三列的表头点击排序也写在这一条状态上，不另起一份，
 // 否则表头箭头与工具栏按钮文案会各说各话。
 const quickSort = ref<{ field: string; direction: 'asc' | 'desc' } | null>(null)
 const canOperateTasks = computed(() => canOperate(authStore.user?.role))
@@ -214,13 +218,16 @@ function isScheduleFault(task: any) {
 
 const hasRunningTasks = computed(() => tasks.value.some(t => t.status === 2))
 
-// 可以点表头排序的两列。表头点击与下拉选项写的是同一条 quickSort 状态，
+// 可以点表头排序的三列。表头点击与下拉选项写的是同一条 quickSort 状态，
 // 这份名单用来判断「当前排序该不该在表头上画箭头」。
-const taskColumnSortFields = ['last_run_at', 'next_run_at']
+const taskColumnSortFields = ['cron_expression', 'last_run_at', 'next_run_at']
 
 // 快捷排序可选项：value 为 null 表示恢复默认排序，其余对应后端 sort_rules 的单条规则。
 // 「最后运行 / 下次运行」四项是表头排序的替代入口：窄桌面（<1600px）「最后运行」整列被 v-if 掉了，
 // 没有这几项的话那档视口下根本点不到这个排序。
+// 「定时规则」两项（issue #151）按每天最早一次执行的时刻排（后端 cron_expression 规则 v3.3.3 起的口径），
+// 与「下次运行」不同：它不随「现在几点」轮转，周一 09:00 与每天 09:00 挨在一起，方便看哪个时段扎堆；
+// 手动 / 开机运行等没有时刻的任务恒排本区最后，不随升降序翻转。移动端卡片没有表头，只能从这里选。
 const quickSortOptions: { key: string; label: string; value: { field: string; direction: 'asc' | 'desc' } | null }[] = [
   { key: 'default', label: '默认排序', value: null },
   { key: 'name_asc', label: '名称 A→Z', value: { field: 'name', direction: 'asc' } },
@@ -231,6 +238,8 @@ const quickSortOptions: { key: string; label: string; value: { field: string; di
   { key: 'last_run_asc', label: '最后运行（最早优先）', value: { field: 'last_run_at', direction: 'asc' } },
   { key: 'next_run_asc', label: '下次运行（最快到来）', value: { field: 'next_run_at', direction: 'asc' } },
   { key: 'next_run_desc', label: '下次运行（最晚到来）', value: { field: 'next_run_at', direction: 'desc' } },
+  { key: 'cron_time_asc', label: '定时规则（每天时刻 早→晚）', value: { field: 'cron_expression', direction: 'asc' } },
+  { key: 'cron_time_desc', label: '定时规则（每天时刻 晚→早）', value: { field: 'cron_expression', direction: 'desc' } },
 ]
 
 // 排序字段的中文名。原来这里是 `field === 'name' ? '名称' : '创建时间'` 的三目，
@@ -279,18 +288,21 @@ let syncingTableSort = false
 /**
  * 把 quickSort 同步到表头箭头。
  *
- * 只有「最后运行 / 下次运行」两列画得出箭头，其余排序（含默认排序、视图自带排序）一律 clearSort()——
+ * 只有「定时规则 / 最后运行 / 下次运行」三列画得出箭头，其余排序（含默认排序、视图自带排序）一律 clearSort()——
  * 不收回去的话表头会一直指着上一次点的那一列，和实际排序对不上。
  * clearSort 内部是 silent 提交，不会触发 @sort-change，可以直接调。
  *
  * ⚠️ 「最后运行」列在窄桌面被 v-if 掉了，此时 el-table 里根本没有这一列，
  *    sort() 找不到列会静默什么都不做（连箭头都不画），所以先判一次列是否真的渲染出来。
+ *    「定时规则」「下次运行」两档桌面都渲染。
  */
 function syncTableSortIndicator() {
   const table = taskTableRef.value
   if (!table) return
   const field = quickSort.value?.field || ''
-  const columnRendered = field === 'next_run_at' || (field === 'last_run_at' && !isNarrowDesktop.value)
+  const columnRendered = field === 'next_run_at'
+    || field === 'cron_expression'
+    || (field === 'last_run_at' && !isNarrowDesktop.value)
   if (taskColumnSortFields.includes(field) && columnRendered) {
     syncingTableSort = true
     table.sort?.(field, quickSort.value?.direction === 'desc' ? 'descending' : 'ascending')
@@ -1427,7 +1439,8 @@ function toggleSelectAllOnPage() {
 /**
  * 移动端工具栏「+」菜单。第一行只放得下搜索框、排序和这一个按钮，所以把这些入口都收进来，移动端不丢功能：
  *   - 新建任务 / 新建视图 / 视图管理：后两项原来在视图分组栏右侧，移动端那两个按钮不再渲染（见 ViewManager.vue）；
- *   - 导入 / 导出 / 清理日志：桌面「⋯」菜单里的三项。
+ *   - 导入 / 导出 / 批量设置通知 / 清理日志：桌面「⋯」菜单里的四项。
+ *     「批量设置通知」（issue #149）放这里是给「没勾选、要改全部任务」用的；勾选后批量栏里另有「通知」按钮。
  * 「新建视图」按 canOperateTasks 收权限：后端 POST /tasks/views 要求 operator，观察者点了只会 403。
  * 分隔线挂在第二组的第一个可见项上，第一组一项都没有时不画（画在菜单顶端像一条多余的横线）。
  * 「导出任务」对所有角色可见，所以这份菜单实际不会为空；为空时整个「+」不渲染只是兜底。
@@ -1442,6 +1455,7 @@ const mobileAddMenuItems = computed<SplitButtonItem[]>(() => {
   const moreGroup: SplitButtonItem[] = [
     { key: 'import', label: '导入任务', visible: op },
     { key: 'export', label: '导出任务', visible: true },
+    { key: 'batchNotify', label: '批量设置通知', visible: op },
     { key: 'cleanLogs', label: '清理日志', visible: op },
   ].filter(item => item.visible)
   return [
@@ -1456,6 +1470,7 @@ function onMobileAddCommand(command: string | number | object) {
   else if (command === 'manageViews') viewManagerRef.value?.openManagementDialog()
   else if (command === 'import') triggerImport()
   else if (command === 'export') void handleExport()
+  else if (command === 'batchNotify') openBatchNotify()
   else if (command === 'cleanLogs') void handleCleanLogs()
 }
 
@@ -1524,6 +1539,19 @@ function openBatchAddLabel() {
 
 function handleBatchLabelSuccess() {
   selectedIds.value = []
+  loadTasks()
+}
+
+// 批量设置通知（issue #149）。不要求先勾选：没勾选时弹窗只能选「全部任务」，
+// 这正是 issue 原话「一键设置全部脚本」的用法（网页勾选只作用于当前页，凑不齐全部任务的 id）。
+function openBatchNotify() {
+  if (!ensureCanOperate()) return
+  batchNotifyVisible.value = true
+}
+
+// 桌面勾选存在 el-table 内部，要走 clearSelection 才能把复选框一起清掉（只清数组复选框不会回弹）
+function handleBatchNotifySuccess() {
+  clearSelection()
   loadTasks()
 }
 
@@ -1651,7 +1679,9 @@ async function handleImport(event: Event) {
          导入用的隐藏 file input 两套各放一份、共用同一个 ref：同一时刻只渲染其中一套，桌面那份的位置保持原样。 -->
     <div v-if="isMobile" class="task-mobile-toolbar">
       <!-- 批量栏：全选 / 取消全选 → 批量按钮（图标 + 短文字）→ 取消（最后）。不显示「已选 N 项」，横向放不下时左右滑动。
-           三个红按钮的相对位置与桌面批量区一致（任意两个不相邻，实心删除不放最外侧），理由见桌面那一支的注释。 -->
+           三个红按钮的相对位置与桌面批量区一致（任意两个不相邻，实心删除不放最外侧），理由见桌面那一支的注释。
+           「通知」（issue #149）只在移动端批量栏里有：这一排能横向滑，多一个按钮不影响布局；
+           桌面批量区没有余量了，那边的入口放在右侧「⋯」菜单里。它插在「标签」「置顶」之间，红按钮仍两两不相邻。 -->
       <div v-if="mobileBatchActive" class="dd-scroll-row dd-mobile-batch-bar">
         <el-button @click="toggleSelectAllOnPage">{{ allPageSelected ? '取消全选' : '全选' }}</el-button>
         <el-button :icon="CircleCheck" @click="handleBatchAction('enable')">启用</el-button>
@@ -1659,6 +1689,7 @@ async function handleImport(event: Event) {
         <el-button :icon="VideoPlay" @click="handleBatchAction('run')">运行</el-button>
         <el-button type="danger" plain :icon="VideoPause" @click="handleBatchAction('stop')">停止</el-button>
         <el-button :icon="PriceTag" @click="openBatchAddLabel">标签</el-button>
+        <el-button :icon="Bell" @click="openBatchNotify">通知</el-button>
         <el-button :icon="Top" @click="handleBatchPin">置顶</el-button>
         <el-button type="danger" :icon="Delete" @click="handleBatchAction('delete')">删除</el-button>
         <el-button :icon="Close" @click="clearSelection">取消</el-button>
@@ -1858,12 +1889,16 @@ async function handleImport(event: Event) {
             </template>
           </el-dropdown>
         </el-tooltip>
+        <!-- 「批量设置通知」（issue #149）放在这里而不进左侧批量区：批量区对有权限的账号常驻 DOM 参与撑高，
+             1280 宽下只剩约 17px 余量，再加一个按钮会让工具栏常年多出一行、表格被压矮一行。
+             放在这里还有一个好处：右区在勾选前后都可见，没勾选时也能直接改「全部任务」。 -->
         <el-dropdown trigger="click">
           <el-button><el-icon><More /></el-icon></el-button>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item @click="handleExport">导出任务</el-dropdown-item>
               <el-dropdown-item v-if="canOperateTasks" @click="triggerImport">导入任务</el-dropdown-item>
+              <el-dropdown-item v-if="canOperateTasks" @click="openBatchNotify">批量设置通知</el-dropdown-item>
               <el-dropdown-item v-if="canOperateTasks" divided @click="handleCleanLogs">清理日志</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -2041,7 +2076,16 @@ async function handleImport(event: Event) {
             </code>
           </template>
         </el-table-column>
-        <el-table-column label="定时规则" :min-width="isNarrowDesktop ? 95 : 70">
+        <!-- 表头可点排序（issue #151）：写法同下方「最后运行 / 下次运行」，sortable="custom" 只出箭头、交给后端排。
+             按每天最早一次执行的时刻比较，不是按表达式字符串；口径见 quickSortOptions 那两项的注释。
+             窄桌面加了排序箭头后，这一格在 101px 以下会折成两行，但按 90:70:95 的比例那时「命令 / 脚本」列
+             （表头要 89px、下限 70）早已折行，整行表头高度不变，所以不需要为它加 nowrap 或调宽；调宽反而会把命令列挤到折行。 -->
+        <el-table-column
+          prop="cron_expression"
+          label="定时规则"
+          :min-width="isNarrowDesktop ? 95 : 70"
+          sortable="custom"
+        >
           <template #default="{ row }">
             <template v-if="row.task_type === 'cron'">
               <TaskCronList
@@ -2244,6 +2288,12 @@ async function handleImport(event: Event) {
       v-model:visible="batchLabelVisible"
       :task-ids="selectedIds"
       @success="handleBatchLabelSuccess"
+    />
+
+    <BatchNotifyDialog
+      v-model:visible="batchNotifyVisible"
+      :task-ids="selectedIds"
+      @success="handleBatchNotifySuccess"
     />
 
     <TaskDeleteDialog

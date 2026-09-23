@@ -307,12 +307,12 @@ func NewPipInstallCommandForPythonVersionWithFlags(pythonVersion, packageName st
 	return spec.command(BuildPipInstallArgs(extraFlags, packageName)), nil
 }
 
-func NewPipUninstallCommandForPythonVersion(pythonVersion, packageName string, extraOptions ...string) (*exec.Cmd, error) {
+func NewPipUninstallCommandForPythonVersion(pythonVersion, packageName string) (*exec.Cmd, error) {
 	spec, err := resolvePipCommandSpecForPythonVersion(pythonVersion, true)
 	if err != nil {
 		return nil, err
 	}
-	return spec.command(BuildPipUninstallArgs(spec.extraFlags, packageName, extraOptions...)), nil
+	return spec.command(BuildPipUninstallArgs(spec.extraFlags, packageName)), nil
 }
 
 // BuildPipInstallArgs 把 install 子命令、附加 flag、包名拼成完整的 args。
@@ -325,9 +325,10 @@ func BuildPipInstallArgs(extraFlags []string, packageName string) []string {
 
 // BuildPipUninstallArgs 类似 BuildPipInstallArgs，但用于卸载场景。
 // 注意：--user 在 uninstall 时无意义，--break-system-packages 仍需要传以绕过 PEP 668。
-func BuildPipUninstallArgs(extraFlags []string, packageName string, extraOptions ...string) []string {
+// 刻意不留「额外选项」参数：以前强制卸载经它塞进了 --no-deps，而 pip uninstall 根本没有这个选项，
+// 整条命令在参数解析阶段就以退出码 2 退出、一个包都不卸（#150）。卸载要的选项只有上面这些。
+func BuildPipUninstallArgs(extraFlags []string, packageName string) []string {
 	args := []string{"uninstall", "-y"}
-	args = append(args, extraOptions...)
 	for _, flag := range extraFlags {
 		if flag == "--user" {
 			continue

@@ -333,7 +333,7 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 		WecomTriggerEnabledConfigKey,
 		"启用企业微信触发",
 		"false",
-		"开启后，企业微信自建应用可以通过回调（/api/v1/wecom/callback/:id）或菜单链接（/api/v1/open-api/trigger）拉起面板任务。需要面板公网可达并走 80/443，且在企业微信后台配好回调 URL、Token、EncodingAESKey 与可信 IP",
+		"开启后，企业微信自建应用可以通过回调（/api/v1/wecom/callback/:id）或菜单链接（/api/v1/open-api/trigger）拉起面板任务。要求企业微信服务器能访问到面板（公网可达），建议使用 80/443 端口，且在企业微信后台配好回调 URL、Token、EncodingAESKey 与可信 IP",
 		"wecom",
 	),
 	newBoolConfig(

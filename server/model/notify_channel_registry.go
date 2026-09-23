@@ -255,7 +255,10 @@ var registeredNotifyChannels = []NotifyChannelDefinition{
 			notifyInput("corp_id", "企业 ID", "企业微信 CorpID").required(),
 			notifyPassword("secret", "应用 Secret", "应用 Secret").required(),
 			notifyInput("agent_id", "Agent ID", "应用 AgentId").required(),
-			notifyInput("base_url", "反代基础地址 (可选)", "留空使用 https://qyapi.weixin.qq.com，也可填你的 Nginx 反代地址"),
+			// base_url 就是 wxchat 这类「微信代理」要填的地方（#152）：它们把 qyapi 的 gettoken / message/send
+			// 等几条路径原样转发出去，面板正好只打这两条。label 点名「微信代理」是为了让 NAS 用户认得出来；
+			// 下面那一栏「代理地址」是正向代理，填 wxchat 进去是填错的。只改文案，键与语义不动。
+			notifyInput("base_url", "反代基础地址 / 微信代理 (可选)", "留空使用 https://qyapi.weixin.qq.com；wxchat 等微信代理填 http://VPS地址:端口"),
 			// proxy 是正向代理（http/https/socks5），与上面的 base_url（反向代理基础地址）是两件事，可以叠加：
 			// 先按 base_url 拼出请求地址，再经 proxy 发出。取 token 与发消息两次请求都走它。
 			// 留空回落系统设置 proxy_url，再空走进程环境变量 HTTP(S)_PROXY / 直连 —— 与 telegram 完全一致。

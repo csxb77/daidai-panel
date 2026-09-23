@@ -35,8 +35,12 @@ const DEMO_VERSION = String(import.meta.env.VITE_DEMO_VERSION || '')
  *
  * 三条 `body` / `.layout-container` / `.login-page` 的补丁是必需的：
  * 横幅是 position: fixed，不占文档流；而外壳写死了 `height: 100dvh`、
- * 登录页写死了 `min-height: 100vh`，不把这 34px 从它们身上减掉，
- * 页面底部就会被推到视口外（桌面端 html/body 是 overflow:hidden，表现为底部内容被裁掉）。
+ * 登录页写死了 `min-height: 100vh`，不把这 34px 从它们身上减掉，整页就比视口高 34px：
+ * 桌面端 html/body 是 overflow:hidden，表现为底部内容被裁掉；手机上整页能被拖动 34px，
+ * 横幅、顶栏和弹窗会一起错开一截（issue #148 录屏）。
+ *
+ * 后两条必须带 !important：外壳和登录页的高度都写在 scoped 规则里（选择器带 [data-v-xxx]，特异性 (0,2,0)），
+ * 这里的 (0,1,0) 会被静默压掉。v3.3.3 之前没加，横幅上线起这两条就从来没生效过。
  */
 function bannerCss() {
   return `
@@ -44,9 +48,9 @@ function bannerCss() {
 
 body { padding-top: var(--dd-demo-banner-height); }
 
-/* MainLayout 的外壳写死 100dvh，登录页写死 100vh，都要把横幅高度让出来 */
-.layout-container { height: calc(100dvh - var(--dd-demo-banner-height)); }
-.login-page { min-height: calc(100vh - var(--dd-demo-banner-height)); }
+/* MainLayout 的外壳写死 100dvh，登录页写死 100vh，都要把横幅高度让出来；!important 的理由见 bannerCss 的注释 */
+.layout-container { height: calc(100dvh - var(--dd-demo-banner-height)) !important; }
+.login-page { min-height: calc(100vh - var(--dd-demo-banner-height)) !important; }
 
 #${BANNER_ID} {
   position: fixed;
@@ -55,14 +59,13 @@ body { padding-top: var(--dd-demo-banner-height); }
   right: 0;
   height: var(--dd-demo-banner-height);
   /*
-   * z-index 必须低于手机宽度下 .layout-main 的 21（见 MainLayout.vue 的 F1）：
-   * 那里的 z-index 让 .layout-main 自成层叠上下文，原地渲染的弹窗 / 抽屉（el-dialog、el-drawer
-   * 默认不 teleport）的 2000+ 只在它内部排序，整体只按 21 和横幅比。横幅再高就会盖住它们顶部 34px，
-   * 抽屉右上角的 × 还会落在「重置演示数据」底下，点偏一点整页重载、演示数据清空。
-   * 取 20 而不是 21：只靠数值就压在 .layout-main 下面，不依赖两者在文档里的先后。
-   * 与 sticky 顶栏（同为 20）并列无碍：body 已让出横幅高度，两者不会重叠。
-   * 不要调回 1000 一类的大值。其余浮层不受这个取值影响：消息框、下拉等 teleport 到 body，
-   * 手机侧栏抽屉原地渲染在 .layout-container 下（它不成层叠上下文），都按 2000+ 和横幅比，照样盖得住。
+   * z-index 只要低于 EP 浮层的 2000 即可，保持 20，与 sticky 顶栏并列（body 已让出横幅高度，两者不会重叠）。
+   * v3.3.3（issue #148）起移动端 .layout-main 不再自成层叠上下文（见 MainLayout.vue 的 F1），原地渲染的弹窗 / 抽屉
+   * （el-dialog、el-drawer 默认不 teleport）的遮罩直接在根上下文里用 2000+ 和横幅比；消息框、下拉 teleport 到 body，
+   * 手机侧栏抽屉原地渲染在 .layout-container 下，也都是 2000+，统统盖得住横幅。
+   * 横幅一旦 ≥ 2000，就会盖住弹窗和抽屉顶部 34px，抽屉右上角的 × 还会落在「重置演示数据」底下，
+   * 点偏一点整页重载、演示数据清空。
+   * （v3.3.1 / v3.3.2 时 .layout-main 是 z-index 21 的层叠上下文，这里的理由写的是「必须低于 21」，已作废。）
    */
   z-index: 20;
   display: flex;

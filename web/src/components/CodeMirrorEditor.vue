@@ -586,8 +586,9 @@ function resolveMinHeight(value: string | number | undefined) {
 }
 
 /* iOS Safari 在可编辑区字号小于 16px 时，聚焦会自动把整页放大。
-   index.html 的 viewport 刻意没有 maximum-scale（加了会禁掉用户手动缩放，不可接受），
-   所以只能反过来把移动端的编辑器字号提到 16px 来规避。 */
+   index.html 的 viewport 刻意不写 maximum-scale（安卓上它会真的禁掉双指缩放，不可接受）；
+   iOS 由 main.ts 在运行时追加 maximum-scale=1.0 挡住自动放大（iOS 10 起不影响双指缩放）。
+   这里把移动端编辑器字号提到 16px 照留，作为不依赖 UA 判定的兜底：UA 认不出的设备也不会被放大。 */
 @media (max-width: 768px) {
   .code-editor-wrapper {
     font-size: 16px;

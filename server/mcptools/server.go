@@ -67,6 +67,8 @@ var (
 		"create_subscription", "update_subscription", "delete_subscription", "set_subscription_enabled",
 		"batch_env_action", "import_envs",
 		"send_notification", "create_backup", "delete_backup", "restore_backup",
+		// #149 批量设置任务通知
+		"batch_set_task_notify",
 	}
 )
 

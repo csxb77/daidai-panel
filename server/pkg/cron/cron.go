@@ -128,6 +128,34 @@ func NextRunTimesForExpressionsFrom(raw string, count int, from time.Time) []tim
 	return times
 }
 
+// FirstRunSecondOfDay 算出这组定时规则「一天之内最早一次触发」的时刻，单位是距 0 点的秒数（0-86399）。
+// 任务列表按「定时规则」排序时用它当排序键（issue #151）：用户要的是一条 00:00→23:59 的时间线，
+// 用来看哪个时间段扎堆了哪些脚本，所以只取时:分:秒、不管落在哪一天——每周一 09:00 和每天 09:00 算同一时刻。
+// 结果只取决于规则本身、与「现在几点」无关，刷新列表时顺序不会漂移（这一点和「下次运行」排序不同）。
+//
+// 每行 cron 各自从本地「今天 0 点」起找第一次触发，多行取最小：
+//   - 起点故意用 0 点减 1 秒：robfig 的 Next 会先把起点进位到下一整秒再找，这样 00:00:00 本身也能命中。
+//     直接从 0 点起找的话 0 点被排除在外，`0 0 0,12 * * *` 会被算成 12:00、`*/10 * * * * *` 会被算成 00:00:10；
+//   - 第一次触发不一定在今天（周三算每周一的任务会落到下周一），但时刻相同，只取时分秒不受影响；
+//   - `*/5` 这类高频规则落在 00:00，带时段的（9-22 点每 10 分钟）落在时段起点，都是它们确实会跑的时刻。
+//
+// 一行都算不出（空串、表达式非法、2 月 30 日这种永不触发）时返回 false，由调用方当成「没有值」。
+func FirstRunSecondOfDay(raw string, now time.Time) (int, bool) {
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	best, found := 0, false
+	for _, expression := range SplitExpressions(raw) {
+		times := NextRunTimesFrom(expression, 1, midnight.Add(-time.Second))
+		if len(times) == 0 {
+			continue
+		}
+		second := times[0].Hour()*3600 + times[0].Minute()*60 + times[0].Second()
+		if !found || second < best {
+			best, found = second, true
+		}
+	}
+	return best, found
+}
+
 func parserForParts(parts []string) (robfigcron.Parser, bool, error) {
 	switch len(parts) {
 	case 5:

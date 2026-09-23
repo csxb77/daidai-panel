@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -33,8 +34,7 @@ var (
 	depOperations   = make(map[uint]context.CancelFunc)
 	depOpsMu        sync.Mutex
 
-	dependencyInstallRunner  = installDependency
-	dependencyExportTextFunc = buildDependencyExportText
+	dependencyInstallRunner = installDependency
 )
 
 // defaultDependencyOperationTimeout 是 dependency_install_timeout_minutes 读不出来时的兜底值，
@@ -644,16 +644,20 @@ func (h *DepsHandler) Export(c *gin.Context) {
 	}
 	query.Order("name ASC").Find(&deps)
 
-	text, err := dependencyExportTextFunc(depType, deps)
-	if err != nil {
-		response.InternalError(c, "导出依赖清单失败: "+err.Error())
-		return
+	// 按安装时填写的原样导出（#150）：记录的 Name 就是用户当初填的内容，当初带版本号的才带，没带的就不带。
+	// 每行一个，可以直接粘贴回「新建依赖」重新安装；Python 这份同时也是合法的 requirements.txt。
+	// v1.9.8 起这里会现场跑 pip list / npm list / dpkg-query，拼成「名称==>已装版本」：那个格式 pip 不认，
+	// 手动改成 == 再导回去又会把当初没钉版本的依赖全部钉死，所以不再附带已装版本，
+	// 导出也就不再依赖 pip / npm / dpkg 能不能跑起来（以前任何一个跑不起来整份导出就 500）。
+	lines := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		lines = append(lines, dep.Name)
 	}
 
 	filename := fmt.Sprintf("dependencies-%s-%s.txt", filenameType, time.Now().Format("20060102-150405"))
 	c.Header("Content-Type", "text/plain; charset=utf-8")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
-	c.String(200, text)
+	c.String(200, strings.Join(lines, "\n"))
 }
 
 func (h *DepsHandler) PythonRuntimes(c *gin.Context) {
@@ -1526,8 +1530,12 @@ func forceUninstallDependency(depType, name, pythonVersion string) {
 			return
 		}
 	case model.DepTypePython:
+		// 与普通卸载是同一条 pip 命令，「强制」只体现在不管成败先删记录。
+		// 这里曾经多传了一个 --no-deps：pip uninstall 没有这个选项（它本来就不删依赖），
+		// 带上它 pip 在参数解析阶段就以退出码 2 退出、一个包都不卸 —— 强制 / 批量卸载从 v1.3.0 起
+		// 一直只删了记录，site-packages 原样不动（#150）。
 		var err error
-		cmd, err = service.NewPipUninstallCommandForPythonVersion(pythonVersion, name, "--no-deps")
+		cmd, err = service.NewPipUninstallCommandForPythonVersion(pythonVersion, name)
 		if err != nil {
 			return
 		}
@@ -1554,10 +1562,20 @@ func forceUninstallDependency(depType, name, pythonVersion string) {
 	// 卡死就会把后续所有依赖任务一起堵住，所以这里必须有超时兜底。
 	service.SetPgid(cmd)
 
-	ctx, cancel := context.WithTimeout(context.Background(), resolveDependencyOperationTimeout())
+	// 记录在调用前就已经删掉了，卸载失败在页面上看不到。把输出收下来，失败时至少写进面板日志，
+	// 不再像 #150 那样无声失败。接了输出管道后 Wait 要等管道关闭，WaitDelay 防止逃出进程组的
+	// 孙进程攥着管道，让这里连同包锁一起卡住。
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	cmd.WaitDelay = 10 * time.Second
+
+	timeout := resolveDependencyOperationTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	if err := cmd.Start(); err != nil {
+		log.Printf("warn: 强制卸载 %s 依赖 %s 失败: %v", depType, name, err)
 		return
 	}
 
@@ -1566,13 +1584,23 @@ func forceUninstallDependency(depType, name, pythonVersion string) {
 		waitCh <- cmd.Wait()
 	}()
 
+	var err error
 	select {
-	case <-waitCh:
+	case err = <-waitCh:
 	case <-ctx.Done():
 		if cmd.Process != nil {
 			service.KillProcessGroup(cmd.Process)
 		}
 		<-waitCh
+		err = fmt.Errorf("执行超过 %s 仍未结束，已终止", timeout)
+	}
+	if err != nil {
+		// 只留输出末尾：apt / npm 失败时输出很长，真正的报错在最后；截断处可能切开多字节字符，顺手清掉。
+		text := strings.TrimSpace(output.String())
+		if len(text) > 2000 {
+			text = "..." + strings.ToValidUTF8(text[len(text)-2000:], "")
+		}
+		log.Printf("warn: 强制卸载 %s 依赖 %s 失败: %v；输出末尾：\n%s", depType, name, err, text)
 	}
 }
 

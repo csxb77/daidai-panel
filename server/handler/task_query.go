@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"cmp"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -40,6 +41,12 @@ type preparedTaskListItem struct {
 	// 拿到的时间点还可能已经跨过一个周期，导致排序结果和下发给前端的 next_run_at 对不上。
 	// 值为 nil 表示「算不出下次运行」（已禁用 / 非 cron 任务 / cron 表达式为空）。
 	nextRunAt *time.Time
+	// firstRunSecond 是按「定时规则」（sort_rules 的 cron_expression）排序用的键（issue #151）：
+	// 这条任务一天之内最早一次触发的时刻，距 0 点的秒数，取法见 panelcron.FirstRunSecondOfDay。
+	// 和 nextRunAt 一样在预处理时算一次，排序比较器里绝不再解析 cron。
+	// 值为 nil 表示没有时刻可排（手动 / 开机任务、表达式为空、2 月 30 日这种永不触发）。
+	// 与 nextRunAt 不同，禁用任务照样有值：它们在禁用分区内部也按时刻排，重新启用前方便查时间冲突。
+	firstRunSecond *int
 	// groupName 是这条任务的分组名（第一个非空的 `分组:` 标签，取法见 taskGroupNameFromLabels），
 	// 视图筛选 / 排序的 group 字段只认它（#130）。刻意不从 displayLabels 里取：
 	// 分组名在那里排第 0 位，和自定义标签、订阅名混在一起，按 labels 等于 X 会误中同名的标签。
@@ -197,6 +204,8 @@ func taskDictWithEnabledSwitch(task *model.Task) map[string]interface{} {
 
 func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string, notificationChannels map[uint]taskNotificationChannelInfo) []preparedTaskListItem {
 	prepared := make([]preparedTaskListItem, 0, len(tasks))
+	// FirstRunSecondOfDay 只拿它定位「今天 0 点」，算出的时刻与哪一天无关，整批共用一个即可。
+	now := time.Now()
 	for _, task := range tasks {
 		displayLabels, subscriptionLabels := buildPreparedTaskLabels(task.GetLabels(), subscriptionNames)
 
@@ -221,6 +230,13 @@ func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string,
 				item["next_run_at"] = nextTimes[0]
 				// 顺手把同一份快照留给排序用，绝不在排序里第二次解析 cron。
 				nextRunAt = &nextTimes[0]
+			}
+		}
+		// 「定时规则」排序的键（issue #151）。刻意不看启用状态，理由见 preparedTaskListItem.firstRunSecond。
+		var firstRunSecond *int
+		if task.UsesCronSchedule() && task.CronExpression != "" {
+			if second, ok := panelcron.FirstRunSecondOfDay(task.CronExpression, now); ok {
+				firstRunSecond = &second
 			}
 		}
 
@@ -262,6 +278,7 @@ func prepareTaskListItems(tasks []model.Task, subscriptionNames map[uint]string,
 			displayLabels:      displayLabels,
 			subscriptionLabels: subscriptionLabels,
 			nextRunAt:          nextRunAt,
+			firstRunSecond:     firstRunSecond,
 			groupName:          taskGroupNameFromLabels(task.GetLabels()),
 		})
 	}
@@ -669,6 +686,12 @@ func sortPreparedTaskListItems(items []preparedTaskListItem, sortRules []taskLis
 					return rightTime == nil
 				}
 			}
+			// cron_expression（界面叫「定时规则」）按每天时刻排（issue #151），空值口径与上面一致：
+			// 手动 / 开机 / 表达式为空 / 永不触发的任务没有时刻，一律沉到本区最后、不随 asc/desc 翻转，
+			// 同样必须写在翻转 direction 之前。否则倒序时这些压根不按时间跑的任务会整片冲到最前面。
+			if rule.Field == "cron_expression" && (left.firstRunSecond == nil) != (right.firstRunSecond == nil) {
+				return right.firstRunSecond == nil
+			}
 
 			comparison := comparePreparedTaskByRule(left, right, rule)
 			if comparison == 0 {
@@ -691,7 +714,15 @@ func comparePreparedTaskByRule(left, right preparedTaskListItem, rule taskListSo
 	case "command":
 		return strings.Compare(strings.ToLower(strings.TrimSpace(left.task.Command)), strings.ToLower(strings.TrimSpace(right.task.Command)))
 	case "cron_expression":
-		return strings.Compare(strings.ToLower(strings.TrimSpace(left.task.CronExpression)), strings.ToLower(strings.TrimSpace(right.task.CronExpression)))
+		// 按「一天之内最早一次执行的时刻」比较（issue #151），不再比表达式字符串：
+		// 字符串序会把 15 点排在 8 点前面（'1' < '8'），同是 09:00 的 5 段与 6 段写法也被拆到两头，
+		// 用户想按定时规则看「哪个时间段有哪些脚本」时完全没法用。
+		// 空值已在 sortPreparedTaskListItems 里判掉，走到这里两边要么都有值、要么都为空（按相等处理）。
+		// 时刻相同返回 0，交给下一条规则；全部打平再回落默认序（置顶、list_order 那一套）。
+		if left.firstRunSecond == nil || right.firstRunSecond == nil {
+			return 0
+		}
+		return cmp.Compare(*left.firstRunSecond, *right.firstRunSecond)
 	case "status":
 		return compareFloat64(left.task.Status, right.task.Status)
 	case "labels":

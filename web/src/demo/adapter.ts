@@ -1345,6 +1345,28 @@ route('PUT', '/tasks/batch/add-labels', (ctx) => {
   return { message: `已为 ${ids.length} 个任务添加标签`, success_count: ids.length }
 })
 
+// 批量改通知开关（issue #149），口径同服务端 BatchSetNotify：只改传了的开关（false 也算传了），
+// all=true 时忽略 task_ids、改全部任务。先判开关再判范围，两条 400 与没命中的 404 文案逐字抄服务端；
+// 计数是命中的任务数（值本来就一样的也算），与服务端 RowsAffected 的口径一致。只认 task_ids，服务端不认 ids。
+route('PUT', '/tasks/batch/notify', (ctx) => {
+  const body = bodyObject(ctx)
+  const keys = (['notify_on_failure', 'notify_on_success', 'notify_on_abort'] as const)
+    .filter((key) => typeof body[key] === 'boolean')
+  if (keys.length === 0) return badRequest('请至少设置一项通知开关')
+  const all = body['all'] === true
+  const ids = idList(ctx, 'task_ids')
+  if (!all && ids.length === 0) return badRequest('请先选择任务')
+  let count = 0
+  for (const task of db().tasks) {
+    if (!all && !ids.includes(task.id)) continue
+    for (const key of keys) task[key] = body[key]
+    task.updated_at = nowIso()
+    count++
+  }
+  if (count === 0) return notFound('没有找到要修改的任务')
+  return { message: `已更新 ${count} 个任务的通知设置`, success_count: count }
+})
+
 // Web 的批量操作走这里。count 只有 action=delete 与服务端同口径（只计实际存在并被删掉的任务）。
 // 其它 action（含不认识的 action）的 count 仍等于传入 id 的个数、含不存在的 id；服务端只计查到的任务，
 // 还会扣掉 enable 校验不通过、run 启动失败、stop 没在运行的。message 也不是服务端的「批量{action}: N 个任务」。
@@ -2817,14 +2839,19 @@ route('GET', '/deps/mirrors', () => ({
 }))
 route('PUT', '/deps/mirrors', () => ({ message: '镜像源已更新' }))
 
-// 依赖清单导出同样是 responseType: 'blob'（见 /scripts/download 上的说明）
+// 依赖清单导出同样是 responseType: 'blob'（见 /scripts/download 上的说明）。
+// 口径同服务端 Export（issue #150 起按安装时填写的原样导出）：只导出已安装的记录、按名称排序、每行一个，
+// 末尾不补换行。没过滤 installed 时，演示数据里安装失败的依赖（如 3.11 的 pandas）也会被导出去。
 route('GET', '/deps/export', (ctx) => {
   const type = (ctx.params['type'] ?? 'python').trim()
   const pythonVersion = (ctx.params['python_version'] ?? '').trim()
   const names = db().deps
-    .filter((dep) => dep.type === type && (!pythonVersion || dep.python_version === pythonVersion))
+    .filter((dep) => dep.type === type && dep.status === 'installed' && (!pythonVersion || dep.python_version === pythonVersion))
     .map((dep) => dep.name)
-  return new Blob([`${names.join('\n')}\n`], { type: 'text/plain;charset=utf-8' })
+    // 服务端是 SQLite 的 ORDER BY name ASC（按字节比较，大写排在小写前）。依赖名只有 ASCII，
+    // 默认 sort() 按码元比较与它一致；不能用 localeCompare，那会把 a 排到 B 前面
+    .sort()
+  return new Blob([names.join('\n')], { type: 'text/plain;charset=utf-8' })
 })
 
 route('GET', '/deps/:id/status', (ctx) => {

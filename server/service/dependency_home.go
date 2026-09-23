@@ -86,9 +86,10 @@ func homeRedirectEnv(env []string) []string {
 	return redirectHomeEnv(env, EffectiveHomeDir(), strings.TrimSpace(os.Getenv("HOME")))
 }
 
-// WritableHomeEnv 给「不装依赖、但同样要跑 npm / pip 的」命令用（依赖列表、导出依赖）。
+// WritableHomeEnv 给「不装依赖、但同样要跑 npm / pip 的」命令用（依赖列表）。
 // npm 只要启动就会初始化 $HOME/.npm 下的 cache，HOME 不可写时连 npm list 都会失败 ——
-// 表现成「装得上、却看不到、也导不出」，而这两件事看起来毫无关联。
+// 表现成「装得上、却看不到」，而这两件事看起来毫无关联。
+// （导出依赖从 v3.3.3 起按记录原样输出，不再跑 npm / pip，#150。）
 // 与安装路径共用同一份 HOME 判定，避免两条路解析出不同的 HOME。
 func WritableHomeEnv(base []string) []string {
 	return homeRedirectEnv(base)

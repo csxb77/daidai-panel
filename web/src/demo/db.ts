@@ -664,14 +664,21 @@ function normalizeSortText(value: string): string {
   return String(value).trim().toLowerCase()
 }
 
-/** 按时间排序的两个字段：值可能为空，空值有专门的排法（见 sortPreparedTasks） */
-type TaskTimeSortField = 'last_run_at' | 'next_run_at'
+/**
+ * 按时间排序的三个字段：值可能为空，空值有专门的排法（见 sortPreparedTasks）。
+ * cron_expression 从 v3.3.3 起（issue #151）也在这里：服务端不再按表达式字符串比，
+ * 改成按「每天最早一次执行的时刻」比，空值口径与另外两个相同。
+ */
+type TaskTimeSortField = 'last_run_at' | 'next_run_at' | 'cron_expression'
 
 function isTimeSortField(field: string): field is TaskTimeSortField {
-  return field === 'last_run_at' || field === 'next_run_at'
+  return field === 'last_run_at' || field === 'next_run_at' || field === 'cron_expression'
 }
 
-/** 取 last_run_at / next_run_at 的毫秒值，null 表示没有值 */
+/**
+ * 取排序用的数值，null 表示没有值：last_run_at / next_run_at 是毫秒时间戳，
+ * cron_expression 是一天之内的秒数（0–86399）。同一条规则只会拿同一个字段的值互相比，单位不混用。
+ */
 type PreparedTaskTimeOf = (item: PreparedTask, field: TaskTimeSortField) => number | null
 
 /** 复刻 comparePreparedTaskByRule：-1 / 0 / 1，方向由调用方翻转；不认识的字段返回 0（静默回落默认序，不报错） */
@@ -693,8 +700,7 @@ function comparePreparedTaskByRule(
       return compareByteOrder(normalizeSortText(left.task.name), normalizeSortText(right.task.name))
     case 'command':
       return compareByteOrder(normalizeSortText(left.task.command), normalizeSortText(right.task.command))
-    case 'cron_expression':
-      return compareByteOrder(normalizeSortText(left.task.cron_expression), normalizeSortText(right.task.cron_expression))
+    // cron_expression 已并进上面的时间字段分支（按每天时刻比，issue #151），这里不再按字符串比
     case 'status':
       return compareNumbers(left.task.status, right.task.status)
     case 'labels':
@@ -719,17 +725,24 @@ function comparePreparedTaskByRule(
  *    而不带排序规则时它们规规矩矩地待在各自的区里，同一个列表两副面孔。
  *    唯一的例外：首要排序字段就是 status 时跳过状态分组（只看第一条规则），否则「按状态升序」读出来是
  *    0.5 → 1 → 2 → 0，数值上并不递增。置顶分区永不豁免。
- * 🔴 空值语义：last_run_at / next_run_at 没有值的任务（从未运行、禁用、非定时任务）在各自分区内恒排最后，
- *    不随 asc / desc 翻转 —— 这段判定必须写在方向翻转【之前】，写在后面的话降序时一堆「-」会全冒到最前面。
+ * 🔴 空值语义：三个时间字段没有值的任务（last_run_at：从未运行；next_run_at：禁用或非定时任务；
+ *    cron_expression：手动 / 开机运行、表达式为空或永不触发）在各自分区内恒排最后，不随 asc / desc 翻转 ——
+ *    这段判定必须写在方向翻转【之前】，写在后面的话降序时一堆「-」会全冒到最前面。
  * 🔴 规则全部打平才回落 compareTasksByDefault（服务端同样直接调 defaultTaskListLess），
  *    所以「运行中提到本区最前」只在这时生效：用户显式点了「名称 A→Z」，运行中不该越过他的规则插到前面。
  *
  * next_run_at 不是库里的列、是按 cron 现算的快照，生效条件（非禁用 + 定时任务 + 表达式非空）与 toTaskDict 一致，
  * 否则会出现「列表里显示有下次运行、排序却把它当成空值沉底」。它要遍历时间窗口，每条任务只算一次，不在比较器里反复算。
+ *
+ * cron_expression（issue #151）复刻服务端 pkg/cron 的 FirstRunSecondOfDay：每一行从今天 0 点起求第一次触发，
+ * 取时:分，多行取最早。只看「定时任务 + 表达式非空」，【不看】启用状态 —— 禁用任务在禁用分区里照样按时刻排，
+ * 方便重新启用前查冲突。演示站的 nextRunTimes 丢弃秒段，所以随机秒的任务在这里按分钟打平，服务端会精确到秒。
  */
 function sortPreparedTasks(items: PreparedTask[], rules: TaskListSortRule[]): PreparedTask[] {
   const skipStatusGrouping = rules[0]?.field === 'status'
   const now = Date.now()
+  // 本地今天 0 点（setHours 直接返回时间戳）
+  const todayStart = new Date(now).setHours(0, 0, 0, 0)
   const timeCache = new Map<string, number | null>()
   const timeOf: PreparedTaskTimeOf = (item, field) => {
     const key = `${field}:${item.task.id}`
@@ -739,6 +752,18 @@ function sortPreparedTasks(items: PreparedTask[], rules: TaskListSortRule[]): Pr
     let value: number | null = null
     if (field === 'last_run_at') {
       value = task.last_run_at ? Date.parse(task.last_run_at) : null
+    } else if (field === 'cron_expression') {
+      if (task.task_type === 'cron' && task.cron_expression) {
+        // nextRunTimes 只认第一行，多行要自己拆开逐行算。起点取「今天 0 点前 1 毫秒」，
+        // 因为它只收严格晚于起点的时刻，这样才能命中 00:00 本身（服务端同理用 0 点前 1 秒）
+        for (const line of splitCronExpressions(task.cron_expression)) {
+          const first = nextRunTimes(line, todayStart - 1, 1)[0]
+          if (!first) continue
+          const at = new Date(first)
+          const secondOfDay = at.getHours() * 3600 + at.getMinutes() * 60
+          if (value === null || secondOfDay < value) value = secondOfDay
+        }
+      }
     } else if (task.status !== TASK_STATUS_DISABLED && task.task_type === 'cron' && task.cron_expression) {
       const next = estimateNextRun(task.cron_expression, now)
       value = next ? Date.parse(next) : null

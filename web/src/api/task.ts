@@ -252,6 +252,13 @@ export const taskApi = {
     return request.put('/tasks/batch/add-labels', { task_ids: taskIds, labels }) as Promise<{ message: string; success_count: number }>
   },
 
+  // 批量改通知开关（issue #149）。三个开关只传要改的那几个，没传的服务端不动；false 也是一次有效的修改（批量关闭）。
+  // all=true 时服务端忽略 task_ids、改全部任务：网页列表只能勾当前页，拿不到全部 id。
+  // 不改任务绑定的通知渠道。一个开关都没传、或没选任务回 400；一个任务都没命中回 404。
+  batchSetNotify(payload: { task_ids?: number[]; all?: boolean; notify_on_failure?: boolean; notify_on_success?: boolean; notify_on_abort?: boolean }) {
+    return request.put('/tasks/batch/notify', payload) as Promise<{ message: string; success_count: number }>
+  },
+
   cleanLogs(days?: number) {
     return request.delete('/tasks/clean-logs', { params: { days } }) as Promise<{ message: string }>
   },

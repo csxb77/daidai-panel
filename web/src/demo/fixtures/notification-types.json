@@ -334,9 +334,9 @@
         },
         {
           "key": "base_url",
-          "label": "反代基础地址 (可选)",
+          "label": "反代基础地址 / 微信代理 (可选)",
           "widget": "input",
-          "placeholder": "留空使用 https://qyapi.weixin.qq.com，也可填你的 Nginx 反代地址"
+          "placeholder": "留空使用 https://qyapi.weixin.qq.com；wxchat 等微信代理填 http://VPS地址:端口"
         },
         {
           "key": "proxy",

@@ -505,6 +505,12 @@ func buildQingLongWecomAppConfig(env map[string]string) map[string]string {
 	if len(parts) >= 5 && strings.TrimSpace(parts[4]) != "" {
 		cfg["msg_type"] = strings.TrimSpace(parts[4])
 	}
+	// QYWX_ORIGIN 是青龙的「企业微信代理地址」（wxchat 这类），对应本渠道的 base_url（#152）。
+	// 不带过来的话，在青龙里靠代理绕开企业可信 IP 的用户迁过来后会静默直连、开始报 60020。
+	// 只映射到企业微信应用：机器人 webhook 不受可信 IP 限制，wxchat 也不转发 webhook 路径。
+	if origin := strings.TrimSpace(env["QYWX_ORIGIN"]); origin != "" {
+		cfg["base_url"] = origin
+	}
 	return cfg
 }
 

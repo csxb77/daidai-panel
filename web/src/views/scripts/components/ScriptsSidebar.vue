@@ -206,7 +206,8 @@ function scrollRowIntoView(path: string, smooth: boolean) {
   const scroller = findScrollContainer(row)
   if (!scroller) return
   const scrollerTop = scroller.getBoundingClientRect().top + scroller.clientTop
-  // 可见区取容器与窗口的交集：容器自己也可能被窗口裁掉一截（演示站顶部横幅把整页往下推了 34px，.layout-main 底边落在窗口外）
+  // 可见区取容器与窗口的交集：容器自己也可能被窗口裁掉一截，不能假定外壳恰好等于视口。
+  // （v3.3.3 之前演示站横幅没把高度让出来，.layout-main 底边落在窗口外 34px；banner.ts 已修，这里的交集照留）
   const viewTop = Math.max(scrollerTop, 0)
   const viewBottom = Math.min(scrollerTop + scroller.clientHeight, window.innerHeight)
   let delta = 0

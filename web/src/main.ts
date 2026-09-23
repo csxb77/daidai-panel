@@ -105,6 +105,26 @@ if (!daidaiWindow.__DAIDAI_SAFE_FOCUS_PATCHED__) {
   };
 }
 
+// iOS 聚焦字号 <16px 的输入框会自动放大整页（v3.3.3 / issue #148 下半），EP 的输入框默认就是 14px。
+// 放大之后 iOS 不再遵守 body 的 overflow:hidden（WebKit bug 240860），弹窗背后的整页都能被拖动；
+// 收起键盘后也不缩回，fixed 的弹窗与顶栏错位、底部露出背后的列表。
+// 只对 iOS 追加 maximum-scale=1.0：iOS 10 起它只挡「自动放大」，用户仍可双指缩放；
+// 安卓上它会真的禁掉双指缩放（无障碍问题），所以不写死在 index.html，这里按设备追加。
+// iPadOS 13 起默认发桌面 UA（MacIntel），只能靠多点触控认出来。
+// 和上面的 safeFocus 一样挂在模块顶层：只影响之后的聚焦行为，不需要抢首帧，也不依赖 app 挂载。
+if (
+  /iP(hone|ad|od)/.test(navigator.userAgent) ||
+  (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+) {
+  const viewportMeta = document.querySelector<HTMLMetaElement>(
+    'meta[name="viewport"]',
+  );
+  // 在 index.html 原有内容后面追加，不整串覆盖：以后那边加了 viewport-fit 之类的参数也不会被这里冲掉
+  if (viewportMeta) {
+    viewportMeta.content += ", maximum-scale=1.0";
+  }
+}
+
 // 升级后旧页面拿不到新版文件时自动刷新一次（issue #126，细节见 utils/chunkReload.ts）。
 // Vite 的预加载助手在任何动态 import 失败时都会先派发这个事件（切页、Monaco、懒加载的弹窗都算），
 // 它是 chunk 失效最早、也最全的信号。模块自身求值时抛的普通异常也会走到这里，由 isChunkLoadError 挡在外面：

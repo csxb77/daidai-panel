@@ -176,6 +176,9 @@ func main() {
 	// Node 换了大版本（刷新版 Magisk 模块、换 Docker 镜像）后 deps/nodejs 里原生扩展的 ABI 会对不上。
 	// 排在启动校验之后：它排队的 Node 依赖重装与这里的 npm rebuild 共用同一把包操作锁，后台串行、不阻塞启动。
 	service.RebuildNodeDependenciesIfABIChanged()
+	// Docker 在 Alpine（musl）与 Debian（glibc）镜像之间切换后，数据卷里 venv 的原生扩展链接的是另一种 C 库，
+	// 「已安装」却加载不了，重装按钮也修不好（#150）。同样排在启动校验之后，后台按原版本定点重装，不阻塞启动。
+	service.RepairPythonPackagesForLibcChange()
 	handler.FinalizePendingAutoUpdateOnStartup()
 	if err := service.EnsureBuiltinNotifyHelpers(cfg.Data.ScriptsDir); err != nil {
 		log.Printf("prepare builtin notify helpers failed: %v", err)
