@@ -2178,7 +2178,7 @@ if !ok {
 
 - **选择语义**：有点名（ID 或名称）→ 按 ID 精确命中、忽略 `push_scope`；没点名 → 广播集合（`COALESCE(push_scope, '') <> 'bound'`）。`channel_types` 在两者之上取交集，**广播时照样遵守 push_scope**。名称解析不看 `enabled`：禁用渠道交给下游报「未找到已启用的通知渠道」。
 - **响应 `data` 只增不改**：新增 `content_type`（归一后的值，没传为 `""`）与 `channel_types`（归一后的类型名，没传为 `[]`）；`requested_ids` 含按名称解析出的 ID；`used_all` 仍是「没有任何点名」，`channel_types` 不影响它。
-- **`content_type` 为空 = 各渠道报文与 v3.2.8 逐字节一致。** `adaptNotifyContent` 与每个 `sendXxxWithFormat` 在 `format == ""` 时必须原样走改动前的分支。由 `notifier_legacy_payload_test.go` 的 golden 守护：golden 是在 v3.2.8 的 `notifier.go` 上用同一套用例真跑抓下来的请求（方法、路径、关键请求头、请求体），不是新代码和自己的包装函数比。有意改变某渠道默认报文时，必须同时改 golden 并在提交说明写清为什么老行为可以变。serverchan / igot / qmsg / pushover 地址写死、这次没改，golden 覆盖不到；pushplus 在 `notifier_content_format_test.go` 单独守。
+- **`content_type` 为空 = 各渠道报文与 v3.2.8 逐字节一致。** `adaptNotifyContent` 与每个 `sendXxxWithFormat` 在 `format == ""` 时必须原样走改动前的分支。由 `notifier_legacy_payload_test.go` 的 golden 守护：golden 是在 v3.2.8 的 `notifier.go` 上用同一套用例真跑抓下来的请求（方法、路径、关键请求头、请求体），不是新代码和自己的包装函数比。有意改变某渠道默认报文时，必须同时改 golden 并在提交说明写清为什么老行为可以变。igot / qmsg / pushover 地址写死、这次没改，golden 覆盖不到；pushplus 在 `notifier_content_format_test.go` 单独守；serverchan 两代接口（Turbo 版、Server酱³）的地址后来（v3.3.4）也改成了包级变量，请求路径与请求体（`title` / `desp`）由 `notifier_serverchan_test.go` 守。
 - **渠道映射（只在 `content_type` 非空时生效）**：
   - 进渠道前先 `adaptNotifyContent`：渠道不在「能收 HTML」名单且调用方声明 html → `notifyHTMLToText` 去标签，格式交还成 `""`，按渠道配置的文本类消息发（不强制改成 text 消息）。能收 HTML 的只有 `webhook` / `email` / `pushplus` / `wxpusher` / `custom`。`notifyChannelAcceptsHTML` 必须覆盖注册表全部类型；ntfy 的 Markdown 头、gotify extras、Bark markdown 字段依赖服务端版本、老版本静默忽略，**不因「新版本支持」标 true**。
   - email：html → `MIME-Version: 1.0` + `Content-Type: text/html; charset=UTF-8` + `Content-Transfer-Encoding: quoted-printable`（压缩成一行的 HTML 超过 998 字节会被部分 SMTP 拒收；不带 MIME-Version 部分客户端照样显示源码）；text / markdown 仍是原 `text/plain` 报文，逐字节不变。
@@ -4131,7 +4131,7 @@ columns = append(columns, "updated_at")
 | 顺序 | 条件 | `reason` |
 |---|---|---|
 | 1 | 非 Linux | 一键安装只支持 Linux 上的 Debian 12 版 Docker 镜像，当前系统是 %s |
-| 2 | Alpine / apk | Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请换 Debian 版镜像 linzixuanzz/daidai-panel:debian |
+| 2 | Alpine / apk | Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请把镜像标签里的 latest 换成 debian（如 latest → debian、latest-full → debian-full） |
 | 3 | 非 apt | 一键安装只支持 apt 系统（Debian 12），当前包管理器：%s |
 | 4 | 架构不是 amd64 / arm64 | Playwright 的 Chromium 只有 amd64 / arm64 构建，当前架构是 %s |
 | 5 | 不是 Debian 12 | 一键安装目前只内置 Debian 12（bookworm）的系统库清单，当前系统：ID=… VERSION_ID=… VERSION_CODENAME=… |
@@ -4223,11 +4223,33 @@ columns = append(columns, "updated_at")
 **任务失败提示**（`BuildPlaywrightEnvironmentHint`，经 `BuildRuntimeFailureHint` 接进 4 个调用点：`task_executor.go` 两处、`script_debug.go`、`script_run_code.go`；
 先认 ESM 兼容提示，两者关键词不相交）
 
+- 触发词共三类：缺模块（v3.3.4 / #154 新增：Python 的 `No module named 'playwright'`；Node 用 require 报 `Cannot find module 'playwright'`，
+  用 ESM 的 import 报 `Cannot find package 'playwright'`，后者不含前一句）、缺浏览器、缺系统库。
+  一个都不命中时连环境都不读（`playwrightHintEnvFunc` 要查库、读 os-release），任务每次失败都会调到这里。
+- 🔴 **顺序契约：Alpine 分支排在最前面，先于缺浏览器、缺库**（v3.3.4 / #154）。后两段会引人去点「安装 Playwright 运行环境」，
+  而一键安装在 Alpine 上一定被 `planPlaywrightRuntime` 拒绝；排在后面，Alpine 用户要多走一圈才知道得换镜像。
+  进 Alpine 分支的条件：`playwrightHintEnv.Alpine`（os-release 的 `ID=alpine`），且报错提到 `playwright` 或含 `Host system is missing dependencies`
+  （缺模块、缺浏览器、Playwright 自己报的缺库都满足）。不提 playwright 的通用缺库报错（`error while loading shared libraries`，以及 musl 的 `error loading shared library` / `error relocating`）
+  不进，交给原逻辑（口径见下面缺库那一条：没提到 playwright 时宁可不给提示）。
+- **不是 Alpine、只命中缺模块 → 返回空串**，交给任务的自动安装（开关关着时由用户自己装）。缺模块的提示只在 Alpine 上给。
+- Alpine 文案（`buildPlaywrightAlpineHint`）按「语言 × 部署 × 架构」拼，每种组合都必须单行、`[提示] ` 开头、≤320 字符，
+  `TestBuildPlaywrightEnvironmentHintAlpineCoversEveryVariant` 把全部组合跑一遍兜底：
+  - 语言只能从报错文本认：Python（`no module named 'playwright'` / traceback / `playwright._impl`）讲「PyPI 只发 manylinux 预编译包，pip 装不上（from versions: none）」；
+    Node（`cannot find module 'playwright'` / `cannot find package 'playwright'` / `npx playwright` / `node:internal`）讲「npm 包能装上，但 Playwright 下载的 Chromium 是 glibc 构建、起不来」，
+    并给出 `connect` / `connectOverCDP` 连接别处浏览器这条路；认不出时只讲两边都成立的结论。
+    **Python 的说法（pip、manylinux）不能出现在 Node 文案里，Node 文案也不能说成「跑不了 Playwright」。**
+  - 部署决定出路：容器（`OneClick`）→ 把镜像标签里的 latest 换成 debian（`latest` → `debian`、`latest-full` → `debian-full`，`-3.10` / `-3.11` / `-all` 同理；
+    写死 `:debian` 的话，`latest-full` 的用户照做会丢掉 Go 与编译链），数据卷可直接沿用，再点一键安装；
+    面具（`Magisk`）→ 不提镜像标签、也不提一键安装按钮，改刷 Debian 版模块再在终端执行 `python3 -m playwright install --with-deps chromium`
+    （Node 是 `npx playwright install --with-deps chromium`），并写明安卓上能否跑起 Chromium 尚未验证；其它部署 → 换 Debian / Ubuntu 等 glibc 系统。
+  - 架构（`Arch`，即 `playwrightGOARCH`）不是 amd64 / arm64：Playwright 的浏览器与 Debian 版镜像都只有这两种架构，换什么都没用，所以这一段排在部署出路之前、直接收尾，哪种部署都不叫人换镜像、改刷模块或换系统。结尾按语言分三种：Python 说「这台机器上跑不了 Playwright」；Node 说「这台机器上起不了浏览器，只能让脚本用 connect / connectOverCDP 连接别处的浏览器」（它还能连别处的浏览器，所以同样不能说成「跑不了 Playwright」）；认不出语言时说「这台机器上起不了 Playwright 的浏览器」。
 - 报错含 `Executable doesn't exist` 且含 `ms-playwright` → 写出当前生效的 `PLAYWRIGHT_BROWSERS_PATH`；容器部署引导去「依赖管理 → Linux」点「安装 Playwright 运行环境」，否则给命令。
-- 含 `Host system is missing dependencies` 或 `error while loading shared libraries` → 有 N 个 Linux 依赖在 installing / queued 时，
+- 含 `Host system is missing dependencies`、`error while loading shared libraries`，或 musl 的 `error loading shared library` / `error relocating`
+  → 有 N 个 Linux 依赖在 installing / queued 时，
   提示「容器重建后正在后台自动重装 N 个系统依赖，完成后重试即可」：这段时间里该让用户等，而不是再去点一次安装。
   否则容器部署引导去点一键安装，其它部署给 `python3 -m playwright install-deps chromium`（以 root 执行）。
   `error while loading shared libraries` 是任何原生程序缺库都会报的通用错误，报错里没提到 playwright 时宁可不给提示。
+  musl 的两种说法是 v3.3.4 / #154 补的，口径同上：Alpine 镜像靠 gcompat 让 musl 加载器拉起 glibc 版 Chromium，缺库时报的是 musl 措辞，glibc 不会打这两句。
 - 正在重装的依赖数通过可注入的 `playwrightHintEnvFunc` 取，只在命中缺库关键词时才查库。
 - 提示要短：失败摘要会截断到 320 字符。
 
