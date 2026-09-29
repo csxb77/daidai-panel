@@ -1752,7 +1752,7 @@ if __name__ == '__main__':
             browsers_path: '/app/Dumb-Panel/deps/ms-playwright',
           },
           '不支持当前环境 (400)': {
-            error: 'Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请换 Debian 版镜像 linzixuanzz/daidai-panel:debian',
+            error: 'Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请把镜像标签里的 latest 换成 debian（如 latest → debian、latest-full → debian-full）',
           },
         }, null, 2),
         responseFields: [

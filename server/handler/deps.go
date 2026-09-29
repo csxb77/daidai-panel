@@ -1165,8 +1165,9 @@ func buildAlpineGlibcHint(env dependencyToolchainEnv) string {
 			"（换到 Debian 版镜像后则是 build-essential、cmake）后再重装"
 	}
 
+	// 镜像按标签对应换（与 Playwright 的 Alpine 提示同一个说法）：写死 :debian 的话，latest-full 的用户照做会丢掉 Go 与编译链。
 	hint := "[当前容器使用 Alpine 镜像（musl libc），该依赖在 musl 上没有可用的预编译包" +
-		"（PyPI 上常见的 manylinux wheel 只认 glibc）。请切换到 Debian 版镜像（如 linzixuanzz/daidai-panel:debian）后重试，" +
+		"（PyPI 上常见的 manylinux wheel 只认 glibc）。请切换到 Debian 版镜像（把镜像标签里的 latest 换成 debian，如 latest → debian、latest-full → debian-full）后重试，" +
 		"多数这类包换过去就能直接装上、不用编译；若换镜像后仍然报编译失败，说明该包连 manylinux wheel 都没有，只能现场编译 —— " +
 		install
 	if env.PrivilegeHint != "" {
@@ -1353,7 +1354,8 @@ func buildMissingToolchainHint(env dependencyToolchainEnv) string {
 			"记得先到「系统设置 - 任务运行 - 依赖安装超时(分钟)」把阈值调大，默认 20 分钟往往不够"
 		if preferDebianImage {
 			// 两条出路是并列关系，不是二选一：先给成本最低的换镜像，再给兜底的现场编译。
-			body = "出路一：换到 Debian 版镜像（如 linzixuanzz/daidai-panel:debian）后重装 —— " +
+			// 镜像按标签对应换，理由同 buildAlpineGlibcHint：写死 :debian 的话，latest-full 的用户照做会丢掉 Go 与编译链。
+			body = "出路一：换到 Debian 版镜像（把镜像标签里的 latest 换成 debian，如 latest → debian、latest-full → debian-full）后重装 —— " +
 				"多数科学计算包在 musl 上没有预编译包、在 glibc 上却有 manylinux wheel，换过去往往直接装上、不用编译。" +
 				"出路二：若该包连 manylinux wheel 都没有，就只能现场编译：" + compile
 		} else {

@@ -120,7 +120,8 @@ func TestPlanPlaywrightRuntime(t *testing.T) {
 				f.PackageManager = "apk"
 				f.Arch = "386"
 			}),
-			reasonHave: []string{"Alpine", "linzixuanzz/daidai-panel:debian"},
+			// 按标签对应换镜像：latest-full 的用户要换到 debian-full，写死 :debian 会丢掉 Go 与编译链。
+			reasonHave: []string{"Alpine", "latest → debian", "latest-full → debian-full"},
 		},
 		{name: "只认出 apk", facts: with(func(f *playwrightRuntimeFacts) { f.OSRelease = LinuxOSRelease{}; f.PackageManager = "apk" }), reasonHave: []string{"Alpine"}},
 		{name: "dnf 系", facts: with(func(f *playwrightRuntimeFacts) { f.PackageManager = "dnf" }), reasonHave: []string{"apt", "dnf"}},
@@ -323,6 +324,29 @@ func TestBuildPlaywrightEnvironmentHint(t *testing.T) {
 		"/app/Dumb-Panel/deps/ms-playwright/chromium_headless_shell-1181/chrome-linux/headless_shell: " +
 		"error while loading shared libraries: libnss3.so: cannot open shared object file: No such file or directory"
 	const hostMissing = "BrowserType.launch: \nHost system is missing dependencies to run browsers."
+	// #154：Alpine 上 import playwright 的真实报错（Python 的 wheel 在 musl 上装不上，只会停在这一步）。
+	const pyMissingModule = "Traceback (most recent call last):\n" +
+		"  File \"/app/Dumb-Panel/scripts/pw_demo.py\", line 1, in <module>\n" +
+		"    from playwright.sync_api import sync_playwright\n" +
+		"ModuleNotFoundError: No module named 'playwright'"
+	const nodeMissingModule = "node:internal/modules/cjs/loader:1228\n  throw err;\n  ^\n\n" +
+		"Error: Cannot find module 'playwright'\nRequire stack:\n- /app/Dumb-Panel/scripts/pw_demo.js\n" +
+		"    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)"
+	// Node 版装上 npm 包之后的下一步：缺浏览器。Playwright 给 Node 的安装指引写的是 npx playwright install。
+	const nodeMissingBrowser = "browserType.launch: Executable doesn't exist at " +
+		"/app/Dumb-Panel/deps/ms-playwright/chromium_headless_shell-1181/chrome-linux/headless_shell\n" +
+		"║ Looks like Playwright Test or Playwright was just installed or updated. ║\n" +
+		"║ Please run the following command to download new browsers:              ║\n" +
+		"║     npx playwright install                                              ║"
+	// ESM 的 import 缺包：Node 报 Cannot find package（错误码 ERR_MODULE_NOT_FOUND），不含 cannot find module。
+	// 只留报错这一行、不带 node:internal 堆栈，语言也得靠这一句认成 Node。
+	const nodeESMMissingModule = "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'playwright' imported from /app/Dumb-Panel/scripts/pw_demo.mjs"
+	// Alpine 镜像装了 gcompat，glibc 版 Chromium 由 musl 的加载器拉起：缺库、缺符号都是 musl 的说法，
+	// Playwright 把浏览器的 stderr 加上 [pid=…][err] 前缀转出来。glibc 的 error while loading shared libraries 在 Alpine 上不会出现。
+	const muslMissingLib = "[pid=1][err] Error loading shared library libnss3.so: No such file or directory " +
+		"(needed by /app/Dumb-Panel/deps/ms-playwright/chromium_headless_shell-1181/chrome-linux/headless_shell)"
+	const muslMissingSymbol = "[pid=1][err] Error relocating " +
+		"/app/Dumb-Panel/deps/ms-playwright/chromium_headless_shell-1181/chrome-linux/headless_shell: fcntl64: symbol not found"
 
 	noPending := func() int64 { return 0 }
 	cases := []struct {
@@ -392,6 +416,118 @@ func TestBuildPlaywrightEnvironmentHint(t *testing.T) {
 			env:       playwrightHintEnv{OneClick: true, PendingLinux: noPending},
 			wantEmpty: true,
 		},
+		{
+			// #154：pip 在 musl 上一个能装的版本都找不到，给「按标签换 Debian 版镜像再点一键安装」的确定结论；
+			// 标签按「把 latest 换成 debian」对应，latest-full 的用户不能被引到丢掉 Go 与编译链的精简版上。
+			name:        "Alpine：Python 缺模块（容器）",
+			output:      pyMissingModule,
+			env:         playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			contains:    []string{"Alpine", "from versions: none", "latest → debian", "latest-full → debian-full", "安装 Playwright 运行环境"},
+			notContains: []string{"connectOverCDP"},
+		},
+		{
+			// 面具版没有镜像标签可换，一键安装也会被拒：只能改刷 Debian 版模块、在终端装。
+			name:        "Alpine：Python 缺模块（面具）",
+			output:      pyMissingModule,
+			env:         playwrightHintEnv{PendingLinux: noPending, Alpine: true, Magisk: true, Arch: "arm64"},
+			contains:    []string{"Debian 版面具模块", "python3 -m playwright install --with-deps chromium", "尚未验证"},
+			notContains: []string{"latest → debian", "安装 Playwright 运行环境"},
+		},
+		{
+			name:        "Alpine：Python 缺模块（其它部署）",
+			output:      pyMissingModule,
+			env:         playwrightHintEnv{PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			contains:    []string{"Debian / Ubuntu"},
+			notContains: []string{"latest → debian", "安装 Playwright 运行环境"},
+		},
+		{
+			// Debian 版镜像只发布 amd64 / arm64：别的架构不能再叫人去换镜像。
+			name:        "Alpine：Python 缺模块（32 位 arm 容器）",
+			output:      pyMissingModule,
+			env:         playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "arm"},
+			contains:    []string{"CPU 架构是 arm", "amd64 / arm64", "跑不了 Playwright"},
+			notContains: []string{"latest → debian", "安装 Playwright 运行环境"},
+		},
+		{
+			// Node 的 npm 包在 Alpine 上能装上：不能套 Python 的说法（pip / manylinux），还要给出连远端浏览器这条路。
+			name:        "Alpine：Node 缺模块（容器）",
+			output:      nodeMissingModule,
+			env:         playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			contains:    []string{"npm 的 playwright 包能装上", "connectOverCDP", "latest → debian"},
+			notContains: []string{"pip", "manylinux"},
+		},
+		{
+			// ESM 的 import 缺包（Cannot find package）同样要认出来，并且认成 Node：不能套 pip / manylinux。
+			name:        "Alpine：Node ESM 缺包（容器）",
+			output:      nodeESMMissingModule,
+			env:         playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			contains:    []string{"npm 的 playwright 包能装上", "connectOverCDP", "latest → debian"},
+			notContains: []string{"pip", "manylinux"},
+		},
+		{
+			// npm 包装上之后的下一轮报缺浏览器：不能再走 #142 那句「点一键安装重新下载」，Alpine 上那个按钮一定被拒。
+			name:        "Alpine：Node 缺浏览器（容器）",
+			output:      nodeMissingBrowser,
+			env:         playwrightHintEnv{BrowsersPath: "/app/Dumb-Panel/deps/ms-playwright", OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			contains:    []string{"Alpine", "connectOverCDP"},
+			notContains: []string{"pip", "manylinux", "重新下载"},
+		},
+		{
+			name:        "Alpine：Node 缺模块（面具）",
+			output:      nodeMissingModule,
+			env:         playwrightHintEnv{PendingLinux: noPending, Alpine: true, Magisk: true, Arch: "arm64"},
+			contains:    []string{"npx playwright install --with-deps chromium", "connectOverCDP"},
+			notContains: []string{"python3 -m", "pip", "manylinux", "latest → debian", "安装 Playwright 运行环境"},
+		},
+		{
+			// Alpine 判定排在缺库之前：后台重装系统库也救不了 Alpine，不能叫人干等。
+			// 缺库原文用 musl 加载器的说法：Alpine 上只会是它，glibc 的措辞在这里不会出现。
+			name:        "Alpine：缺库且系统依赖正在重装",
+			output:      muslMissingLib,
+			env:         playwrightHintEnv{OneClick: true, PendingLinux: func() int64 { return 7 }, Alpine: true, Arch: "amd64"},
+			contains:    []string{"Alpine", "latest → debian"},
+			notContains: []string{"正在后台自动重装"},
+		},
+		{
+			// musl 加载器缺符号时报 Error relocating …: symbol not found，同样是 Chromium 在 Alpine 上起不来。
+			name:     "Alpine：缺符号（musl 的 Error relocating）",
+			output:   muslMissingSymbol,
+			env:      playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			contains: []string{"Alpine", "latest → debian"},
+		},
+		{
+			// 与 Playwright 无关的通用缺库报错不归 Alpine 分支管，口径与非 Alpine 一致。
+			name:      "Alpine：与 Playwright 无关的缺库报错",
+			output:    "./tool: error while loading shared libraries: libssl.so.1.1: cannot open shared object file",
+			env:       playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			wantEmpty: true,
+		},
+		{
+			// 换成 Alpine 上真实会出现的 musl 说法也一样：没有正在重装的系统依赖时不给提示。
+			name:      "Alpine：与 Playwright 无关的 musl 缺库报错",
+			output:    "Error loading shared library libssl.so.1.1: No such file or directory (needed by ./tool)",
+			env:       playwrightHintEnv{OneClick: true, PendingLinux: noPending, Alpine: true, Arch: "amd64"},
+			wantEmpty: true,
+		},
+		{
+			// 非 Alpine 上缺模块交给任务的自动安装，这里不抢着给提示。
+			name:      "非 Alpine：Python 缺模块",
+			output:    pyMissingModule,
+			env:       playwrightHintEnv{OneClick: true, PendingLinux: noPending, Arch: "amd64"},
+			wantEmpty: true,
+		},
+		{
+			name:      "非 Alpine：Node 缺模块",
+			output:    nodeMissingModule,
+			env:       playwrightHintEnv{OneClick: true, PendingLinux: noPending, Arch: "amd64"},
+			wantEmpty: true,
+		},
+		{
+			name:      "非 Alpine：Node ESM 缺包",
+			output:    nodeESMMissingModule,
+			env:       playwrightHintEnv{OneClick: true, PendingLinux: noPending, Arch: "amd64"},
+			wantEmpty: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -403,6 +539,10 @@ func TestBuildPlaywrightEnvironmentHint(t *testing.T) {
 					t.Fatalf("期望不给提示，实际 %q", got)
 				}
 				return
+			}
+			// 任务日志里靠「[提示]」这个已登记的前缀认出面板行。
+			if !strings.HasPrefix(got, "[提示] ") {
+				t.Fatalf("提示应以「[提示] 」开头，实际 %q", got)
 			}
 			for _, want := range tc.contains {
 				if !strings.Contains(got, want) {
@@ -422,6 +562,89 @@ func TestBuildPlaywrightEnvironmentHint(t *testing.T) {
 				t.Fatalf("提示应是单行，实际 %q", got)
 			}
 		})
+	}
+}
+
+// #154：Alpine 文案按「语言 × 部署 × 架构」拼出来，这里把每一种组合都跑一遍。
+// 每条都必须单行、以「[提示] 」开头、不超过失败摘要的 320 字符，而且说法对这种组合要成立。
+func TestBuildPlaywrightEnvironmentHintAlpineCoversEveryVariant(t *testing.T) {
+	var env playwrightHintEnv
+	old := playwrightHintEnvFunc
+	t.Cleanup(func() { playwrightHintEnvFunc = old })
+	playwrightHintEnvFunc = func() playwrightHintEnv { return env }
+
+	outputs := map[string]string{
+		"python": "Traceback (most recent call last):\n" +
+			"  File \"/app/Dumb-Panel/scripts/pw_demo.py\", line 1, in <module>\n" +
+			"ModuleNotFoundError: No module named 'playwright'",
+		"node": "Error: Cannot find module 'playwright'\nRequire stack:\n- /app/Dumb-Panel/scripts/pw_demo.js",
+		// 只有一句缺库、看不出是哪种语言：只能讲两边都成立的结论。
+		"unknown": "BrowserType.launch: \nHost system is missing dependencies to run browsers.",
+	}
+	deployments := map[string]playwrightHintEnv{
+		"容器":   {OneClick: true},
+		"面具":   {Magisk: true},
+		"其它部署": {},
+	}
+	for lang, output := range outputs {
+		for deployName, deploy := range deployments {
+			for _, arch := range []string{"amd64", "arm64", "386", "arm"} {
+				env = deploy
+				env.Alpine = true
+				env.Arch = arch
+				env.PendingLinux = func() int64 { return 0 }
+				name := lang + " / " + deployName + " / " + arch
+
+				got := BuildPlaywrightEnvironmentHint(output)
+				if !strings.HasPrefix(got, "[提示] 当前系统是 Alpine") {
+					t.Fatalf("%s：应给 Alpine 提示，实际 %q", name, got)
+				}
+				if n := len([]rune(got)); n > 320 || strings.Contains(got, "\n") {
+					t.Fatalf("%s：提示必须单行且不超过 320 字符（实际 %d 字符）：%q", name, n, got)
+				}
+				// pip / manylinux 只对 Python 成立；Node 还能连别处的浏览器，不能说它「跑不了 Playwright」。
+				if lang != "python" && (strings.Contains(got, "pip") || strings.Contains(got, "manylinux") || strings.Contains(got, "跑不了 Playwright")) {
+					t.Fatalf("%s：不能套用 Python 的说法，实际 %q", name, got)
+				}
+				if lang == "node" && !strings.Contains(got, "connectOverCDP") {
+					t.Fatalf("%s：Node 应给出连接别处浏览器这条路，实际 %q", name, got)
+				}
+
+				if arch != "amd64" && arch != "arm64" {
+					// 换镜像、换系统都救不了这种架构，不能再叫人去换。
+					for _, unwanted := range []string{"latest → debian", "改刷", "Debian / Ubuntu", "安装 Playwright 运行环境"} {
+						if strings.Contains(got, unwanted) {
+							t.Fatalf("%s：不应包含 %q，实际 %q", name, unwanted, got)
+						}
+					}
+					if !strings.Contains(got, "amd64 / arm64") {
+						t.Fatalf("%s：应写明只支持 amd64 / arm64，实际 %q", name, got)
+					}
+					continue
+				}
+				var want, unwanted []string
+				switch deployName {
+				case "容器":
+					want = []string{"latest → debian", "latest-full → debian-full", "安装 Playwright 运行环境"}
+				case "面具":
+					want = []string{"Debian 版面具模块", "install --with-deps chromium", "尚未验证"}
+					unwanted = []string{"latest → debian", "安装 Playwright 运行环境"}
+				default:
+					want = []string{"Debian / Ubuntu"}
+					unwanted = []string{"latest → debian", "安装 Playwright 运行环境"}
+				}
+				for _, item := range want {
+					if !strings.Contains(got, item) {
+						t.Fatalf("%s：应包含 %q，实际 %q", name, item, got)
+					}
+				}
+				for _, item := range unwanted {
+					if strings.Contains(got, item) {
+						t.Fatalf("%s：不应包含 %q，实际 %q", name, item, got)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -480,5 +703,23 @@ func TestBuildRuntimeFailureHintCombinesModuleAndPlaywrightHints(t *testing.T) {
 
 	if got := BuildRuntimeFailureHint("ZeroDivisionError: division by zero"); got != "" {
 		t.Fatalf("无关报错不应给提示，实际 %q", got)
+	}
+
+	// #154：同一段 traceback，非 Alpine 上交给自动安装、不给提示；
+	// Alpine 上失败摘要（失败通知里的「失败原因」）直接就是换镜像的结论，而不是原样的 ModuleNotFoundError。
+	traceback := "Traceback (most recent call last):\n" +
+		"  File \"/app/Dumb-Panel/scripts/pw_demo.py\", line 1, in <module>\n" +
+		"    from playwright.sync_api import sync_playwright\n" +
+		"ModuleNotFoundError: No module named 'playwright'"
+	if got := BuildRuntimeFailureHint(traceback); got != "" {
+		t.Fatalf("非 Alpine 上缺 playwright 模块不应给提示，实际 %q", got)
+	}
+	stubPlaywrightHintEnv(t, playwrightHintEnv{OneClick: true, PendingLinux: func() int64 { return 0 }, Alpine: true, Arch: "amd64"})
+	hint := BuildRuntimeFailureHint(traceback)
+	if !strings.Contains(hint, "Alpine") || !strings.Contains(hint, "latest → debian") {
+		t.Fatalf("Alpine 上应返回换镜像的提示，实际 %q", hint)
+	}
+	if got := summarizeTaskFailureOutput(traceback); got != hint {
+		t.Fatalf("任务失败摘要应直接是这条 Alpine 提示，实际 %q", got)
 	}
 }

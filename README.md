@@ -278,7 +278,7 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 </details>
 
 <details>
-<summary><b>展开：该选哪个镜像标签 —— 要跑 Go 任务 / 装需要现场编译的依赖 / pip 报 Failed building wheel 怎么办 / 换 Debian 运行时 / 指定 Python 3.10、3.11 / 查 CPU 架构支持 / 本地源码构建</b></summary>
+<summary><b>展开：该选哪个镜像标签 —— 要跑 Go 任务 / 跑 Playwright / 装需要现场编译的依赖 / pip 报 Failed building wheel 怎么办 / 换 Debian 运行时 / 指定 Python 3.10、3.11 / 查 CPU 架构支持 / 本地源码构建</b></summary>
 
 ### 支持的 CPU 架构
 
@@ -301,6 +301,8 @@ docker logs daidai-watchtower 2>&1 | head -n 5
 | 完整版 | 精简版的全部内容 | 额外包含 Go/gofmt、Docker CLI、wget、C/C++ 编译链、make、Linux 头文件和 pkg-config；**同样不含 CMake** |
 
 自 `v3.0.0` 起，**Go 任务必须使用 `latest-full` 或 `debian-full`。** 安装需要现场编译原生扩展的 pip/npm 依赖时，也建议使用完整版。普通 Python、JavaScript、TypeScript 和 Shell 任务优先使用体积更小的精简版。
+
+**要跑 Playwright / Chromium 浏览器自动化，请直接用 Debian 版镜像。** Playwright 的 Python 包只发布认 glibc 的 `manylinux` 预编译包，在 Alpine 上 pip 会报 `from versions: none` / `No matching distribution found`，换源、重试都没用；它下载的 Chromium 也是 glibc 构建，Node.js 版在 Alpine 上同样起不来浏览器。其它包在 Alpine 上报这两句、而包名、网络、Python 版本都没问题时，多半也是只发布了 glibc 预编译包（例如 ddddocr 依赖的 onnxruntime），同样换 Debian 版镜像。详见 [Alpine 版镜像跑不了浏览器，请用 Debian 版](./docs/task-not-running.md#alpine-版镜像跑不了浏览器请用-debian-版)。
 
 > ⚠️ **「换工具档位」和「换基础系统」是两件事，别混在一起。**<br>
 > **换档位（精简版 → `latest-full` / `debian-full`）解决不了「缺 CMake」。** 完整版补的是 Alpine 的 `build-base` + `linux-headers` + `pkgconf`、Debian 的 `build-essential` + `linux-libc-dev` + `pkg-config` —— 有 gcc / g++ / make，但**两个档位都没有 CMake**。只要那个包真的要现场编译、且构建后端调 CMake，换成完整版之后日志照样停在 `CMake must be installed to build ...`。<br>
@@ -508,6 +510,7 @@ daidai-panel-windows-amd64/
 | 先看看界面长什么样，不想为此先装一遍 | [在线演示](#在线演示)，或直接打开 <https://linzixuanzz.github.io/daidai-panel/> |
 | 跑 Go 任务、装需要现场编译的依赖、换 Debian 运行时、指定 Python 3.10 / 3.11 | [快速部署](#快速部署) → 「该选哪个镜像标签」 |
 | pip 装包报 `Failed building wheel` / `gcc: not found` / `CMake must be installed` | [快速部署](#快速部署) → 「该选哪个镜像标签」→ 「pip 装某个包时报…」 |
+| Alpine 镜像上 pip 装包报 `No matching distribution found` / `from versions: none`（装 playwright 时必报） | [快速部署](#快速部署) → 「该选哪个镜像标签」→ 「Alpine 与 Debian 运行时和镜像标签」；Playwright 见 [Alpine 版镜像跑不了浏览器](./docs/task-not-running.md#alpine-版镜像跑不了浏览器请用-debian-版) |
 | 想在面板里装 Linux 系统包（`apk` / `apt` / `dnf` / `yum` / `microdnf` / `zypper`），或直接敲命令 | 面板「依赖管理」页 →「Linux」页签 / 工具条菜单「系统命令行」 |
 | 不用 Docker，在 Windows 上直接跑 | [快速部署](#快速部署) → 「Windows 单机版」 |
 | 在已 Root 的安卓手机上跑 | [快速部署](#快速部署) → 「Android Magisk 模块」，完整文档见 [`Magisk/README.md`](./Magisk/README.md) |

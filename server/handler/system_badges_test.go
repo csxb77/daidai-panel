@@ -148,3 +148,58 @@ func TestSystemBadgesScopesCountsByRole(t *testing.T) {
 	assertField(t, "admin", adminData, "deps_failed", 1)
 	assertField(t, "admin", adminData, "deps_installing", 2)
 }
+
+// TestSystemBadgesExcludesYesterdayFailures 锁住「今日失败」角标的下界（issue #153 补索引时一并补的口径锁）：
+// 昨天 23:59:59.999999999 失败的那次不算今天，今天零点整失败的那次算。
+// 口径与仪表板的 today_* 相同（created_at >= 本地今天零点），加索引只改执行计划，不该改这个数。
+func TestSystemBadgesExcludesYesterdayFailures(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "badge-yesterday-failure", "viewer")
+	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+
+	task := &model.Task{
+		Name:     "badge yesterday failure task",
+		Command:  "echo ok",
+		TaskType: model.TaskTypeManual,
+		Status:   model.TaskStatusEnabled,
+	}
+	if err := database.DB.Create(task).Error; err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	// 时间一律交给驱动按 time.Time 绑定：库里存的是带偏移的文本，手写日期字符串的零点语义和生产不一样。
+	today := settledLocalToday(t)
+	failedStatus := model.LogStatusFailed
+	for _, createdAt := range []time.Time{today.Add(-time.Nanosecond), today} {
+		logRecord := &model.TaskLog{
+			TaskID:    task.ID,
+			Status:    &failedStatus,
+			StartedAt: createdAt,
+			CreatedAt: createdAt,
+		}
+		if err := database.DB.Create(logRecord).Error; err != nil {
+			t.Fatalf("create task log: %v", err)
+		}
+	}
+
+	rec := performJSONRequest(
+		engine,
+		http.MethodGet,
+		"/api/v1/system/badges",
+		`{}`,
+		map[string]string{"Authorization": "Bearer " + token},
+		"",
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	data, ok := decodeJSONMap(t, rec)["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected data object, got %s", rec.Body.String())
+	}
+	if got := data["logs_failed_today"]; got != float64(1) {
+		t.Fatalf("昨天的失败不该算进今日失败角标，期望 1（只有今天零点整那条），实际 %#v", got)
+	}
+}

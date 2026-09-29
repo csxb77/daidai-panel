@@ -201,6 +201,9 @@ func TestSummarizeTaskSuccessOutputDropsBannersAndMeta(t *testing.T) {
 		"[执行前置脚本]",
 		"[第 1 次重试，等待 5 秒]",
 		"[检测到缺失依赖: requests，正在自动安装...]",
+		// 自动装 npm 包前的兼容映射说明，自 #154 起单独成行。它走不收集输出的 onOutput、今天进不了成功摘录，
+		// 这里守的是「面板自己打的行都要登记进 panelMetaLinePrefixes」这条契约。取自真实生成函数，免得字面量与实现漂移。
+		NodeInstallCompatibilityNotice("axios"),
 		"[安装成功: requests]",
 		"[依赖已安装 (1/5)，自动重试执行]",
 		"签到: 成功",
@@ -212,7 +215,7 @@ func TestSummarizeTaskSuccessOutputDropsBannersAndMeta(t *testing.T) {
 	if strings.Contains(summary, "=== 开始执行") || strings.Contains(summary, "=== 执行结束") {
 		t.Fatalf("expected banner lines removed, got %q", summary)
 	}
-	for _, meta := range []string{"[执行前置脚本]", "[第 1 次重试", "[检测到缺失依赖", "[安装成功", "[依赖已安装"} {
+	for _, meta := range []string{"[执行前置脚本]", "[第 1 次重试", "[检测到缺失依赖", "[Node.js 依赖]", "[安装成功", "[依赖已安装"} {
 		if strings.Contains(summary, meta) {
 			t.Fatalf("expected panel meta %q removed, got %q", meta, summary)
 		}

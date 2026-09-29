@@ -246,7 +246,17 @@ python -m playwright install chromium
 
 面板默认的 Alpine 镜像是 **musl** 环境，而 Playwright 官方下载的 Chromium 是 **glibc** 构建的，**在 Alpine 里根本无法执行**。一键安装在 Alpine 版上会直接提示不支持，`playwright install-deps` 也只支持 Debian/Ubuntu。
 
-要跑浏览器自动化，请改用 **Debian 版镜像**。仓库里有现成的 `Dockerfile.debian` 和 `docker-compose.debian.yml`，镜像标签的完整对照见 [README → Alpine 与 Debian 运行时和镜像标签](../README.md#alpine-与-debian-运行时和镜像标签)。
+Python 的 `playwright` 包在 Alpine 上连装都装不上：它的每个版本都只发布认 glibc 的 `manylinux` 预编译包，没有 musl 能用的包，也没有源码包。不管是在「依赖管理」里装，还是任务运行时自动安装缺失依赖，pip 都会报下面这几行（第一行是你配置的镜像源）。这不是网络问题，换源、重试都不会有变化：
+
+```text
+Looking in indexes: https://mirrors.cloud.tencent.com/pypi/simple
+ERROR: Could not find a version that satisfies the requirement playwright (from versions: none)
+ERROR: No matching distribution found for playwright
+```
+
+Node.js 的 `playwright` npm 包在 Alpine 上能装上，但它下载的 Chromium 同样是 glibc 构建，照样启动不了（脚本也可以用 `connect` / `connectOverCDP` 连接别处的浏览器）。`v3.3.4` 起，任务日志、失败通知、调试运行里碰上这几种情况，面板会直接提示该换什么。
+
+要跑浏览器自动化，请改用 **Debian 版镜像**（数据卷可以直接沿用），换好之后到「依赖管理 → Linux」点「安装 Playwright 运行环境」。仓库里有现成的 `Dockerfile.debian` 和 `docker-compose.debian.yml`，镜像标签的完整对照见 [README → Alpine 与 Debian 运行时和镜像标签](../README.md#alpine-与-debian-运行时和镜像标签)。面具模块版同理：改刷 Debian 版模块（`daidai-panel-magisk-debian-vX.Y.Z.zip`），再在终端执行 `python3 -m playwright install --with-deps chromium`；安卓上能否跑起 Chromium 目前没有验证过。
 
 ### `/dev/shm` 默认只有 64MB，Chromium 会崩
 

@@ -187,7 +187,8 @@ func planPlaywrightRuntime(facts playwrightRuntimeFacts) PlaywrightRuntimePlan {
 	case facts.GOOS != "linux":
 		plan.Reason = fmt.Sprintf("一键安装只支持 Linux 上的 Debian 12 版 Docker 镜像，当前系统是 %s", facts.GOOS)
 	case facts.OSRelease.ID == "alpine" || facts.PackageManager == "apk":
-		plan.Reason = "Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请换 Debian 版镜像 linzixuanzz/daidai-panel:debian"
+		// 与 buildPlaywrightAlpineHint 同一个说法：按标签对应换，写死 :debian 的话 latest-full 的用户照做会丢掉 Go 与编译链。
+		plan.Reason = "Alpine 镜像（musl）跑不了 Playwright 官方的 Chromium（glibc 构建），请把镜像标签里的 latest 换成 debian（如 latest → debian、latest-full → debian-full）"
 	case facts.PackageManager != "apt":
 		manager := facts.PackageManager
 		if manager == "" {
@@ -291,10 +292,16 @@ func NewPlaywrightBrowserInstallCommand(pythonVersion string) (*exec.Cmd, string
 type playwrightHintEnv struct {
 	// BrowsersPath 是任务里实际生效的 PLAYWRIGHT_BROWSERS_PATH
 	BrowsersPath string
-	// OneClick 表示当前部署能用「依赖管理 → Linux」里的一键安装（容器部署）
+	// OneClick 表示浏览器目录由面板托管，也就是容器部署：非 Alpine 时能用「依赖管理 → Linux」里的一键安装；
+	// Alpine 上一键安装一定被拒，Alpine 分支只拿它判断「是不是容器、该不该叫人换镜像」
 	OneClick bool
 	// PendingLinux 返回正在安装 / 排队中的 Linux 依赖数；只在命中缺库关键词时才调用，避免每次失败都查库
 	PendingLinux func() int64
+	// Alpine / Magisk / Arch 只给 Alpine 分支用（#154）：Alpine（musl）上 Playwright 跑不起来，
+	// 出路按部署形态（容器 / 面具模块 / 其它）和 CPU 架构分岔，见 buildPlaywrightAlpineHint
+	Alpine bool
+	Magisk bool
+	Arch   string
 }
 
 var playwrightHintEnvFunc = func() playwrightHintEnv {
@@ -302,6 +309,9 @@ var playwrightHintEnvFunc = func() playwrightHintEnv {
 		BrowsersPath: ResolvePlaywrightBrowsersPath(),
 		OneClick:     DefaultPlaywrightBrowsersPath() != "",
 		PendingLinux: countPendingLinuxDependencies,
+		Alpine:       DetectLinuxOSRelease().ID == "alpine",
+		Magisk:       playwrightMagiskFunc(),
+		Arch:         playwrightGOARCH,
 	}
 }
 
@@ -316,23 +326,116 @@ func countPendingLinuxDependencies() int64 {
 	return count
 }
 
-// BuildPlaywrightEnvironmentHint 针对任务 / 调试运行里 Playwright 的两类环境故障给出一句提示。
+// BuildPlaywrightEnvironmentHint 针对任务 / 调试运行里 Playwright 的环境故障给出一句提示：
+// Alpine 上根本跑不了 Playwright（#154），以及缺浏览器、缺系统库两类（#142）。
 //
 // 与 BuildModuleCompatibilityHint 分开写：那是纯函数、有现成测试锁着，而这里要查库（正在重装的系统依赖数）
-// 和读环境（浏览器目录、是不是容器），这些都通过 playwrightHintEnvFunc 注入。
+// 和读环境（浏览器目录、是不是容器、是不是 Alpine），这些都通过 playwrightHintEnvFunc 注入。
 // 提示会进任务失败摘要，摘要截断到 320 字符，所以每条都要写短。
 func BuildPlaywrightEnvironmentHint(output string) string {
 	lower := strings.ToLower(output)
 	if lower == "" {
 		return ""
 	}
+	// 缺模块（#154）：Python 的 No module named 'playwright'；Node 用 require 时报 Cannot find module 'playwright'，
+	// 用 ESM 的 import 时报的是 Cannot find package 'playwright' imported from …（错误码 ERR_MODULE_NOT_FOUND），不含前一句。
+	// 只有 Alpine 上才凭它给提示，别的系统上缺模块交给任务的自动安装（见下面第 ② 段）。
+	missingModule := strings.Contains(lower, "no module named 'playwright'") ||
+		strings.Contains(lower, "cannot find module 'playwright'") ||
+		strings.Contains(lower, "cannot find package 'playwright'")
 	missingBrowser := strings.Contains(lower, "executable doesn't exist") && strings.Contains(lower, "ms-playwright")
+	// 缺系统库。后两句是 musl 加载器的说法（#154）：Alpine 镜像装了 gcompat，glibc 版 Chromium 由 musl 的加载器拉起，
+	// 缺库打 Error loading shared library …（needed by …），缺符号打 Error relocating …: symbol not found（musl 的 ldso/dynlink.c），
+	// 不会出现 glibc 的 error while loading shared libraries；Playwright 的依赖校验在 musl 上也报不出 Host system is missing dependencies
+	// （musl 的 ldd 缺库时以 127 退出，Playwright 遇到非 0 退出码直接当作没缺库）。不认这两句，Alpine 上的缺库就认不出来。
+	// glibc 不会打这两句，非 Alpine 上真实输入的行为不变。
 	missingLibs := strings.Contains(lower, "host system is missing dependencies") ||
-		strings.Contains(lower, "error while loading shared libraries")
+		strings.Contains(lower, "error while loading shared libraries") ||
+		strings.Contains(lower, "error loading shared library") ||
+		strings.Contains(lower, "error relocating")
+	// 一个关键词都不命中就不读环境：任务每次失败都会调到这里，不能每次都查库。
+	if !missingModule && !missingBrowser && !missingLibs {
+		return ""
+	}
+	env := playwrightHintEnvFunc()
+
+	// ① Alpine 必须排在最前面（#154）：原逻辑的缺浏览器、缺库两段会引人去点「安装 Playwright 运行环境」，
+	// 而一键安装在 Alpine 上一定被 planPlaywrightRuntime 拒绝，用户得多走一圈才知道要换镜像。
+	// 缺模块、缺浏览器（路径里带 ms-playwright）、Playwright 自己报的缺库，报错里都会出现 playwright，
+	// Host system is missing dependencies 也是 Playwright 专有的说法；剩下的只有与 Playwright 无关的
+	// 通用缺库报错，它不归这里管，交给下面的原逻辑（那里对它的口径是「宁可不给提示」）。
+	if env.Alpine && (strings.Contains(lower, "playwright") || strings.Contains(lower, "host system is missing dependencies")) {
+		return buildPlaywrightAlpineHint(lower, env)
+	}
+	// ② 不是 Alpine、只是缺模块：交给任务的自动安装（开关关着时由用户自己装），这里不给提示。
 	if !missingBrowser && !missingLibs {
 		return ""
 	}
-	return buildPlaywrightEnvironmentHint(lower, missingBrowser, playwrightHintEnvFunc())
+	// ③ 缺浏览器 / 缺系统库，沿用 #142 的原逻辑。
+	return buildPlaywrightEnvironmentHint(lower, missingBrowser, env)
+}
+
+// buildPlaywrightAlpineHint 给 Alpine（musl）上的 Playwright 故障一句确定结论（#154）。
+//
+// 文案按「语言 × 部署 × 架构」拼，每种组合都必须单行、≤320 字符（失败摘要的上限）：
+//   - 语言只能从报错文本里认。Python 的客户端包在 musl 上根本装不上（PyPI 只发 manylinux 预编译包，
+//     没有 musllinux 包也没有源码包）；Node 的 npm 包能装上，起不来的只是 Playwright 下载的 glibc 版 Chromium，
+//     还可以连别处的浏览器。两边的说法对另一边都不成立，认不出语言时只讲两边都成立的结论。
+//   - 部署决定「换什么」：容器按标签换成对应的 Debian 版镜像（latest → debian、latest-full → debian-full）再点一键安装；
+//     面具模块没有镜像标签可换，一键安装也会被 planPlaywrightRuntime 拒绝（浏览器目录不归面板管），
+//     只能改刷 Debian 版模块再在终端装；其它部署换到 glibc 系统。
+//   - Playwright 的浏览器和 Debian 版镜像都只有 amd64 / arm64：别的架构换什么都没用，不能再叫人去换。
+func buildPlaywrightAlpineHint(lower string, env playwrightHintEnv) string {
+	python := strings.Contains(lower, "no module named 'playwright'") ||
+		strings.Contains(lower, "traceback (most recent call last)") ||
+		strings.Contains(lower, "playwright._impl")
+	// npx playwright 出自 Playwright 给 Node 用户的安装指引（缺浏览器、缺库时都会打印），Python 版写的是 playwright install。
+	// ESM 的 import 缺包报的是 Cannot find package 'playwright'：报错里没有 node:internal 堆栈时（比如脚本只打印了 message），
+	// 语言只能靠这一句认出来。
+	node := !python && (strings.Contains(lower, "cannot find module 'playwright'") ||
+		strings.Contains(lower, "cannot find package 'playwright'") ||
+		strings.Contains(lower, "npx playwright") ||
+		strings.Contains(lower, "node:internal"))
+
+	// 认不出语言时的默认值：只讲两边都成立的结论，面具版的终端命令两种都给。
+	reason := "Playwright 官方的 Chromium 是 glibc 构建，在这里启动不了。"
+	command := "python3 -m playwright install --with-deps chromium（Node 脚本用 npx playwright install --with-deps chromium）"
+	if python {
+		reason = "Playwright 的 Python 包只发布认 glibc 的 manylinux 预编译包，pip 在这里装不上（会报 from versions: none），自动安装和重试都不会有变化。"
+		command = "python3 -m playwright install --with-deps chromium"
+	} else if node {
+		reason = "npm 的 playwright 包能装上，但 Playwright 下载的 Chromium 是 glibc 构建，在这里启动不了。"
+		command = "npx playwright install --with-deps chromium"
+	}
+	hint := "[提示] 当前系统是 Alpine（musl libc），" + reason
+
+	if env.Arch != "amd64" && env.Arch != "arm64" {
+		// Node 仍然可以连别处的浏览器，所以只能说「起不了浏览器」，不能说「跑不了 Playwright」。
+		ending := "这台机器上起不了 Playwright 的浏览器。"
+		if python {
+			ending = "这台机器上跑不了 Playwright。"
+		} else if node {
+			ending = "这台机器上起不了浏览器，只能让脚本用 connect / connectOverCDP 连接别处的浏览器。"
+		}
+		return hint + fmt.Sprintf("CPU 架构是 %s，而 Playwright 的浏览器与 Debian 版镜像都只有 amd64 / arm64，", env.Arch) + ending
+	}
+
+	fix := "请把面板换到 Debian / Ubuntu 等 glibc 系统上运行"
+	if env.Magisk {
+		// 面具版不能提 Docker 镜像标签，也不能提一键安装按钮；Debian 版模块上能不能跑起 Chromium 没人验证过，照实说。
+		// 命令后面接全角逗号而不是半角空格：认不出语言时 command 以全角括号收尾，接空格会变成「…） 装」。
+		fix = "请改刷 Debian 版面具模块（daidai-panel-magisk-debian-vX.Y.Z.zip），再在终端执行 " + command +
+			"，装浏览器和系统库；安卓上能否跑起 Chromium 尚未验证"
+	} else if env.OneClick {
+		// Alpine 的正式浮动标签有 latest、latest-full、latest-3.10、latest-3.11、latest-all 五个（README 的标签表），
+		// 对应的 Debian 版都是把 latest 换成 debian；写死 :debian 的话，latest-full 的用户照做会丢掉 Go 与编译链。
+		fix = "请把镜像标签里的 latest 换成 debian（如 latest → debian、latest-full → debian-full），数据卷可直接沿用，" +
+			"再到「依赖管理 → Linux」点「安装 Playwright 运行环境」"
+	}
+	if node {
+		fix += "；也可以让脚本用 connect / connectOverCDP 连接别处的浏览器"
+	}
+	return hint + fix + "。"
 }
 
 func buildPlaywrightEnvironmentHint(lower string, missingBrowser bool, env playwrightHintEnv) string {

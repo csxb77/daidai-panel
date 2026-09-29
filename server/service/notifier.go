@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,10 @@ var (
 	wecomAppSendURL  = "https://qyapi.weixin.qq.com/cgi-bin/message/send"
 	// 写成变量只是为了让测试能把它指向 httptest，线上始终是官方地址。
 	pushplusSendURL = "https://www.pushplus.plus/send"
+	// Server酱 两代接口的地址格式，写成变量同样只是为了让测试能把它们指向 httptest，线上始终是官方地址。
+	// Turbo 版唯一的 %s 是 SendKey；Server酱³ 的两个 %s 依次是 uid（做子域名）和 SendKey，见 sendServerchan。
+	serverchanTurboSendURLFormat = "https://sctapi.ftqq.com/%s.send"
+	serverchan3SendURLFormat     = "https://%s.push.ft07.com/send/%s.send"
 
 	smtpSendMail                = smtp.SendMail
 	smtpSendMailWithImplicitTLS = sendSMTPMailWithImplicitTLS
@@ -476,7 +481,7 @@ var (
 		checkNotifyCodeField("StatusCode", []float64{0}, "StatusMessage"),
 	)
 	checkPushplusResult   = checkNotifyCodeField("code", []float64{200}, "msg")
-	checkServerchanResult = checkNotifyCodeField("code", []float64{0}, "message", "msg")
+	checkServerchanResult = checkNotifyCodeField("code", []float64{0}, "message", "msg", "error") // Server酱³ 出错时原因放在 error 字段，见 sendServerchan
 	checkBarkResult       = checkNotifyCodeField("code", []float64{200}, "message")
 )
 
@@ -1382,9 +1387,28 @@ func sendPushplusWithFormat(cfg map[string]string, title, content, format string
 	return httpPostChecked(apiURL, body, nil, checkPushplusResult)
 }
 
+// serverchan3SendKeyPattern 认出 Server酱³ 的 SendKey 并取出 uid。
+// 官方文档（https://doc.sc3.ft07.com/zh/serverchan3/server/api）给的规则是 /^sctp(\d+)t/：
+// uid 就是 SendKey 里 sctp{uid}t 那一段，接口地址要拿它做子域名。
+// 这里额外不区分大小写：前缀写成大写 SCTP 的也还是 Server酱³ 的 key，同样发往 Server酱³，不当成老 key。
+var serverchan3SendKeyPattern = regexp.MustCompile(`(?i)^sctp(\d+)t`)
+
+// sendServerchan 按 SendKey 的开头区分 Server酱 的两代接口，用户不用另选渠道：
+//   - sctp{uid}t 开头的是 Server酱³，发到 https://<uid>.push.ft07.com/send/<sendkey>.send。
+//     它的 APP 接入了各手机厂商的系统推送，不开 App 也能收到（APP #14 的答复依据）；
+//   - 其余的 key（SCT 开头的 Turbo 版等）照旧发 https://sctapi.ftqq.com/<sendkey>.send，行为与以前一致。
+//
+// 两代的请求参数都是 title / desp，请求体共用。key 不对时两代的响应不同：
+// Turbo 版回 HTTP 400，由 httpPostChecked 的状态码分支报出；
+// Server酱³ 回 HTTP 200 + {"error":"sendkey not found","code":10003}（官方文档没写响应格式，这是用假 key 实测的），
+// 原因在 error 字段，所以 checkServerchanResult 的文案候选字段里带上了 error。
 func sendServerchan(cfg map[string]string, title, content string) error {
 	key := cfg["key"]
-	apiURL := fmt.Sprintf("https://sctapi.ftqq.com/%s.send", key)
+	apiURL := fmt.Sprintf(serverchanTurboSendURLFormat, key)
+	// 以 sctp 开头却取不到 uid 的 key 拼不出 Server酱³ 的地址，照旧发老地址，与改动前一致。
+	if match := serverchan3SendKeyPattern.FindStringSubmatch(key); match != nil {
+		apiURL = fmt.Sprintf(serverchan3SendURLFormat, match[1], key)
+	}
 	body := map[string]string{
 		"title": title,
 		"desp":  content,

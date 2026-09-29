@@ -2,8 +2,10 @@ package appboot
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"daidai-panel/config"
 	"daidai-panel/database"
@@ -40,6 +42,16 @@ func ResolveConfigPath() string {
 	return "config.yaml"
 }
 
+// TaskLogQueryIndexNames 是 v3.3.4（issue #153）给 task_logs 补的三个查询索引名。
+// 启动时只拿它判断「老库还缺不缺这几个索引」，决定要不要打那两行补建日志；索引本身由 AutoMigrate 按 tag 建。
+// 必须与 model/task_log.go 的 tag 一致，迁移测试兜底（database/task_log_indexes_migration_test.go）：
+// 名字一旦对不上，HasIndex 永远判「缺」，以后每次启动都会误打「正在补建」。导出只是为了让那条测试能核对它。
+var TaskLogQueryIndexNames = []string{
+	"idx_task_logs_created_at_status",
+	"idx_task_logs_started_at_status",
+	"idx_task_logs_task_id_started_at",
+}
+
 func LoadAndInit(configPath string) (*config.Config, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -61,7 +73,29 @@ func InitWithConfig(cfg *config.Config) error {
 	// 必须排在 AutoMigrate 之前：AutoMigrate 建唯一索引失败会直接 log.Fatalf，
 	// 老库里的同名数据要先改名让路，否则升级后面板起不来。
 	database.DeduplicateBeforeUniqueIndex()
+
+	// 老库升级后第一次启动时，AutoMigrate 要给 task_logs 补建三个查询索引（issue #153）。
+	// 每建一个约等于把整张执行日志表连同日志正文读一遍，日志多的库要等好几秒甚至更久；
+	// 这一步在 HTTP 服务起来之前同步执行，GORM 建索引又全程不打日志，用户只会看到「升级后面板半天打不开」。
+	// 所以只在「表已存在、且至少缺一个索引」时前后各打一行。全新库（表还不存在）建表时顺带建索引、很快，不打；
+	// 补建过之后的每次启动索引都在，也不打。
+	taskLogIndexMissing := false
+	if database.DB.Migrator().HasTable(&model.TaskLog{}) {
+		for _, name := range TaskLogQueryIndexNames {
+			if !database.DB.Migrator().HasIndex(&model.TaskLog{}, name) {
+				taskLogIndexMissing = true
+				break
+			}
+		}
+	}
+	migrateStartedAt := time.Now()
+	if taskLogIndexMissing {
+		log.Printf("正在为执行日志补建查询索引（v3.3.4，仅升级后首次启动需要，日志越多耗时越长）...")
+	}
 	database.AutoMigrate(allModels()...)
+	if taskLogIndexMissing {
+		log.Printf("执行日志查询索引补建完成，耗时 %s", time.Since(migrateStartedAt).Round(time.Millisecond))
+	}
 	database.EnsureColumns()
 
 	legacyPythonVenvMigration := service.MigrateLegacyManagedPythonVenvInfo()

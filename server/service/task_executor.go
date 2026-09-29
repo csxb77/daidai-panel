@@ -1073,6 +1073,9 @@ var panelMetaLinePrefixes = []string{
 	"[安装成功:",
 	"[安装失败:",
 	"[依赖已安装 ",
+	// 自动安装 npm 包前打的兼容映射说明（NodeInstallCompatibilityNotice）。它走的是不收集输出的 onOutput，
+	// 本来就进不了成功通知的摘录；登记只是守住「面板自己打进任务日志的行都要在册」这条契约（quality-guidelines.md）。
+	"[Node.js 依赖]",
 	"[重试启动失败:",
 	"[任务异常崩溃:",
 	// 执行器因停止 / 关机打进日志的提示行（stopNotice 产出的两种前缀）：
@@ -1502,31 +1505,43 @@ func (e *TaskExecutor) detectAndInstallDeps(plan *CommandExecutionPlan, output s
 		return false
 	}
 
-	if installedDeps != nil && installedDeps[candidate.PackageName] {
-		onOutput(fmt.Sprintf("[%s 已安装但仍然报错，可能是模块版本不兼容或内部依赖异常，请尝试手动安装指定版本]", candidate.DisplayName))
+	// installedDeps 按包名记「本次执行里自动安装过一次的结果」（true = 装上了），同一个包只装一次。
+	// 重试轮要按成败给出不同说法（#154）：原来装之前就记成 true，配了重试时会把「装失败」
+	// 误报成「已安装但仍然报错」。「本次执行已装包数」由调用方只在返回 true（装成功）时累加，不看这张表。
+	if installed, tried := installedDeps[candidate.PackageName]; tried {
+		if installed {
+			onOutput(fmt.Sprintf("[%s 已安装但仍然报错，可能是模块版本不兼容或内部依赖异常，请尝试手动安装指定版本]\n", candidate.DisplayName))
+		} else {
+			// 同一次执行里再装一遍结果也不会变（Alpine 上的 playwright 必然失败），只会白等一遍 pip / npm。
+			// 复用已登记的「[安装失败:」前缀，不新增元信息前缀。
+			onOutput(fmt.Sprintf("[安装失败: %s 本次执行已自动安装过一次并失败，不再重复安装，原因见上方日志]\n", candidate.DisplayName))
+		}
 		return false
 	}
 
-	onOutput(fmt.Sprintf("[检测到缺失依赖: %s，正在自动安装...]", candidate.DisplayName))
+	// 这里打的每一行都要自带换行：onOutput 是原样写入的，原来不带换行时会粘成
+	// 「…正在自动安装...][安装失败: …」（#154 的截图）和「…for playwright]=== 执行结束」。
+	onOutput(fmt.Sprintf("[检测到缺失依赖: %s，正在自动安装...]\n", candidate.DisplayName))
 	if candidate.Manager == "nodejs" {
+		// NodeInstallCompatibilityNotice 的返回值本身不带换行。
 		if notice := NodeInstallCompatibilityNotice(candidate.PackageName); notice != "" {
-			onOutput(notice)
+			onOutput(notice + "\n")
 		}
 	}
 	result := InstallAutoDependency(candidate, envVars)
 	if installedDeps != nil {
-		installedDeps[candidate.PackageName] = true
+		installedDeps[candidate.PackageName] = result.Success
 	}
 	if !result.Success {
 		failureReason := strings.TrimSpace(result.Error)
 		if failureReason == "" {
 			failureReason = "未知错误"
 		}
-		onOutput(fmt.Sprintf("[安装失败: %s]", failureReason))
+		onOutput(fmt.Sprintf("[安装失败: %s]\n", failureReason))
 		return false
 	}
 
-	onOutput(fmt.Sprintf("[安装成功: %s]", candidate.DisplayName))
+	onOutput(fmt.Sprintf("[安装成功: %s]\n", candidate.DisplayName))
 	return true
 }
 

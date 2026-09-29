@@ -387,7 +387,12 @@ var registeredNotifyChannels = []NotifyChannelDefinition{
 		Fields: []NotifyFieldDefinition{
 			// notifier.go 的 sendServerchan 不做任何判空，直接把 key 拼进 URL。
 			// 按本文件的 required 口径，这里不标 required。
-			notifyInput("key", "SendKey", "Server酱的 SendKey (SCT...)"),
+			//
+			// 两代 SendKey 共用这一个输入框：sendServerchan 按开头自动选接口（sctp 开头走 Server酱³，
+			// 其余走 Turbo 版），所以 placeholder 把两种开头都写出来，免得 Server酱³ 用户以为填不了。
+			// 渠道名保持「Server酱」不改：type / name 是冻结的公开契约
+			// （TestNotifyChannelTypesRemainBackwardCompatible），老客户端只认这两项。
+			notifyInput("key", "SendKey", "Server酱的 SendKey (Turbo 版 SCT... / Server酱³ sctp...)"),
 		},
 	},
 	{

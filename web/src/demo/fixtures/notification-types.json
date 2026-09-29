@@ -714,7 +714,7 @@
           "key": "key",
           "label": "SendKey",
           "widget": "input",
-          "placeholder": "Server酱的 SendKey (SCT...)"
+          "placeholder": "Server酱的 SendKey (Turbo 版 SCT... / Server酱³ sctp...)"
         }
       ]
     },
