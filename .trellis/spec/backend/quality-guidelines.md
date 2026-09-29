@@ -3079,6 +3079,111 @@ if (response.statusCode! >= 400) {
 
 ---
 
+## 场景：登录会话号与撤销契约（v3.3.4）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/middleware/auth.go`（签发、`JWTAuth`、`AccessTokenRevoked`）、`server/service/auth.go` 的 `RefreshToken`、`server/service/login_security.go` 的会话 / 黑名单函数、`server/handler/auth.go` 的登录与退出、`server/handler/security.go` 的会话管理、`server/handler/mcp_auth.go`、`server/handler/log.go` 的日志流心跳，或新增任何「改用户状态」的入口（网页、开放接口、命令行）时必须看本节。
+- 原因：JWT 无状态，撤销只能靠黑名单。v3.3.4 之前撤销只拉黑「登录那一刻」的两个 jti，续期得来的 access 无处可查——退出、撤销、改密、禁用、删除、改角色之后，续期过的设备照样能用到自然过期；黑名单行一过期被清理，已撤销的 token 还会复活。
+
+### 2. Signatures
+
+- claims：`middleware.Claims.SessionID`（JSON `sid`，omitempty）；常量 `middleware.ScriptTokenUsername = "internal-script-notify"`
+- 签发：`GenerateAccessTokenInfo`（登录用，sid = 自己的 jti）/ `GenerateSessionAccessTokenInfo(username, role, sid)`（只给续期用）/ `GenerateTemporaryAccessTokenInfo`（应用令牌、脚本令牌，不带 sid）
+- 判定：`middleware.IsUserSessionToken(claims)`、`middleware.AccessTokenRevoked(claims)`（`JWTAuth` 与 `authenticateMCPBearer` 共用）
+- `JWTAuth` 额外写入上下文：`sid`（新令牌取 sid，老令牌取 jti）、`token_expires_at`、`claims`
+- 会话：`service.CreateSessionWithRefresh(...) error`、`BlockSessionTokens`、`RevokeSession(sid, tokenExpiresAt)`、`RevokeAllUserSessions(userID)`、`RevokeOtherUserSessions(userID, sid)`、`CleanExpiredSessions()`
+- 日志流：`handler.logStreamHeartbeatInterval`（包级变量，默认 30s，只为测试能调短）
+
+### 3. Contracts
+
+- **会话号**：用户 access 的 `sid` = `user_sessions.jti` = 登录那枚 access 的 jti；续期出的 access 沿用同一个 sid。refresh、应用令牌、脚本令牌不带 sid，形状与改动前一致。不加列、不改表结构。
+- 🔴 **每请求只查一次库**（数据库单连接，#153）：
+  - 非用户主体（`app:` 前缀与**精确的** `internal-script-notify`）→ 只按 jti 查（老规则）。它们没有用户行、也没有会话行，落进用户会话的判定会一律 401，所有任务通知、开放 API、MCP、企业微信触发全挂；
+  - 带 sid 的用户令牌 → `jti IN (jti, sid)`；
+  - 升级前签发、没有 sid 的用户令牌 → 一条语句里两个子查询：不在黑名单，且会话行（`s.jti = jti`）还在、用户启用、用户名没改——也就是只放行「登录时那一枚」；
+  - 不许在 `JWTAuth` 里另加查询（查用户表、查会话表），也不许改成进程内缓存：`ddp` 是第二个写同一个库的进程，缓存看不到它的撤销。
+- **撤销**：撤销一个会话 = 会话号一行 + refresh 一行进黑名单，并删会话行。退出登录、「撤销其他会话」、会话列表的 `current` 一律按 `sid` 认当前会话，不按 jti（续期过的令牌 jti 不等于会话号）。
+- 🔴 **黑名单行到期不变式：每条黑名单行的到期 ≥ 它拦截的每一枚 token 的到期。** 会话号行 = max(会话记录的最晚 access 到期, refresh 到期 + access 有效期)；同一 jti 再写时到期只延不缩；退出时找不到会话行的兜底 = max(令牌自身到期, now + access 有效期)。**禁止写死 24 小时**——那正是「清理任务一跑、已撤销的 token 复活」的根因。
+- **续期**：refresh 不轮换、响应形状不变（`{"access_token": …}`）；必须按 `refresh_jti` 找到会话行，且会话属于该用户（删号后重建同名账号时拒绝），否则 401；签出带原 sid 的 access，并把会话的 `expires_at` 推到「最晚 access 到期」（在 Go 里比较取大，不在 SQL 里比时间文本）；更新影响 0 行（会话恰好此刻被撤销）→ 401、不下发。守住客户端不变式「续期成功 ⇒ 新 access 立即可用」。
+- **会话清理**：只删 access 与 refresh **都**过期的行（`expires_at < now AND (refresh_expires_at IS NULL OR refresh_expires_at < now)`）。只看 refresh 的话，「refresh 已过期、续期出的 access 还有效」时会话行被删，之后改密 / 禁用遍历不到它，那枚 access 漏拉黑。
+- **登录**：会话行落不下去 → 500「登录失败」、不发 token，否则签出一枚有 sid、没有会话行、永远撤销不掉的令牌。会话行先于「登录成功」日志与登录通知落库。**落会话后重读用户（F2）**：会话行落库之后按 id 重读一次用户，与这次校验时读到的那份比启用状态、角色、密码哈希、用户名；有变化（含用户已被删）就用 `RevokeSession` 撤销刚建的会话，并按原失败分支拒绝登录、不发 token——被禁用回 403「账号已被禁用」，其余回 401「用户名或密码错误」（角色变了也回 401：校验用的账号快照已过时，重新登录就按新角色签发）。它补的是「登录校验完、会话行还没落库」时管理员改了用户状态的窗口：那次 `RevokeAllUserSessions` 遍历不到还没建的会话行。
+- 🔴 **硬约束：任何用户状态变更都必须调 `RevokeAllUserSessions`，命令行也不例外。** 现有调用点：改自己的密码、改自己的用户名、管理员改角色 / 禁用（`PUT /users/:id`）、管理员重置密码、删除用户、`ddp reset-password`、`ddp reset-username`。2FA 开关、账号锁定按产品语义不撤销。新令牌每请求只查黑名单、不查用户状态，漏调一处就是静默重开洞，代码评审时当硬约束守。
+  - 🔴 **必须先把用户状态落库，再调 `RevokeAllUserSessions`；F2 的重读依赖这个顺序。** 改动早于登录的重读，登录自己看得见、当场撤掉刚建的会话；晚于重读，会话行已经在库里，随后的撤销一定遍历得到。反过来先撤销后落库，一次登录能落在撤销的 Find 之后、落库之前：重读看不到变化、照发 token，它的会话行也躲过了这次撤销。上面 7 个调用点都是这个顺序；删除用户是先删用户行、再撤销（`UserHandler.Delete` 曾写反：用户行随后被删，这行孤儿会话再没有哪条改用户状态的路径会撤它，被删的管理员拿着这枚 access——role 仍是 admin——能调管理员接口到自然过期）。
+- **会话列表**：列「access 或 refresh 仍有效」的会话，每项下发 `current`（按 sid 认）；`GetLoginStats` 的活跃会话同一口径。
+- **日志流复查**：`/logs/:id/stream` 的心跳是固定周期的 ticker（v3.3.4 之前是静默满 30s 才发），每个周期先调 `AccessTokenRevoked`：已撤销就先写 `event: done` + `data: reconnect` 再收流，否则照发 `: keepalive`。🔴 不能不发 done 就断开（网页的日志弹窗会卡在「运行中」）；也不能把复查挂在「静默心跳」上（一直有输出的任务永远等不到它）。
+- **401 口径**：用户令牌失效 → `{"error":"登录已失效，请重新登录","code":"session_revoked"}`（只增加 code，两端都不读它）；脚本 / 应用令牌被拉黑仍回 `{"error":"令牌已被撤销"}`（`docs/script-api.md` 已写）；refresh 被拒仍回 `令牌无效或已过期`。会话层面的拒绝一律 401，不能用 403：两端遇 403 都不登出。
+- **升级 / 回退**：升级不踢人——登录时的老 access 照常可用（旧版 APP 只持有它），续期得来的老 access 回 401，网页与 APP v1.3.0+ 用老 refresh 自动续一次。回退旧版本不需要迁移：旧版忽略 sid，旧版撤销时本来就写 `session.JTI` 那一行。
+
+### 4. Validation & Error Matrix
+
+| 场景 | 结果 |
+|---|---|
+| 会话被撤销后，该会话任意一枚 access（含续期得来的） | 401 `session_revoked` |
+| 被撤销会话的 refresh | 401 `令牌无效或已过期` |
+| 升级前续期得来的老 access（没有 sid） | 401 `session_revoked`；老 refresh 找得到会话就续出带 sid 的新 access |
+| 升级前「删号未撤销」留下的孤儿会话 | 老 A1 与 R1 都 401 |
+| 删号后重建同名账号，拿旧 refresh 续期 | 401 |
+| 脚本令牌在任务结束后被拉黑 | 401 `令牌已被撤销`（不带 code） |
+| 登录时会话行写入失败 | 500 `登录失败`，响应里没有 token |
+| 执行日志流连着时会话被撤销 | 下一个心跳周期内 `event: done` / `data: reconnect`，随后收流 |
+
+### 5. 明确接受的残留（不在本轮消除，发布说明同步写明）
+
+- 依赖安装、订阅拉取、安卓运行环境下载三条 SSE 连上后不复查撤销，受各自的时长上限约束（约 5-30 分钟），内容也不是用户敏感信息。
+- 新令牌每请求只查黑名单、不查用户状态，正确性完全依赖上面「任何用户状态变更都必须调 `RevokeAllUserSessions`」这条硬约束。
+- 升级前「用续期得来的 token 退出」遗留的会话：会话行与 refresh 都还在，服务端无法与正常会话区分；发布说明提示用户到「安全 → 会话管理」检查一遍。
+- 退出登录只拉黑会话号那行与 refresh 那行，**不拉黑发起退出的那枚续期 access 自己的 jti**（新版靠会话号命中即可作废整条会话，不需要它）。一旦回退到旧版本，旧版不认 sid、只按 jti 查黑名单，这枚 access 在回退期间可用到自然过期。已接受：正常退出后这枚令牌只剩泄漏出去的副本（发起退出的客户端已经把它丢弃），且回退本身就是把缺口整体退回旧版状态、不会比旧版更差；要多拉黑它就得在退出时凭 jti 再写一行黑名单，属回退期才有意义的额外成本，本轮不做。
+
+### 6. Tests Required
+
+- `go test -list '^TestRV' ./handler/ ./cmd/ddp/` 列出 28 条：`server/handler/session_revocation_test.go` 26 条 = 初版设计用例 19 条 + 日志流复查 1 条 + 评审修复后补的回归用例 6 条（F1–F5 各 1 条、删号顺序 1 条）；`server/cmd/ddp/reset_revoke_test.go` 2 条（设计用例）。写法：有效期设成生产默认的 480h / 1440h；「清理后复活」用「按清理条件、把 now 换成 A2 到期前 1 分钟删黑名单」模拟；升级兼容用 `jwt.MapClaims` 手签不带 sid 的老令牌；每请求 SQL 条数用计数 logger 数；并发窗口用只触发一次的 GORM 查询回调（`Callback().Query().After("gorm:query")`）确定性地塞进去，不靠并发抢时序。只用改动前就有的 API（日志流心跳变量除外）。
+- 放到改动前的代码上实测 23 红 5 绿：绿的 5 条是 4 条 `TestRVGuard*` 与 `TestRVUpgradeLegacyLoginAccessKeepsWorking`，也就是 21 条设计用例（handler 19 + ddp 2）16 红 5 绿；日志流复查与 6 条回归用例全红（旧代码只按静默 30s 发心跳、不复查撤销；删号顺序那条在旧代码上红在「回调没触发」——旧版删号根本不撤销，也就没有那次 Find）。注意这份测试文件在改动前的代码上并不能直接编译：日志流复查那条用例引用了改动后才有的包级变量 `logStreamHeartbeatInterval`，要先补一行编译垫片（`var logStreamHeartbeatInterval = 30 * time.Second`）才编得过。
+- 评审必做逐条有断言：豁免 `app:` 与精确的 `internal-script-notify`（`TestRVGuardNonUserTokensUnaffected`，形近用户名在 `TestRVUpgradeLegacyRefreshedAccessRecoversWithOneRefresh`）；会话清理条件与续期推后 `expires_at`（`TestRVRevocationRowOutlivesEveryIssuedAccess` 后半段）；MCP Bearer 同一判定（`TestRVAdminRevokeKillsRefreshedAccess`）；登录落会话失败回 500（`TestRVDisplacedDeviceLosesRefreshedAccess` 末尾）；退出兜底不写死 24 小时（`TestRVLogoutWithRefreshedAccessEndsWholeSession` 末尾）。
+- 评审修复的回归保护（每条守一处评审发现的缺口）：F1 登录只写 `last_login_at` 一列、不整行写回（`TestRVLoginUpdatesOnlyLastLoginColumn`）；F2 登录落会话后重读用户（`TestRVLoginRevokesSessionWhenUserDisabledMidLogin`）；F3 撤销只删这次拉黑过的会话行、不按 `user_id` 整批删（`TestRVRevokeAllKeepsSessionInsertedDuringRevoke`）；F4 会话号那行黑名单的到期上界含「refresh 到期 + access 有效期」（`TestRVRevocationRowCoversRefreshedAccessAfterCleanup`）；F5 老令牌分支那条查询里 `u.username = ?` 与 `u.enabled = ?` 两个条件都要在（`TestRVUpgradeLegacyAccessRejectedAfterUsernameChangeOrDisable`）；删号先删用户行、再撤销（`TestRVLoginRacingUserDeleteLeavesNoUsableToken`）。F4、F5 与删号顺序三条的用例注释写了用 `go test -overlay` 只改回那一处看它变红的办法；删号顺序那条已这样实测过：把 `UserHandler.Delete` 改回先撤销后删行，并发登录拿到的 access 调 `/system/version` 与 `GET /users` 都回 200，库里留下 1 行孤儿会话。
+- ⚠️ `testutil.MustCreateRefreshToken` 会顺手落一行会话（与真实登录一致）。**不要**把 `TestRefreshOnlyAcceptsBearerRefreshToken` 改成期望 401——那等于把「续期要绑活会话」这条契约测反。
+- 造应用令牌要走真实的 `POST /open-api/token`（没有 jti）；`testutil.MustCreateAppToken` 签出的令牌带 jti，形状与线上不同。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./handler ./cmd/ddp -run "TestRV|TestRefreshOnlyAcceptsBearerRefreshToken" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误一：按 jti 认当前会话。续期过的令牌 jti 不等于会话号，「撤销其他会话」会把自己也撤掉。
+service.RevokeOtherUserSessions(user.ID, c.GetString("jti"))
+
+// 错误二：兜底写死 24 小时。清理任务一跑，还没到期的 token 就复活了。
+blockToken(jti, "access", nil, time.Now().Add(24*time.Hour))
+
+// 错误三：新加的禁用 / 删除 / 改密入口只改了用户表。令牌每请求不查用户表，被禁用的人照样能用。
+database.DB.Model(&user).Update("enabled", false)
+```
+
+#### Correct
+
+```go
+service.RevokeOtherUserSessions(user.ID, c.GetString("sid"))
+
+// 至少盖住令牌自己的到期
+expiresAt := time.Now().Add(config.C.JWT.AccessTokenExpire)
+if tokenExpiresAt.After(expiresAt) {
+    expiresAt = tokenExpiresAt
+}
+blockToken(sessionID, "access", nil, expiresAt)
+
+database.DB.Model(&user).Update("enabled", false)
+service.RevokeAllUserSessions(user.ID) // 命令行也一样
+```
+
+---
+
 ## 场景：Magisk 容器脚本的 flavor 隔离（musl vs glibc）
 
 ### 1. Scope / Trigger
