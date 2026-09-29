@@ -383,9 +383,16 @@ panel.add_or_update_env(
         method: 'POST',
         path: '/api/auth/refresh',
         title: '刷新令牌',
-        description: '使用 refresh_token 获取新的 access_token',
+        description: '使用 refresh_token 获取新的 access_token，请求头带 Authorization: Bearer <refresh_token>。refresh_token 不轮换：响应里只有新的 access_token，之后继续用原来那枚 refresh_token 续期。续期得来的 access_token 与登录时那枚属于同一个登录会话，同一会话可以同时存在多枚有效的 access_token（多个标签页各自续期）。所属登录会话已退出或被撤销时（退出登录、在会话管理里被撤销、修改或重置密码、禁用或删除用户、修改角色或用户名、被同类型的新登录顶替）返回 401 {"error":"令牌无效或已过期"}，需要重新登录。',
         auth: 'jwt',
-        responseExample: JSON.stringify({ access_token: 'eyJhbGciOi...' }, null, 2),
+        responseExample: JSON.stringify({
+          '续期成功 (200)': { access_token: 'eyJhbGciOi...' },
+          '登录会话已失效 (401)': { error: '令牌无效或已过期' },
+        }, null, 2),
+        responseFields: [
+          { name: 'access_token', type: 'string', description: '新的访问令牌，签发后立即可用' },
+          { name: '已鉴权接口的 401', type: 'tip', description: '登录令牌所属的会话失效后，任何已鉴权接口都返回 401 {"error":"登录已失效，请重新登录","code":"session_revoked"}。收到后先调本接口续期一次：会话还在（例如面板升级前续期得来的旧令牌）就能拿到新的 access_token 接着用；本接口也返回 401 时才需要重新登录。脚本令牌与开放 API 应用令牌被作废时仍返回 {"error":"令牌已被撤销"}，不带 code' },
+        ],
       },
       {
         id: 'auth-me',

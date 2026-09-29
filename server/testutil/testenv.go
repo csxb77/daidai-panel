@@ -171,12 +171,36 @@ func MustCreateAccessToken(t *testing.T, username, role string) string {
 func MustCreateRefreshToken(t *testing.T, username, role string) string {
 	t.Helper()
 
-	token, err := middleware.GenerateRefreshToken(username, role)
+	refreshInfo, err := middleware.GenerateRefreshTokenInfo(username, role)
 	if err != nil {
 		t.Fatalf("generate refresh token: %v", err)
 	}
 
-	return token
+	// 续期要求 refresh 能按 refresh_jti 找到所属的登录会话（撤销会话就是删这一行），
+	// 所以这里与真实登录一样顺手落一行会话：会话号取一枚新 access 的 jti，与登录时同形。
+	// 用户不存在时 user_id 记 0，续期照样会因为「用户不存在」被拒，不改变这类用例原来的断言。
+	// 这里不能调 service.CreateSessionWithRefresh：service 包自己的测试也 import testutil，会成环。
+	var user model.User
+	database.DB.Where("username = ?", username).Limit(1).Find(&user)
+	accessInfo, err := middleware.GenerateAccessTokenInfo(username, role)
+	if err != nil {
+		t.Fatalf("generate session access token: %v", err)
+	}
+	refreshExpiresAt := refreshInfo.ExpiresAt
+	session := model.UserSession{
+		UserID:           user.ID,
+		Username:         username,
+		JTI:              accessInfo.JTI,
+		RefreshJTI:       refreshInfo.JTI,
+		ClientType:       "web",
+		ExpiresAt:        accessInfo.ExpiresAt,
+		RefreshExpiresAt: &refreshExpiresAt,
+	}
+	if err := database.DB.Create(&session).Error; err != nil {
+		t.Fatalf("create session for refresh token: %v", err)
+	}
+
+	return refreshInfo.Token
 }
 
 func MustCreateOpenApp(t *testing.T, appKey, scopes string) *model.OpenApp {

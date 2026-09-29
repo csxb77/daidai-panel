@@ -78,7 +78,8 @@ func authenticateMCPBearer(c *gin.Context, tokenStr string) (string, bool) {
 		response.Unauthorized(c, "令牌类型错误")
 		return "", false
 	}
-	if middleware.IsTokenBlocked(claims.ID) {
+	// 与 JWTAuth 同一个撤销判定：只按 jti 查的话，被撤销会话续期出的登录令牌还能在这里列出工具清单
+	if middleware.AccessTokenRevoked(claims) {
 		response.Unauthorized(c, "令牌已被撤销")
 		return "", false
 	}

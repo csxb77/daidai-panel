@@ -19,6 +19,10 @@ import (
 
 type LogHandler struct{}
 
+// logStreamHeartbeatInterval 是执行日志流发 keepalive 心跳的周期，也是复查登录会话是否已撤销的周期。
+// 抽成变量只是为了让测试调短（真等 30 秒太慢），生产上就是 30 秒。
+var logStreamHeartbeatInterval = 30 * time.Second
+
 func NewLogHandler() *LogHandler {
 	return &LogHandler{}
 }
@@ -153,6 +157,12 @@ func (h *LogHandler) Stream(c *gin.Context) {
 		sub := tl.Subscribe()
 		defer tl.Unsubscribe(sub)
 
+		// 这条流只在连上时过一次 JWTAuth，而执行日志流能一直推到任务结束，所以每个心跳周期要复查一次撤销。
+		// 心跳用固定周期的 ticker，不再是「静默满 30s 才发」：复查挂在心跳上，一直有输出的任务
+		// 永远等不到静默心跳，复查也就永远不跑。有输出时多出来的注释心跳，两端都直接跳过。
+		claims := c.MustGet("claims").(*middleware.Claims)
+		heartbeat := time.NewTicker(logStreamHeartbeatInterval)
+		defer heartbeat.Stop()
 		ctx := c.Request.Context()
 		for {
 			select {
@@ -166,8 +176,16 @@ func (h *LogHandler) Stream(c *gin.Context) {
 				c.Writer.Flush()
 			case <-ctx.Done():
 				return
-			case <-time.After(30 * time.Second):
-				// 静默 30s 不代表任务结束（慢接口/长计算/下载/sleep 都会无输出）。
+			case <-heartbeat.C:
+				// 登录会话已被撤销：结束这条流。每条打开的流每个心跳周期多 1 条 SQL，不在每请求路径上。
+				// 🔴 必须先发 done:reconnect 再收流：不发 done 直接断开，网页的日志弹窗会静默卡在「运行中」；
+				// reconnect 让网页与 APP 重连 → 401 → 续期失败 → 回登录页。
+				if middleware.AccessTokenRevoked(claims) {
+					fmt.Fprintf(c.Writer, "event: done\ndata: reconnect\n\n")
+					c.Writer.Flush()
+					return
+				}
+				// 静默不代表任务结束（慢接口/长计算/下载/sleep 都会无输出）。
 				// 这里发一条 SSE keepalive 注释心跳并继续保持连接（不 return）：
 				//   - 维持长连接，避免反代/网关空闲超时主动断开；
 				//   - 不再断开重连重发整段历史，消除安静任务的周期性全量重渲染卡顿；

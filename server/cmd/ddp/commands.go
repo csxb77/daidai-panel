@@ -920,7 +920,11 @@ func runResetPassword(rt *cliRuntime, args []string) error {
 	// 同步清除登录失败记录，避免还在锁定中
 	_ = database.DB.Where("username = ?", user.Username).Delete(&model.LoginAttempt{}).Error
 
-	fmt.Printf("已重置用户 %s 的密码\n", user.Username)
+	// 与网页改密一致：撤销该用户的全部登录会话（含续期出的令牌）。命令行是独立进程，
+	// 撤销写在库里，运行中的面板下一个请求就能看到，不用重启。
+	revoked := service.RevokeAllUserSessions(user.ID)
+
+	fmt.Printf("已重置用户 %s 的密码，已撤销 %d 个登录会话\n", user.Username, revoked)
 	return nil
 }
 
@@ -1016,7 +1020,10 @@ func runResetUsername(rt *cliRuntime, args []string) error {
 	// 同步清除历史登录失败记录
 	_ = database.DB.Where("username = ?", oldUsername).Delete(&model.LoginAttempt{}).Error
 
-	fmt.Printf("已将用户 %s 重命名为 %s\n", oldUsername, newName)
+	// 与网页改用户名一致：撤销该用户的全部登录会话，旧用户名签出的令牌一律作废
+	revoked := service.RevokeAllUserSessions(user.ID)
+
+	fmt.Printf("已将用户 %s 重命名为 %s，已撤销 %d 个登录会话\n", oldUsername, newName, revoked)
 	return nil
 }
 

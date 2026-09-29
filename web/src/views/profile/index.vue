@@ -861,7 +861,7 @@ onUnmounted(() => {
               </li>
               <li>
                 <span class="tip-bullet">4</span>
-                <span>修改密码后当前会话之外的其它登录都会被撤销。</span>
+                <span>修改密码后所有登录（包括当前这个）都会被撤销，需要重新登录。</span>
               </li>
             </ul>
           </section>

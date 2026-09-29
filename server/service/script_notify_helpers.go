@@ -829,7 +829,7 @@ func BuildNotifyHelperEnv(scriptsDir string, workDir string, serverPort int, def
 		return nil, nil, err
 	}
 
-	tokenInfo, err := middleware.GenerateTemporaryAccessTokenInfo("internal-script-notify", "operator", ttl)
+	tokenInfo, err := middleware.GenerateTemporaryAccessTokenInfo(middleware.ScriptTokenUsername, "operator", ttl)
 	if err != nil {
 		return nil, nil, err
 	}
