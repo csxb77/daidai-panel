@@ -170,7 +170,8 @@ database.DB.
 - 准备入口：`func (e *TaskExecutor) OnTaskExecuting(req *ExecutionRequest) error`（只准备，**不得阻塞到任务结束**）
 - 延迟计算：`func (e *TaskExecutor) ResolveExecutionDelay(req *ExecutionRequest) time.Duration`（只算时长，**不得 sleep**）
 - 延迟等待：`func (s *SchedulerV2) EnqueueDelayed(delay time.Duration, reqFunc func() *ExecutionRequest)`
-- 关停两段：`func (s *SchedulerV2) SignalStop()` / `func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool`
+- 关停两段：`func (s *SchedulerV2) SignalStop()`（等正在跑的 cron 回调最多 `schedulerCronCallbackWait` = 1 秒）/ `func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool`；
+  包级入口 `func HaltSchedulerV2()`（SignalStop + StopAllRunningTasks，可重复调用）/ `func ShutdownSchedulerV2()`（保持无参，`schedulerShutdownWait` = 4 秒），面板关停的整体顺序见「场景：停机收尾」
 - 并发数热生效：`func (s *SchedulerV2) SetWorkerCount(n int) (previous int, applied int)` / `func (s *SchedulerV2) GetWorkerCount() int` / `func ApplySchedulerWorkerCount()`
 - 配置键：`max_concurrent_tasks` -> `SchedulerConfig.WorkerCount`（启动时）-> `SetWorkerCount()`（保存后热生效）
 - 请求字段：`ExecutionRequest.DelayResolved bool`、包内 `taskLog *model.TaskLog` / `tinyLog *TinyLog`
@@ -184,6 +185,11 @@ database.DB.
 - 「多实例检查 + 登记运行中」必须在**同一把写锁**内完成。分成 RLock 检查 + Lock 登记两段会产生 TOCTOU：两个 worker 可同时通过检查，把 `AllowMultipleInstances=false` 的任务跑成两份。
 - **准备阶段必须有 `recover`**：`executeTask` 内 `OnTaskScheduled` / `OnTaskExecuting` / `OnTaskStarted` 的 panic 会打穿 worker goroutine，那个并发名额将永久消失。`runTask` 内部自带 recover，但覆盖不到它之外的阶段。
 - **关停顺序固定**：`SignalStop()` → `StopAllRunningTasks()` → `WaitWorkers()` → `executor.Wait()`。先等 worker 再杀进程会让每次关机都白等满超时。
+  前两步是 `HaltSchedulerV2()`，后两步在 `ShutdownSchedulerV2()` 里（它开头会再调一次 `HaltSchedulerV2`，重复调用无害）。v3.3.5 起每一步都有上限：
+  - `SignalStop` 等正在跑的 cron 回调**最多 1 秒**，到点打一行日志放手：回调要读写库，唯一的连接被恢复备份这类长事务占着时会一直卡，而杀任务排在它后面（原来无限等）。
+  - 面板关停（`server/main.go` 的 `shutdownPanel`）里，HTTP 关停（`server.Shutdown(5s)`）**先起协程、与 `HaltSchedulerV2` 同时开始**：`HaltSchedulerV2` 卡住时 SSE 照样断开。
+  - `WaitWorkers` 与 `executor.Wait` **共用一个 4 秒截止时间**（原来 5 秒 + 5 秒串行），传给它们的剩余时间**至少 1ms**：两者都把 `<= 0` 当成「一直等」，算成 0 就变回无限等。
+  - 截止时先 `revokeUnsettledScriptTokens` 吊销仍在执行窗口里（没结算完）的执行注入脚本的凭据，再 `MarkActiveTasksInterrupted` 把它们标成中断。
 - 队列容量与并发数解耦。`Enqueue` 保持非阻塞 + 满时返回错误的语义，**不得**改成阻塞入队（会卡死 cron 线程）。
 - 任何入队失败路径都必须保证任务状态不停留在 `queued` 假象上——包括 `EnqueueDelayed` 到期后重新入队失败这条新路径。
 - **并发数改动必须热生效**：保存 `max_concurrent_tasks` 后立刻走 `reloadRuntimeConfigKeys` -> `ApplySchedulerWorkerCount()`，不得要求用户重启面板（重启会中断所有正在运行的任务）。
@@ -227,6 +233,8 @@ database.DB.
 - 准备失败 / 准备阶段 panic -> 槽位都必须归还，且后续任务仍能被同一个 worker 执行。
 - 延迟重新入队失败 -> 任务状态从 `queued` 回落。
 - `ShutdownSchedulerV2` 在有任务运行时耗时远小于等待超时，且中断发生在等待 worker 之前。
+- 执行卡住（不登记进程、不理停止）时 `ShutdownSchedulerV2` 5 秒内返回、任务标成中断、凭据吊销；cron 回调卡住时 `SignalStop` 1.5 秒内返回
+  （`service/panel_shutdown_test.go` 的 `TestShutdownSchedulerV2IsBoundedWhenRunIsStuck`、`TestSchedulerV2SignalStopDoesNotWaitForStuckCronCallback`，下面的命令已覆盖）。
 - `SetWorkerCount` 调大 -> 排队中的任务立刻被新 worker 接走，峰值达到新上限。
 - `SetWorkerCount` 调小 -> 收缩完成后峰值不超过新上限。
 - `SetWorkerCount` 调小时队列全程空闲 -> `GetWorkerCount()` 仍必须降到目标值（这条专门防「空闲 worker 卡在 `<-taskQueue` 上永远发现不了自己该退休」）。
@@ -767,21 +775,45 @@ if err != nil {
 
 ### 1. Scope / Trigger
 
-- 触发：修改 `server/service/resource_monitor*.go`、`server/handler/script_file_ops.go`、`server/service/backup*.go`、`server/main.go` 里脚本目录扫描、备份恢复、资源监控或启动期清理逻辑时必须看本节。
+- 触发：修改 `server/service/resource_monitor*.go`、`server/handler/script_file_ops.go`、`server/service/backup*.go`、`server/service/script_dir_guard.go`、
+  `script_notify_helpers.go` 的 `CleanupManagedHelperCopiesUnderRoot`、`server/main.go` 里脚本目录扫描、备份恢复、资源监控或启动期清理逻辑时必须看本节。
 - 原因：Windows 运行态如果只实现 Linux 资源采集，仪表板会长期显示 `0 B / 0 B`；脚本目录如果混入 `%SystemDrive%` 这类异常目录，会污染脚本管理、统计和备份恢复链路。
 
 ### 2. Signatures
 
 - Windows 资源补齐：`fillWindowsResourceInfo(info *ResourceInfo)`
-- 异常脚本判断：`ShouldIgnoreScriptEntryName(name string) bool`
+- 忽略判断（展示 / 统计 / 备份打包与恢复跳过，**不搬走**）：`ShouldIgnoreScriptEntryName(name string) bool`
 - 绝对路径判断：`ShouldIgnoreScriptPath(scriptsDir, targetPath string) bool`
 - 相对路径判断：`ShouldIgnoreScriptRelativePath(relPath string) bool`
-- 启动期隔离：`QuarantineUnexpectedScriptEntriesOnStartup()`
+- 启动期隔离名单（命中即搬走）：`quarantinedScriptDirNames`（`service/script_dir_guard.go`，目前只有 `%systemdrive%`）
+- 启动期隔离：`QuarantineUnexpectedScriptEntriesOnStartup()`，末尾调 `removeLeftoverManagedNodeModulesLinks(scriptsDir, managedNodeModules string)`。
+  `main` 里直接调用并计时（遍历整棵脚本目录，慢盘上也可能几秒）：步骤名 `隔离脚本目录污染项、清理残留软链（遍历脚本目录）`，口径见 `logging-guidelines.md`「约定：启动耗时与关停日志」。
+- 通知脚本副本清理：`CleanupManagedHelperCopiesUnderRoot(scriptsDir string) error`（`service/script_notify_helpers.go`）
 
 ### 3. Contracts
 
 - `GetResourceInfo()` 在 Windows 下必须返回可用的 `memory_total`、`memory_used`、`disk_total`、`disk_used`，不能继续全量为 `0`。
-- 启动时如果脚本目录顶层命中 `%SystemDrive%` 等异常目录，必须自动移动到 `data/quarantine/scripts/`，而不是继续暴露给脚本管理页。
+- 启动期隔离**只认 `quarantinedScriptDirNames`**：脚本目录**顶层**命中 `%SystemDrive%` 这类真正的污染目录时，必须自动移动到 `data/quarantine/scripts/`，而不是继续暴露给脚本管理页。
+- 🔴 **`node_modules` / `__pycache__` 不隔离**（v3.3.5，#156）：它们只在 `ShouldIgnoreScriptEntryName` 里，作用仅限展示 / 统计 / 备份跳过。
+  「忽略名单就是隔离名单」的旧写法已删，隔离循环不得再调 `ShouldIgnoreScriptEntryName`。
+  - 为什么：`__pycache__` 是脚本根目录里被 import 的模块（如面板放的 `notify.py`）每次运行都会重新生成的；`node_modules` 可能是用户自己 `npm install` 的真目录（搬走后 `require` 直接失败），
+    也可能是 Node 任务运行时面板自建、被 SIGKILL 来不及删的软链。旧写法每次启动都把它们搬一遍，#156 的用户隔离区里已经攒到 `__pycache__.duplicate-34`、`node_modules.duplicate-10`。
+  - 已经搬进 `quarantine/scripts/` 的副本不自动删（用户可手动删 `__pycache__.duplicate-*`、`node_modules.duplicate-*`）。
+- **启动时只清「悬空的面板式」`node_modules` 软链**（`removeLeftoverManagedNodeModulesLinks`，在隔离循环之后调；v3.3.5 回归复核后收窄）：
+  - 先解析脚本根：`filepath.EvalSymlinks(scriptsDir)`，失败退回原值；解析结果 `Lstat` 仍不是目录（Windows junction：Go 1.23 起 `EvalSymlinks` 不解析它、原样返回）时，
+    再 `os.Readlink` 补一层（得到绝对路径才用）。不解析的话，脚本目录本身是软链 / junction（脚本放到别的盘、NAS 上）时 `WalkDir` 只访问根这一项、不进链接，整棵树一条都清不到。
+  - 然后 `WalkDir` 整棵树，下面三条**同时满足**才删，其余一律不动：
+    1. 名字是 `node_modules`（忽略大小写），`os.Readlink` 成功（软链 / junction），目标是**绝对路径**（面板只建绝对路径的；相对路径要在 `Stat` 之前放过，否则会按面板进程的工作目录解析、判不准悬空）；
+    2. 目标 `filepath.Clean` 后等于当前托管依赖目录 `<data.dir>/deps/nodejs/node_modules`，或以 `<分隔符>deps<分隔符>nodejs<分隔符>node_modules` 结尾（数据目录搬家、改过 `data.dir` 之前建的，指向旧数据目录）；Windows 上两项都忽略大小写；
+    3. `os.Stat(目标)` 报**不存在**（悬空）。`Stat` 报别的错（例如没权限）按「还在」处理，不删。
+  - 一律不动：不悬空的面板软链（指向旧数据目录的也算）、真 `node_modules` 目录（整棵 `SkipDir`，里面的软链哪怕悬空也不碰）、指向别处的软链（悬空的也算）、相对路径的软链。
+  - `.git`、`__pycache__` 等 `ShouldHideScriptTreeEntryName` 命中的目录整棵跳过；读不了的目录跳过；删除失败只打日志。不往 quarantine 里搬任何东西。
+  - 为什么要清悬空的：`ensureManagedNodeModulesAccess` 只在不存在时才建、从不修已有的，悬空软链留着会一直挡住那个目录里的任务（ESM 的 `import` 没有 `NODE_PATH` 兜底，一直报找不到模块）。
+    托管目录被删（依赖全卸光、数据目录被清过）、数据目录搬家都会造出它；以前靠「隔离把顶层那个软链搬走」顺手自愈。
+  - 🔴 为什么不删不悬空的：它与面板现在会建的等价，留着无害；而且启动时**并不是**没有进程在用它——`ddp task run` 是另一个进程，二进制 / Magisk 下被强杀的面板还可能留下仍在跑的孤儿任务，
+    删掉它们正在用的软链，正在 `require` 的依赖会突然消失（回归复核实测：v3.3.5 第二波按「目标等于托管目录就删」，正在用这条软链的 node 进程报 `ENOENT` 退出）。
+- **`CleanupManagedHelperCopiesUnderRoot` 遍历时遇到 `ShouldHideScriptTreeEntryName` 命中的目录（`node_modules`、`__pycache__`、`.git` 等）直接 `SkipDir`**：
+  它们不会是任务的工作目录，面板不会往里放通知脚本副本；订阅仓库的 `.git`、真实 `node_modules` 动辄上千个目录，启动和每条 `ddp` 命令都要白扫一遍。
 - 脚本文件树、脚本统计、备份打包、备份恢复复制链路都必须复用同一套 `ShouldIgnoreScript*` 判断，避免有的地方隐藏、有的地方继续打包。
 - 备份恢复遇到命中异常规则的脚本相对路径时必须跳过，不能把污染目录重新写回脚本根目录。
 - 备份恢复写回脚本目录、日志目录、`panel.log` 这类 live 资源时，禁止“先清空 live，再逐步复制”；必须先把新内容完整写入同目录 staging 位置，确认成功后再原子切换到 live 目录/文件。
@@ -789,16 +821,27 @@ if err != nil {
 ### 4. Validation & Error Matrix
 
 - Windows 资源采集 API 调用失败 → 返回 0，但不能影响服务启动。
-- 脚本目录扫描遇到异常目录 → 展示层/统计层跳过；启动期尝试隔离到 quarantine。
+- 顶层是 `quarantinedScriptDirNames` 里的污染目录（`%SystemDrive%`）→ 展示 / 统计 / 备份跳过；启动期隔离到 quarantine（`os.Rename` 失败、跨设备 EXDEV 只打日志跳过）。
+- `node_modules` / `__pycache__` 真目录 → 展示 / 统计 / 备份照旧按忽略规则跳过（口径不变）；启动期**原地不动**，quarantine 里不再多出副本。
+- `node_modules` 是面板式的绝对路径软链 / junction（目标是当前托管依赖目录，或以 `<分隔符>deps<分隔符>nodejs<分隔符>node_modules` 结尾的旧数据目录），且目标已不存在
+  → 启动时删掉，打一行 `leftover node_modules link removed: <链接> -> <目标>`；删除失败 → 只打日志。
+- 同样是面板式软链，但目标还在（或 `Stat` 报「不存在」以外的错）→ 不动：与面板现建的等价，`ddp task run`、孤儿任务可能正在用。
+- `node_modules` 是指向别处的软链（悬空与否）、相对路径软链 → 不动。
+- 脚本目录本身是软链 / junction → 解析成真实目录后照常清理；根链接本身、里面的脚本不动。
 - quarantine 目标重名 → 追加 `.duplicate-N` 后缀，不能覆盖旧证据目录。
 - 备份恢复中遇到 `%SystemDrive%/...` 相对路径 → 直接跳过，不报错中断整个恢复流程。
 - 备份恢复 staging 构建失败 → 直接返回错误，live 目录/文件必须保持恢复前原样，不能出现“旧数据已删，新数据没写完”的半恢复状态。
 
 ### 5. Good/Base/Bad Cases
 
-- Good：Windows 仪表板显示真实内存/磁盘占用；脚本页只显示正常脚本文件；异常 `%SystemDrive%` 目录被移到 `data/quarantine/scripts/%SystemDrive%`。
+- Good：Windows 仪表板显示真实内存/磁盘占用；脚本页只显示正常脚本文件；异常 `%SystemDrive%` 目录被移到 `data/quarantine/scripts/%SystemDrive%`；
+  脚本根目录的 `__pycache__`、用户自己的 `node_modules` 重启后原地还在，悬空的面板 `node_modules` 软链被清掉、不悬空的原样保留。
 - Base：Linux 继续沿用 `/proc` 和 `df` 采集逻辑，不受 Windows 分支影响。
 - Bad：只在前端隐藏 `%SystemDrive%`，但备份仍把异常目录继续打包；或只修仪表板展示，不修 `/api/system/info` 的 0 值来源；或恢复时先删 live 目录，复制中途失败后留下空目录/半目录。
+- Bad：隔离循环改回 `if !ShouldIgnoreScriptEntryName(entry.Name())`，或把 `node_modules` / `__pycache__` 加进 `quarantinedScriptDirNames` —— 每次启动搬一份进 quarantine（#156 回归）。
+- Bad：清软链时按名字删所有 `node_modules` 软链，或删前不比对目标 —— 用户指向自己项目的软链被删。
+- Bad：不悬空的面板软链也删（v3.3.5 第二波的写法，以为「启动时没人在用」）—— `ddp task run`、孤儿任务正在 `require` 的依赖突然消失，node 进程报 `ENOENT` 退出。
+- Bad：直接 `WalkDir(scriptsDir)`、不先解析脚本根 —— 脚本目录本身是软链 / junction 时一条都清不到；只用 `EvalSymlinks` 也不够，Windows junction 它原样返回。
 
 ### 6. Tests Required
 
@@ -806,6 +849,18 @@ if err != nil {
 - `TestShouldIgnoreScriptPath`
 - `TestShouldIgnoreScriptRelativePath`
 - `TestQuarantineUnexpectedScriptEntriesOnStartup`
+- `TestQuarantineDoesNotMoveGitRepository`
+- `TestQuarantineKeepsNodeModulesAndPycacheInPlace`：顶层真 `node_modules`、`__pycache__` 原地不动，`%SystemDrive%` 仍被隔离，quarantine 里只有它一项。
+- `TestQuarantineKeepsLiveNodeModulesLinks`：不悬空的软链一律原样保留——根目录与各级子目录里指向托管目录的面板软链、指向旧数据目录（目标还在）的、指向别处的；
+  托管目录、旧目录、用户目录与真 `node_modules` 目录的内容都不受影响；相对路径软链保留（只在类 Unix 上验）；不创建 quarantine 目录。
+- `TestQuarantineRemovesDanglingPanelNodeModulesLink`：托管目录与旧数据目录都删掉后，指向当前托管目录（根目录、子目录）与指向旧数据目录 `…/deps/nodejs/node_modules` 的悬空软链都被删；
+  指向别处的悬空软链、真 `node_modules` 里面的悬空面板式软链、相对路径的悬空软链（只在类 Unix 上验）都保留。
+- `TestQuarantineCleansDanglingLinksWhenScriptsDirIsLink`：脚本目录本身是链接（Windows 上是 junction，其它平台是软链）时，里面悬空的面板软链照样被删；
+  里面不悬空的面板软链、根链接本身与里面的脚本都不动。
+- 突变：把实现换回第二波（不判悬空、不解析脚本根），上面三条都红。
+- `TestCleanupManagedHelperCopiesUnderRootSkipsHiddenDirs`：普通子目录里的托管副本照清，`node_modules` / `.git` / `__pycache__` 里的不被遍历。
+- ⚠️ 软链用例用面板自己的 `createManagedDirectoryLink` 建链（Windows 上是 `mklink /J` 建 junction，其它平台 `os.Symlink`），建不了就 `t.Skip`；
+  相对路径软链那段只在类 Unix 上验。Windows 上跑过不算数：必须交叉编译到 Linux / WSL 再跑一遍（`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c ./service`）。
 - `TestCreateBackupSkipsQuarantinedScriptEntriesInArchive`
 - `TestRestoreScriptFilesKeepsLiveDataWhenStageCopyFails`
 - `TestRestoreLogFilesKeepsLivePanelLogWhenStageCopyFails`
@@ -842,6 +897,30 @@ _ = clearDirectoryContents(config.C.Data.ScriptsDir)
 _ = copyDirectoryContents(sourceDir, config.C.Data.ScriptsDir)
 ```
 
+```go
+// 错误：隔离循环复用忽略名单 —— node_modules / __pycache__ 每次启动都被搬进 quarantine（#156，攒到 .duplicate-34）
+for _, entry := range entries {
+    if !ShouldIgnoreScriptEntryName(entry.Name()) {
+        continue
+    }
+    _ = os.Rename(filepath.Join(scriptsDir, entry.Name()), uniqueQuarantinePath(...))
+}
+```
+
+```go
+// 错误：目标等于托管目录就删，且直接从 scriptsDir 遍历（v3.3.5 第二波）——
+// 删掉 ddp task run / 孤儿任务正在用的软链（node 报 ENOENT）；脚本目录本身是软链 / junction 时一条都清不到；
+// 数据目录搬家后指向旧目录的悬空软链又认不出来，一直挡住任务。
+_ = filepath.WalkDir(scriptsDir, func(path string, d fs.DirEntry, err error) error {
+    if err == nil && strings.EqualFold(d.Name(), "node_modules") {
+        if target, readErr := os.Readlink(path); readErr == nil && filepath.Clean(target) == managedNodeModules {
+            _ = os.Remove(path)
+        }
+    }
+    return nil
+})
+```
+
 #### Correct
 
 ```go
@@ -870,6 +949,44 @@ filepath.Walk(scriptsDir, func(path string, info os.FileInfo, err error) error {
 // 正确：先把恢复结果写到 staging，成功后再切换 live 目录。
 _ = restoreDirectoryWithStage(config.C.Data.ScriptsDir, func(stageDir string) error {
     return copyDirectoryContents(sourceDir, stageDir)
+})
+```
+
+```go
+// 正确：隔离只认污染目录名单；node_modules 只清悬空的面板式软链
+for _, entry := range entries {
+    if !quarantinedScriptDirNames[strings.ToLower(strings.TrimSpace(entry.Name()))] {
+        continue
+    }
+    ...
+}
+removeLeftoverManagedNodeModulesLinks(scriptsDir, filepath.Join(config.C.Data.Dir, "deps", "nodejs", "node_modules"))
+```
+
+```go
+// 正确：先解析脚本根，再只删「绝对路径 + 面板式目标 + 目标不存在」的软链
+root := scriptsDir
+if resolved, err := filepath.EvalSymlinks(scriptsDir); err == nil {
+    root = resolved
+}
+if info, err := os.Lstat(root); err == nil && !info.IsDir() { // Windows junction：EvalSymlinks 原样返回
+    if target, err := os.Readlink(root); err == nil && filepath.IsAbs(target) {
+        root = target
+    }
+}
+panelLinkSuffix := string(filepath.Separator) + filepath.Join("deps", "nodejs", "node_modules")
+_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+    // ……名字是 node_modules：Readlink 失败 = 真目录，SkipDir；以下是软链 / junction
+    cleanTarget := filepath.Clean(target)
+    panelStyle := cleanTarget == managedNodeModules || strings.HasSuffix(cleanTarget, panelLinkSuffix) // Windows 上忽略大小写
+    if !filepath.IsAbs(target) || !panelStyle {
+        return nil // 相对路径、指向别处的：用户自己的
+    }
+    if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+        return nil // 目标还在：与面板现建的等价，可能正被 ddp task run / 孤儿任务使用
+    }
+    _ = os.Remove(path) // 失败只打日志
+    return nil
 })
 ```
 
@@ -2350,7 +2467,8 @@ return None
 - 手动停止开关：`/data/adb/daidai-panel/stopped`（Go 常量 `magiskStopFlagPath` ↔ 四个 shell 的 `STOP_FLAG` / `$PERSIST_DIR/stopped`）
 - 守护代次标记：`/data/adb/daidai-panel/watchdog.gen`（Go 常量 `magiskWatchdogGenName` ↔ service.sh 的 `WATCHDOG_GEN_FILE`）
 - 停止接口：`func (h *SystemHandler) StopPanel(c *gin.Context)` + `func writeMagiskStopFlag() error` + `const magiskStopSupportedShellVersion`
-- 进程退出注入点：`var panelProcessExit` / `var panelProcessExitDelay`（Restart 与 StopPanel 共用，仅为可测）
+- 面板自请求退出的唯一出口：`var panelProcessExit`（默认 `os.Exit`；面板主程序启动时用 `SetPanelExitRequester` 换成「请求 main 走 `shutdownPanel` 收尾后按原退出码退出」，ddp 等其它进程不接线）/ `var panelProcessExitDelay`（只为可测）。
+  Restart（退出码 1）、StopPanel（0）与二进制 / Magisk 在线升级让位（0）共用，v3.3.5 起不再直接 `os.Exit`，见「场景：停机收尾」。
 
 ### 3. Contracts
 
@@ -2875,23 +2993,28 @@ if cronExpr == "" {
 
 ### 1. Scope / Trigger
 
-- 触发：想让某个目录名「在脚本管理里不出现」时必须看本节。
-- 原因：`ShouldIgnoreScriptEntryName` 被 `QuarantineUnexpectedScriptEntriesOnStartup`
-  复用，命中即 `os.Rename` **物理搬走**。往它的名单里加 `.git`，
-  会在「脚本根目录本身是 git 仓库」时把整个仓库搬走。
+- 触发：想让某个目录名「在脚本管理里不出现」，或想往启动期隔离名单里加东西时必须看本节。
+- 原因：脚本目录有**三套**名单，语义一层比一层重，放错一层就是静默事故：
+  - 隐藏（`ShouldHideScriptTreeEntryName`）：树里不展示、API / CLI 读不到；
+  - 忽略（`ShouldIgnoreScriptEntryName`）：展示 / 统计 / **备份打包与恢复**都跳过；
+  - 隔离（`quarantinedScriptDirNames`）：启动期命中即 `os.Rename` **物理搬走**。
+  v3.3.5（#156）之前隔离循环直接复用忽略名单（「忽略名单就是隔离名单」），`node_modules` / `__pycache__` 因此每次启动都被搬走；现在隔离只认 `quarantinedScriptDirNames`。
 - 配套阅读：`## 场景：脚本目录污染隔离与 Windows 资源监控`
 
 ### 2. Signatures
 
-- 隔离语义（会搬走文件）：`ShouldIgnoreScriptEntryName(name string) bool`
-- 隐藏语义（只是不展示 / 不可访问）：`ShouldHideScriptTreeEntryName(name string) bool`
+- 隔离语义（会搬走文件，只看脚本目录顶层）：`quarantinedScriptDirNames`（`map[string]bool`，键是小写名，目前只有 `%systemdrive%`），只有 `QuarantineUnexpectedScriptEntriesOnStartup` 读它
+- 忽略语义（展示 / 统计 / 备份跳过，不搬走）：`ShouldIgnoreScriptEntryName(name string) bool` = `node_modules` / `__pycache__` ∪ 隔离名单
+- 隐藏语义（只是不展示 / 不可访问）：`ShouldHideScriptTreeEntryName(name string) bool` = 忽略 ∪ `hiddenScriptTreeNames`（`.git` / `.svn` / `.hg` / `.bzr`）
 - 逐段路径判定：`ShouldHideScriptTreePath(scriptsDir, targetPath string) bool` /
   `ShouldHideScriptTreeRelativePath(relPath string) bool`
 
 ### 3. Contracts
 
-- **两套名单语义不同，绝不可合并**。隐藏名单复合隔离名单（`Ignore || hidden`），
-  反向不成立：`ShouldIgnoreScriptEntryName(".git")` 必须**恒为 false**。
+- **三套名单语义不同，绝不可合并**，只能「重的包含轻的」：隐藏 ⊇ 忽略 ⊇ 隔离，反向不成立。
+  - `ShouldIgnoreScriptEntryName(".git")` 必须**恒为 false**：忽略名单决定备份打包 / 恢复跳过哪些路径，加进去订阅仓库的 git 元数据就进不了备份。
+  - `quarantinedScriptDirNames` **只放真正的污染目录**，`.git`、`node_modules`、`__pycache__` 一个都不能进：命中即搬走，脚本根目录本身是 git 仓库时整个仓库会被搬走。
+  - 隔离循环只认 `quarantinedScriptDirNames`，不得改回调用 `ShouldIgnoreScriptEntryName`。
 - 路径判定必须**逐段遍历**。旧的 `ShouldIgnoreScriptPath` 只判第一段，
   导致 `SmallWorld/.git/**`、`SmallWorld/node_modules/**` 全部漏网。
 - 「树里隐藏」与「API 读不到」是**两套独立闸门**，都要接：
@@ -2908,21 +3031,24 @@ if cronExpr == "" {
 - `safePath` 命中隐藏段 → 返回「该路径不可访问」错误，13 个入口一并拒绝
 - `validateScriptLeafName` 命中 → 拒绝改名成该名字
 - `copyDir` 遍历命中 → 跳过，避免产生**看不见的凭据副本**
-- `ShouldIgnoreScriptEntryName` 命中 → 启动期 `os.Rename` 搬走（**只用于真正的污染目录**）
+- `ShouldIgnoreScriptEntryName` 命中 → 展示 / 统计 / 备份跳过，**启动期不动它**
+- `quarantinedScriptDirNames` 命中（脚本目录顶层）→ 启动期 `os.Rename` 搬进 `data/quarantine/scripts/`（**只用于真正的污染目录**）
 
 ### 5. Good/Base/Bad Cases
 
-- Good：`.git` 在树里不出现，`GET /api/scripts/content?path=X/.git/config` 被拒。
+- Good：`.git` 在树里不出现，`GET /api/scripts/content?path=X/.git/config` 被拒；订阅仓库的 `.git` 照样进备份。
 - Base：`.env`、`.hidden-dir`、`.github` 仍然可见可读。
-- Bad：把 `.git` 加进 `ShouldIgnoreScriptEntryName` —— 脚本根目录是 git 仓库时仓库被搬走。
+- Bad：把 `.git` 加进 `quarantinedScriptDirNames` —— 脚本根目录是 git 仓库时仓库被搬走；加进 `ShouldIgnoreScriptEntryName` —— 订阅仓库的 git 元数据进不了备份。
+- Bad：隔离循环改回复用 `ShouldIgnoreScriptEntryName` —— `node_modules` / `__pycache__` 每次启动被搬一份（#156）。
 - Bad：只改 `runScriptList` 不改 `resolveCLIScriptPath` —— `ddp script cat X/.git/config`
   仍直接打印 PAT（CLI 的扩展名闸门对无扩展名文件一律放行）。
 
 ### 6. Tests Required
 
 - `ShouldHideScriptTreeEntryName(".git")` 为真，且 `ShouldIgnoreScriptEntryName(".git")`
-  **仍为假**（守住 quarantine 不误搬）
-- quarantine 不搬走 `.git` 仓库的用例
+  **仍为假**（守住备份带上 `.git`）
+- quarantine 不搬走 `.git` 仓库的用例（`TestQuarantineDoesNotMoveGitRepository`），
+  也不搬走 `node_modules` / `__pycache__`（`TestQuarantineKeepsNodeModulesAndPycacheInPlace`）
 - `.hidden-dir` / `.env` 可见断言**必须保留**，同用例追加 tree 不含 `.git`
 - GetContent / Download / Delete / Copy / CLI 命中隐藏段的拒绝用例
 
@@ -2931,7 +3057,8 @@ if cronExpr == "" {
 #### Wrong
 
 ```go
-// 错误：直接往隔离名单里加，启动期会把整个 git 仓库 os.Rename 搬走。
+// 错误：为了「树里不出现」往忽略名单里加 .git —— 备份打包 / 恢复跳过订阅仓库的 git 元数据。
+// （v3.3.5 之前隔离循环复用这份名单，那时更是会把整个 git 仓库 os.Rename 搬走。）
 func ShouldIgnoreScriptEntryName(name string) bool {
     switch strings.ToLower(name) {
     case "node_modules", "__pycache__", ".git":
@@ -2939,12 +3066,17 @@ func ShouldIgnoreScriptEntryName(name string) bool {
     }
     ...
 }
+
+// 错误：往隔离名单里加「不想看见」的目录 —— 命中即搬走，每次启动搬一份
+var quarantinedScriptDirNames = map[string]bool{
+    "%systemdrive%": true, "node_modules": true, "__pycache__": true,
+}
 ```
 
 #### Correct
 
 ```go
-// 正确：另起一套隐藏语义，复合隔离名单但不反向污染它。
+// 正确：另起一套隐藏语义，复合忽略名单但不反向污染它；隔离名单只放污染目录。
 var hiddenScriptTreeNames = map[string]bool{
     ".git": true, ".svn": true, ".hg": true, ".bzr": true,
 }
@@ -2952,6 +3084,10 @@ var hiddenScriptTreeNames = map[string]bool{
 func ShouldHideScriptTreeEntryName(name string) bool {
     return ShouldIgnoreScriptEntryName(name) ||
         hiddenScriptTreeNames[strings.ToLower(strings.TrimSpace(name))]
+}
+
+var quarantinedScriptDirNames = map[string]bool{
+    "%systemdrive%": true,
 }
 ```
 
@@ -3552,11 +3688,16 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 ### 2. Signatures
 
 - 执行窗口：`func (e *TaskExecutor) beginExecuting(taskID uint) *executingRun` / `func (e *TaskExecutor) endExecuting(run *executingRun)`（幂等）
-- 准备阶段窗口：`preparedRuns map[uint]*executingRun` + `func (e *TaskExecutor) closePreparedRun(taskID uint)`
+- 准备阶段窗口：`preparedRuns map[*ExecutionRequest]*executingRun` + `func (e *TaskExecutor) closePreparedRun(req *ExecutionRequest)`
 - 每次执行的停止意图：`executingRun.stop runStopKind`（`runStopNone` / `runStopManual` / `runStopHalt`）+ `executingRun.stopCh`
-- 停止入口：`func (e *TaskExecutor) StopTask(taskID uint) bool` / `func (e *TaskExecutor) StopAllRunningTasks()`
+- 停止入口：`func (e *TaskExecutor) StopTask(taskID uint) bool` / `func (e *TaskExecutor) StopAllRunningTasks() int`（返回杀掉的进程数，含钩子）
 - 重试等待：`func (e *TaskExecutor) waitRetryInterval(run *executingRun, d time.Duration) bool`
 - 进程登记释放：`func (e *TaskExecutor) releaseRunProcesses(run *executingRun)`
+- 关停（v3.3.5）：
+  - 执行器级标记 `TaskExecutor.halted bool`（受 `processLock` 保护，只由 `StopAllRunningTasks` 置位、不复位）+ `func (e *TaskExecutor) halting() bool`；
+  - 钩子登记 `executingRun.hookProcesses map[int]*os.Process` + `registerHookProcess(run, process)` / `releaseHookProcess(run, process)`：
+    钩子经 `runInlineScript` / `runHookScript` 的 `onStart OnProcessStartFunc` 回调登记（导出的 `RunInlineScript` / `RunHookScript` 传 nil，其它调用方行为不变）；
+  - 凭据登记 `executingRun.scriptToken *ScriptTokenInfo` + `attachRunScriptToken(run, token)` / `func (e *TaskExecutor) revokeUnsettledScriptTokens() int`。
 
 ### 3. Contracts
 
@@ -3565,10 +3706,22 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 - **停止意图记在 `executingRun` 上，不能按 taskID 记一笔**。`AllowMultipleInstances=true` 时，按 taskID 记会让「停止之后才启动」的实例一进循环就跳出，一个进程都不起。
 - **手动停止的结算按 run 判定**：`run.stop == runStopManual` 的执行各自结算为 Aborted；任务级的 `manualStopMarks`（外部入口按 PID 兜底停止时打的）只有在「本任务此刻没有别的执行在窗口里」时才允许认领，否则一次没被停的执行会抢走这笔标记、被误判成已终止并吞掉成功通知。
 - **窗口全开全关成对**：准备阶段开的窗口记在 `preparedRuns`，建日志失败 / `OnTaskFailed` / `RunTask` 缺日志兜底都必须 `closePreparedRun`；`runTask` 接手后用 `defer e.endExecuting(run)` 收口（含 panic 路径）。漏关的表现是空闲任务被永远当成「正在执行」：`StopTask` 恒返回 true，停止请求还会挂到下一次运行。
-- **关机用 `runStopHalt`，不是手动停止**：`StopAllRunningTasks` 除杀进程外还要拦住窗口里的执行继续启动新进程，但**结算口径不变**（仍按失败，再由 `MarkActiveTasksInterrupted` 统一标成中断）。写成手动停止会把「面板重启」谎报成「用户终止」。
+- **关机用 `runStopHalt`，不是手动停止**：`StopAllRunningTasks` 除杀进程外还要拦住窗口里的执行继续启动新进程。写成手动停止会把「面板重启」谎报成「用户终止」。
+  v3.3.5 起（D15）被它打断的执行**在 `runTask` 里自己结算**：
+  - 日志自己写 `[面板正在关闭，任务已中断]`（只在没成功时写）与 `[面板正在关闭，跳过后置脚本]`，都由 `stopNotice` 产出、各独占一行，被 `isPanelMetaLine` 认出。
+    前提是上一行也换了行：`script_runner.go` 的 `runSingleCommand` 里「[脚本进程被信号终止：…]」那行补了结尾 `\n`，否则中断提示粘在它行尾，按行首认不出。
+  - `halting()` 为真时**不启动**任务后置脚本、`task_after.sh`、`extra.sh`，也不再启动新的前置钩子（任务前置脚本、`task_before.sh`）。每个钩子最长 60 秒，关停等不起。
+  - **不发失败通知**：判据是这次执行 `runStopKind(run) == runStopHalt` 且没成功。任务自己先失败、关停时正卡在后置钩子里，同样算被关停打断，不发。
+  - `last_run_status` 仍记 `RunFailed`（不是 Aborted）。
+  - 前置 / 后置钩子进程登记在 `executingRun.hookProcesses`，刻意不进 `runningProcesses` / `processes`：**只有 `StopAllRunningTasks` 读这张表、按进程组杀**；
+    `StopTask` 不读它，手动停止照旧跑后置脚本、结算 Aborted，行为不变。
+  - `halted` 只由 `StopAllRunningTasks` 置位（生产上只有 `HaltSchedulerV2` 调它）。之后才开窗的执行（worker 恰好在关停前取到请求）在 `newExecutingRunLocked` 里**生来带 `runStopHalt`**：
+    不起前置钩子、主进程一次不起；关停瞬间才起来的钩子由 `registerHookProcess` 直接杀掉、不登记。
+  - 只有截止（`ShutdownSchedulerV2` 的 4 秒）前**没结算完**的执行才由 `MarkActiveTasksInterrupted` 标「面板正在关闭或重启，任务已被中断」；
+    截止时先 `revokeUnsettledScriptTokens` 吊销它们的脚本凭据（结算 defer 里那句吊销等不到了）。面板关停的整体顺序见「场景：停机收尾」。
 - **结算只摘自己登记的 pid**，禁止 `delete(e.runningProcesses, taskID)`：多实例下先结算的那次会把另一次仍在跑的进程一起抹掉，之后停不掉它，`HasRunningProcess` 也会误报「没有进程在跑」——「删除任务时一并删除脚本」正是靠它兜底，会把还在跑的任务的脚本删掉。
 - **杀进程不要持锁**：锁内只收集 victim 列表与落定标记，出锁后再 `KillProcessGroup`（Unix 下是 syscall，持锁会把进程登记、`HasRunningProcess` 这些短临界区堵住）。
-- 面板自己打进任务日志的停止提示行（`[任务已被手动停止，…`、`[面板正在关闭，…`）必须登记进 `panelMetaLinePrefixes`，否则成功通知的日志摘录会被这些行顶掉用户真正想看的脚本输出。
+- 面板自己打进任务日志的停止提示行（`[任务已被手动停止，…`、`[面板正在关闭，…`；「取消后续执行」「终止刚启动的进程」「任务已中断」「跳过后置脚本」都挂在这两个前缀下）必须登记进 `panelMetaLinePrefixes`，否则成功通知的日志摘录会被这些行顶掉用户真正想看的脚本输出。
 
 ### 4. Validation & Error Matrix
 
@@ -3576,7 +3729,13 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 - 停止落在重试等待 → `stopCh` 立刻唤醒，不等满 `RetryInterval`，不再起下一轮。
 - 停止命中已登记进程 + `MaxRetries>0` → 杀进程**并且**置停止意图，重试循环不得续跑。
 - `AllowMultipleInstances=true`，停止后才启动的实例 → 不受上一次停止影响，正常执行。
-- 关机 → 窗口内执行不再起新进程，`last_run_status` 仍是失败/中断，不是 Aborted。
+- 关机 → 窗口内执行不再起新进程、不再启动前置 / 后置钩子，正在跑的钩子按进程组杀；没成功的写「[面板正在关闭，任务已中断]」「[面板正在关闭，跳过后置脚本]」（各占一行），
+  `last_run_status` 记失败（不是 Aborted），不发失败通知。
+- 关机时主进程已经成功、还没轮到后置脚本 → 只写「[面板正在关闭，跳过后置脚本]」，照常记成功（成功通知照旧异步发出，面板随即退出，不保证送达）。
+- 关停之后才开窗的执行 → 生来带 `runStopHalt`：前置钩子与主进程都不起，日志「取消后续执行」「任务已中断」「跳过后置脚本」三行，记失败。
+- 已经进入后置钩子阶段才关停 → 正在跑的钩子整组被杀，后面的钩子一起来就被杀；这次执行照常在 `runTask` 里结算（输出不丢），
+  失败的不发失败通知（`run.stop` 已是 `runStopHalt`），成功的照常记成功。「跳过后置脚本」的判断在进入后置阶段时已经做过，所以这种情况日志里没有那两行提示。
+- 执行卡在读输出里（逃出进程组的孙进程攥着管道）→ `runTask` 结算不了，等到 `ShutdownSchedulerV2` 的 4 秒截止：凭据吊销，库里由 `MarkActiveTasksInterrupted` 标中断，这次输出丢失。
 - 任务此刻没有任何执行在窗口里 + 外部入口打了任务级标记 → 下一次执行开窗时先 `consumeManualStop` 清掉残留，不得串到这一次。
 
 ### 5. Good/Base/Bad Cases
@@ -3594,7 +3753,10 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 - 停止落在重试等待 → 结算耗时远小于 `RetryInterval`。
 - 多实例：停止不得泄漏到「停止之后才开始」的执行。
 - 多实例：一次停止同时命中两个实例时两个都判 Aborted；没被停过的执行不得认领任务级标记。
-- 关机：窗口内执行被拦住，且 `last_run_status` 仍是失败。
+- 关机：窗口内执行被拦住，且 `last_run_status` 仍是失败（`TestStopAllRunningTasksHaltsExecutingWindowAndRetries`）。
+- 关机结算（`service/panel_shutdown_test.go`，断言点见「场景：停机收尾」）：被打断的跳过三种后置脚本、不发失败通知、两行提示各占一行且被 `isPanelMetaLine` 认出
+  （`TestHaltedRunSkipsPostHooksAndFailureNotify`、`TestShutdownInterruptNoticesAreStandalonePanelMetaLines`）；正在跑的前置 / 后置钩子整组被杀、关停后开窗的执行不起钩子
+  （`TestHaltKillsRunningPreHookAndSkipsNewOnes`、`TestHaltKillsRunningPostHook`）；手动停止照旧跑后置脚本、结算 Aborted（`TestManualStopStillRunsPostHooks`）。
 - 准备阶段失败 / `runTask` 内 panic → 窗口必须关闭（之后 `StopTask` 不得恒 true）。
 - 结算只释放自己的进程登记（另一实例仍可被停止）。
 - 停止提示行必须在 `panelMetaLinePrefixes` 里。
@@ -3602,7 +3764,7 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 
 ```bash
 cd server
-go test ./service -run "Stop|Executing|Manual|Executor|RunTask" -count=1
+go test ./service -run "Stop|Executing|Manual|Executor|RunTask|Halt|Shutdown" -count=1
 go test ./...
 ```
 
@@ -3663,7 +3825,7 @@ case <-timer.C:
 
 ### 3. Contracts
 
-- **两级开关**：`mcp_enabled=false` → 403；`mcp_allow_mutations=false` → 只注册 11 个只读工具，写类工具**不存在**（不是注册了再拒绝，避免 AI 反复试）。
+- **两级开关**：`mcp_enabled=false` → 403；`mcp_allow_mutations=false` → 只注册只读工具（v3.3.5 起 16 个，以 `server/mcptools/server.go` 的 `readToolNames` 为准），写类工具**不存在**（不是注册了再拒绝，避免 AI 反复试）。
 - 鉴权走 Open API 应用凭据（Basic `app_key:app_secret`）或登录 Bearer；**权限范围仍由应用的 scope 决定**，工具不得绕过接口层自己查库。
 - 工具调用在进程内走 `engine.ServeHTTP` 派发到既有 handler，**不复制业务逻辑**：接口改了行为，工具自动跟上。
 - `list_envs` 必须与 Web 同口径遮蔽敏感值（`server/handler/envsecret.go` ↔ `web/src/utils/envSecret.ts`），否则「网页上打码、AI 一问就明文」。
@@ -3680,7 +3842,9 @@ case <-timer.C:
 
 ### 5. Tests Required
 
-- 开关矩阵：关/只读/读写三档下的工具数（11 / 21）与写工具可见性。
+- 开关矩阵：关/只读/读写三档下的工具数（v3.3.5：403 / 16 / 46，即 `readToolNames` 16 个 + `writeToolNames` 30 个；数字随名单变，断言按名单逐个核对：
+  `TestReadOnlyServerListsExactlyTheReadTools`、`TestMutationServerAddsWriteToolsWithAnnotations`）与写工具可见性。
+  `web/src/views/api-docs/apiData.ts` 的 MCP 条目里写死了「共 N 个工具 / M 个查询类 / K 个写入类」与工具表，增删工具时手工同步（没有测试守着）。
 - 鉴权：Basic、Bearer、错误 secret、无凭据、外站 Origin。
 - `list_envs` 遮蔽与 Web 实现逐字对齐（同一组样例）。
 - `ddp mcp` stdio：initialize → tools/list → 一次真实工具调用。
@@ -3971,6 +4135,8 @@ cmd, err := newNpmRebuildCommandFunc(nodeDir, nodePackageNames(broken))
 - MCP 工具只做「转发到已有开放接口 + 整理结果」，权限沿用接口本身的 scope 与角色校验；写入 / 执行工具只能经 `addWriteTool` 在 `allowMutations` 时注册。
 - **会覆盖已有数据的也算破坏性**：重命名 / 移动 / 复制（同名静默覆盖）、创建同名备份，与删除、恢复一样标 DestructiveHint。
 - 面板接口对「全部失败」也回 200 时（批量删除脚本、删除不存在的备份），工具要自己判定并返回错误，不能把失败当成功转述给 Agent。
+- 接口返回**裸数组**时（`GET /tasks/labels`，v3.3.5）不能走通用的 `call()`：它只把 2xx 解成对象，数组会被报成「无法解析的内容」。
+  照 `tools_read.go` 的 `listTaskLabels` 直接 `t.d.Do` 取原始响应、单独解码：非 2xx 仍交 `apiError`；2xx 却解不出数组时如实报错，**不能**当成空列表；输出包成对象（`{total, labels}`）。
 - `read_script` 按字节分段：`offset` / `limit`（上限 48 KiB），返回 `total_bytes`、`next_offset`、`truncated`；切分点必须落在 UTF-8 字符边界。
 
 ### 4. Validation & Error Matrix
@@ -4058,7 +4224,7 @@ sample := defaultLinuxResourceSampler.current() // 有后台采样缓存直接�
 - 用户显式存的 `false` 照常下发（`omitempty` 只看指针是否为 nil），与「从没存过」是两种形态，前端能分清。
 - **4KB 上限**：两列各自按合并后编码的长度判，超了 400。现在 list 编码后撑死一百来字节，这道闸是给将来加键时留的。
 - **`preferenceWriteMu` 把「读整行 → 合并 → upsert 整列」串成一段**：
-  - 为什么非加不可：upsert 写回的是合并后的**整列** JSON。两个只改不同键的 PUT（视图管理一次保存两个隐藏开关、两个标签页各改各的、
+  - 为什么非加不可：upsert 写回的是合并后的**整列** JSON。两个只改不同键的 PUT（两个标签页各改各的、
     首次迁移紧跟着一次改动）如果都先读到旧行、再先后写回，后写的那个会把先写的那个键改回旧值：服务端静默丢一个设置，
     下次加载时前端还拿旧值冲掉本机缓存，用户看到设置「自己变回去了」。
     `database.go` 的 `SetMaxOpenConns(1)` 只让单条语句轮流用连接，挡不住两段读-改-写在语句之间交错。
@@ -4166,6 +4332,7 @@ columns = append(columns, "updated_at")
   `deps.go` 的 `runCmdWithSSEThen` / `depFollowUpStep` / `buildDependencyFailureHint` / `installDependency`，
   `linux_packages.go` 的包锁与 apt 选项、`linux_mirror.go` 的 apt 源改写、`dependency_reconcile.go`、`backup_runtime.go` 的 `reinstallDependency`，
   或 `main.go` 的启动顺序时，必须看本节。
+  （v3.3.5 起：启动校验怎么判「已安装」见「场景：启动依赖校验的已装包快照（契约 S1）」；`runCmdWithSSEThen` 的输出接法见「场景：依赖命令的输出管道（契约 P1）」。）
 - 背景：镜像不预装 Playwright（体积不变，用户 2026-09-18 拍板），改成「面板一键安装 + 容器重建后自动重装」。
   三样东西各有去处：Chromium 与 pip 包都在数据卷里，重建不丢；系统库登记成 Linux 依赖，重建后由启动校验在后台按记录重装。
 
@@ -4286,7 +4453,8 @@ columns = append(columns, "updated_at")
     所以写日志和判定引用同一组常量。
   - 下载失败 → 整条记录 failed；取消 / 超时同样覆盖第二段（整个进程组被杀）。主命令恰好在 ctx 结束的同一瞬间成功时，后续步骤不再启动，
     记「[依赖任务已超时，后续步骤未执行]」或「[依赖任务已取消，后续步骤未执行]」，否则它会脱离超时与取消的管控。
-  - `followUps` 为空时，`runCmdWithSSEThen` 与改动前的 `runCmdWithSSE` 逐项一致（卸载、强制卸载都走这条）。
+  - `followUps` 为空时，`runCmdWithSSEThen` 与 `runCmdWithSSE` 完全相同（卸载走这条）。强制卸载（删除、批量删除）**不走** `runCmdWithSSEThen`：
+    记录事先就删了，用的是 `forceUninstallDependency` 自己的 `bytes.Buffer` + `WaitDelay`。主命令与后续步骤的输出接法见「场景：依赖命令的输出管道（契约 P1，v3.3.5）」。
   - 网页安装、重装、一键安装都经过 `installDependency`；**重启后的自动重装（`reinstallDependency`）不追加下载**：浏览器在数据卷里，重建不丢。
 - **下载全进程串行**：step 的 `acquire` 是 `acquirePlaywrightBrowserDownloadSlot`，先试一次拿 `playwrightBrowserDownloadSem`；
   拿不到就写一行「[Playwright] 另一条记录正在下载 Chromium，排队等待……」并立刻落库，再 `select` 等槽位或 `ctx.Done()`。
@@ -4522,4 +4690,642 @@ case <-ctx.Done():
 unlock := LockLinuxPackageOperation()
 defer unlock()
 cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
+```
+
+---
+
+## 场景：启动依赖校验的已装包快照（契约 S1，v3.3.5 #156）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/service/dependency_reconcile.go`（`ReconcileDependenciesAfterRestart`、`listPythonInstalledPackages`）、
+  `dependency_state.go` 的 `DependencyInstalledForPythonVersion`、`python_package_name.go` 的 `CanonicalizePythonPackageName`，
+  或 `main.go` 里 `verifyInstalledDeps()` 的位置时必须看本节。
+- 背景（#156）：启动校验在 HTTP 监听**之前**同步执行。以前对每条「已安装」依赖串行起子进程：装着的 Python 依赖每条 5 个、判缺的 12 个（Linux 1 个 dpkg-query，Node 0 个），
+  慢 NAS 上整轮 3 分 35 秒，这段时间面板打不开；带版本号 / extras 的依赖逐条 `pip show` 永远判缺，每次重启都排进后台重装。
+  改成快照后 #156 实测整轮从约 100 个子进程 / 14 秒降到 6 个 / 0.7 秒（WSL 真实 venv，10 条 Python + 2 条 Linux + 2 条 Node + 1 条排队：
+  改前 93~100 个子进程、7.7~20.5 秒，改后 6 个、0.43~0.70 秒；单条判缺从 12 个子进程降到 5 个）。
+
+### 2. Signatures
+
+- `func ReconcileDependenciesAfterRestart()`：流程顺序不变（第一轮 installed → stale 轮 queued / installing / removing），两轮共用闭包
+  `dependencyStillInstalled(dep model.Dependency, staleRound bool) bool`（第一轮传 false、stale 轮传 true，见契约里的 stale 轮例外）。
+- `func listPythonInstalledPackages(pythonVersion string) (map[string]bool, error)`：键是 PEP 503 规范名；返回 nil 表示列举失败。
+- 包级变量（测试替身 / 可调参数，用例里改了必须 `t.Cleanup` 还原）：
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `pythonInstalledPackagesFunc` | `listPythonInstalledPackages` | 列举替身，返回 nil = 列举失败、这个版本走逐条 |
+| `pythonInstalledPackagesTimeout` | `60 * time.Second` | 只管 pip list 这一条命令 |
+| `dependencyReconcileSlowLogThreshold` | `3 * time.Second` | 整轮超过它才打分类型耗时 |
+| `pipListHiddenPackageNames` | `python` / `wsgiref` / `argparse` | pip list 写死不列（pip 的 `stdlib_pkgs`）、pip show 却查得到的名字 |
+| `dependencyInstalledFunc`（既有） | `DependencyInstalledForPythonVersion` | 逐条判定 |
+
+- 命令：`NewPipCommandForPythonVersion(version, []string{"list", "--format=json", "--disable-pip-version-check"})`，`cmd.Env = SanitizePipEnv(os.Environ())`，
+  经 `runNodeABICommand(cmd, pythonInstalledPackagesTimeout)` 执行（`SetPgid` + 超时 `KillProcessGroup` + `WaitDelay` 兜住攥着管道的孙进程）。
+- 名称规范化：`CanonicalizePythonPackageName(spec)`，与 `POST /deps` 查重是同一个函数，不另写一套。
+
+### 3. Contracts
+
+- **懒加载、每个 Python 版本一次**：键是 `NormalizeDependencyPythonVersion(dep.PythonVersion)`（`python_version` 为空的老记录并入默认版本），第一轮与 stale 轮共用；没有 Python 依赖时一次都不跑。
+- **判定**：`snapshot[CanonicalizePythonPackageName(dep.Name)]` 为真即已装。基础包名先去掉环境标记、extras、版本算符，再做 PEP 503（小写 + 折叠 `-_.`）：
+  `requests==2.31.0`、`httpx[http2]`、`aiohttp>=3.9`、`name @ https://…` → `requests` / `httpx` / `aiohttp` / `name`。
+  ⚠️ `@ url` 能还原靠的是 `@` 前有空白（函数在空白处截断，不认 `@`）；`name@https://…` 不带空白时还原不出主包名、按判缺处理——与 `POST /deps` 查重同口径，要改两处一起改。
+  快照里没有、但规范名在 `pipListHiddenPackageNames` 里 → 退回逐条 `dependencyInstalledFunc` 问一次；其余判缺。
+- 🔴 **stale 轮例外**（v3.3.5 回归复核后补）：stale 轮（queued / installing / removing）里，名字含 `= > < ~ ! [ @ ;` 任一字符（版本约束 / extras / url / marker）的 Python 记录
+  **不查快照**，照旧逐条 `dependencyInstalledFunc` 精确判定（`staleRound && strings.ContainsAny(dep.Name, "=><~![@;")`），结局与改快照之前一致：
+  逐条 `pip show` 认不出这类写法、判为未装，于是带 `[恢复备份]` 的 installing 续装，queued 置 failed（「排队中的任务因服务重启而中断」），其余 installing 与 removing 置 failed（「操作因服务重启而中断」）。
+  - 为什么：这些记录的操作还没做完，只看主包会误判。恢复备份时 `requests==2.31.0` 装到一半重启、环境里留着旧版 `requests`，按主包判就直接记成已安装，续装不再发生、钉住的版本永远装不上；
+    排队中的 `PyYAML==6.0` 一步都没执行，也会被记成已安装。复核用真 venv、真 pip 实测：第二波 stale 轮也查快照时，8 条 stale 记录里带版本号 / extras / marker 的 6 条全被误记成已安装；改后 8 条结局与 v3.3.4 完全一致。
+  - 不含这些字符的裸包名：主包就是这条记录本身，查快照与逐条问结论相同，照旧查快照。**第一轮（installed）不受影响**，照旧按主包查快照（`idna==3.7` 保持已安装，v3.3.4 会判缺重装，这是有意的差别）。
+- **规范名只用在启动校验**，不下沉到 `DependencyInstalledForPythonVersion`（恢复备份续装、Playwright 状态卡片的判定口径不变）。
+  语义变化（要写进发布说明）：**已安装**（第一轮）里带版本号 / extras / `@ url` 的依赖改为「主包在就算已装」，重启不再强制装回钉死的版本、不再补缺的 extra；stale 轮的语义不变（见上一条）。
+- **pip list 的三个坑**（缺一个都会让快照静默失效或拖住启动）：
+  1. 必须带 `--disable-pip-version-check`：pip ≤ 24.0 的普通 `pip list` 会联网自检版本，venv 里的 pip 是建 venv 时带进来的，不随镜像升级；
+  2. **只解析 stdout**，stderr 单独收：中断安装留下的 `~xxx` 残目录会让 pip 往 stderr 打 `Ignoring invalid distribution`，混进来 JSON 就解析失败；
+  3. 超时 ≥ 60 秒、超时按进程组杀。它只管 pip list 这一条，`NewPipCommandForPythonVersion` 返回前的 4 个 venv 健康检查子进程不归它管；
+     设得太短，慢机器会悄悄退回逐条校验，等于没修。
+- **失败回退**：版本不支持、pip 坏了、超时、JSON 解析失败 → 这个版本整体退回逐条 `dependencyInstalledFunc`，语义与改动前一致；
+  **每个版本只试一次、只打一行原因**，不按依赖重试。
+- **Node.js / Linux** 照旧逐条 `dependencyInstalledFunc`（只 stat 目录 / 起一个 dpkg-query 或 apk，本来就便宜）。
+- **两类 `[启动校验]` 日志行**（标准库 `log`，进面板日志）：
+  - 列举失败，每个版本一行：`[启动校验] 列举 Python <版本> 已安装的包失败，该版本依赖改为逐条校验：<原因>`。
+    原因：`NewPipCommandForPythonVersion` 的错误原样（版本不支持、venv 坏了）；pip 非 0 退出或超时是 `pip list 执行失败：<err> <stderr 最后一行>`
+    （超时的 err 是「执行超过 1m0s 仍未结束，已终止」）；解析失败是 `pip list 的输出不是预期的 JSON：<err>`。
+  - 整轮慢日志，只在 ≥ `dependencyReconcileSlowLogThreshold`（3 秒）时打一行：`[启动校验] 校验 N 条已安装依赖耗时 X（Python a / Node.js b / Linux c）`。
+    N 是两轮实际判定过的记录数（stale 轮通常为 0）；X 是整轮总耗时（含写库）；a / b / c 只算判定本身（Python 含建快照那次 pip list），都按毫秒取整。没超阈值不打，正常启动不刷日志。
+- **`DependencyInstalledForPythonVersion` 去重**：`ResolveManagedPipBinaryForPythonVersion` 拿到托管 pip 就只跑它一次 `pip show`；
+  拿不到（版本不支持、venv 坏了）才按原顺序试 venv 里残留的 `bin/pip`、`bin/pip3`、`Scripts/pip.exe` 与系统 pip。语义零变化，判缺 12 → 5 个子进程，恢复备份、Playwright 状态卡片跟着变快。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 |
+|---|---|
+| 快照可用，主包在 | 已装，不再起子进程（stale 轮带版本约束 / extras / url / marker 的除外，见下两行） |
+| 快照可用，主包不在 | 判缺，走原有重装（第一轮）/ 收口（stale 轮）逻辑 |
+| stale 轮，名字含 `= > < ~ ! [ @ ;` | 不查快照，逐条 `dependencyInstalledFunc`：带 `[恢复备份]` 的 installing 续装，queued 置 failed，其余 installing / removing 置 failed（与改快照之前一致） |
+| stale 轮，裸包名 | 查快照，主包在 → 同步成已安装 |
+| 快照里没有 `python` / `wsgiref` / `argparse` | 逐条 `pip show` 问一次 |
+| 镜像不支持该 Python 版本 / venv 坏了 | 该版本逐条校验 + 一行原因日志 |
+| pip list 超过 60 秒 | 整个进程组被杀，该版本逐条校验 + 一行原因日志 |
+| stdout 不是 JSON | 该版本逐条校验 + 一行原因日志 |
+| stderr 有 `Ignoring invalid distribution ~xxx` | 不影响，快照照常生效 |
+| venv 里是 pip ≤ 24.0、开机网络没通 | 不联网，快照照常生效（靠 `--disable-pip-version-check`） |
+| 整轮 ≥ 3 秒 | 打一行分类型耗时 |
+
+### 5. Good/Base/Bad Cases
+
+- Good：25 条 Python + 26 条 Linux + 10 条 Node 的面板重启时，每个 Python 版本只起一次 pip list（外加它前面的 4 个健康检查）；`requests==2.31.0` 判已装，不再每次重装。
+- Base：只有 Node / Linux 依赖 → 一次 pip list 都不跑，行为与改动前一致。
+- Bad：合并 stdout / stderr；不带 `--disable-pip-version-check`；超时只给几秒；列举失败时每条依赖都重试一次 pip list；
+  把规范名判定塞进 `DependencyInstalledForPythonVersion`（恢复备份跟着改语义）；用例建了 Python 记录却不给 `pythonInstalledPackagesFunc` 打桩。
+- Bad：stale 轮也一律按主包查快照（v3.3.5 第二波的写法）—— 恢复备份装到一半的 `requests==2.31.0` 被记成已安装、不再续装，排队中一步没执行的 `PyYAML==6.0` 也被记成已安装。
+
+### 6. Tests Required
+
+- `server/service/dependency_reconcile_snapshot_test.go`（`stubReconcileFuncs` 一次换掉四个包级替身）：
+  - `TestReconcileDependenciesAfterRestartJudgesPythonDepsBySnapshot`：每个版本整轮只列举一次（两轮共用）；第一轮带版本号 / extras / `@ url` 按主包判已装；
+    `python_version` 为空的老记录并入 3.12；逐条判定的只有 Node / Linux 与 stale 轮那条排队中的 `PyYAML==6.0`（逐条判未装 → 置失败，不记成已安装）。
+  - `TestReconcileDependenciesAfterRestartJudgesStaleSpecifiersExactly`（stale 轮例外）：逐条判定的恰好是 stale 轮带版本约束 / extras 的 5 条，裸包名与第一轮的 `idna==3.7` 不逐条问；
+    带 `[恢复备份]` 的 installing（`requests==2.31.0`、`httpx[http2]`）续装并保持安装中；queued 的 `PyYAML==6.0` 置失败；installing 的 `aiohttp>=3.9`、removing 的 `urllib3<2` 置失败；
+    queued 的裸包名 `certifi` 查快照同步成已安装；第一轮的 `idna==3.7` 保持已安装、不排重装。突变：去掉 stale 轮的字符判断，这条与上一条都红。
+  - `TestReconcileDependenciesAfterRestartFallsBackPerVersionWhenSnapshotFails`：只有列举失败的版本逐条判定；该版本**恰好一行**原因日志且带原因；成功的版本不打。
+  - `TestReconcileDependenciesAfterRestartSkipsSnapshotWithoutPythonDeps`、`TestReconcileDependenciesAfterRestartAsksPipShowForNamesPipListHides`、
+    `TestReconcileDependenciesAfterRestartLogsSlowRoundByType`（默认阈值下不打；阈值调成 0 时断言「校验 3 条已安装依赖耗时」与「（Python … / Node.js … / Linux …」）。
+  - `TestReconcileDependenciesAfterRestartListsPythonPackagesOnceWithManagedPip`：冒充的托管 venv 端到端，4 条 Python 依赖只起 5 个子进程（4 个健康检查 + 1 次 pip list），不出现 `pip show`。
+  - `TestListPythonInstalledPackagesReadsOnlyStdout`（冒充的 pip 往 stderr 打告警，且不带 `--disable-pip-version-check` 就报错）、`TestListPythonInstalledPackagesRejectsNonJSONOutput`、
+    `TestListPythonInstalledPackagesTimesOutAndKillsProcessGroup`（超时调成 1 秒，孙进程攥着 stdout 时 6 秒内返回）。
+- `server/service/dependency_state_test.go`：`TestDependencyInstalledForPythonVersionAsksManagedPipOnce`。
+- 🔴 **任何会走到 `ReconcileDependenciesAfterRestart` 且建了 Python 记录的用例都必须给 `pythonInstalledPackagesFunc` 打桩**
+  （既有的如 `backup_restore_regression_test.go` 的 `TestReconcileDependenciesAfterRestartSettlesQueuedRecords`），否则 CI 会真去建 venv、跑 pip。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "ReconcileDependencies|ListPythonInstalledPackages|DependencyInstalled" -count=1
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误一：合并 stdout / stderr —— 有 ~xxx 残目录时 stderr 的告警混进 JSON，快照永远解析失败、静默退回逐条
+out, err := exec.Command(pip, "list", "--format=json", "--disable-pip-version-check").CombinedOutput()
+
+// 错误二：不带 --disable-pip-version-check —— pip ≤ 24.0 每次都联网自检，开机网络没通时一直拖到超时
+cmd, err := NewPipCommandForPythonVersion(version, []string{"list", "--format=json"})
+
+// 错误三：按原名查表 —— requests==2.31.0、httpx[http2] 永远判缺，每次重启都重装
+installed := snapshot[strings.ToLower(dep.Name)]
+
+// 错误四：stale 轮也按主包查快照 —— 恢复备份装到一半的 requests==2.31.0、排队中的 PyYAML==6.0 都被记成已安装，续装不再发生
+dependencyStillInstalled := func(dep model.Dependency) bool {
+    return snapshot[CanonicalizePythonPackageName(dep.Name)]
+}
+```
+
+#### Correct
+
+```go
+cmd, err := NewPipCommandForPythonVersion(version, []string{"list", "--format=json", "--disable-pip-version-check"})
+if err != nil {
+    return nil, err
+}
+cmd.Env = SanitizePipEnv(os.Environ())
+var stdout, stderr bytes.Buffer
+cmd.Stdout, cmd.Stderr = &stdout, &stderr // 只解析 stdout
+if err := runNodeABICommand(cmd, pythonInstalledPackagesTimeout); err != nil { // 超时按进程组杀
+    return nil, fmt.Errorf("pip list 执行失败：%v %s", err, lastLine) // lastLine：stderr 最后一行
+}
+// json.Unmarshal(stdout.Bytes(), &rows)，键一律过 CanonicalizePythonPackageName
+
+// dependencyStillInstalled(dep, staleRound) 里，查快照之前先放过 stale 轮的例外：
+// 带版本约束 / extras / url / marker 的记录逐条精确判定（恢复备份续装、排队中置失败与改前一致）
+if staleRound && strings.ContainsAny(dep.Name, "=><~![@;") {
+    return dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion)
+}
+installed := snapshot[CanonicalizePythonPackageName(dep.Name)] // 基础包名 + PEP 503
+```
+
+---
+
+## 场景：依赖命令的输出管道（契约 P1，v3.3.5）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `server/handler/deps.go` 的 `runCmdWithSSEThen`（含内部的 `waitCommand` 与后续步骤 `depFollowUpStep` 的启动），
+  或新写「起子进程、边读输出边广播 SSE、再等它退出」的代码时必须看本节。
+- 走这里的：`installDependency`（网页安装、重装、批量重装、Playwright 一键安装）与 `uninstallDependency`（卸载）。
+  强制卸载（删除、批量删除）**不走**这里，用的是 `forceUninstallDependency` 自己的 `bytes.Buffer` + `WaitDelay`。
+- 背景：v1.8.0 起读协程与 `Wait` 并发读 `cmd.StdoutPipe()`，`Wait` 看到进程退出就关读端：秒退的命令偶尔整段输出只剩一行
+  「[读取安装输出失败] read |0: file already closed」，输出多的丢末尾一截；单行超过 256KB 时读协程退出、没人读管道，命令写满就卡到 20 分钟超时。
+  v3.3.4 发版时 CI 与 Release 的第一次尝试都挂在 `TestRunCmdWithSSEThenRunsFollowUpInSameRecord` 上。
+
+### 2. Signatures
+
+- `func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess bool, followUps []depFollowUpStep)`；`runCmdWithSSE` = 它 + `followUps=nil`。
+- `var dependencyOutputWaitDelay = 10 * time.Second`：与强制卸载、Node ABI 重建取同一个值，抽成变量只为测试能调短。
+- 内部：`waitCommand(running *exec.Cmd, output *io.PipeReader, outputWriter *io.PipeWriter) (error, string)`，主命令与每个后续步骤共用；返回退出错误与被 ctx 打断时的终态。
+
+### 3. Contracts
+
+1. **输出接 `io.Pipe` 的写端**：`pipeReader, pipeWriter := io.Pipe(); cmd.Stdout = pipeWriter; cmd.Stderr = pipeWriter`，后续步骤同一套接法。
+   不是 `*os.File` 的 Writer 会让 exec 起一个内部拷贝协程，`Wait` 要等它把输出全部交给读端才返回；stdout / stderr 给同一个写端，exec 只建一根 OS 管道，两路输出照旧按到达顺序混排。
+2. **`cmd.WaitDelay = dependencyOutputWaitDelay`，必须在 `Start` 之前设**：命令拉起的后台进程（守护进程、postinst 起的服务、`xxx &`）会继承这根管道，
+   不设上限时这条依赖一直停在「安装中」，还攥着 apt / npm 的包操作锁。
+3. **`Wait` 返回之后才关写端**：Wait 协程写成 `err := running.Wait(); outputWriter.Close(); …; waitCh <- err`，读协程这才读到 EOF 结束。
+4. 🔴 **读协程任何退出路径都必须把管道读到 EOF**：开头 `defer close(scanDone)` 之后紧跟 `defer func() { _, _ = io.Copy(io.Discard, output) }()`（defer 后进先出：先读空、再关 `scanDone`）。
+   io.Pipe 的 Write 要等读端读走才返回：读协程一停读，exec 的拷贝协程就永久卡在 Write 上，`Wait` 永不返回——卡住的是面板进程自己，
+   杀进程组、超时、WaitDelay 都救不回来，还一直攥着包锁。目前唯一的提前退出是单行超过 256KB（`bufio.Scanner` 上限）：
+   记一行「[读取安装输出失败] bufio.Scanner: token too long」，之后的输出读空丢弃、不进日志；将来在读循环里加 `return`（比如给日志限长）也由这个 defer 兜住。
+   **不能**只在 `scanner.Err()` 分支里排空。
+5. **`exec.ErrWaitDelay` 归一成成功**：只有命令本体以 0 退出、但输出管道到点还没关时 `Wait` 才报它（意味着命令成功、只是后台进程还攥着管道）。
+   `err = nil`、记 `backgroundHeld`，读完输出后追加一行「[命令已结束；仍有它拉起的后台进程持有输出管道，其后续输出不再收集]」（口径同系统命令行的 `resolveConsoleRunOutcome`）。
+6. **ctx 分支（超时 / 取消）**：`KillProcessGroup` → 等 `waitCh` → **先 `<-scanDone` 等读协程写完剩余输出**，
+   再写「[依赖任务已超时，进程已终止]」/「[依赖任务已取消]」/「[依赖任务在超时/取消触发的同时已正常结束，按成功处理]」，收尾行不会插进输出中间。
+   结果记 cancelled / failed、「同一瞬间正常结束按成功」、ctx 结束后不再启动后续步骤、包锁与下载槽位的释放时机都不变。
+7. 🔴 **禁止 `cmd.StdoutPipe()` 与 `Wait` 并发**。Go 文档（`os/exec` 的 `StdoutPipe`）原文：
+   「Wait will close the pipe after seeing the command exit, so most callers need not close the pipe themselves. It is thus incorrect to call Wait before all reads from the pipe have completed.」
+- 代价（已接受，写进 PR 描述）：后台进程攥着管道，或取消 / 超时时有逃出进程组的孙进程（Linux 的 `setsid`、Windows 上 `npm.cmd` 包着的 node.exe），
+  最多多等 10 秒才落终态；这 10 秒里包锁与 Chromium 下载槽位仍攥着。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 |
+|---|---|
+| 命令写一大段输出后立刻 0 退出 | 一行不少，记 successStatus，没有「读取安装输出失败」 |
+| 命令 0 退出，后台进程攥着管道 | WaitDelay 到点收尾，记 successStatus，追加「仍有它拉起的后台进程持有输出管道」 |
+| 单行 > 256KB，之后还有大量输出 | 立即结束，按退出码记，日志有「[读取安装输出失败] bufio.Scanner: token too long」，之后的输出丢弃 |
+| 取消 / 超时，有逃出进程组的孙进程 | 杀组后最多再等 WaitDelay，记 cancelled / failed，收尾行在全部输出之后 |
+| 命令非 0 退出 | 照旧 failed + `buildDependencyFailureHint`（`ErrWaitDelay` 只在 0 退出时出现，不会把失败洗成成功） |
+
+### 5. Good/Base/Bad Cases
+
+- Good：pip 秒退时日志完整；`apt install` 拉起的服务攥着管道时 10 秒后按成功收尾并写明原因。
+- Base：普通 pip / npm / apk 安装，行为与改动前一致，只是不再随机丢尾巴、不再冒出误报的「读取安装输出失败」。
+- Bad：回退成 `StdoutPipe`；只在 `scanner.Err()` 分支里排空；`Wait` 返回之前就关写端；不设 `WaitDelay`；ctx 分支不等读协程就写收尾行。
+
+### 6. Tests Required
+
+- `server/handler/deps_output_pipe_test.go`（把测试二进制自己当子进程 `TestDependencyOutputHelperProcess`，不依赖 sh / cmd 的行为）：
+  - `TestRunCmdWithSSEKeepsTailOfFastExitingCommand`：30000 行（约 470KB）后立刻 `os.Exit(0)`，连跑 5 轮；每轮 installed、没有读取失败行、30000 行齐全且最后一行 `dep-line-029999` 在。
+  - `TestRunCmdWithSSEDoesNotWaitForBackgroundProcessHoldingOutput`：`dependencyOutputWaitDelay` 调到 300ms，`echo main-ok; sleep 20 & echo bg-started`（Windows 用 `start /b ping`）；
+    10 秒内收尾、installed、有说明行、没有读取失败行。
+  - `TestRunCmdWithSSEDrainsOutputAfterOverlongLine`：先一行 300KB 再 30000 行；20 秒内结束、installed、有「bufio.Scanner: token too long」。
+- 突变验证（改这段代码后要复跑）：去掉 `WaitDelay` → 第 2 条红；去掉排空 → 第 3 条红（永久卡死）；回退到 `StdoutPipe` → Linux 上三条都红。
+- 既有用例修后变成确定性的：`deps_playwright_test.go` 的 `TestRunCmdWithSSEThenRunsFollowUpInSameRecord`、`TestRunCmdWithSSEWithoutFollowUpsKeepsBehavior`
+  （修前 WSL 300 次分别红 10~33 次、13 次，修后 0 次）。
+- 竞态只在 Linux 复现，Windows 上过不代表修好了：交叉编译测试二进制到 WSL 跑（`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c ./handler`）。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误一：StdoutPipe + 与读协程并发的 Wait —— Wait 看到进程退出就关读端，秒退的命令丢尾巴
+pipe, _ := cmd.StdoutPipe()
+cmd.Stderr = cmd.Stdout
+go scan(pipe)
+waitCh <- cmd.Wait()
+
+// 错误二：只在读出错时排空 —— 将来读循环里多一个 return，exec 的拷贝协程就永久卡在 io.Pipe 的 Write 上
+for scanner.Scan() { appendLine(scanner.Text(), true) }
+if err := scanner.Err(); err != nil {
+    appendLine("[读取安装输出失败] "+err.Error(), true)
+    _, _ = io.Copy(io.Discard, output)
+}
+```
+
+#### Correct
+
+```go
+pipeReader, pipeWriter := io.Pipe()
+cmd.Stdout, cmd.Stderr = pipeWriter, pipeWriter
+cmd.WaitDelay = dependencyOutputWaitDelay // Start 之前设
+
+// 以下在 waitCommand(running, output, outputWriter) 里：output / outputWriter 就是上面那根 io.Pipe 的两端
+go func() {
+    defer close(scanDone)
+    defer func() { _, _ = io.Copy(io.Discard, output) }() // 任何退出路径都先读到 EOF
+    scanner := bufio.NewScanner(output)
+    scanner.Buffer(make([]byte, 64*1024), 256*1024)
+    for scanner.Scan() { appendLine(scanner.Text(), true) }
+    if err := scanner.Err(); err != nil { appendLine("[读取安装输出失败] "+err.Error(), true) }
+}()
+go func() {
+    err := running.Wait()
+    outputWriter.Close() // Wait 返回之后才关写端
+    if errors.Is(err, exec.ErrWaitDelay) { backgroundHeld = true; err = nil }
+    waitCh <- err
+}()
+```
+
+---
+
+## 场景：停机收尾（v3.3.5，#156 顺带）
+
+### 1. Scope / Trigger
+
+- 触发：改下面任何一处都必须看本节。
+  - `server/main.go`：`main` 里的信号接管、`SetPanelExitRequester`、`http.Server` 构造、启动清理的位置；`shutdownPanel` 本身。
+  - `service/scheduler_manager.go` 的 `HaltSchedulerV2` / `ShutdownSchedulerV2`、`scheduler_v2.go` 的 `SignalStop`、`backup_schedule.go` / `subscription_scheduler.go` 的关停、`database.Close`。
+  - `handler/system.go` 的 `panelProcessExit` / `SetPanelExitRequester`，或新增「面板自己退出」的入口。
+  - 三条 SSE（`log.go` 的 `Stream`、`deps.go` 的 `LogStream`、`subscription.go` 的 `PullStream`），或新增长连接。
+  - `docker/entrypoint.sh` 的 trap / `shutdown()` / `log()`；`service/task_temp_cleanup.go`，或任务临时文件创建处的前缀与形状。
+  - 任何调用 `GetSchedulerV2()` / `GetTaskExecutor()` 的地方，或给 `*SchedulerV2` 新增方法：关停第 3 步之后它们是 nil，见下文「关停后的全局调度器」。
+  - 被关停打断的那次执行怎么结算，见「执行器的「执行窗口」与 per-run 停止」。
+- 背景（#156 专项调研在 WSL 里模拟 PID 1 实测，v3.3.4 及以前）：
+  - 停容器时 entrypoint 转手 `kill` 就 `exit 0`，PID 1 几毫秒内退出，内核把面板整组 SIGKILL：任务停在「运行中」、执行日志正文为空，`node_modules` 软链残留，
+    `daidai.db` 只有 4 KB、数据全在 1.8 MB 的 `-wal` 里，`/tmp` 漏下装着全部环境变量与 7 天有效脚本凭据的任务临时文件（jwt 密钥存在数据目录，重启后凭据照样能用）。
+  - 只改 entrypoint 不够：开着实时日志时 `Shutdown(15s)` 被 SSE 拖满 15 秒，而 Docker 默认只给 10 秒；关停时照跑后置脚本（一个 `sleep 31` 的 `task_after.sh` 就拖到被 SIGKILL，二进制部署还留下孤儿）；
+    失败通知时有时无；「重启面板」是裸 `os.Exit(1)`，不输出的任务成孤儿继续跑，新进程却把它标成「上次异常退出」。
+- 目标：停容器、`ddp restart`、systemd stop、Ctrl+C、关 Windows 控制台窗口，以及面板里「重启 / 停止 / 在线升级」，都在 **8 秒内**收完尾。正常路径实测几十毫秒（PID 1 约 20~30ms 退出）。
+
+### 2. Signatures
+
+- `server/main.go`：
+  - `func shutdownPanel(server *http.Server)`：唯一的关停流程。预算常量 `shutdownHardLimit = 8s`、`shutdownHTTPWait = 5s`、`shutdownSchedulersDeadline = 6500ms`（从关停开始算）、`shutdownDBWait = 1s`。
+  - `http.Server{Handler: engine, BaseContext: func(net.Listener) context.Context { return requestsCtx }}` + `server.RegisterOnShutdown(cancelRequests)`。
+  - 进入关停的三个入口：`serverErr`（`Serve` 意外返回，之后以 1 退出）、`shutdownSignals`（`os.Interrupt` / `syscall.SIGTERM`）、`panelExitRequests chan int`（容量 1）。
+  - `func logSlowStartupStep(step string, started time.Time)` + `startupStepSlowThreshold = 3s`（日志口径见 `logging-guidelines.md`「约定：启动耗时与关停日志」）。
+- `service`：
+  - `func HaltSchedulerV2()`：`SignalStop` + `StopAllRunningTasks`，可重复调用。
+  - `func ShutdownSchedulerV2()`：**保持无参**（二十多个测试 `t.Cleanup(ShutdownSchedulerV2)`）；`schedulerShutdownWait = 4s`；`SignalStop` 里的 `schedulerCronCallbackWait = 1s`。
+  - `func ShutdownBackupScheduler(deadline time.Time)` / `func ShutdownSubscriptionScheduler(deadline time.Time)`：只有 `shutdownPanel` 调。
+  - `func CleanupLeakedTaskTempEntriesOnStartup()`（`task_temp_cleanup.go`）；内部 `cleanupLeakedTaskTempEntries(dir string) int`、`isLeakedTaskTempEntry(entry os.DirEntry) bool`、表 `leakedTaskTempPatterns`。
+  - 执行器侧的 `halted` / `hookProcesses` / `revokeUnsettledScriptTokens` 见「执行窗口」一节。
+- `database`：`func Close(timeout time.Duration) error`。
+- `handler`：`func SetPanelExitRequester(fn func(code int))`（传 nil 不替换）；`var panelProcessExit = func(code int) { os.Exit(code) }`（面板主程序之外的进程不接线）。
+- `docker/entrypoint.sh`：脚本开头 `trap 'exit 143' TERM INT`；尾段 `shutdown()` + `trap shutdown TERM INT`；`log()` / `fail()`。
+
+### 3. Contracts
+
+**关停顺序与时间预算**（`shutdownPanel`；改任何一步都要重算这笔账）：
+
+| 步 | 做什么 | 上限 |
+|---|---|---|
+| 兜底 | 最先装 `time.AfterFunc(8s)`：打「面板关停超过 8s 仍未完成，强制退出」后 `os.Exit(1)` | 8 秒 |
+| 2 | **先起协程** `server.Shutdown(5s)`：关监听 → 调 `RegisterOnShutdown` 注册的 `cancelRequests` → 所有请求 ctx 取消、SSE 收流；超时就 `Close` | 5 秒，与 1 / 3 / 4 并行 |
+| 1 | `HaltSchedulerV2`：`SignalStop`（不再触发、不再入队；等正在跑的 cron 回调 ≤ 1 秒）+ `StopAllRunningTasks`（按进程组杀任务进程与钩子、标 `runStopHalt`、置 `halted`） | ≈ 1 秒 |
+| 3 | `ShutdownSchedulerV2`：`WaitWorkers` 与 `executor.Wait` 共用一个 4 秒截止时间（剩余至少 1ms）→ `revokeUnsettledScriptTokens` → `MarkActiveTasksInterrupted` → 把 `globalScheduler` / `globalExecutor` 置 nil（之后的调用点见「关停后的全局调度器」） | 4 秒 |
+| 4 | 关自动更新、日志清理、资源监控的通道；备份调度、订阅调度**同时**（各一个协程）`cron.Stop`，正在跑的作业共用截止「关停开始后 6.5 秒」，**不取消**作业 | 到 6.5 秒 |
+| 5 | `<-httpDone` | 通常立刻 |
+| 6 | `database.Close(1s)`，**必须最后**：之后任何读写都报 `sql: database is closed` | 1 秒 |
+| 收尾 | 回到 main：`cleanupPIDFile()`；退出码非 0 才 `os.Exit(code)`，0 时 main 正常返回 | — |
+
+- 总账：max(1 + 4, 6.5, 5) + 1 = 7.5 秒 < 8 秒 < Docker 默认的 10 秒。总兜底管住其余意外，例如唯一的数据库连接被恢复备份的长事务占着，`MarkActiveTasksInterrupted` 拿不到连接。
+- HTTP 关停必须与第 1 步**同时开始**：第 1 步可能卡住（cron 回调要读写库），串行写在后面 SSE 就断不开。
+- 两个 cron 不各写死 1 秒：走到这一步任务已经结算完，多等不影响别的，能让本来来得及跑完的定时拉取跑完（git 在 stash push 与 pop 之间被杀会把用户改动留在 stash 里）。
+
+**请求 ctx 与三条 SSE**：
+
+- `http.Server.Shutdown` 本身**不取消**请求 ctx（只关监听、等连接空闲）。不接 `BaseContext` + `RegisterOnShutdown(cancel)` 的话，SSE 永远等不到 ctx，`Shutdown` 等满超时。
+- 🔴 ctx 取消分支 return 之前**必须先写终止事件再 Flush**。干净结束的响应不会触发网页 `sse.ts` 的任何回调，日志弹窗、日志管理、依赖页只认 `done` 与 `onError`，会静默卡在「运行中」。
+  原来被 SIGKILL 是异常断开、会走 `onError`，所以漏发是新设计才会引入的回退。客户端自己断开时这次写入只是写失败，无副作用。
+  - 实时日志 `GET /logs/:id/stream`：`event: done` + `data: reconnect`（与会话撤销同口径；网页与 APP 去重连，面板没起来就走各自的出错收口）。三个分支都要：
+    TinyLog 实时分支的 `ctx.Done`、排队中短轮询的 `ctx.Done`、运行中却没有 TinyLog 的 `c.Stream` 轮询分支（典型是 conc 模式 / 抑制实时输出的任务）。
+    `c.Stream` 只认客户端断开、不认 ctx：**每轮开头**判 `c.Request.Context().Err() != nil`，两轮之间的 500ms 等待也 `select` ctx，否则要轮询满 60 秒。
+  - 依赖安装输出 `GET /deps/:id/log-stream`、订阅拉取输出 `GET /subscriptions/:id/pull-stream`：**同样**是 `event: done` + `data: reconnect`，三条流同值。
+    🔴 不能发 `timeout`：APP 的依赖页、订阅页（从仓库最早的 tag v1.0.2 起）把 `reconnect` 以外的 `done` 都当成完成，收到 `timeout` 会显示绿色「安装完成 / 拉取完成」，是假成功；
+    `reconnect` 则让所有版本的 APP 1 秒后重连一次，面板没起来就走 `onError`，显示红色「安装日志连接已断开 / 拉取日志连接已断开」，与 v3.3.4 被强杀时同一终态（只是正文末尾多一行字面量 `reconnect`）。
+    网页依赖页对 `timeout` 与 `reconnect` 显示同一句「日志流已断开，任务可能仍在进行」（`web/src/views/deps/index.vue` 的 done 分支）；网页订阅页把 `finished` / `not_running` / `closed` 以外的值都当「连接中断」，不用改。
+    v3.3.5 第二波这里发的是 `timeout`，APP 侧 spec 复核发现后改成 `reconnect`；APP 各页的表现与约束见 APP 仓库 `.trellis/spec/frontend/panel-contract.md`「面板关停时的结束事件」。
+  - 只改 ctx 取消分支：依赖流的硬上限（`hardDeadline` = 依赖操作超时 + 5 分钟）、订阅流 5 分钟无输出仍发 `timeout`（APP 依赖 / 订阅页对它同样显示「…完成」，是 APP 既有问题，待 APP 修）。
+- 取消只影响「看输出」的那条流：依赖安装与订阅拉取本身的 ctx 派生自 `context.Background()`，GORM 调用不带请求 ctx；MCP、企业微信回调正在进行的调用会收到取消，停机时可接受。
+
+**关停后的全局调度器**（`GetSchedulerV2()` / `GetTaskExecutor()`）：
+
+- 第 3 步 `ShutdownSchedulerV2` 末尾把 `globalScheduler` / `globalExecutor` 置 nil，之后**仍有**代码会去拿它：第 4 步还在等的定时拉取（最多到关停开始后 6.5 秒）、
+  handler 起的手动拉取协程（不随关停取消、没有 `recover`）、仍在处理的 HTTP 请求；`ddp` 进程里调度器本来就没起（`ddp sub pull` 走同一段订阅同步代码）。
+- 🔴 调用点一律先判空，只读一次：`if scheduler := GetSchedulerV2(); scheduler != nil { … }`。连读两次（`GetSchedulerV2() != nil && GetSchedulerV2().X()`）两次之间可能变 nil，
+  `handler/task_query.go` 的 `schedule_hint` 那处不崩只因为 `ScheduledEntryCount` 对 nil 返回 -1，新代码别这么写。
+- `*SchedulerV2` 上对 nil 接收者安全的方法：`AddJob`（返回 nil；`UpdateJob` 转调它）、`RemoveJob`、`HasJob`（false）、`ScheduledEntryCount`（-1）、`Enqueue`（返回 `scheduler stopped`，
+  `RunNow` 经它也只返回错误）、`SignalStop`。新增会在关停期间被调到的方法，照此开头判 `s == nil`。
+- 调度器为 nil 时，订阅同步自动添加的任务**不注册、不算失败**：任务行已经落库，面板下次启动 `InitSchedulerV2` 按库注册（与同文件摘任务的 `deleteSubscriptionTaskIfUnchanged` 同一写法）。
+- 教训（v3.3.5 回归复核实测）：第二波的订阅同步自动添加任务直接 `GetSchedulerV2().AddJob(&task)`。关停时还在跑的手动拉取走到这里空指针，面板以退出码 2 崩溃，
+  关库、删 PID 文件都没走，`-wal` / `-shm` 残留，同时在跑的定时拉取也什么都没落库；单独的定时拉取被 cron 的 `Recover` 兜住，但这次拉取的收尾丢了；`ddp sub pull` 需要自动加任务时同样崩。
+
+**面板自己发起的退出**：
+
+- 「重启面板」（`POST /system/restart`，退出码 1）、「停止面板服务」（`POST /system/stop`，0）、二进制与 Magisk 在线升级让位（0）都只调 `panelProcessExit(code)`。
+  main 用 `SetPanelExitRequester` 把它接到 `panelExitRequests`，走完 `shutdownPanel` 再按原退出码退出。退出码不变：1 让 Docker 重启循环、systemd `Restart=on-failure`、Magisk 存活守护照旧拉起。
+- 🔴 `SetPanelExitRequester` 必须早于 `handler.StartPanelAutoUpdateWatcher` 与 `server.Serve`（main 里放在 `InitSchedulerV2` 之前）：之后再接，会与这些可能触发退出的协程产生数据竞争。
+- 通道容量 1：已有请求在排队时，后来的直接丢弃（以第一个为准，例如连点两次重启）。
+- ddp 进程不接线：`ddp update` 走二进制分支时仍是默认的 `os.Exit`，行为不变。
+- `Serve` 意外返回（不是 `http.ErrServerClosed`）也走 `shutdownPanel`，再以 1 退出（原来是 `log.Fatalf`，什么都不收尾）。
+
+**信号与 defer**：
+
+- `signal.Notify(shutdownSignals, os.Interrupt, syscall.SIGTERM)` 必须在 `service.InitSchedulerV2` **之前**：调度器一起来就可能有开机任务在跑，之后到的信号先存进通道，HTTP 起来后立刻处理。
+  更早的启动步骤（启动校验可能很慢，#156）里收到信号，仍按默认方式立即退出：那时还没有任务要收尾。
+- main **不再 defer** 任何收尾函数，也不直接调用它们（`HaltSchedulerV2`、`ShutdownSchedulerV2`、两个调度器、资源监控、日志清理、自动更新、`database.Close`；`cleanupPIDFile` 也不 defer）。
+  顺序只由 `shutdownPanel` 一处决定：v3.3.4 的 defer 逆序让 HTTP 先关（还要等满 15 秒）、任务最后才杀。
+
+**启动时清理上次留下的任务临时文件**（`CleanupLeakedTaskTempEntriesOnStartup`）：
+
+- 位置：`InitSchedulerV2` 之前。这时本进程还没有任务在跑，命中前缀的通常是上次留下的（SIGKILL、`os.Exit`、8 秒兜底强退，或执行卡在读输出里走不到清理）；
+  但同一个临时目录里别的进程正在用的也长这样：`ddp task run`（Docker 里 `docker exec` 起的、Magisk 里进容器执行的，与面板共用容器的 `/tmp`）、共用 `TMPDIR` 的另一个二进制面板。
+  它们的文件同样会被删，那次执行的日志正文丢失（已知限制，backlog，见错误矩阵）。
+- 只扫 `os.TempDir()`（Unix 上遵从 `TMPDIR`，与创建处同一位置），只删三类，形状必须对得上：
+
+| 前缀 / 形状 | 创建处 |
+|---|---|
+| `daidai-runtime-*`，目录 | `runtime_exec.go` 的 `writeManagedRuntimeEnvFile` / `writeManagedRuntimeShellEnvFile` |
+| `daidai-hook-env-*`，目录 | `task_hook_env.go` 的 `newHookEnvCapture` |
+| `daidai-log-*.log`，普通文件 | `tiny_log.go` 的 `NewTinyLog` |
+
+- 软链（`DirEntry.Type()` 不跟随）、形状不对的、前缀不在开头的、别的程序的文件，一律不动。真删了才打一行 `removed N leftover task temp entries from <dir>`。
+- **不区分实例**：只认前缀与形状，不认是哪个面板进程建的（代价见错误矩阵）。
+- 改了创建处的前缀或形状，必须同步 `leakedTaskTempPatterns`（`TestLeakedTaskTempPatternsMatchCreators` 守着）。
+- 测试里只对 `t.TempDir()` 调 `cleanupLeakedTaskTempEntries`，**不要**调 `CleanupLeakedTaskTempEntriesOnStartup`：并行的其它测试包也在系统临时目录里建同前缀的文件。
+
+**关库**：`database.Close(timeout)` 把 `sqlDB.Close()` 放进协程，到点就返回错误、不干等（SQLite 本身崩溃安全，没提交的事务下次打开时自动回滚）。
+SQLite 关最后一个连接时会自动 checkpoint 并删掉 `-wal` / `-shm`，数据目录只剩 `daidai.db`。还没结束的协程（依赖安装、慢请求）之后读写会报 `database is closed`，只多几行日志。
+
+**entrypoint**（`docker/entrypoint.sh`，dash 与 busybox ash 都要成立）：
+
+- 脚本第一件事（PUID 的 `chown -R`、`find` 之前）装 `trap 'exit 143' TERM INT`：没装 trap 的 PID 1 收到的 SIGTERM 会被内核丢掉，`docker stop` 要白等满 10 秒。
+  trap 要等手上那条前台命令跑完才执行。面板起来之前换成 `trap shutdown TERM INT`。
+- `shutdown()` 的顺序：
+  1. `trap '' TERM INT`，防重入；
+  2. `kill -TERM "$SERVER_PID"` 成功才 `log` 一行，并 `wait "$SERVER_PID" 2>/dev/null || true`（`|| true` 不能省：面板非 0 退出时会被 `set -e` 带出）；
+  3. `nginx -s quit 2>/dev/null || true`，不等它；
+  4. `rm -f` PID 文件；
+  5. **在 trap 里 `exit 0`**，不回 `while true` 重启循环。
+- **不自设超时**：兜底交给 Go 的 8 秒与 Docker 宽限；内部计时器还会截断用户自己配的更长宽限。
+- `log()` / `fail()` 每行带 `date '+%Y/%m/%d %H:%M:%S'` 时间戳，与 Go `log` 的默认格式一致。
+- su-exec / gosu / `/usr/bin/env` 那几行启动命令原样保留：exec 链上 PID 不变，`SERVER_PID` 就是降权后的面板本身（`docker_entrypoint_assets_test.go` 断言这几行）。
+- 旧 docker.sock 一键更新的辅助脚本（`handler/system_update.go` 的 `buildPanelUpdateHelperScript`）：`docker rm -f` 之前先 `docker stop -t 10 <容器> >/dev/null 2>&1 || true`。
+  `rm -f` 等于直接 SIGKILL；stop 失败时 `rm -f` 照样兜底。
+- **不加**：compose `stop_grace_period`、Dockerfile `STOPSIGNAL` / `init`、entrypoint 内部超时。理由：面板 8 秒内必退；tini 只转发给直接子进程，entrypoint 本来就是那个子进程；用 NAS 图形界面部署的用户拿不到 compose 配置。
+  `packaging/linux/daidai-panel.service` 的 `TimeoutStopSec=30s` 只是余量。Magisk 动作按钮「TERM 后等 2 秒再 KILL」本轮不改（backlog）。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 |
+|---|---|
+| 正常停容器 / Ctrl+C，开着实时日志 | 面板日志 `panel shutdown finished in` 几十毫秒；SSE 以 `done` 事件结束；任务按失败结算并写两行「[面板正在关闭，…]」；软链清掉；只剩 `daidai.db`；`/tmp` 无残留；下次启动没有 `recovered` |
+| 第 1 步卡住（cron 回调拿不到库连接，例如恢复备份的长事务占着唯一连接） | `SignalStop` 1 秒后放手、接着杀任务；HTTP 照样关、SSE 照样以结束事件断开；后面的写库也拿不到连接时，8 秒兜底 `os.Exit(1)`（不删 PID 文件，systemd 显示 failed） |
+| 任务派生了逃出进程组、攥着输出管道的孙进程（`pumpAndWait` 等不到 EOF，`runTask` 卡住） | 4 秒截止：凭据吊销、`MarkActiveTasksInterrupted` 标中断，这次输出丢失。`node_modules` 软链留着（不悬空，与面板现建的等价、无害；之后托管目录没了、变悬空时，由下次启动的 `removeLeftoverManagedNodeModulesLinks` 清），临时文件留给下次启动的 `CleanupLeakedTaskTempEntriesOnStartup`。孙进程本身**不保证**被清理：Docker 里随 PID 1 退出被内核收走，二进制 / Magisk 下成孤儿。spec 与发布说明都**不承诺**「一定清理」 |
+| Windows | `killGroup` 是空操作，只杀直接子进程：孙进程攥管道更常见，走上一行的 4 秒路径（关控制台窗口约 5 秒上限） |
+| 定时备份 / 定时拉取正在跑 | 等到关停开始后 6.5 秒，不取消；到点不再等（Docker 里随后被 SIGKILL；备份非原子写盘、git stash 中途被杀见 backlog） |
+| 正在装依赖 | 不取消；记录停在 installing，下次启动的对账改成已安装 / 续装 / 「操作因服务重启而中断」，不会卡住 |
+| 关停开始后才轮到的钩子 | `halting()` 拦住不启动；正好撞上的那一下由 `registerHookProcess` 立刻杀掉 |
+| 两个二进制面板共用一个 `TMPDIR`，或面板重启时正有 `ddp task run` 在跑——包括 Docker 里 `docker exec` 起的、Magisk 里进容器手动执行的（它们与面板共用容器里同一个 `/tmp`） | 启动清理不区分实例，会删掉对方正在用的 TinyLog（`daidai-log-*.log`）与运行时目录，后果是那次执行的日志正文丢失（`TinyLog.Close` 按路径回读，文件没了就读不到正文）。Docker / Magisk 的独立 `/tmp` 只隔开宿主机，挡不住容器里的 `ddp`。已知限制（backlog） |
+| `ddp restart` / `ddp backup restore`（Docker 里） | 给面板发 TERM、面板以 0 退出，entrypoint 随之退出、整个容器停掉，靠 compose 的 `unless-stopped` 拉起（既有问题，未改，backlog） |
+| `net.Listen` 失败（端口被占） | 仍是 `log.Fatalf` 直接退出、不走 `shutdownPanel`，而调度器此时已经起来（既有行为，未改） |
+| `ShutdownSchedulerV2` 末尾把 `globalScheduler` / `globalExecutor` 置 nil 之后，还有代码调 `GetSchedulerV2()`（第 4 步还在等的定时拉取、handler 起的手动拉取、仍在处理的请求；`ddp` 进程里本来就是 nil） | 调用点都判空、`AddJob` / `RemoveJob` 对 nil 安全：不 panic，自动添加的任务照常落库、下次启动注册（见「关停后的全局调度器」）。置 nil 与这些协程的读并发，`-race` 下会报（backlog） |
+| 关停时订阅拉取还在跑、要自动添加任务（手动拉取 + 定时拉取） | 面板照常以 0 退出；订阅日志、`last_pull_at`、新任务行都在 SIGTERM 之后落库，重启后任务注册进调度器（回归复核 WSL 实测，2.5 秒走完关停）。第二波漏判空时：手动拉取空指针、面板以退出码 2 崩溃，什么都没落库 |
+| 面板卡死、无视 TERM | entrypoint 不自设超时，Docker 宽限到点 SIGKILL，结果同 v3.3.4 |
+| 启动前半段（面板还没起）收到 TERM | 手上那条前台命令跑完就以 143 退出，不启动 nginx 与面板 |
+| 收尾期间再来 TERM / INT | 忽略，收尾照常完成 |
+| 重启间隙（`sleep 2`）收到 TERM | 不再拉起；dash 要等外部 `sleep` 跑完，busybox 的内建 `sleep` 立即被打断 |
+| 新 entrypoint 配旧 Go | 开着实时日志停容器要等满 10 秒被 SIGKILL，比 v3.3.4 还慢：两侧必须同版发（镜像同版构建，不会错配） |
+
+### 5. Good/Base/Bad Cases
+
+- Good：开着实时日志停容器 → PID 1 约 20~30ms 退出；网页日志弹窗收到 `done: reconnect` 后走重连 / 出错收口，不卡在「运行中」；面板回来后重新打开弹窗，能看到「[面板正在关闭，任务已中断]」。
+- Good：停调度那一步卡住 → HTTP 照样十几毫秒关停、SSE 照样以结束事件断开，8 秒兜底准时退出，等不到 Docker 10 秒强杀。
+- Base：点「重启面板」→ 旧进程收完尾以 1 退出、被原机制拉起，新进程约 4 秒可用（与改前相当），不再留下孤儿任务。
+- Base：没有任务在跑时停容器 → 只多几行关停日志。
+- Bad：entrypoint `kill` 完立刻 `exit`；`Shutdown(15s)` 排在杀任务之前、请求 ctx 取消不了；两个 cron 各写死 1 秒；SSE 被取消时直接 return；
+  `SetPanelExitRequester` 挪到 `Serve` 之后；main 里重新 defer 收尾函数；删掉 `wait` 后面的 `|| true`。
+- Bad：依赖安装 / 订阅拉取流在关停时发 `timeout`（APP 依赖页、订阅页显示绿色「安装完成 / 拉取完成」）；
+  关停后还可能跑的代码里直接 `GetSchedulerV2().AddJob(...)`（订阅拉取自动加任务时面板 panic、以退出码 2 崩溃）。
+
+### 6. Tests Required
+
+计时一律只断言上界（WSL 墙钟会跳；shell 侧用 `/proc/uptime`）。
+
+- `server/service/panel_shutdown_test.go`：
+  - `TestShutdownSchedulerV2IsBoundedWhenRunIsStuck`：`runCommandWithPlanFunc` 卡住、不登记进程、不理停止 → `ShutdownSchedulerV2` 5 秒内返回（两段各等 4 秒，或剩余时间算成 0 变成无限等，都远超）；
+    任务不再是运行中 / 排队中，`last_run_status == RunFailed`，日志含「面板正在关闭或重启」；该次执行注入脚本的凭据按 jti 进了 `TokenBlocklist`。
+  - `TestHaltedRunSkipsPostHooksAndFailureNotify`：先跑不关停的对照（`[执行后置脚本]` 出现、webhook 探针收到失败通知；Linux 上三个标记文件写出），证明链路是通的。
+    关停那条：`[执行后置脚本]` 不出现；任务后置脚本、`task_after.sh`、`extra.sh` 的标记文件都不存在；`[面板正在关闭，任务已中断]` 与 `[面板正在关闭，跳过后置脚本]` 各自整行出现且 `isPanelMetaLine` 认得；
+    等 500ms 探针仍是 0 次。两条都 `RunFailed`。
+  - `TestManualStopStillRunsPostHooks`（回归）：手动停止照跑后置脚本，日志里没有 `[面板正在关闭，`，结算 `RunAborted`。
+  - `TestHaltKillsRunningPreHookAndSkipsNewOnes`：正在 `sleep 30` 的前置钩子 5 秒内被杀（结束标记不存在）、主进程一次没起、「取消后续执行」「任务已中断」「跳过后置脚本」三行整行出现、`RunFailed`；
+    关停之后才开窗的执行连 `[执行前置脚本]` 都不出现，任务前置脚本与 `task_before.sh` 都没跑。
+  - `TestHaltKillsRunningPostHook`：关停前已经开始的后置钩子（`sleep 30 &` + `wait`）整组被杀，后台 `sleep` 3 秒内消失（`/proc/<pid>/stat` 读不到或是僵尸）；
+    这次执行在 `runTask` 里正常结算，日志保留主进程输出、`[执行后置脚本]`、`=== 执行结束`。
+  - `TestShutdownInterruptNoticesAreStandalonePanelMetaLines`：真实 bash 进程被关停整组杀掉，日志有「[脚本进程被信号终止：」，两行提示整行出现；
+    逐行检查：`[面板正在关闭，` 只出现在行首，以它或「[脚本进程被信号终止：」开头的行都被 `isPanelMetaLine` 认出。
+  - `TestSchedulerV2SignalStopDoesNotWaitForStuckCronCallback`：cron 回调卡住时 `SignalStop` 1.5 秒内返回，之后 `Enqueue` 报错。
+  - `TestCronSchedulersShutdownWithinDeadline`（备份、订阅各两条）：作业在跑时，截止 100ms 的关停 500ms 内返回，作业既没被打断也还没跑完，放行后照常跑完；没有作业时截止给 5 秒也在 1 秒内返回。
+  - `TestSubscriptionSyncAfterSchedulerShutdownStillCreatesTasks`：按 `shutdownPanel` 的顺序 `InitSchedulerV2` → `HaltSchedulerV2` → `ShutdownSchedulerV2`（先断言 `GetSchedulerV2()` 已是 nil），
+    再对开着自动添加的订阅调 `syncSubscriptionTasks`：不 panic；任务行落库（命令、cron 正确）；同步日志有「[自动添加任务] 」。
+  - `TestSchedulerV2NilReceiverAddAndRemoveJob`：nil 调度器的 `AddJob` / `UpdateJob` 返回 nil、`RemoveJob` 不 panic、`HasJob` 为 false、`ScheduledEntryCount` 为 -1。
+  - 突变：去掉 `AddJob` / `RemoveJob` 开头的 nil 判断，第二条 panic；第一条要 `syncSubscriptionTasks` 的判空与 `AddJob` 的 nil 判断**同时**去掉才红（两处互为兜底），两处都要留。
+- `server/service/shutdown_wiring_test.go` 的 `TestMainShutdownOrder`（AST 读 `../main.go`，注释里出现函数名不算）：
+  - `shutdownPanel`：`time.AfterFunc` → `service.HaltSchedulerV2` → `service.ShutdownSchedulerV2` → `service.ShutdownBackupScheduler` → `service.ShutdownSubscriptionScheduler` → `database.Close`；
+    `server.Shutdown` 在 `go` 语句里、写在 `HaltSchedulerV2` 之前，两者之间没有任何 `<-` 接收。
+  - `main`：`handler.SetPanelExitRequester` 早于 `handler.StartPanelAutoUpdateWatcher`，也早于 `server.Serve`、`shutdownPanel`；`server.RegisterOnShutdown` 早于 `server.Serve`；
+    `service.CleanupLeakedTaskTempEntriesOnStartup` 与 `signal.Notify` 都早于 `service.InitSchedulerV2`；`http.Server` 字面量带 `BaseContext`；
+    不直接调用、也不 defer 那八个收尾函数，也不 defer `cleanupPIDFile`。
+- `server/service/task_temp_cleanup_test.go`：
+  - `TestCleanupLeakedTaskTempEntriesRemovesOnlyPanelPrefixes`（只在 `t.TempDir()` 里）：恰好删 3 条；`daidai-runtime-` 开头的普通文件、名为 `daidai-log-*.log` 的目录、`.txt` 后缀、
+    `daidai-restore-*`、`my-daidai-runtime-*`、别的文件、同前缀软链及其指向都保留；目录不存在时删 0 条。
+  - `TestLeakedTaskTempPatternsMatchCreators`：用真实的创建函数各建一个，判定必须认得，并且都建在 `os.TempDir()` 下。
+- `server/handler/panel_shutdown_test.go`：
+  - `TestShutdownEndsSSEStreamsWithDoneEvent`（表驱动 5 行：实时日志的 TinyLog 分支、排队中短轮询、运行中无 TinyLog 的轮询分支、依赖安装输出、订阅拉取输出；服务按 main 的方式接 `BaseContext` + `RegisterOnShutdown`）：
+    `Shutdown` 后 1 秒内收流，五行的最后两行都是 `event: done` 与 `data: reconnect`，`Shutdown` 2 秒内无错返回。
+    突变：删掉任一 ctx 分支的结束事件，对应那行变红；依赖 / 订阅改回 `data: timeout`，那两行变红；删掉轮询分支开头的 ctx 判断，「轮询分支」那行变红。
+  - `TestRestartAndStopRouteThroughPanelExitRequester`：`/system/restart` 请求退出码 1、`/system/stop` 请求 0；`SetPanelExitRequester(nil)` 不替换已接好的出口。
+  - `TestPanelSelfUpdateExitsThroughPanelExitRequester`（AST）：`system_update_binary.go`、`system_update_magisk.go` 不直接调 `os.Exit`，并且都调了 `panelProcessExit`。
+  - `TestPanelUpdateHelperStopsContainerBeforeRemoving`：`docker stop -t 10 '<容器>' >/dev/null 2>&1 || true` 在 `docker rm -f` 之前，`docker 'run'` 在最后。
+- `server/database/close_test.go` 的 `TestCloseCheckpointsWALAndRemovesSidecarFiles`：前提是 Close 之前 `-wal` 存在（否则断言没有区分度）；`Close(1s)` 后 `-wal`、`-shm` 都不存在；全新的连接读得到刚写的行。
+- `docker/test-entrypoint-shutdown.sh`（需要 root）：`unshare --mount` + tmpfs 隔离 `/tmp`、`/app`、`/ql`；`unshare --pid --fork --mount-proc` 让**整份** entrypoint 当 PID 1；
+  面板换成「收到 TERM 后收尾 1 秒」的 shell 桩；dash 跑一遍，有 busybox 再用 `busybox sh` 跑一遍。8 个用例：
+
+| # | 用例 | 断言点 |
+|---|---|---|
+| 1 | TERM 转发并等待收尾 | rc 0、没被强杀、收尾标记写出、只拉起 1 次、< 5000ms、`nginx -s quit`、PID 文件已删、entrypoint 日志带 `YYYY/MM/DD HH:MM:SS` 时间戳 |
+| 2 | 面板收尾后以 3 退出 | PID 1 仍以 0 退出、没被重新拉起（dash 下走降权分支，用 chown 桩把 TERM 稳稳落在 `set -e` 还开着的那一小段） |
+| 3 | 收尾期间再来 TERM + INT | rc 0；被忽略，收尾完成，只拉起 1 次 |
+| 4 | 崩溃后照常重启 | 桩以 1 退出后第 2 次拉起；之后 TERM → rc 0，不再拉起第 3 次 |
+| 5 | 重启间隙收到 TERM | rc 0，不再拉起，< 4000ms |
+| 6 | 面板自己以 0 退出 | entrypoint 以 0 退出、不是被强杀，只拉起 1 次 |
+| 7 | 降权链路（PUID=65534，本机没有 65534 就 SKIP） | 桩以 uid 65534 运行，PID 文件里的 `SERVER_PID` 就是桩自己；TERM → rc 0，降权后的面板完成收尾 |
+| 8 | 启动前半段收到 TERM | 以 143 退出、< 4000ms、没被强杀、面板与 nginx 都没启动 |
+
+  - 已实测的三个突变（`ENTRYPOINT_SRC=<改坏的文件> sudo -E bash docker/test-entrypoint-shutdown.sh`）：`shutdown()` 换回「kill 完立刻 exit 0」→ 第 1 条红；删掉 `wait` 后面的 `|| true` → 第 2 条红；删掉开头的 `trap 'exit 143'` → 第 8 条红。
+  - 接在 `.github/workflows/checks.yml` 的 PUID 那步之后：先装 busybox，装不上只跑 dash 并打 warning。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "Shutdown|Halt|SignalStop|LeakedTaskTemp|ManualStopStillRunsPostHooks|NilReceiver" -count=1
+go test ./handler -run "Shutdown|PanelExitRequester|PanelUpdateHelperStops" -count=1
+go test ./database -run "TestCloseCheckpointsWAL" -count=1
+go test ./...
+# Linux / WSL，需要 root：
+sudo bash docker/test-entrypoint-shutdown.sh
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```sh
+# 错误：转手 kill 就退。PID 1 一退出，内核把容器里剩下的进程整组 SIGKILL，面板一个收尾动作都做不了
+shutdown() {
+  if [ -n "${SERVER_PID:-}" ]; then
+    kill "${SERVER_PID}" 2>/dev/null || true
+  fi
+  rm -f "${SERVER_PID_FILE}"
+  exit 0
+}
+```
+
+```go
+// 错误：Shutdown(15s) 排在杀任务之前（杀任务靠 defer 逆序，最后才轮到），请求 ctx 又取消不了。
+// 开着实时日志时 SSE 把 Shutdown 拖满 15 秒，任务这期间照常跑，Docker 10 秒到点 SIGKILL。
+service.InitSchedulerV2()
+defer service.ShutdownSchedulerV2()
+server := &http.Server{Handler: engine}
+// ……
+case sig := <-shutdownSignals:
+    ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+    defer cancel()
+    _ = server.Shutdown(ctx)
+```
+
+```go
+// 错误：两个 cron 各写死 1 秒、串行。主动放弃本来来得及跑完的定时拉取（git 在 stash push 与 pop 之间被杀）；
+// 串行时后一个 cron 还没 Stop，等前一个的这段时间里还可能再触发一次新作业。
+service.ShutdownBackupScheduler(time.Now().Add(time.Second))
+service.ShutdownSubscriptionScheduler(time.Now().Add(time.Second))
+```
+
+```go
+// 错误：ctx 取消时直接 return。响应是干净结束的，网页 sse.ts 一个回调都不触发，弹窗静默卡在「运行中」
+case <-ctx.Done():
+    return
+```
+
+```go
+// 错误：依赖安装 / 订阅拉取流在关停时发 timeout（v3.3.5 第二波）。
+// APP 的依赖页、订阅页（v1.0.2 起）把 reconnect 以外的 done 都当成完成，显示绿色「安装完成 / 拉取完成」——假成功。
+case <-ctx.Done():
+    fmt.Fprintf(c.Writer, "event: done\ndata: timeout\n\n")
+    c.Writer.Flush()
+    return
+```
+
+```go
+// 错误：关停第 3 步之后 globalScheduler 已是 nil，还在跑的订阅拉取走到这里空指针。
+// 手动拉取的协程没有 recover，面板以退出码 2 崩溃，关库、删 PID 文件都没走（v3.3.5 第二波）。
+if err := GetSchedulerV2().AddJob(&task); err != nil {
+    log.Printf("任务 %d 注册调度失败（它不会自动触发）: %v", task.ID, err)
+}
+```
+
+#### Correct
+
+```sh
+trap 'exit 143' TERM INT # 脚本第一件事：面板还没起，收到就退
+# ……
+shutdown() {
+  trap '' TERM INT
+  if [ -n "${SERVER_PID:-}" ] && kill -TERM "${SERVER_PID}" 2>/dev/null; then
+    log "收到停止信号，等待面板收尾..."
+    wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+  nginx -s quit 2>/dev/null || true
+  rm -f "${SERVER_PID_FILE}"
+  exit 0 # 在 trap 里退，不回重启循环
+}
+trap shutdown TERM INT
+```
+
+```go
+requestsCtx, cancelRequests := context.WithCancel(context.Background())
+server := &http.Server{
+    Handler:     engine,
+    BaseContext: func(net.Listener) context.Context { return requestsCtx },
+}
+server.RegisterOnShutdown(cancelRequests)
+
+// shutdownPanel：HTTP 关停先起协程，与停调度、杀任务同时开始
+go func() {
+    defer close(httpDone)
+    ctx, cancel := context.WithTimeout(context.Background(), shutdownHTTPWait)
+    defer cancel()
+    if err := server.Shutdown(ctx); err != nil {
+        _ = server.Close()
+    }
+}()
+service.HaltSchedulerV2()
+service.ShutdownSchedulerV2()
+// 两个 cron 各起一个协程同时停，共用截止 started.Add(shutdownSchedulersDeadline)（关停开始后 6.5 秒），再 Wait
+<-httpDone
+if err := database.Close(shutdownDBWait); err != nil {
+    log.Printf("close database failed: %v", err)
+}
+```
+
+```go
+case <-ctx.Done():
+    // 三条流（实时日志、依赖安装、订阅拉取）都发 reconnect；非关停的硬上限 / 静默超时才发 timeout
+    fmt.Fprintf(c.Writer, "event: done\ndata: reconnect\n\n")
+    c.Writer.Flush()
+    return
+```
+
+```go
+// 正确：只读一次、先判空。调度器为 nil 时不注册也不算失败：任务行已落库，下次启动 InitSchedulerV2 按库注册
+if scheduler := GetSchedulerV2(); scheduler != nil {
+    if err := scheduler.AddJob(&task); err != nil {
+        log.Printf("任务 %d 注册调度失败（它不会自动触发）: %v", task.ID, err)
+    }
+}
+
+// 正确：会在关停期间被调到的方法，对 nil 接收者直接返回（与 HasJob / ScheduledEntryCount / Enqueue 一致）
+func (s *SchedulerV2) AddJob(task *model.Task) error {
+    if s == nil {
+        return nil
+    }
+    // ……
+}
 ```

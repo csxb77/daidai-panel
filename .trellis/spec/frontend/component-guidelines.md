@@ -1224,7 +1224,8 @@ watch(() => props.fileTree, async () => {
 
 ### 1. Scope / Trigger
 
-- 触发：改 `web/src/utils/listPreferences.ts`；改任务页、环境变量页的每页条数；改任务页视图栏「全部」「分组标签」的显隐；
+- 触发：改 `web/src/utils/listPreferences.ts`；改任务页、环境变量页的每页条数；改任务页视图栏「全部」「顶栏分组页签」的显隐
+  （v3.3.5 前视图管理里这一行叫「分组标签」，与「显示设置」里管任务名旁分组小标签的开关同名，#157 起改名区分）、改 `ViewManagementDialog.vue` 的保存；
   或者要往服务端的 `list` 白名单里加键时，必须看本节。
 - 背景：这 4 项原来分散在 `tasks/index.vue`、`envs/index.vue`、`ViewManager.vue` 里，各自直接读写 localStorage。
   localStorage 按 origin 隔离，issue 的报告者正是多域名 / 多 IP 在用，换个地址打开就全没了。v3.3.1 起跟随账户。
@@ -1245,15 +1246,17 @@ export const LIST_PREFERENCES_DEFAULTS  // { tasks_page_size: 20, envs_page_size
 export const LIST_PREFERENCE_KEYS       // 五个键，供遍历
 export function parseListPreferenceWire(key, raw)                  // 校验「接口上的值」，口径与服务端白名单一致（类型不对也算非法）
 export function readListPreference(key): ListPreferences[K]        // 同步读本地缓存
-export function setListPreferences(patch: Partial<ListPreferences>): void  // 一次改多项，只发一次 PUT
+export function setListPreferences(patch: Partial<ListPreferences>): void  // 一次改多项，只发一次 PUT；写本机后发出去不管
 export function setListPreference(key, value): void                // 等于只带这一个键的 setListPreferences
+export async function saveListPreferences(patch: Partial<ListPreferences>): Promise<void>  // v3.3.5：等 PUT 结果，失败回滚本机键并抛错
 export function ensureListPreferencesLoaded(): Promise<void>       // 记忆化
 export function resetListPreferencesCache(): void
 ```
 
 - `api/auth.ts`：`getPreferences()` 的返回类型多了 `list?: Record<string, unknown>`；新增 `updateListPreferences(list)`，
   发 `PUT /auth/preferences`，body 只有 `{ list }`。editor 那条 `updatePreferences(editor)` 不动。
-- 消费方：`tasks/index.vue`（`tasks_page_size`）、`tasks/components/ViewManager.vue`（两个 hidden）、`envs/index.vue`（`envs_page_size`）；
+- 消费方：`tasks/index.vue`（`tasks_page_size`）、`tasks/components/ViewManager.vue`（读两个 hidden 并应用到顶栏）、
+  `tasks/components/ViewManagementDialog.vue`（保存两个 hidden，走 `saveListPreferences`）、`envs/index.vue`（`envs_page_size`）；
   `log_open_at_bottom` 的消费方见下面「打开已结束的日志」；
   `stores/auth.ts` 的 `clearAuth` 调 `resetListPreferencesCache()`。
 - 组名还叫 `list`，但 v3.3.3 起它装的是「列表页 / 日志查看等跟账户走的零散界面开关」。以后再有这类开关照样往里加键，
@@ -1288,18 +1291,37 @@ export function resetListPreferencesCache(): void
   本机一个老键都没有时，不发任何请求，避免给服务端「占坑」写默认值。
 
 **写入**
-- 🔴 **所有写入必须经 `setListPreference(s)`**。验收 grep：
+- 🔴 **所有写入必须经 `setListPreference(s)` 或 `saveListPreferences`**。验收 grep：
   `dd:tasks:page_size|daidai-env-page-size|dd:tasks:view_(all|groups)_hidden|dd:log:open_at_bottom` 在 `web/src` 里只允许出现在 `listPreferences.ts`（v3.3.1 时零违例）。
   绕过它直接写 localStorage 的后果：改动只留在本机，下次加载被服务端的旧值静默改回去，不报错、构建全绿。
+- 两种写法，按「失败要不要让用户知道」选：
+  - `setListPreferences(patch)`：**写本机 + 发出去不管**，给即改即生效的开关用（每页条数、个人设置「日志查看」）。
+    同步失败对它们只是「换个浏览器不记得」，不值得打断用户。
+  - `saveListPreferences(patch)`（v3.3.5，#157 ③）：同一套校验与本机写入，但**等服务端写入结果**，给「点了保存、要提示已保存」的地方用（目前只有视图管理弹窗）。
 - `setListPreferences(patch)` 的顺序：按白名单键遍历 → `parseWire` 逐键校验（非法或缺失的那一键单独丢弃，其余照发）→ 记脏 → 写本地缓存 →
   后台发**一次** `updateListPreferences(accepted)`；一个合法键都没有就不发；同步失败静默（本机已经生效了）。
   按白名单遍历而不是遍历 patch：白名单外的键天然被忽略；非法值要是放行，服务端会对整个请求回 400，同一批里合法的键也跟着丢。
-- 同一个动作要改好几项时用 `setListPreferences`，不要连调几次 `setListPreference`（请求数白白翻倍）。
-  `ViewManager.handleManagementSaved` 就是把两个开关合进一个 patch。这不是为了防丢键：服务端的 `preferenceWriteMu`
+- `saveListPreferences(patch)` 的顺序：前四步同上，并记下每个被写键**写之前的本机原值**（没存过记 null）与它原来在不在脏集合里 →
+  `await updateListPreferences(accepted)`。成功才 resolve；失败时逐键回滚（原来没存过的删掉本机键与内存覆盖，读的时候回落默认值；存过的写回原值），
+  原来不在脏集合里的键移出 `locallyChanged`（还在路上的那次 ensure 回来时要允许它把服务端值写回本机），再把错误**原样抛给调用方**，由它报错、不关弹窗。
+  一个合法键都没有时直接 resolve、不发请求。
+- 同一个动作要改好几项时合成一个 patch 交给上面两个函数之一，不要连调几次 `setListPreference`（请求数白白翻倍）。
+  视图管理保存时 `ViewManagementDialog.handleSave` 就是把两个开关合进一个 patch。这不是为了防丢键：服务端的 `preferenceWriteMu`
   已经把「读 - 合并 - 写」串行化，改不同键的并发 PUT 都会落库；两个 PUT 改**同一个**键时，以服务端后处理的那个为准。
-- 🔴 **只在用户动作里 set，程序化回写不 set**。当前三处：tasks 与 envs 的 `handlePageSizeChange`、ViewManager 的 `handleManagementSaved`（而且只在值真的变了时）。
+- 🔴 **只在用户动作里 set，程序化回写不 set**。当前调用点：tasks 与 envs 的 `handlePageSizeChange`、个人设置「日志查看」卡（这三处 `setListPreference`）；
+  视图管理弹窗的 `handleSave`（`saveListPreferences`，只在值真的变了时）。`ViewManager.handleManagementSaved` 只负责把弹窗回传的结果应用到顶栏，**不再写偏好**。
   不要挂进 `watch(pageSize)`：应用服务端值时 watch 也会触发，多发一次 PUT，还会把这一键误记成「本地改过」，挡住后面的下行同步。
-  视图管理什么都没改就点保存时不发请求：服务端是稀疏存储，写一次就等于替用户占坑。
+  视图管理什么都没改就点保存时不发偏好请求：服务端是稀疏存储，写一次就等于替用户占坑。
+
+**视图管理的保存要等写入结果（v3.3.5，#157 ③）**
+- 为什么：原来 `ViewManager.handleManagementSaved` 用 `setListPreferences` 发 PUT 不管结果，弹窗却先提示了「视图设置已保存」并当场隐藏页签；
+  PUT 一旦失败，界面是假成功，刷新后 `ensureListPreferencesLoaded` 拿服务端旧值把本机缓存冲回去，用户关掉的页签又出现了（「关了刷新又出现」）。
+- `ViewManagementDialog.handleSave` 的顺序：有自定义视图时先 `taskViewApi.reorder(...)` → 两个开关里**真的变了**的键合成 patch → `await saveListPreferences(patch)`
+  → 都成功才 `ElMessage.success('视图设置已保存')`、`emit('saved', allHidden, groupsHidden)` 并关窗；父组件 `ViewManager.handleManagementSaved` 应用到顶栏再 `loadViews()`。
+- 失败：报错（有服务端文案用文案，否则「保存失败，请检查网络后重试」，不透出 axios 的英文 `err.message`）、**弹窗不关**、本机两个键已由 `saveListPreferences` 回滚。
+  视图那一半（reorder）已经成功、只是偏好没写成时 `emit('views-saved')`，父组件 `@views-saved="loadViews"` 按服务端刷新视图列表，弹窗里改好的开关留着等用户重试。
+- 有未保存改动（视图顺序、任一视图显隐、两个内置开关与打开时不同）时，×、Esc（`before-close`）、「取消」（手机全屏弹窗唯一的关窗入口）、「编辑」先确认「放弃未保存的修改？」；
+  保存成功是直接 emit 关窗、不经过确认，确认框挡不住正常保存。
 - 分页器给的是 number：写之前按白名单取一遍（`TASKS_PAGE_SIZE_OPTIONS.find(option => option === pageSize.value)`），不要用 `as` 断言。
   `:page-sizes` / 条数下拉的选项也由两个 OPTIONS 常量生成，不在页面里再抄一份。
 
@@ -1353,12 +1375,16 @@ export function resetListPreferencesCache(): void
 - `setListPreference` 收到白名单外的值 -> 这一键丢弃，不写本地、不发请求
 - 隐私模式 `setItem` 抛错 -> 走内存覆盖，本次会话生效，刷新后丢失
 - 页面直接读写老键 -> 验收 grep 违例；运行时表现为下次加载被服务端值改回去，不报错
+- 视图管理保存时 `PUT /auth/preferences` 失败 -> 报错、不提示「视图设置已保存」、弹窗不关；本机两个键回滚到保存前，刷新后仍是保存前的值
+- 视图管理保存时 reorder 成功、偏好 PUT 失败 -> `views-saved` 让顶栏按服务端刷新视图列表，弹窗里改好的开关留着等重试
 
 ### 5. Good/Base/Bad Cases
 
-- Good：只在用户动作里 set；一次动作改多项时合成一个 patch；首拉阻塞与否按页面有没有请求序号闸、以及「先拉那次是否注定作废」来定
+- Good：只在用户动作里 set；一次动作改多项时合成一个 patch；首拉阻塞与否按页面有没有请求序号闸、以及「先拉那次是否注定作废」来定；
+  点了「保存」要提示成功的地方用 `saveListPreferences`，等写入结果再提示
 - Base：从没改过这几项的新用户 -> 服务端一行都不写，全部用前端默认值
-- Bad：`watch(pageSize, v => setListPreference(...))`；ensure 里把回落出来的默认值也迁上去；页面自己 `localStorage.getItem('dd:tasks:page_size')`
+- Bad：`watch(pageSize, v => setListPreference(...))`；ensure 里把回落出来的默认值也迁上去；页面自己 `localStorage.getItem('dd:tasks:page_size')`；
+  弹窗里 `setListPreferences(patch)` 之后立刻提示「已保存」（PUT 失败时界面假成功，刷新被服务端旧值冲回）
 
 ### 6. Tests Required
 
@@ -1368,6 +1394,8 @@ export function resetListPreferencesCache(): void
   - 只改过列表偏好的账号打开编辑器页：本机的编辑器偏好不被默认值冲掉（`GET` 的 `stored` 仍为 `false`）
   - 本机有老键、服务端没有：首次加载后 Network 里只有一个 PUT，只带本机真有的键；本机没有老键：零个 PUT
   - 视图管理什么都不改点保存：零个 PUT；两个开关都改：一个 PUT 带两个键
+  - 视图管理拨开关后用 CDP `Fetch.failRequest` 让 `PUT /auth/preferences` 失败：报错、弹窗不关、不提示「已保存」；刷新后页签状态与保存前一致
+  - 视图管理拨了开关点 × / 取消 / Esc：先弹「放弃未保存的修改？」；什么都没改时直接关
   - DevTools 限速到 Slow 3G，进任务页后立刻改条数：GET 回来之后不会被弹回去
   - 退出登录、换一个账号：看到的是新账号自己的值
 - 服务端用例：`cd server && go test ./handler -run Preferences -count=1`（清单见 backend `quality-guidelines.md`）。
@@ -1387,6 +1415,13 @@ watch(pageSize, (v) => localStorage.setItem('dd:tasks:page_size', String(v)))
 watch(pageSize, (v) => setListPreference('tasks_page_size', v as 10 | 20 | 50 | 100))
 ```
 
+```ts
+// 视图管理保存：发出去不管就提示成功 —— PUT 失败时界面假成功，刷新后页签又出现（#157 ③）
+setListPreferences(patch)
+ElMessage.success('视图设置已保存')
+emit('saved', allTabHidden.value, groupTabsHidden.value)
+```
+
 #### Correct
 
 ```ts
@@ -1397,6 +1432,19 @@ function handlePageSizeChange() {
   const size = TASKS_PAGE_SIZE_OPTIONS.find(option => option === pageSize.value)
   if (size !== undefined) setListPreference('tasks_page_size', size)  // 只在这个用户动作里写
   void reloadAndScrollToTop()
+}
+```
+
+```ts
+// 视图管理保存：等写入结果再提示；失败时 saveListPreferences 已回滚本机键，这里报错、弹窗不关
+try {
+  if (Object.keys(patch).length > 0) await saveListPreferences(patch)
+  ElMessage.success('视图设置已保存')
+  emit('saved', allTabHidden.value, groupTabsHidden.value)
+  emit('update:modelValue', false)
+} catch (err: any) {
+  if (viewsSaved) emit('views-saved')
+  ElMessage.error(err?.response?.data?.error || '保存失败，请检查网络后重试')
 }
 ```
 
@@ -1572,5 +1620,121 @@ async function handlePageChange() {
 function handlePageSizeChange() {
   page.value = 1
   void handlePageChange()
+}
+```
+
+---
+
+## Scenario: 任务标签输入（`TaskLabelPicker`，v3.3.5，issue #157）
+
+### 1. Scope / Trigger
+
+- 触发：改 `web/src/views/tasks/components/TaskLabelPicker.vue`；改 `TaskForm.vue` 的标签 / 任务分组输入或 `BatchAddLabelDialog.vue`；
+  或在别处新做「输入框 + 候选 chip」这类「填了就要保存」的输入时，必须看本节。
+- 背景：#157 ①「填了标签点更新，提示已更新，刷新后标签没建上」。原标签框只在 `@keyup.enter` 时变成标签，`handleSubmit` 只提交 `form.labels`，
+  没回车的字被静默丢掉、照样提示成功（v1.0.0 起就这样，后端不丢标签）；批量弹窗的 `el-select allow-create` 失焦就清字，粘贴后按回车也建不出标签。
+
+### 2. Signatures
+
+- `TaskLabelPicker.vue`：`v-model: string[]`，只含用户可编辑的普通标签——`分组:` / `subscription:` 两类内部标签由宿主经 `splitTaskLabels` / `mergeTaskLabels` 自己藏起来、提交时并回去。
+  `defineExpose({ commitPending })`：`commitPending(): boolean` 把输入框里的文字并进 v-model，有被拦下的段时返回 `false`（原文留在框里、已提示）。
+  emit 是同步的，返回时宿主 v-model 绑的那份数组已经是新值，可以直接拿去组装请求体。
+- 候选：挂载时 `taskApi.labels()`（`GET /tasks/labels`，裸数组，服务端契约 L1 见 backend `index.md`）→ `normalizeTaskNameCounts`（`taskLabels.ts`）→
+  再滤一遍 `isInternalTaskLabel` → 按 count 降序、同 count 按 name 排。
+- 宿主写法：`<TaskLabelPicker :key="labelPickerKey" ref="labelPickerRef" v-model="form.labels" />`，放在 `destroy-on-close` 的弹窗内容里，弹窗每次打开 `labelPickerKey++`。
+
+### 3. 硬约定（每条都是「去掉就静默失效」）
+
+1. **候选 chip、「添加」、「全部 N 个 / 收起」一律原生 `<button type="button">` + `@mousedown.prevent`。**
+   - 是什么：不用 `el-button`、`el-check-tag`、`el-tag` 当可点的 chip；原生 button 两个属性都不能漏。
+   - 为什么：漏写 `type`，它在 el-form 渲染的 `<form>` 里就是提交按钮，在输入框里按回车会触发原生隐式提交、**整页刷新**；
+     不 `prevent`，点它会抢走输入框焦点，手机上键盘随之收起 / 弹出，连续加几个标签每点一次收一次；`el-check-tag` / `el-tag` 是 span，键盘聚焦不到。
+   - 例子：任务表单「任务分组」下方的「已有分组」chip（`TaskForm.vue` 的 `.group-chip`）同一套约定、同一套样式，改一边要同步另一边。
+2. **回车用 `@keydown.enter`，`e.isComposing || e.keyCode === 229` 时直接 return，否则 `preventDefault()` 后提交。不用 `@keyup.enter`。**
+   - 为什么：输入法组字中按回车只是上屏（Chrome 报 `isComposing`，Safari 先发 compositionend、再发 keyCode 229 的 keydown）；
+     Windows 中文输入法回车上屏英文时 keyup 报的是 Enter，用 keyup 会把刚上屏的字母直接变成标签。`preventDefault()` 挡掉 `<form>` 的隐式提交。
+3. **宿主保存时先 `commitPending()`，再做空值校验、组装请求体。**
+   - `TaskForm.handleSubmit`：放在各项校验之后、`const data = { ...form.value }` 之前；返回 `false` 时 `activeTab = 'basic'` 并中止。
+   - `BatchAddLabelDialog.handleConfirm`：**先** `commitPending()`（`false` 就停），**再**做「请输入至少一个标签」——顺序反了，「打字不回车点确定」仍报空。
+4. **输入状态随弹窗销毁。**
+   - 是什么：输入框的值（`query`）只放在 picker 自己身上；picker 放在 `destroy-on-close` 的弹窗内容里，宿主每次打开再换一次 `:key`。
+   - 为什么：`TaskForm` 常驻挂载，`destroy-on-close` 只卸 DOM；关窗动画没走完就重开时 EP 不重建内容。少了 `:key`，A 任务里没回车的字会带进下一个打开的任务，保存时被并进去（#157 N3）。
+5. **内部前缀只校验新输入，不碰已有标签。** 新加的段 trim 后以 `分组:` / `subscription:` 开头 → 拦下、原文留在输入框，
+   提示「标签不能以「分组:」或「subscription:」开头，分组请填在「任务分组」里」（`grouping: true`，每次操作只提示一次），合法的段照常加入。
+   已选区里的历史脏数据（如 ` subscription:1`）不校验，否则这个任务保存不了。
+6. **点候选只替换最后一段，前面各段先提交。** `pickCandidate`：`query.split(/[,，]/)` 弹出最后一段（那是搜索词），`commitSegments([...前面各段, name])`。
+   只「加 chip + 清空输入框」会把「a,b,监」点「监控」里的 a、b 静默丢掉（#157 N1）。
+7. **与候选忽略大小写相等时用候选的写法**（候选已按 count 降序，取最常用的那个变体）；与已选忽略大小写相等算重复、不再加。
+   输入框加 `autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="done"`：手机句首自动大写会造出第二个「Prod」；
+   安卓 Chrome 不设 `enterkeyhint` 时，后面紧跟「任务分组」输入框，软键盘动作键是「下一项」、不发回车。
+8. **`el-select allow-create` 不能做「填了就保存」的输入。** 失焦或收起时 EP 会清掉没回车的文字；没有候选时粘贴、单字后按回车也建不出项（悬停索引被 nextTick 复位）。
+   环境变量分组（`EnvEditDialog` / `EnvBatchGroupDialog`）、面板时区（`SystemConfigCard`）仍是这种写法，属已知同类，进 backlog，别顺手改。
+
+其它口径：
+
+- 拆分按 `/[,，]/`（半角、全角逗号都拆），逐段 trim、去空、去重：存储按半角逗号拼接，标签里留着逗号保存后会被拆成两个。
+- **刻意不做「失焦即并入」**：输入框同时是搜索框，打半截字去点别处就入库不对；只在回车、点「添加」、宿主保存三处并入。
+  有未提交文字时，输入框下方提示「保存时会把「xx」作为新标签一起保存」，让「所见即所得」名副其实。
+- 每次操作只 emit 一次（`commitSegments`）：v-model 的 props 要等下一次渲染才更新，同一拍里连 emit 两次，第二次读到的还是旧的已选。
+- 候选加载失败、老面板 404、权限不足、演示站兜底体 `{data: []}`、不是数组 → 一律当「没有候选」，**静默**，输入框照常可用。
+- 「任务分组」保持 `el-input`（所见即所得，不存在没回车就丢）；分组名含半角逗号时拦下，提示「分组名不能包含英文逗号」并切回「基本信息」。
+
+### 4. Tests Required（仓库无前端单测，`npm run build` + 浏览器实测）
+
+- 桌面 1280 与手机 390 各一遍：
+  - 打字不回车直接点「创建 / 更新」→ 刷新后标签在，按该标签建的视图能筛出这个任务；
+  - `a,b，c` 回车得到三个；「a,b,监」再点「监控」得到 a、b、监控；
+  - 组字中按回车不提交；在输入框回车不触发整页刷新；手机上点候选 chip、「添加」不弹 / 不收键盘；
+  - 打 `分组:xx` 点保存：被拦一次、原文留在框里、停在「高级设置」时自动切回「基本信息」；
+  - A 任务里打字 → 取消 → 打开任务 C 或新建：输入框是空的；
+  - 批量添加标签弹窗打字不回车点「确定」也能加上。
+- 演示站：`npm run build:demo` 后任务表单能看到已有标签；跑完必须再 `npm run build` 还原 `web/dist`。
+
+### 5. Wrong vs Correct
+
+#### Wrong
+
+```vue
+<!-- 只在 keyup 回车时入列：没回车的字被静默丢掉；输入法回车上屏也被当成提交 -->
+<el-input v-model="labelInput" @keyup.enter="addLabel" />
+<!-- 漏 type：在输入框回车触发原生提交、整页刷新；不 prevent：手机上点一下收一次键盘 -->
+<button class="chip" @click="pick(item.name)">{{ item.name }}</button>
+<!-- 失焦就清掉没回车的字 -->
+<el-select v-model="labels" multiple filterable allow-create default-first-option />
+```
+
+```ts
+// 顺序反了：「打字不回车点确定」仍报「请输入至少一个标签」
+if (labels.value.length === 0) return ElMessage.warning('请输入至少一个标签')
+pickerRef.value?.commitPending()
+```
+
+#### Correct
+
+```vue
+<el-input
+  v-model="query"
+  enterkeyhint="done"
+  autocapitalize="off"
+  autocorrect="off"
+  spellcheck="false"
+  @keydown.enter="handleEnter"
+/>
+<button type="button" class="label-picker__chip" @mousedown.prevent @click="pickCandidate(item.name)">…</button>
+```
+
+```ts
+function handleEnter(event: Event | KeyboardEvent) {
+  const e = event as KeyboardEvent
+  if (e.isComposing || e.keyCode === 229) return // 组字中按回车只是上屏
+  e.preventDefault()                              // 挡掉 <form> 的隐式提交
+  commitPending()
+}
+
+async function handleConfirm() {
+  if (pickerRef.value && !pickerRef.value.commitPending()) return // 先并入没回车的字（有非法段就停）
+  const cleaned = Array.from(new Set(labels.value.map(label => label.trim()).filter(Boolean)))
+  if (cleaned.length === 0) return ElMessage.warning('请输入至少一个标签') // 再做空值校验
+  // ...
 }
 ```

@@ -47,6 +47,50 @@
 - 发生失败时没有打关键上下文，后面难排查。
 - 只写“失败了”，不写哪个步骤失败。
 
+## 约定：启动耗时与关停日志（v3.3.5，#156）
+
+**是什么**
+
+- **启动慢步骤**：`server/main.go` 的 `logSlowStartupStep(step, started)`，某一步用时 ≥ `startupStepSlowThreshold`（3 秒）才打一行
+  `[启动耗时] <步骤> 用时 <耗时>`（耗时按 10ms 取整，Go `Duration` 写法，如 `14.27s`）。目前计时五步（按 main 里的先后）：
+  `初始化配置与数据库`（`appboot.InitWithConfig`）、`启动校验已安装依赖`（`verifyInstalledDeps`）、`整理通知辅助脚本（遍历脚本目录）`、
+  `隔离脚本目录污染项、清理残留软链（遍历脚本目录）`（`service.QuarantineUnexpectedScriptEntriesOnStartup`：它末尾要遍历整棵脚本目录找悬空的 `node_modules` 软链，慢盘上也可能几秒）、
+  `初始化任务调度器`（`service.InitSchedulerV2`）。
+  - 被计时的函数**保持直接调用**，不要包成传函数值的 helper：`service/startup_wiring_test.go` 按 AST 核对 main 里的调用顺序。
+  - 启动校验内部另有分类型的 `[启动校验] 校验 N 条已安装依赖耗时 …`，同样是 3 秒门槛，口径见 `quality-guidelines.md`「契约 S1」。
+- **关停**（`shutdownPanel` 及它调用的各步，标准库 `log`，进面板日志）：沿用既有的英文短句。正常路径打入口一行、`scheduler v2 stopped`、`backup scheduler stopped`、
+  `subscription scheduler stopped`、`database closed`、`panel shutdown finished in <耗时>`（毫秒取整）；其余的行只在真发生时出现：
+
+| 时机 | 日志行 |
+|---|---|
+| 进入关停 | `received <signal>, shutting down panel` / `panel exit requested (code=N), shutting down panel` / `server failed: <err>` |
+| 杀任务 | `interrupted N running task process(es) during panel shutdown` |
+| 某一步到点放手 | `scheduler v2: cron callbacks still running after 1s, not waiting for them`、`timed out waiting for scheduler workers to finish`、`timed out waiting for running task cleanup`、`backup scheduler stopped (a scheduled backup is still running, not waiting for it)`、`subscription scheduler stopped (a scheduled pull is still running, not waiting for it)`、`server graceful shutdown failed: <err>`、`close database failed: <err>` |
+| 截止时兜底 | `revoked N script token(s) of unsettled task run(s) during shutdown`、`marked N active task(s) as interrupted during shutdown` |
+| 总兜底（随后 `os.Exit(1)`） | `面板关停超过 8s 仍未完成，强制退出` |
+| 下次启动 | `removed N leftover task temp entries from <dir>`（真删了才打） |
+
+- **entrypoint**：`log()` / `fail()` 每行以 `YYYY/MM/DD HH:MM:SS`（`date '+%Y/%m/%d %H:%M:%S'`）开头，与 Go `log` 的默认格式一致，后面跟 `[entrypoint]` / `[entrypoint][ERROR]`；
+  收到停止信号时打 `收到停止信号，等待面板收尾...`。
+
+**为什么**
+
+- 慢启动（#156）以前只能看到「过了很久才开始监听」，对不上是哪一步；门槛设 3 秒，正常启动一行都不多打。
+- 关停的每一步都有上限、到点就放手往下走，日志是事后判断「卡在哪一步、有没有执行被兜底标中断、凭据有没有吊销」的唯一依据。
+- entrypoint 与面板日志用同一种时间格式，`docker logs` 里两边的时间线能直接对上。
+
+**例子**（格式示意，不是实测输出；`……` 处省略了其余行）
+
+```text
+2026/10/05 09:12:40 [启动耗时] 启动校验已安装依赖 用时 14.27s
+……
+2026/10/05 21:03:11 [entrypoint] 收到停止信号，等待面板收尾...
+2026/10/05 21:03:11 received terminated, shutting down panel
+2026/10/05 21:03:11 interrupted 2 running task process(es) during panel shutdown
+……
+2026/10/05 21:03:11 panel shutdown finished in 18ms
+```
+
 ## Scenario: 任务日志流中的终端覆盖刷新
 
 ### 1. Scope / Trigger
