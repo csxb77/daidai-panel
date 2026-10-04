@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -40,6 +41,16 @@ var (
 // defaultDependencyOperationTimeout 是 dependency_install_timeout_minutes 读不出来时的兜底值，
 // 与该配置项的注册默认值保持一致。真正生效的阈值一律走 resolveDependencyOperationTimeout()。
 const defaultDependencyOperationTimeout = 20 * time.Minute
+
+// dependencyOutputWaitDelay 是依赖命令本体退出之后，输出管道还被别的进程攥着时最多再等的时长。
+//
+// 依赖命令的输出接在 io.Pipe 上（见 runCmdWithSSEThen），Wait 要等所有拿着管道写端的进程都关掉它才返回。
+// 命令拉起的后台进程（守护进程、postinst 起的服务、`xxx &`）会继承这根管道：命令正常退出时没人去杀它们，
+// 取消 / 超时时整组杀也杀不到逃出了进程组的（setsid），Windows 上更是只杀得到直接子进程。
+// 不设上限的话，这条依赖会一直停在「安装中」，还连带攥着 apt / npm 的包操作锁。
+// 到点后 os/exec 强制关掉管道，Wait 返回 exec.ErrWaitDelay（处理见 runCmdWithSSEThen 的 waitCommand）。
+// 与强制卸载、Node ABI 重建取同一个值；抽成变量只为测试能调短。
+var dependencyOutputWaitDelay = 10 * time.Second
 
 // resolveDependencyOperationTimeout 读取用户配置的依赖操作超时。
 // 配置项注册在 model 层并带 5-720 分钟的区间校验，这里只对「数据库里存着历史越界值」
@@ -819,24 +830,27 @@ func runCmdWithSSE(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess
 	runCmdWithSSEThen(cmd, id, successStatus, deleteOnSuccess, nil)
 }
 
-// runCmdWithSSEThen 是 runCmdWithSSE 加上「成功后接着执行的后续步骤」。
-// followUps 为空时与改动前的 runCmdWithSSE 行为逐项一致（卸载、强制卸载等调用方都走这条）。
+// runCmdWithSSEThen 是 runCmdWithSSE 加上「成功后接着执行的后续步骤」，followUps 为空时两者完全相同。
+// 走这里的是 installDependency（网页安装、重装、批量重装、Playwright 一键安装）与 uninstallDependency（卸载）。
+// 强制卸载（删除、批量删除）不走这里：它的记录事先就删掉了，用的是 forceUninstallDependency 自己的
+// bytes.Buffer + WaitDelay。
 func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuccess bool, followUps []depFollowUpStep) {
 	broadcaster := getOrCreateBroadcaster(id)
 	defer removeBroadcaster(id)
 
 	service.SetPgid(cmd)
 
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		database.DB.Model(&model.Dependency{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"status": model.DepStatusFailed,
-			"log":    err.Error(),
-		})
-		broadcaster.done()
-		return
-	}
-	cmd.Stderr = cmd.Stdout
+	// 输出接 io.Pipe 的写端，不用 cmd.StdoutPipe()。
+	// StdoutPipe 的读端会在 Wait 看到进程退出时被直接关掉（os/exec 文档：读完之前不能调 Wait），
+	// 而下面的读协程与 Wait 是并发的：秒退的命令偶尔整段输出丢失，日志里只剩一行
+	// 「[读取安装输出失败] read |0: file already closed」；输出多的命令则是丢掉末尾那一截。
+	// 换成不是 *os.File 的 Writer 后，Wait 会等 exec 内部的拷贝协程把输出全部交给读协程之后才返回。
+	// stdout 与 stderr 给同一个写端，exec 只建一根 OS 管道、一个拷贝协程，两路输出照旧按到达顺序混在一起。
+	pipeReader, pipeWriter := io.Pipe()
+	cmd.Stdout = pipeWriter
+	cmd.Stderr = pipeWriter
+	// 必须在 Start 之前设置。语义见 dependencyOutputWaitDelay 的注释。
+	cmd.WaitDelay = dependencyOutputWaitDelay
 
 	// 阈值只在任务启动时读一次并存下来，保证下面日志里写的数字就是本次实际生效的数字；
 	// 中途用户改配置不影响已经跑起来的任务。
@@ -900,10 +914,16 @@ func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuc
 	// waitCommand 读完一条已启动命令的输出并等它退出；超时 / 取消时杀掉整个进程组。
 	// 返回命令的退出错误，以及被 ctx 打断时应记的终态（没被打断为空串）。
 	// 主命令与后续步骤共用它，所以取消、超时对第二段下载同样生效。
-	waitCommand := func(running *exec.Cmd, output io.Reader) (error, string) {
+	// output / outputWriter 是同一根 io.Pipe 的两端，启动前已经接到 running.Stdout / Stderr 上。
+	waitCommand := func(running *exec.Cmd, output *io.PipeReader, outputWriter *io.PipeWriter) (error, string) {
 		scanDone := make(chan struct{})
 		go func() {
 			defer close(scanDone)
+			// 不管读循环从哪条路退出（读到 EOF、单行超长，或者将来有人加的提前 return），都要先把管道读到 EOF：
+			// exec 内部往 io.Pipe 写端灌输出的拷贝协程没人读就永久阻塞，Wait 跟着卡死，
+			// 杀进程、WaitDelay 都救不回来（卡住的是面板进程自己），还一直攥着包操作锁。
+			// 正常读到 EOF 时这里立即返回。defer 后进先出：先读空，再 close(scanDone)。
+			defer func() { _, _ = io.Copy(io.Discard, output) }()
 
 			scanner := bufio.NewScanner(output)
 			scanner.Buffer(make([]byte, 64*1024), 256*1024)
@@ -912,14 +932,27 @@ func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuc
 				flushLog(false)
 			}
 
+			// 目前只有单行超过 256KB 会走到这里；这一行之后的输出由上面的 defer 读空丢弃，不再进日志。
 			if err := scanner.Err(); err != nil {
 				appendLine("[读取安装输出失败] "+err.Error(), true)
 			}
 		}()
 
+		// backgroundHeld 只在下面的 Wait 协程里写、收到 waitCh 之后才读，channel 保证了先后，不用加锁。
+		backgroundHeld := false
 		waitCh := make(chan error, 1)
 		go func() {
-			waitCh <- running.Wait()
+			err := running.Wait()
+			// Wait 返回时输出已经全部交给了读协程（或者 WaitDelay 到点强制收了管道），
+			// 这时关掉写端，读协程才会读到 EOF 结束。
+			outputWriter.Close()
+			if errors.Is(err, exec.ErrWaitDelay) {
+				// 只有命令本体以 0 退出时 Wait 才会报 ErrWaitDelay：命令成功了，只是它拉起的后台进程
+				// 还攥着输出管道，被 WaitDelay 到点强制收了管道。不算失败（同系统命令行的 resolveConsoleRunOutcome）。
+				backgroundHeld = true
+				err = nil
+			}
+			waitCh <- err
 		}()
 
 		interrupted := ""
@@ -931,6 +964,8 @@ func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuc
 				service.KillProcessGroup(running.Process)
 			}
 			waitErr = <-waitCh
+			// 先等读协程把剩下的输出写完，下面的收尾行才不会插到输出中间。
+			<-scanDone
 			switch {
 			case waitErr == nil:
 				// 临界情况：进程恰好在超时/取消的同一瞬间正常退出，杀进程没杀到活的。
@@ -946,11 +981,14 @@ func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuc
 		}
 
 		<-scanDone
+		if backgroundHeld {
+			appendLine("[命令已结束；仍有它拉起的后台进程持有输出管道，其后续输出不再收集]", true)
+		}
 		return waitErr, interrupted
 	}
 
 	status := successStatus
-	waitErr, interrupted := waitCommand(cmd, pipe)
+	waitErr, interrupted := waitCommand(cmd, pipeReader, pipeWriter)
 	if interrupted != "" {
 		status = interrupted
 	}
@@ -1005,13 +1043,11 @@ func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuc
 				return true
 			}
 			service.SetPgid(next)
-			nextPipe, pipeErr := next.StdoutPipe()
-			if pipeErr != nil {
-				appendLine("[后续步骤启动失败] "+pipeErr.Error(), true)
-				waitErr = pipeErr
-				return true
-			}
-			next.Stderr = next.Stdout
+			// 与主命令同一套接法，理由见上面主命令处的注释。
+			nextReader, nextWriter := io.Pipe()
+			next.Stdout = nextWriter
+			next.Stderr = nextWriter
+			next.WaitDelay = dependencyOutputWaitDelay
 			if startLine != "" {
 				appendLine(startLine, true)
 			}
@@ -1020,7 +1056,7 @@ func runCmdWithSSEThen(cmd *exec.Cmd, id uint, successStatus string, deleteOnSuc
 				waitErr = startErr
 				return true
 			}
-			waitErr, interrupted = waitCommand(next, nextPipe)
+			waitErr, interrupted = waitCommand(next, nextReader, nextWriter)
 			if interrupted != "" {
 				status = interrupted
 				return true
