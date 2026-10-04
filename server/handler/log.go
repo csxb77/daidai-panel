@@ -175,6 +175,12 @@ func (h *LogHandler) Stream(c *gin.Context) {
 				writeSSEData(c.Writer, string(data))
 				c.Writer.Flush()
 			case <-ctx.Done():
+				// 面板关停时请求 ctx 会被取消（main 里的 BaseContext），这里是干净收流：
+				// 🔴 不发 done 的话网页日志弹窗只认 done / onError，干净 EOF 一个回调都不触发，会静默卡在「运行中」。
+				// 与下面会话撤销那条同口径发 reconnect：网页与 APP 去重连，面板没起来就走各自的出错收口。
+				// 客户端自己断开时 ctx 同样会取消，这次写入只是写失败，没有副作用。
+				fmt.Fprintf(c.Writer, "event: done\ndata: reconnect\n\n")
+				c.Writer.Flush()
 				return
 			case <-heartbeat.C:
 				// 登录会话已被撤销：结束这条流。每条打开的流每个心跳周期多 1 条 SQL，不在每请求路径上。
@@ -236,6 +242,9 @@ func (h *LogHandler) Stream(c *gin.Context) {
 			case <-c.Request.Context().Done():
 				// 轮询期间客户端完全可能已经走了（关弹窗、切任务、刷新页面），
 				// 不检测的话这条请求还要继续空等到封顶才结束。
+				// 面板关停也会走到这里：同样先发 done:reconnect 再收流，理由见上面实时分支的 ctx.Done。
+				fmt.Fprintf(c.Writer, "event: done\ndata: reconnect\n\n")
+				c.Writer.Flush()
 				return
 			case <-time.After(150 * time.Millisecond):
 			}
@@ -261,6 +270,13 @@ func (h *LogHandler) Stream(c *gin.Context) {
 	} else {
 		idleCount := 0
 		c.Stream(func(w io.Writer) bool {
+			// c.Stream 只认客户端断开、不认 ctx：面板关停时不在这里看一眼，要轮询满 60 秒才结束，
+			// 把 HTTP 关停拖到超时。先发 done:reconnect 再收流，理由同上面实时分支的 ctx.Done。
+			if c.Request.Context().Err() != nil {
+				fmt.Fprintf(w, "event: done\ndata: reconnect\n\n")
+				c.Writer.Flush()
+				return false
+			}
 			tl = mgr.FindByTaskID(uint(taskID))
 			if tl != nil {
 				history, _ := tl.ReadAll()
@@ -284,7 +300,11 @@ func (h *LogHandler) Stream(c *gin.Context) {
 				return false
 			}
 
-			time.Sleep(500 * time.Millisecond)
+			// 等下一轮时也认 ctx：关停时不必睡满这 500ms，下一轮开头会发结束事件。
+			select {
+			case <-c.Request.Context().Done():
+			case <-time.After(500 * time.Millisecond):
+			}
 			return true
 		})
 	}

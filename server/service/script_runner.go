@@ -671,7 +671,10 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		// 所以 conc 模式下它和超时提示形状一致：会被 prefixedOutput 加上 [EnvName#N] 前缀，
 		// 开头那个 \n 让前缀单独占一行 —— 这是既有行为，不在本次改动范围内。
 		// Windows 上 describeTerminationSignal 恒返回空串，这个分支永远不会进。
-		msg := fmt.Sprintf("\n[脚本进程被信号终止：%s（退出码 -1）。常见原因：内存超限被系统 OOM Killer 杀掉、面板或用户手动停止、外部 kill]", signalName)
+		//
+		// 结尾必须带换行：后面紧跟的往往是执行器自己的提示行（「[面板正在关闭，任务已中断]」）或「=== 执行结束」，
+		// 不换行就粘在这一行行尾，isPanelMetaLine 按行首认不出那条提示，日志也难读。
+		msg := fmt.Sprintf("\n[脚本进程被信号终止：%s（退出码 -1）。常见原因：内存超限被系统 OOM Killer 杀掉、面板或用户手动停止、外部 kill]\n", signalName)
 		outputBuilder.WriteString(msg)
 		if onOutput != nil {
 			onOutput(msg)
@@ -1212,6 +1215,12 @@ func buildEnv(envVars map[string]string) []string {
 }
 
 func RunInlineScript(content, scriptsDir string, envVars map[string]string, timeout int, onOutput OnOutputFunc, scriptArgs ...string) error {
+	return runInlineScript(content, scriptsDir, envVars, timeout, onOutput, nil, scriptArgs...)
+}
+
+// runInlineScript 是 RunInlineScript 的本体。onStart 非空时，钩子进程一启动就回调它：
+// 任务执行器借此登记前置 / 后置钩子，面板关停时按进程组杀掉（原来钩子不在任何登记里，关停要白等它跑完）。
+func runInlineScript(content, scriptsDir string, envVars map[string]string, timeout int, onOutput OnOutputFunc, onStart OnProcessStartFunc, scriptArgs ...string) error {
 	tmpFile := filepath.Join(scriptsDir, fmt.Sprintf(".hook_%d.sh", time.Now().UnixNano()))
 	if err := os.WriteFile(tmpFile, NormalizeShellLineEndings([]byte(content)), 0755); err != nil {
 		return err
@@ -1233,6 +1242,9 @@ func RunInlineScript(content, scriptsDir string, envVars map[string]string, time
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	if onStart != nil {
+		onStart(cmd.Process)
+	}
 
 	// 走统一的 pumpAndWait：原来这里是「读协程完全不同步 + 直接 cmd.Wait()」，
 	// 与 runSingleCommand 是同一个丢尾巴的 bug（见 pumpAndWait 的注释），
@@ -1252,6 +1264,11 @@ func RunInlineScript(content, scriptsDir string, envVars map[string]string, time
 }
 
 func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onOutput OnOutputFunc, scriptArgs ...string) {
+	runHookScript(scriptName, scriptsDir, envVars, onOutput, nil, scriptArgs...)
+}
+
+// runHookScript 是 RunHookScript 的本体，onStart 的用途同 runInlineScript。
+func runHookScript(scriptName, scriptsDir string, envVars map[string]string, onOutput OnOutputFunc, onStart OnProcessStartFunc, scriptArgs ...string) {
 	hookPath, err := pathutil.ResolveWithinBase(scriptsDir, scriptName, true)
 	if os.IsNotExist(err) {
 		return
@@ -1283,6 +1300,9 @@ func RunHookScript(scriptName, scriptsDir string, envVars map[string]string, onO
 			onOutput(fmt.Sprintf("[hook %s failed to start: %s]", scriptName, err))
 		}
 		return
+	}
+	if onStart != nil {
+		onStart(cmd.Process)
 	}
 
 	// 与上面两处同因：原来读协程不同步、直接 cmd.Wait()，钩子脚本的尾部输出会被吞掉。

@@ -13,7 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// mustCreateEnvVars 按顺序落库。Position 别给 0：字段带 default:10000.0，
+// mustCreateEnvVars 按顺序落库。Position 别给 0：字段带 default:10000，
 // GORM 遇到零值会改用库默认值，排序断言就对不上了。
 func mustCreateEnvVars(t *testing.T, envs ...*model.EnvVar) {
 	t.Helper()

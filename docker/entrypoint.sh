@@ -4,17 +4,25 @@
 
 set -e
 
+# 第一件事先装一个「收到就退」的 trap：这时面板还没起，没有要收尾的东西。
+# 本脚本在容器里是 PID 1，没装 trap 的 PID 1 收到的 SIGTERM 会被内核直接丢掉 ——
+# 下面 PUID 的 chown -R、find 扫描历史库这些可能跑上好一阵，这期间 docker stop 会白等满 10 秒才 SIGKILL。
+# 注意 trap 要等手上那条前台命令跑完才执行（shell 的通用语义），但至少不再丢信号。
+# 面板起来之前会换成下面真正的 shutdown。
+trap 'exit 143' TERM INT
+
 DATA_DIR=${DATA_DIR:-/app/Dumb-Panel}
 SERVER_PID_FILE="${DATA_DIR}/run/daidai-server.pid"
 PANEL_PORT=${PANEL_PORT:-5700}
 APP_CONFIG_FILE=${APP_CONFIG_FILE:-/app/config.yaml}
 
+# 时间戳格式与 Go 标准库 log 的默认格式一致（2006/01/02 15:04:05），和面板日志放在一起能直接对时间线。
 log() {
-  printf '[entrypoint] %s\n' "$*"
+  printf '%s [entrypoint] %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*"
 }
 
 fail() {
-  printf '[entrypoint][ERROR] %s\n' "$*" >&2
+  printf '%s [entrypoint][ERROR] %s\n' "$(date '+%Y/%m/%d %H:%M:%S')" "$*" >&2
   exit 1
 }
 
@@ -472,11 +480,23 @@ fi
 # --- 启动 nginx + daidai-server ---------------------------------------------
 nginx
 
+# 停机：docker stop / compose down / watchtower 换镜像都只给 PID 1（本脚本）发 SIGTERM，默认 10 秒后 SIGKILL。
+# PID 1 一退出，内核就把容器里剩下的进程整组 SIGKILL —— 所以这里不能 kill 完立刻 exit
+# （v3.3.4 及以前就是这样，面板一个收尾动作都来不及做：任务停在运行中、软链残留、WAL 没 checkpoint），
+# 必须把信号转给面板、等它自己收完尾（停调度、结算运行中的任务、清理软链、关库）再退出。
+# 面板自己保证 8 秒内退出（server/main.go 的关停预算），这里不另设超时，兜底交给 Docker 的宽限期。
 shutdown() {
-  if [ -n "${SERVER_PID:-}" ]; then
-    kill "${SERVER_PID}" 2>/dev/null || true
+  # 只处理第一次：收尾期间再来的 TERM / INT（例如 Ctrl+C 连按）一律忽略，避免重入。
+  trap '' TERM INT
+  if [ -n "${SERVER_PID:-}" ] && kill -TERM "${SERVER_PID}" 2>/dev/null; then
+    log "收到停止信号，等待面板收尾..."
+    # 必须带 || true：面板退出码非 0 时，裸 wait 会被开头的 set -e 带出脚本。
+    wait "${SERVER_PID}" 2>/dev/null || true
   fi
+  # nginx 没有要落盘的东西，quit 只是让它把手上的响应发完；不等它，PID 1 退出时内核会一并收走。
+  nginx -s quit 2>/dev/null || true
   rm -f "${SERVER_PID_FILE}"
+  # 直接在 trap 里 exit，不回到下面的重启循环：因停机而退出不能被当成「异常退出」再拉起来。
   exit 0
 }
 trap shutdown TERM INT
@@ -509,6 +529,7 @@ while true; do
     chown "${TARGET_UID}:${TARGET_GID}" "${SERVER_PID_FILE}" 2>/dev/null || true
   fi
   # 关闭 set -e 包住 wait：server 异常退出时仍要走重启循环，不能让 set -e 把脚本带出。
+  # 收到停止信号时 wait 会被打断、转去执行上面的 shutdown，它自己 exit，不会回到这里。
   set +e
   wait "${SERVER_PID}"
   EXIT_CODE=$?

@@ -1400,8 +1400,14 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 				// 与 handler/task_mutate.go 的 Create 同口径：注册调度失败要留痕，
 				// 否则订阅日志里显示「自动添加任务」成功，任务却从此不会被 cron 触发。
 				// 文案里的「失败」会被 panel_log.go 的 detectPanelLogLevel 判成 ERROR 级。
-				if err := GetSchedulerV2().AddJob(&task); err != nil {
-					log.Printf("任务 %d 注册调度失败（它不会自动触发）: %v", task.ID, err)
+				// 调度器为 nil 时不注册（与下面 deleteSubscriptionTaskIfUnchanged 摘任务同一写法）：面板关停时
+				// ShutdownSchedulerV2 已经把它置空，还在跑的拉取照样会走到这里（原来直接对 nil 调 AddJob，
+				// 手动拉取的协程没有 recover，整个面板崩溃退出）；ddp 进程里调度器本来就没起。
+				// 任务行已经落库，面板下次启动时 InitSchedulerV2 会按库注册它。
+				if scheduler := GetSchedulerV2(); scheduler != nil {
+					if err := scheduler.AddJob(&task); err != nil {
+						log.Printf("任务 %d 注册调度失败（它不会自动触发）: %v", task.ID, err)
+					}
 				}
 				created++
 				if candidate.DefaultRule {

@@ -352,7 +352,8 @@ func executeMagiskPanelUpdateWithOptions(plan *panelUpdatePlan, options panelUpd
 	if plan.ServerPID == 0 || plan.ServerPID == plan.CurrentPID {
 		go func() {
 			time.Sleep(1500 * time.Millisecond)
-			os.Exit(0)
+			// 走主程序的完整关停（终止并结算任务、关库）再以 0 退出，不再直接 os.Exit。
+			panelProcessExit(0)
 		}()
 	}
 }

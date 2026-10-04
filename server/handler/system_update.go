@@ -1039,11 +1039,16 @@ if [ "$status" -eq 0 ]; then
 fi`, shellQuote(previousImageID))
 	}
 
+	// 先 docker stop -t 10 再 rm -f：rm -f 等于直接 SIGKILL，面板一点收尾都做不了（任务停在运行中、
+	// 软链残留、WAL 没 checkpoint）。stop 给面板发 SIGTERM，面板 8 秒内自行收完尾退出；
+	// stop 失败（容器已经不在等）时 || true 放行，后面的 rm -f 照样兜底。
 	return fmt.Sprintf(`sleep 2
+docker stop -t 10 %s >/dev/null 2>&1 || true
 docker rm -f %s >/dev/null 2>&1 || true
 docker %s
 status=$?%s
 exit "$status"`,
+		shellQuote(plan.ContainerName),
 		shellQuote(plan.ContainerName),
 		strings.Join(quotedArgs, " "),
 		cleanupBlock,

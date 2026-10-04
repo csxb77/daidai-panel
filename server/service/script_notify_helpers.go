@@ -771,6 +771,11 @@ func CleanupManagedHelperCopiesUnderRoot(scriptsDir string) error {
 		if strings.EqualFold(filepath.Clean(path), root) {
 			return nil
 		}
+		// node_modules、__pycache__、.git 这类目录不会是任务的工作目录，面板也就不会往里放通知脚本副本，整棵跳过：
+		// 订阅仓库的 .git、真实的 node_modules 动辄上千个目录，启动和每条 ddp 命令都要白扫一遍（#156）。
+		if ShouldHideScriptTreeEntryName(d.Name()) {
+			return filepath.SkipDir
+		}
 		return cleanupManagedHelperCopies(root, path)
 	})
 }

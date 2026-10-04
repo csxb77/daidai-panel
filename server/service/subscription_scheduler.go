@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"daidai-panel/database"
 	"daidai-panel/model"
@@ -46,14 +47,28 @@ func InitSubscriptionScheduler() {
 	log.Printf("subscription scheduler initialized with %d jobs", len(subs))
 }
 
-func ShutdownSubscriptionScheduler() {
+// ShutdownSubscriptionScheduler 停止订阅定时拉取：立刻不再触发；正在跑的那次最多等到 deadline，不主动取消
+// （git stash push 与 pop 之间被打断会把用户改动留在 stash 里，能跑完就让它跑完）。
+// deadline 由面板关停流程统一给出，与备份调度共用，不再各写死一个时长。
+func ShutdownSubscriptionScheduler(deadline time.Time) {
 	if globalSubscriptionScheduler == nil {
 		return
 	}
 
 	ctx := globalSubscriptionScheduler.cron.Stop()
-	<-ctx.Done()
-	log.Println("subscription scheduler stopped")
+	// 至少留 1 毫秒，理由同 ShutdownBackupScheduler。
+	wait := time.Until(deadline)
+	if wait < time.Millisecond {
+		wait = time.Millisecond
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		log.Println("subscription scheduler stopped")
+	case <-timer.C:
+		log.Println("subscription scheduler stopped (a scheduled pull is still running, not waiting for it)")
+	}
 }
 
 func GetSubscriptionScheduler() *SubscriptionScheduler {

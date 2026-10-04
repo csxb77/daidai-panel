@@ -192,13 +192,20 @@ func TestReconcileDependenciesAfterRestartSettlesQueuedRecords(t *testing.T) {
 	originalInstalled := dependencyInstalledFunc
 	originalReinstallBatch := dependencyReinstallBatchFunc
 	originalRestartReinstallBatch := dependencyRestartReinstallBatchFunc
+	originalPythonPackages := pythonInstalledPackagesFunc
 	t.Cleanup(func() {
 		dependencyInstalledFunc = originalInstalled
 		dependencyReinstallBatchFunc = originalReinstallBatch
 		dependencyRestartReinstallBatchFunc = originalRestartReinstallBatch
+		pythonInstalledPackagesFunc = originalPythonPackages
 	})
 	dependencyInstalledFunc = func(depType, name, pythonVersion string) bool {
 		return depType == model.DepTypeLinux && name == "libgbm1"
+	}
+	// 这里有一条 Python 记录：不打桩的话 stale 轮会真去建 venv、跑 pip list。
+	// 返回 nil = 列举失败，退回上面的 dependencyInstalledFunc，判定口径与原来一致。
+	pythonInstalledPackagesFunc = func(pythonVersion string) (map[string]bool, error) {
+		return nil, errors.New("测试里不列举真实的 Python 包")
 	}
 	var resumed []model.Dependency
 	dependencyReinstallBatchFunc = func(deps []model.Dependency) {

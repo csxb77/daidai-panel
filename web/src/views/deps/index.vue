@@ -2420,8 +2420,10 @@ function viewLog(row: any) {
       installFollow.end();
       closeSSE();
       // data 携带的是结束原因：真实终态（installed/failed/...）表示任务确实结束了；
-      // timeout 只代表服务端把这条日志流收了，任务本身可能还在跑，不能当成结束。
-      if ((event.data || "").trim() === "timeout") {
+      // timeout（服务端兜底的硬上限到点）与 reconnect（面板关停时服务端收流）只代表这条日志流断了，
+      // 任务本身可能还在跑，不能当成结束。
+      const reason = (event.data || "").trim();
+      if (reason === "timeout" || reason === "reconnect") {
         logStreamNotice.value = "日志流已断开，任务可能仍在进行";
       }
       loadData();

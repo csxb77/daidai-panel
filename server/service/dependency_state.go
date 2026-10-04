@@ -45,8 +45,16 @@ func DependencyInstalledForPythonVersion(depType, name, pythonVersion string) bo
 		}
 	case model.DepTypePython:
 		pythonVersion = NormalizeDependencyPythonVersion(pythonVersion)
+		// 拿到托管 pip 就只问它一次：下面 venv 里的 bin/pip、bin/pip3 与 NewPipCommandForPythonVersion
+		// 解析出来的都是同一个 venv 的 pip，结论不会变，判缺时却要多起 7 个子进程（12 个降到 5 个，#156）。
+		if managedPip := strings.TrimSpace(ResolveManagedPipBinaryForPythonVersion(pythonVersion)); managedPip != "" {
+			showCmd := exec.Command(managedPip, "show", name)
+			showCmd.Env = SanitizePipEnv(os.Environ())
+			out, err := showCmd.CombinedOutput()
+			return err == nil && strings.Contains(string(out), "Name:")
+		}
+		// 拿不到托管 pip（版本不支持、venv 坏了）时，才按原来的顺序试 venv 里残留的 pip 与系统 pip。
 		candidates := []string{
-			ResolveManagedPipBinaryForPythonVersion(pythonVersion),
 			filepath.Join(ManagedPythonVenvDir(pythonVersion), "bin", "pip"),
 			filepath.Join(ManagedPythonVenvDir(pythonVersion), "bin", "pip3"),
 			filepath.Join(ManagedPythonVenvDir(pythonVersion), "Scripts", "pip.exe"),

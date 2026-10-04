@@ -534,12 +534,22 @@ func (h *SystemHandler) UpdatePanel(c *gin.Context) {
 	})
 }
 
-// panelProcessExit / panelProcessExitDelay 抽成变量只是为了让 Restart 与 StopPanel
-// 可以被测试覆盖（真跑 os.Exit 会把整个 test 二进制干掉）。生产行为与以前逐字一致。
+// panelProcessExit 是「面板自己发起的退出」（重启、停止、二进制 / Magisk 在线升级）的唯一出口。
+// 默认直接 os.Exit：ddp 等其它入口不接线，行为不变。面板主程序启动时用 SetPanelExitRequester
+// 把它换成「请求 main 走完整关停（终止并结算任务、关库）后再按 code 退出」。
+// panelProcessExitDelay 抽成变量是为了让测试不必真等 2 秒（真跑 os.Exit 会把整个 test 二进制干掉）。
 var (
 	panelProcessExit      = func(code int) { os.Exit(code) }
 	panelProcessExitDelay = 2 * time.Second
 )
+
+// SetPanelExitRequester 由面板主程序在启动时调用，必须早于 HTTP 服务与自动更新检查这些可能触发退出的协程，
+// 之后再接会有数据竞争。fn 为空时保持原样。
+func SetPanelExitRequester(fn func(code int)) {
+	if fn != nil {
+		panelProcessExit = fn
+	}
+}
 
 // Restart 只退出进程，由外部（systemd / Docker restart policy / Magisk 存活守护）拉回来。
 //

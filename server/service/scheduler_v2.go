@@ -239,6 +239,11 @@ func (s *SchedulerV2) Stop() {
 	log.Println("scheduler v2 stopped")
 }
 
+// schedulerCronCallbackWait 是 SignalStop 等「正在跑的 cron 回调」的上限。
+// 回调只做两件事：定时触发入队（stopped 已经置位，入队本来就会被拒）与定时停止，不值得无限等。
+// 回调要读写数据库：唯一的连接被恢复备份这类长事务占着时它会一直卡住，而关停的下一步（杀任务）排在它后面。
+const schedulerCronCallbackWait = time.Second
+
 // SignalStop 停掉 cron、关闭 stopCh 并拒绝新的入队，但不等待正在执行的任务。
 func (s *SchedulerV2) SignalStop() {
 	if s == nil {
@@ -249,8 +254,11 @@ func (s *SchedulerV2) SignalStop() {
 		s.stopped.Store(true)
 
 		if s.cron != nil {
-			ctx := s.cron.Stop()
-			<-ctx.Done()
+			select {
+			case <-s.cron.Stop().Done():
+			case <-time.After(schedulerCronCallbackWait):
+				log.Printf("scheduler v2: cron callbacks still running after %s, not waiting for them", schedulerCronCallbackWait)
+			}
 		}
 
 		if s.stopCh != nil {
@@ -524,6 +532,13 @@ func recordSkippedTrigger(req *ExecutionRequest, reason string) {
 }
 
 func (s *SchedulerV2) AddJob(task *model.Task) error {
+	// 调度器为 nil 时直接返回，与 HasJob / ScheduledEntryCount / Enqueue 一致：面板关停时 ShutdownSchedulerV2
+	// 已经把全局调度器置空，还在跑的订阅拉取照样会自动添加任务；ddp 进程里调度器本来就没起。
+	// 任务行已经在库里，面板下次启动时 InitSchedulerV2 会按库注册，这里不算失败。
+	if s == nil {
+		return nil
+	}
+
 	s.entryLock.Lock()
 	defer s.entryLock.Unlock()
 
@@ -679,6 +694,11 @@ func (s *SchedulerV2) UpdateJob(task *model.Task) error {
 }
 
 func (s *SchedulerV2) RemoveJob(taskID uint) {
+	// 调度器为 nil 时没有条目可摘，直接返回（理由同 AddJob）。
+	if s == nil {
+		return
+	}
+
 	s.entryLock.Lock()
 	defer s.entryLock.Unlock()
 

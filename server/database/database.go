@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"daidai-panel/config"
 
@@ -56,6 +57,34 @@ func Init(cfg *config.DatabaseConfig) {
 	DB.Exec("PRAGMA foreign_keys=ON")
 
 	log.Printf("database connected: %s", dbPath)
+}
+
+// Close 在面板退出前关库，最多等 timeout。只给面板关停流程用，必须是关停的最后一步：
+// 之后任何读写都会报 sql: database is closed。
+//
+// SQLite 在最后一个连接关闭时会自动做一次 checkpoint 并删掉 -wal / -shm，数据目录里只剩 daidai.db，
+// 下次启动不必回放 WAL；被 SIGKILL 时数据可能几乎全在 -wal 里，只拷 daidai.db 的备份方式会丢数据。
+// 唯一的连接（SetMaxOpenConns(1)）此刻被长事务占着时 database/sql 不会立刻关它，这里也不干等：
+// 到点就返回，SQLite 本身崩溃安全，没提交的事务下次打开时自动回滚。
+func Close(timeout time.Duration) error {
+	if DB == nil {
+		return nil
+	}
+	sqlDB, err := DB.DB()
+	if err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- sqlDB.Close() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			log.Printf("database closed")
+		}
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("关闭数据库超过 %s，跳过", timeout)
+	}
 }
 
 func AutoMigrate(models ...interface{}) {
@@ -298,7 +327,10 @@ func EnsureColumns() {
 	})
 
 	ensureTableColumns("env_vars", []columnDef{
-		{"position", "REAL DEFAULT 10000.0"},
+		// 默认值写 10000 而不是 10000.0，要与 model.EnvVar 的 tag、GORM 建表写进 DDL 的 DEFAULT 10000 逐字一致（#156）：
+		// GORM 迁移时按字符串比较默认值，对不上就整表重建 env_vars。tag 写 10000.0 的那些版本每次启动、每条 ddp 命令都重建一遍，
+		// 还顺带把自增序号重置成当前最大 id，已删变量的 id 会被新变量复用。插入时两种写法都解析成 10000。
+		{"position", "REAL DEFAULT 10000"},
 		{"sort_order", "INTEGER DEFAULT 0"},
 		{"\"group\"", "VARCHAR(512) DEFAULT ''"},
 	})

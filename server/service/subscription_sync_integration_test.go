@@ -68,7 +68,9 @@ const $ = new Env("吉利雷达");
 		t.Fatalf("create subscription: %v", err)
 	}
 
-	// 必须有 schedulerV2，否则 AddJob 段会 panic
+	// 起真实调度器模拟面板运行中，让自动添加的任务落库后照线上那样走 AddJob 注册调度（下面只断言任务行落库，不查调度器）。
+	// 不起也不会 panic：AddJob 对 nil 接收者安全、调用点也判了空，只是跳过注册；调度器为 nil 的情形见
+	// panel_shutdown_test.go 的 TestSubscriptionSyncAfterSchedulerShutdownStillCreatesTasks。
 	InitSchedulerV2()
 	defer ShutdownSchedulerV2()
 

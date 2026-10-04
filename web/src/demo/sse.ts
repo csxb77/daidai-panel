@@ -392,7 +392,7 @@ function planDepsLogStream(depId: number): DemoStreamScript {
     ],
     560,
     // 服务端这里发的是依赖的最终状态（handler/deps.go:385）。
-    // 只要不是 timeout，deps/index.vue:1578 就不会挂「日志流已断开」的提示。
+    // 只要不是 timeout / reconnect，deps/index.vue 就不会挂「日志流已断开」的提示。
     'installed'
   )
 }
@@ -473,7 +473,7 @@ function planSubscriptionPullStream(subId: number): DemoStreamScript {
  *
  * 同样要吐满 3 秒再收尾，理由和其它三条一样（秒关会触发 LogViewer 的空重连保护）。
  * done 用 finished：这个值对三个调用点都是安全的终态
- *   —— LogViewer 只把 reconnect 当重连信号、deps 只把 timeout 当断流、
+ *   —— LogViewer 只把 reconnect 当重连信号、deps 只把 timeout 与 reconnect 当断流、
  *   订阅把 finished 当正常结束。
  *
  * 行尾统一带 `\n`：这里不知道自己落在哪条流上，而三种约定里只有任务日志流

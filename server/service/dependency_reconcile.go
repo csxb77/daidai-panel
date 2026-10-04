@@ -1,8 +1,13 @@
 package service
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"log"
+	"os"
 	"strings"
+	"time"
 
 	"daidai-panel/database"
 	"daidai-panel/model"
@@ -12,14 +17,88 @@ var dependencyInstalledFunc = DependencyInstalledForPythonVersion
 var dependencyReinstallBatchFunc = reinstallDependenciesAsync
 var dependencyRestartReinstallBatchFunc = reinstallDependenciesAfterRestartAsync
 
+// pythonInstalledPackagesFunc 一次列出某个 Python 版本已装的发行包（键是 PEP 503 规范名），只给启动校验用。
+// 返回 nil 表示列举失败，这个版本退回逐条 dependencyInstalledFunc。
+// 抽成包级变量是为了单测替换：有 Python 记录的启动校验用例必须打桩，否则会真去建 venv、跑 pip。
+var pythonInstalledPackagesFunc = listPythonInstalledPackages
+
+// pythonInstalledPackagesTimeout 只管 pip list 这一条命令（慢 NAS 上它也就几秒）。给足 60 秒：
+// 设得太短，慢机器上会悄悄退回逐条校验，等于没修。
+// NewPipCommandForPythonVersion 返回前做的 venv 健康检查（4 个子进程）不归它管。
+var pythonInstalledPackagesTimeout = 60 * time.Second
+
+// dependencyReconcileSlowLogThreshold：整轮启动校验超过这么久才打一行分类型耗时，正常启动不多刷日志。
+var dependencyReconcileSlowLogThreshold = 3 * time.Second
+
+// pipListHiddenPackageNames 是 pip list 写死不列出的几个名字（pip 源码里的 stdlib_pkgs，21.3 ~ 25.0 都一样），
+// pip show 却照样查得到。快照里没有它们时不能直接判缺，要按老办法逐条问一次。
+var pipListHiddenPackageNames = map[string]bool{"python": true, "wsgiref": true, "argparse": true}
+
 func ReconcileDependenciesAfterRestart() {
+	startedAt := time.Now()
+	// 判定耗时按依赖类型累加（Python 含建快照的那次 pip list），整轮超过阈值时打出来，给慢启动定位用（#156）。
+	checkedCount := 0
+	checkCostByType := map[string]time.Duration{}
+	// 每个 Python 版本懒加载一次已装包快照，第一轮与 stale 轮共用；值为 nil 表示列举失败、这个版本逐条校验。
+	// 以前每条 Python 依赖都要起 5 个子进程（判缺 12 个），慢 NAS 上几十条就能把面板拖住几分钟才开始监听。
+	pythonSnapshots := map[string]map[string]bool{}
+	// staleRound：第二轮（安装中 / 排队中 / 卸载中）传 true，第一轮（已安装）传 false。
+	dependencyStillInstalled := func(dep model.Dependency, staleRound bool) bool {
+		checkStartedAt := time.Now()
+		defer func() {
+			checkedCount++
+			checkCostByType[dep.Type] += time.Since(checkStartedAt)
+		}()
+
+		// Node.js 只 stat 目录、Linux 只起一个 dpkg-query / apk，本来就便宜，照旧逐条判定。
+		if dep.Type != model.DepTypePython {
+			return dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion)
+		}
+
+		// stale 轮里名字带版本约束 / extras / url / marker（= > < ~ ! [ @ ; 任一字符）的不查快照，照旧逐条精确判定。
+		// 快照只看主包在不在，可这些记录的操作还没做完：恢复备份时 requests==2.31.0 装到一半重启、环境里留着旧版 requests，
+		// 按主包判会直接记成已安装，续装不再发生、钉住的版本一直装不上；排队中的 PyYAML==6.0 一步都没执行，也会被记成已安装。
+		// 逐条 pip show 认不出这种写法、判为未装，于是带 [恢复备份] 的安装中续装、排队中置失败、其余的安装中与卸载中置失败，
+		// 与改快照之前一致。
+		// 不带这些字符的裸包名，主包就是这条记录本身，查快照与逐条问的结论相同；第一轮（已安装）照旧按主包查快照。
+		if staleRound && strings.ContainsAny(dep.Name, "=><~![@;") {
+			return dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion)
+		}
+
+		version := NormalizeDependencyPythonVersion(dep.PythonVersion)
+		snapshot, loaded := pythonSnapshots[version]
+		if !loaded {
+			var err error
+			snapshot, err = pythonInstalledPackagesFunc(version)
+			if snapshot == nil {
+				// 每个版本只打这一行：版本不支持、pip 坏了、超时、输出解析失败都在这里写明原因。
+				log.Printf("[启动校验] 列举 Python %s 已安装的包失败，该版本依赖改为逐条校验：%v", version, err)
+			}
+			pythonSnapshots[version] = snapshot
+		}
+		if snapshot == nil {
+			return dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion)
+		}
+
+		// 只看主包在不在：requests==2.31.0、httpx[http2]、name @ https://… 都按基础包名查表，与 POST /deps 查重同一个口径。
+		// 以前逐条 pip show 认不出这种写法，每次重启都判缺、再在后台重装一遍。
+		key := CanonicalizePythonPackageName(dep.Name)
+		if snapshot[key] {
+			return true
+		}
+		if pipListHiddenPackageNames[key] {
+			return dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion)
+		}
+		return false
+	}
+
 	var installed []model.Dependency
 	database.DB.Where("status = ?", model.DepStatusInstalled).Find(&installed)
 	reinstallAfterRestart := make([]model.Dependency, 0)
 	scheduledRestartReinstallIDs := make(map[uint]struct{})
 
 	for _, dep := range installed {
-		if dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion) {
+		if dependencyStillInstalled(dep, false) {
 			continue
 		}
 
@@ -64,7 +143,7 @@ func ReconcileDependenciesAfterRestart() {
 			continue
 		}
 
-		if dependencyInstalledFunc(dep.Type, dep.Name, dep.PythonVersion) {
+		if dependencyStillInstalled(dep, true) {
 			nextLog := appendDependencyLog(dep.Log, "[启动校验] 检测到依赖已安装，已同步状态为已安装")
 			database.DB.Model(&dep).Updates(map[string]interface{}{
 				"status": model.DepStatusInstalled,
@@ -109,6 +188,55 @@ func ReconcileDependenciesAfterRestart() {
 		dependencyReinstallBatchFunc(toResume)
 		log.Printf("dep verify: resumed %d restored dependencies after restart", len(toResume))
 	}
+
+	// 条数是两轮实际判定过的记录数（stale 轮通常为 0）；总耗时含写库，分类型耗时只算判定本身。
+	if elapsed := time.Since(startedAt); elapsed >= dependencyReconcileSlowLogThreshold {
+		log.Printf("[启动校验] 校验 %d 条已安装依赖耗时 %s（Python %s / Node.js %s / Linux %s）",
+			checkedCount, elapsed.Round(time.Millisecond),
+			checkCostByType[model.DepTypePython].Round(time.Millisecond),
+			checkCostByType[model.DepTypeNodeJS].Round(time.Millisecond),
+			checkCostByType[model.DepTypeLinux].Round(time.Millisecond))
+	}
+}
+
+// listPythonInstalledPackages 跑一次 pip list --format=json，列出这个 Python 版本已装的发行包（键是 PEP 503 规范名）。
+// 用的是安装依赖同一个 pip（NewPipCommandForPythonVersion），与逐条 pip show 判定的是同一个环境。三个坑（#156 核实记录）：
+//  1. 必须带 --disable-pip-version-check：pip ≤ 24.0 的普通 pip list 会联网检查自身版本，
+//     venv 里的 pip 是建 venv 时带进来的、不随镜像升级；
+//  2. 只解析 stdout：中断安装留下的 ~xxx 残目录会让 pip 往 stderr 打「Ignoring invalid distribution」，混进来 JSON 就解析失败；
+//  3. 带超时、超时按进程组杀，pip 卡住也拖不住启动。
+func listPythonInstalledPackages(pythonVersion string) (map[string]bool, error) {
+	cmd, err := NewPipCommandForPythonVersion(pythonVersion, []string{"list", "--format=json", "--disable-pip-version-check"})
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = SanitizePipEnv(os.Environ())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	// 复用 runNodeABICommand：带超时、超时按进程组杀，再用 WaitDelay 兜住攥着输出管道不放的孙进程。
+	if err := runNodeABICommand(cmd, pythonInstalledPackagesTimeout); err != nil {
+		// stderr 只带最后一行：pip 的报错结论在最后，前面多是告警。
+		lastLine := strings.TrimSpace(stderr.String())
+		if idx := strings.LastIndexByte(lastLine, '\n'); idx >= 0 {
+			lastLine = strings.TrimSpace(lastLine[idx+1:])
+		}
+		return nil, fmt.Errorf("pip list 执行失败：%v %s", err, lastLine)
+	}
+
+	var rows []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		return nil, fmt.Errorf("pip list 的输出不是预期的 JSON：%v", err)
+	}
+	installed := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		if key := CanonicalizePythonPackageName(row.Name); key != "" {
+			installed[key] = true
+		}
+	}
+	return installed, nil
 }
 
 func shouldResumeRestoredDependency(dep model.Dependency) bool {

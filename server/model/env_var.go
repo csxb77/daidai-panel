@@ -16,7 +16,7 @@ type EnvVar struct {
 	Value     string    `gorm:"type:text;default:''" json:"value"`
 	Remarks   string    `gorm:"size:256;default:''" json:"remarks"`
 	Enabled   bool      `gorm:"default:true" json:"enabled"`
-	Position  float64   `gorm:"default:10000.0;index" json:"position"`
+	Position  float64   `gorm:"default:10000;index" json:"position"` // 只能写 10000：写成 10000.0 与 DDL 对不上，每次 AutoMigrate 都整表重建（#156，见 database.go 补列处）
 	SortOrder int       `gorm:"default:0" json:"sort_order"`
 	Group     string    `gorm:"size:512;default:'';index" json:"group"`
 	CreatedAt time.Time `json:"created_at"`

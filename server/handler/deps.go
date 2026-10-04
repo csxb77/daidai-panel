@@ -474,6 +474,14 @@ func (h *DepsHandler) LogStream(c *gin.Context) {
 			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
 			c.Writer.Flush()
 		case <-ctx.Done():
+			// 面板关停时请求 ctx 会被取消（main 里的 BaseContext）：先发 done:reconnect 再收流，与实时日志同口径。
+			// 不发的话网页依赖页只认 done / onError，干净 EOF 时会静默卡在「安装中」；
+			// 网页依赖页对 reconnect 与 timeout 都提示「日志流已断开，任务可能仍在进行」。
+			// 不能发 timeout：APP 的依赖页（v1.0.2 起）把 reconnect 以外的 done 都当成完成，会显示绿色「安装完成」；
+			// reconnect 让各版本 APP 重连一次，面板没起来就显示红色「连接已断开」，与面板被强杀时一样。
+			// 客户端自己断开时这次写入只是写失败。
+			fmt.Fprintf(c.Writer, "event: done\ndata: reconnect\n\n")
+			c.Writer.Flush()
 			return
 		case <-heartbeat.C:
 			fmt.Fprintf(c.Writer, ": ping\n\n")

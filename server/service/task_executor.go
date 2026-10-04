@@ -47,8 +47,12 @@ type TaskExecutor struct {
 	// preparedRuns 记录 OnTaskExecuting 已经打开、还没被 runTask 接手的执行窗口。
 	// runTask 接手时沿用它（停止请求可能已经记在上面）；准备后没能进入 runTask（OnTaskFailed、缺日志兜底）时据它关窗。
 	preparedRuns map[*ExecutionRequest]*executingRun
-	processLock  sync.Mutex
-	runWG        sync.WaitGroup
+	// halted 在面板关停（StopAllRunningTasks）后置为 true，之后不再复位：关停后这个执行器不会再被复用。
+	// 之后才开窗的执行（worker 恰好在关停前取到请求、正在准备）一开窗就带上 runStopHalt，
+	// 前置钩子也不再启动。受 processLock 保护。
+	halted      bool
+	processLock sync.Mutex
+	runWG       sync.WaitGroup
 }
 
 // runStopKind 是一次执行收到的停止请求种类，只升不降。
@@ -56,21 +60,28 @@ type runStopKind int
 
 const (
 	runStopNone runStopKind = iota
-	// runStopHalt：面板关闭 / 重启时的整体中断（StopAllRunningTasks）。只拦「继续启动新进程」，
-	// 结算口径不变：照旧按失败结算，再由关机流程统一标成中断，不记成手动停止。
+	// runStopHalt：面板关闭 / 重启时的整体中断（StopAllRunningTasks）。拦「继续启动新进程」，
+	// 结算仍按失败（不记成手动停止），由 runTask 自己写「[面板正在关闭，任务已中断]」、跳过后置脚本、不发失败通知；
+	// 关停截止前没能结算的执行才由 MarkActiveTasksInterrupted 兜底标成中断。
 	runStopHalt
 	// runStopManual：手动 / 批量 / 定时停止（StopTask）。拦新进程，且本次执行结算成已终止。
 	runStopManual
 )
 
-// executingRun 是一次执行在执行窗口里的登记。stop、processes、closed 受 processLock 保护；
+// executingRun 是一次执行在执行窗口里的登记。stop、processes、hookProcesses、scriptToken、closed 受 processLock 保护；
 // stopCh 创建后不再替换（因此可以不持锁读），第一次收到停止请求时关闭，重试等待靠它提前醒来。
 type executingRun struct {
 	taskID    uint
 	stop      runStopKind
 	stopCh    chan struct{}
 	processes map[int]*os.Process
-	closed    bool
+	// hookProcesses 是此刻正在跑的钩子进程（前置钩子，以及关停前就已经开始跑的后置钩子）。刻意不进 runningProcesses / processes：
+	// 手动停止从来不杀钩子（行为保持不变），只有面板关停（StopAllRunningTasks）才按进程组杀掉它们——
+	// 不杀的话关停要白等钩子跑完，二进制 / Magisk 部署下面板退出后钩子还会变成孤儿继续跑。
+	hookProcesses map[int]*os.Process
+	// scriptToken 是这次执行注入脚本的面板凭据。关停截止时还没结算的执行由 revokeUnsettledScriptTokens 吊销。
+	scriptToken *ScriptTokenInfo
+	closed      bool
 }
 
 // requestStopLocked 给这次执行记下停止请求：种类只升不降（关机之后又点手动停止会升级成手动，
@@ -351,6 +362,11 @@ func (e *TaskExecutor) newExecutingRunLocked(taskID uint) (*executingRun, bool) 
 		stopCh:    make(chan struct{}),
 		processes: make(map[int]*os.Process),
 	}
+	if e.halted {
+		// 面板已经在关停：worker 恰好在关停前取到请求、此刻才开窗。StopAllRunningTasks 已经扫过一遍，
+		// 不在这里补上的话，这次执行会照常起进程，面板退出后变成孤儿。
+		run.requestStopLocked(runStopHalt)
+	}
 	if e.executingRuns == nil {
 		e.executingRuns = make(map[uint]map[*executingRun]struct{})
 	}
@@ -565,16 +581,22 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 	}
 
 	e.processLock.Lock()
+	e.halted = true
 	processesByTask := e.runningProcesses
 	e.runningProcesses = make(map[uint]map[int]*os.Process)
 	// 关机同样要拦住执行窗口：只杀已登记进程的话，落在窗口里的执行随后照样启动新进程，
 	// 被杀的那一轮还会按失败继续重试，面板退出后这些子进程（独立进程组）会变成孤儿继续跑。
-	// 关机不是手动停止，用 runStopHalt：只拦「继续启动新进程」，结算口径仍是失败，
-	// 再由关机流程的 MarkActiveTasksInterrupted 统一标成中断。
+	// 关机不是手动停止，用 runStopHalt：只拦「继续启动新进程」，结算口径仍是失败（runTask 自己写中断提示）。
+	// 正在跑的钩子（前置钩子、关停前已经开始的后置钩子）一并按进程组杀掉（它们不在进程表里，手动停止不碰它们）。
+	var hookVictims []*os.Process
 	for _, runs := range e.executingRuns {
 		for run := range runs {
 			run.requestStopLocked(runStopHalt)
 			run.processes = make(map[int]*os.Process)
+			for _, process := range run.hookProcesses {
+				hookVictims = append(hookVictims, process)
+			}
+			run.hookProcesses = nil
 		}
 	}
 	e.processLock.Unlock()
@@ -586,7 +608,86 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 			count++
 		}
 	}
+	for _, process := range hookVictims {
+		KillProcessGroup(process)
+		count++
+	}
 	return count
+}
+
+// halting 回答「面板是否已经在关停」：之后不再启动新的前置钩子，也不再跑后置脚本。
+func (e *TaskExecutor) halting() bool {
+	if e == nil {
+		return false
+	}
+	e.processLock.Lock()
+	defer e.processLock.Unlock()
+	return e.halted
+}
+
+// registerHookProcess 登记一个刚启动的钩子进程（前置 / 后置），供关停时按进程组杀掉。
+// 面板已经在关停（钩子起来的那一刻正好撞上 StopAllRunningTasks）时不登记、直接杀掉，否则它会一直跑到超时。
+func (e *TaskExecutor) registerHookProcess(run *executingRun, process *os.Process) {
+	if e == nil || run == nil || process == nil {
+		return
+	}
+	e.processLock.Lock()
+	halted := e.halted
+	if !halted {
+		if run.hookProcesses == nil {
+			run.hookProcesses = make(map[int]*os.Process)
+		}
+		run.hookProcesses[process.Pid] = process
+	}
+	e.processLock.Unlock()
+	if halted {
+		KillProcessGroup(process)
+	}
+}
+
+// releaseHookProcess 在钩子结束后注销它，免得关停时去杀一个早已退出（pid 可能被复用）的进程组。
+func (e *TaskExecutor) releaseHookProcess(run *executingRun, process *os.Process) {
+	if e == nil || run == nil || process == nil {
+		return
+	}
+	e.processLock.Lock()
+	delete(run.hookProcesses, process.Pid)
+	e.processLock.Unlock()
+}
+
+// attachRunScriptToken 把这次执行注入脚本的面板凭据记到执行窗口上，关停截止时据它吊销。
+func (e *TaskExecutor) attachRunScriptToken(run *executingRun, token *ScriptTokenInfo) {
+	if e == nil || run == nil || token == nil {
+		return
+	}
+	e.processLock.Lock()
+	run.scriptToken = token
+	e.processLock.Unlock()
+}
+
+// revokeUnsettledScriptTokens 吊销此刻仍在执行窗口里（还没结算）的每一次执行注入脚本的面板凭据，返回吊销了几枚。
+// 只给关停兜底用：ShutdownSchedulerV2 等到截止还有执行没结算时，结算里那句吊销已经等不到了——
+// 典型是任务派生了逃出进程组、还攥着输出管道的孙进程，runTask 卡在读输出里。
+// 重复吊销安全（blockToken 按 jti 去重），之后那次执行真的结算了再吊一次也无害。
+func (e *TaskExecutor) revokeUnsettledScriptTokens() int {
+	if e == nil {
+		return 0
+	}
+	e.processLock.Lock()
+	var tokens []*ScriptTokenInfo
+	for _, runs := range e.executingRuns {
+		for run := range runs {
+			if run.scriptToken != nil {
+				tokens = append(tokens, run.scriptToken)
+			}
+		}
+	}
+	e.processLock.Unlock()
+
+	for _, token := range tokens {
+		RevokeScriptToken(token)
+	}
+	return len(tokens)
 }
 
 func (e *TaskExecutor) Wait(timeout time.Duration) bool {
@@ -662,6 +763,8 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	if envErr != nil {
 		log.Printf("prepare task runtime env failed: %v", envErr)
 	}
+	// 记到执行窗口上：面板关停时这次执行要是卡住、等不到下面结算里的吊销，ShutdownSchedulerV2 在截止时据它吊销。
+	e.attachRunScriptToken(run, scriptToken)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -702,7 +805,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			// 本次执行自己收到过停止请求：不依赖那笔按任务 id 的手动停止标记（只有一笔，
 			// 多实例下同一次停止命中的两次执行会抢，抢输的被记成普通失败），各自判成已终止；
 			// 顺手把标记消费掉，免得串到下一次运行。
-			// runStopHalt（面板关闭）刻意不走这里：关机按失败结算，再由关机流程统一标成中断。
+			// runStopHalt（面板关闭）刻意不走这里：关机按失败结算（日志里已写明「面板正在关闭，任务已中断」）。
 			consumeManualStop(req.TaskID)
 			runStatus, logStatus, manualAborted = model.RunAborted, model.LogStatusAborted, true
 		} else if e.canClaimTaskManualStopMark(run) {
@@ -760,7 +863,10 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 				Context:    context,
 			})
 		}
-		if !finalAborted && !finalSuccess && task.NotifyOnFailure {
+		// 被面板关停打断的这次执行不发失败通知（D15）：失败是面板自己造成的，原来被 SIGKILL 时也从不通知；
+		// 而且通知是异步发的，进程马上就退出，发没发出去全凭运气，发出去的还写着「执行失败、退出码 -1」，会误导人。
+		haltedByShutdown := !finalSuccess && e.runStopKind(run) == runStopHalt
+		if !finalAborted && !finalSuccess && task.NotifyOnFailure && !haltedByShutdown {
 			title, content, context := buildTaskExecutionNotification(task, req.TaskLogID, model.RunFailed, exitCode, duration, endedAt, lastFailureOutput)
 			SendNotificationWithOptions(title, content, NotificationDispatchOptions{
 				ChannelIDs: buildTaskNotificationChannelIDs(task.NotificationChannelID),
@@ -801,24 +907,42 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	onOutput(fmt.Sprintf("=== 开始执行 [%s] ===\n", startTime.Format("2006-01-02 15:04:05")))
 
+	// 前置 / 后置钩子起来后登记到这次执行上：面板关停（StopAllRunningTasks）时按进程组杀掉，手动停止照旧不碰它们。
+	// 钩子都是先后跑的，共用一个变量记住当前那个进程，跑完就注销。
+	var hookProcess *os.Process
+	onHookStart := func(process *os.Process) {
+		hookProcess = process
+		e.registerHookProcess(run, process)
+	}
+	releaseHook := func() {
+		e.releaseHookProcess(run, hookProcess)
+		hookProcess = nil
+	}
+
 	// 前置脚本（任务专属 + 全局 task_before.sh）里 export 的环境变量会按执行顺序
 	// 增量合并回 envVars，供后面的目标脚本、task_after.sh、extra.sh 和后置脚本共用。
 	// 这是青龙 task_before 的语义；细节与保护名单见 task_hook_env.go。
-	if task.TaskBefore != nil && *task.TaskBefore != "" {
+	// 面板开始关停之后不再启动新的前置钩子（halting），下面的重试循环会直接写「取消后续执行」。
+	if task.TaskBefore != nil && *task.TaskBefore != "" && !e.halting() {
 		onOutput("[执行前置脚本]\n")
 		captureHookEnvExports(envVars, onOutput, func(hookEnv map[string]string) {
 			// 前置脚本的错误过去被直接丢弃，bash 找不到、临时文件写不进去、超时，
 			// 用户在任务日志里只能看到「[执行前置脚本]」一行。这里把它说出来，
 			// 但仍然保持「前置脚本失败不中断任务」的既有行为。
-			if err := RunInlineScript(*task.TaskBefore, e.scriptsDir, hookEnv, 60, onOutput, plan.ScriptArgs...); err != nil {
+			err := runInlineScript(*task.TaskBefore, e.scriptsDir, hookEnv, 60, onOutput, onHookStart, plan.ScriptArgs...)
+			releaseHook()
+			if err != nil {
 				onOutput(fmt.Sprintf("[前置脚本执行失败: %s]\n", err.Error()))
 			}
 		})
 	}
 
-	captureHookEnvExports(envVars, onOutput, func(hookEnv map[string]string) {
-		RunHookScript("task_before.sh", e.scriptsDir, hookEnv, onOutput, plan.ScriptArgs...)
-	})
+	if !e.halting() {
+		captureHookEnvExports(envVars, onOutput, func(hookEnv map[string]string) {
+			runHookScript("task_before.sh", e.scriptsDir, hookEnv, onOutput, onHookStart, plan.ScriptArgs...)
+			releaseHook()
+		})
+	}
 
 	retries := 0
 	var lastExitCode int
@@ -830,7 +954,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		// 停止请求可能落在前置钩子阶段、上一轮进程被杀之后、重试等待里，或依赖自动安装后的重试之前。
 		// 每一轮开始先看一眼：已被停止就直接跳出，不再启动新进程。原来这里没有守卫——
 		// 被杀的那一轮算失败，循环照常重试、再起一个新进程，停止等于没停。
-		// 跳出后照常走后置脚本，再由结算统一判结果（手动停止判已终止，关机仍判失败）。
+		// 跳出后手动停止照常走后置脚本、关机则跳过后置脚本，再由结算统一判结果（手动停止判已终止，关机仍判失败）。
 		if kind := e.runStopKind(run); kind != runStopNone {
 			onOutput(stopNotice(kind, "取消后续执行"))
 			break
@@ -913,17 +1037,37 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 
 	exitCode = lastExitCode
 
-	// 后置脚本不参与环境变量回传：它跑完任务就结束了，回写没有消费方。
-	// 但同样要把执行错误说出来，理由与前置脚本一致。
-	if task.TaskAfter != nil && *task.TaskAfter != "" {
-		onOutput("[执行后置脚本]\n")
-		if err := RunInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput, plan.ScriptArgs...); err != nil {
-			onOutput(fmt.Sprintf("[后置脚本执行失败: %s]\n", err.Error()))
+	if e.halting() {
+		// 面板正在关闭（D15）：不再启动任务后置脚本、task_after.sh、extra.sh。每个最长 60 秒，关停等不起
+		// （Docker 宽限只有 10 秒，到点整组 SIGKILL，这次执行一样结算不了）。
+		// 关停前就已经在跑的后置钩子走下面 else 分支，登记在 hookProcesses 里，由 StopAllRunningTasks 按进程组杀掉。
+		// 写明「任务已中断」：结算就在这次 runTask 里完成，MarkActiveTasksInterrupted 不会再碰它，
+		// 不写的话日志里只剩一行「被信号终止…常见原因：内存超限」，用户看不出是面板重启打断的。
+		// 手动停止（runStopManual）的那次照旧结算成已终止，不写这一行。
+		if !success && e.runStopKind(run) == runStopHalt {
+			onOutput(stopNotice(runStopHalt, "任务已中断"))
 		}
-	}
+		onOutput(stopNotice(runStopHalt, "跳过后置脚本"))
+	} else {
+		// 后置脚本不参与环境变量回传：它跑完任务就结束了，回写没有消费方。
+		// 但同样要把执行错误说出来，理由与前置脚本一致。
+		// 三个后置钩子同样登记到这次执行上（onHookStart）：跑到一半面板开始关停时按进程组杀掉。
+		// 不登记的话关停要白等它跑完，截止时这次执行只能被标成中断、输出丢失，二进制部署下钩子还会变成孤儿。
+		// 关停之后才轮到的钩子一启动就会被 registerHookProcess 杀掉。
+		if task.TaskAfter != nil && *task.TaskAfter != "" {
+			onOutput("[执行后置脚本]\n")
+			err := runInlineScript(*task.TaskAfter, e.scriptsDir, envVars, 60, onOutput, onHookStart, plan.ScriptArgs...)
+			releaseHook()
+			if err != nil {
+				onOutput(fmt.Sprintf("[后置脚本执行失败: %s]\n", err.Error()))
+			}
+		}
 
-	RunHookScript("task_after.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
-	RunHookScript("extra.sh", e.scriptsDir, envVars, onOutput, plan.ScriptArgs...)
+		runHookScript("task_after.sh", e.scriptsDir, envVars, onOutput, onHookStart, plan.ScriptArgs...)
+		releaseHook()
+		runHookScript("extra.sh", e.scriptsDir, envVars, onOutput, onHookStart, plan.ScriptArgs...)
+		releaseHook()
+	}
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime).Seconds()
@@ -1079,7 +1223,7 @@ var panelMetaLinePrefixes = []string{
 	"[重试启动失败:",
 	"[任务异常崩溃:",
 	// 执行器因停止 / 关机打进日志的提示行（stopNotice 产出的两种前缀）：
-	// 「取消后续执行」「终止刚启动的进程」都挂在这两个前缀下。
+	// 「取消后续执行」「终止刚启动的进程」「任务已中断」「跳过后置脚本」都挂在这两个前缀下。
 	"[任务已被手动停止，",
 	"[面板正在关闭，",
 	// 子进程被信号杀掉时的可诊断提示（#113 排查里补的）。被信号杀必然结算为失败、

@@ -1105,11 +1105,12 @@ function connectPullStream(id: number) {
       loadData();
 
       // done 只说明「这条 SSE 连接结束了」，是传输状态不是业务状态。
-      // 真正区分靠 data（PullStream 只发这四种）：
+      // 真正区分靠 data（PullStream 只发这五种）：
       //   finished     收到 \x00DONE 哨兵，拉取确实跑完了
       //   not_running  广播器已不存在，拉取早就结束了
       //   closed       订阅 channel 被 close，只可能来自 removeSubBroadcaster
       //   timeout      5 分钟静默
+      //   reconnect    面板关停时收流（v3.3.5 起），拉取可能还没收尾；与 timeout 一样只报「连接中断」、不查库
       //
       // 前三种都代表「拉取已经返回」，SubLog 也已经 Create 完
       // （service 里 Create 在 done() 之前），可以查库拿成功/失败：
@@ -1117,7 +1118,7 @@ function connectPullStream(id: number) {
       //     非阻塞发哨兵，槽满就丢；而 removeSubBroadcaster 只在
       //     handler 那个拉取 goroutine 的 defer 里调用，能收到 closed
       //     就说明 ExecuteSubscriptionPull 早已 return。
-      //   - 唯独 timeout 是 5 分钟静默，拉取可能还在跑（大仓库 clone），
+      //   - timeout 是 5 分钟静默，拉取可能还在跑（大仓库 clone），
       //     此刻查库拿到的会是上一次的结果，所以只报「连接中断」。
       //
       // 查库本身有 pullBaselineLogId 主键基线守卫兜底：本次没落新记录就降级成

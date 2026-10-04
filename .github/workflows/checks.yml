@@ -75,6 +75,24 @@ jobs:
       - name: entrypoint PUID/PGID 降权回归（真跑一遍 shell 逻辑）
         run: sudo bash docker/test-entrypoint-puid.sh
 
+      # 停容器时 entrypoint 是 PID 1：它得把 SIGTERM 转给面板、等面板自己收完尾再退出
+      # （v3.3.4 及以前 kill 完立刻 exit，PID 1 一退出内核就把面板整组 SIGKILL，任务停在运行中、WAL 没 checkpoint）。
+      # 这一步把整份 entrypoint.sh 当 PID 1 跑起来（unshare --pid），面板换成会「收尾 1 秒」的 shell 桩，
+      # 验八种情形：转发并等待、面板非 0 退出、收尾期间重复信号、崩溃重启、重启间隙收到 TERM、
+      # 面板自己退出、降权链路、启动前半段（面板还没起）收到 TERM。
+      # Alpine 镜像里解析 entrypoint 的是 busybox ash，所以先装 busybox，脚本会用 dash 和 busybox sh 各跑一遍；
+      # 装不上就只跑 dash（脚本里打 SKIP）。
+      #
+      # 【怎么让它失败一次】ENTRYPOINT_SRC=<改坏的 entrypoint> sudo -E bash docker/test-entrypoint-shutdown.sh
+      # 已实测的三个变异都会变红：shutdown() 换回「kill 完立刻 exit 0」、删掉 wait 后面的 || true、
+      # 删掉开头的 trap 'exit 143'。
+      - name: entrypoint 停机信号回归（dash + busybox 各跑一遍）
+        run: |
+          if ! command -v busybox >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq busybox || echo "::warning::busybox 安装失败，本步只跑 dash 那一遍"
+          fi
+          sudo bash docker/test-entrypoint-shutdown.sh
+
       - name: 安装前端依赖
         working-directory: web
         run: npm ci

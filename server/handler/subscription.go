@@ -594,6 +594,13 @@ func (h *SubscriptionHandler) PullStream(c *gin.Context) {
 			fmt.Fprintf(c.Writer, "data: %s\n\n", line)
 			c.Writer.Flush()
 		case <-ctx.Done():
+			// 面板关停时请求 ctx 会被取消（main 里的 BaseContext）：先发 done:reconnect 再收流，与实时日志同口径。
+			// 网页订阅页把 finished / not_running / closed 以外的值都当「连接中断」，不会一直停在拉取中。
+			// 不能发 timeout：APP 的订阅页（v1.0.2 起）把 reconnect 以外的 done 都当成完成，会显示绿色「拉取完成」；
+			// reconnect 让各版本 APP 重连一次，面板没起来就显示红色「连接已断开」，与面板被强杀时一样。
+			// 客户端自己断开时这次写入只是写失败。
+			fmt.Fprintf(c.Writer, "event: done\ndata: reconnect\n\n")
+			c.Writer.Flush()
 			return
 		case <-time.After(5 * time.Minute):
 			fmt.Fprintf(c.Writer, "event: done\ndata: timeout\n\n")
