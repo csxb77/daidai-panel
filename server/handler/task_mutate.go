@@ -14,6 +14,7 @@ import (
 	"daidai-panel/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func normalizeTaskRandomDelaySecondsValue(value interface{}) (*int, error) {
@@ -252,9 +253,24 @@ func (h *TaskHandler) Update(c *gin.Context) {
 	}
 
 	var req map[string]interface{}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	// 请求体是字面量 null 时 JSON 解码不报错，只是把 req 留成 nil map：以前往下走到给 req 赋值的地方
+	// （例如手动 / 开机任务那句 req["cron_expression"] = ""）就 panic，被 gin.Recovery 兜成一个空的 500。
+	// 与其它参数错误同口径回 400，什么都不写。
+	if err := c.ShouldBindJSON(&req); err != nil || req == nil {
 		response.BadRequest(c, "请求参数错误")
 		return
+	}
+
+	// name / command 在库里都是 NOT NULL：显式传 null 会让下面那条 Updates 整条失败，
+	// 同一个请求里的 labels 等其它字段也跟着一起没改，以前这个错误被吞掉、照样回 200「task updated」（#157）。
+	// 网页、APP、MCP 都不会这样发，只有开放 API 的调用方可能传 null，所以在写库之前直接回 400，什么都不写。
+	// 按固定顺序检查，两个字段同时是 null 时提示稳定落在第一个上。
+	// cron_expression 同样是 NOT NULL，但它要看更新后的任务类型，放到下面解析完 task_type 之后再判。
+	for _, key := range []string{"name", "command"} {
+		if value, exists := req[key]; exists && value == nil {
+			response.BadRequest(c, key+" 不能为空")
+			return
+		}
 	}
 
 	if labels, ok := req["labels"].([]interface{}); ok {
@@ -281,6 +297,14 @@ func (h *TaskHandler) Update(c *gin.Context) {
 	}
 
 	if resolvedTaskType == model.TaskTypeCron {
+		// 只有这次更新之后是常规定时任务（本来就是，或同一个请求里改成 cron）时，cron_expression 显式传 null 才回 400，
+		// 理由同上面的 name / command。
+		// 手动 / 开机任务（含同一个请求里把 task_type 改成 manual / startup）走下面的 else：
+		// 服务端一律把 cron_expression 写成空串，传 null 就是清空，保持改动前回 200 的行为。
+		if value, exists := req["cron_expression"]; exists && value == nil {
+			response.BadRequest(c, "cron_expression 不能为空")
+			return
+		}
 		cronExpr := task.CronExpression
 		if value, ok := req["cron_expression"].(string); ok {
 			cronExpr = panelcron.NormalizeExpressions(value)
@@ -377,11 +401,24 @@ func (h *TaskHandler) Update(c *gin.Context) {
 		}
 	}
 
-	if len(updates) > 0 {
-		database.DB.Model(&task).Updates(updates)
+	// 写库与回读放在同一个事务里，任何一步失败都回 500「更新任务失败」、库里保持原样，调度也不去动（#157）：
+	//   - 写库失败：以前这里不接 .Error，没写进去也照样回 200「task updated」，前端弹「任务更新成功」、
+	//     刷新后什么都没变，和「填了标签却没保存」的症状一模一样，很难排查；
+	//   - 回读失败：写进去的值读不回来时（例如开放 API 往整数列 timeout 里传了 "abc"，SQLite 照收、读的时候才报错），
+	//     单独提交就会留下一行读不出来的坏数据，任务列表整页 500、这条任务连改都改不回来，所以要整体回滚。
+	// 底层报错不透给前端；GORM 的日志器（database.Init）会把失败的 SQL 与原因打到进程标准输出。
+	// 事务里只能用 tx：连接池只有一条连接（SetMaxOpenConns(1)），在这里再用 database.DB 会把自己卡死。
+	if err := database.DB.Transaction(func(tx *gorm.DB) error {
+		if len(updates) > 0 {
+			if err := tx.Model(&task).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		return tx.First(&task, taskID).Error
+	}); err != nil {
+		response.InternalError(c, "更新任务失败")
+		return
 	}
-
-	database.DB.First(&task, taskID)
 	if scheduler := service.GetSchedulerV2(); scheduler != nil {
 		scheduler.UpdateJob(&task)
 	}

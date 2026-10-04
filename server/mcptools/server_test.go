@@ -347,6 +347,70 @@ func TestGetTaskLogKeepsTailWithinBudget(t *testing.T) {
 	}
 }
 
+// list_task_labels（#157）：GET /tasks/labels 返回裸数组，通用的 call 解不了，工具要单独解码；
+// 非 2xx 照常翻成带原因的工具错误；2xx 却不是数组时如实报「无法解析」，不能当成「没有标签」。
+func TestListTaskLabelsDecodesBareArray(t *testing.T) {
+	cases := []struct {
+		name      string
+		status    int
+		payload   string
+		wantOut   map[string]any
+		wantError string
+	}{
+		{
+			name:    "labels",
+			status:  http.StatusOK,
+			payload: `[{"name":"Prod","count":1},{"name":"京东","count":3}]`,
+			wantOut: map[string]any{"total": float64(2), "labels": []any{
+				map[string]any{"name": "Prod", "count": float64(1)},
+				map[string]any{"name": "京东", "count": float64(3)},
+			}},
+		},
+		{
+			name:    "no labels",
+			status:  http.StatusOK,
+			payload: `[]`,
+			wantOut: map[string]any{"total": float64(0), "labels": []any{}},
+		},
+		{
+			name:      "missing scope",
+			status:    http.StatusForbidden,
+			payload:   `{"error":"应用无权访问此资源"}`,
+			wantError: "应用无权访问此资源",
+		},
+		{
+			name:      "not an array",
+			status:    http.StatusOK,
+			payload:   `{"data":[],"total":0}`,
+			wantError: "无法解析",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeDispatcher{respond: func(recordedCall) (int, any, error) { return tc.status, tc.payload, nil }}
+			session := connectTestClient(t, fake, false)
+
+			result, text := callTool(t, session, "list_task_labels", nil)
+			calls := fake.recorded()
+			if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/tasks/labels" || len(calls[0].query) != 0 || calls[0].body != nil {
+				t.Fatalf("应当只调用一次不带参数的 GET /tasks/labels，实际 %+v", calls)
+			}
+			if tc.wantError != "" {
+				if !result.IsError || !strings.Contains(text, tc.wantError) {
+					t.Fatalf("应当报错并带上「%s」，实际 isError=%v: %s", tc.wantError, result.IsError, text)
+				}
+				return
+			}
+			if result.IsError {
+				t.Fatalf("list_task_labels 不应失败: %s", text)
+			}
+			if out := decodeObject(t, text); !reflect.DeepEqual(out, tc.wantOut) {
+				t.Fatalf("应当原样给出标签数组与总数，期望 %v，实际 %s", tc.wantOut, text)
+			}
+		})
+	}
+}
+
 // ---- 环境变量 ----------------------------------------------------------------
 
 func TestListEnvsMasksSensitiveValues(t *testing.T) {

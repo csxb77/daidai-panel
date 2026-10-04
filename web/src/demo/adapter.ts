@@ -16,6 +16,7 @@ import {
   buildSystemBadges,
   buildSystemStats,
   buildTaskGroups,
+  buildTaskLabels,
   db,
   executeDemoTaskScriptDeletion,
   filterEnvs,
@@ -1083,6 +1084,11 @@ route('GET', '/tasks/views', () => [...db().taskViews].sort((left, right) => lef
 // 静态路径先进 exactRoutes，不会被 /tasks/:id 系列抢走。口径见 db.ts 的 buildTaskGroups。
 route('GET', '/tasks/groups', () => buildTaskGroups())
 
+// 任务标签（issue #157，契约 L1）同样是【裸数组】[{ name, count }]，按 name 字节序升序，没有标签时是 []。
+// 不铺的话会落进兜底体 {data:[]}：任务表单与「批量添加标签」按「没有候选」静默处理，演示站上就看不到已有标签。
+// 口径见 db.ts 的 buildTaskLabels。
+route('GET', '/tasks/labels', () => buildTaskLabels())
+
 route('POST', '/tasks/views', (ctx) => {
   const body = bodyObject(ctx)
   const current = db()
@@ -1331,20 +1337,35 @@ route('POST', '/tasks/batch/run', (ctx) => {
   return { message: `已提交 ${ids.length} 个任务`, count: ids.length }
 })
 
+// 口径照服务端 BatchAddLabels（issue #157 起对齐，原来不洗内部前缀、全无效也回成功）：
+// - 待追加的标签照 sanitizeIncomingLabels：逐条 trim、跳过空串、以 `分组:` / `subscription:` 开头的忽略（不能借它改分组）、去重；
+//   一个有效的都没有时回 400，文案逐字抄服务端；labels 不是数组时服务端绑定失败，同样回 400「请求参数错误」；
+// - 追加照 mergeLabels：任务原有标签（含内部标签）全部保留、trim 后去重，再把新标签并进去；
+// - success_count 只计真的存在的任务（服务端计的是逐个查到并写成功的条数），不再按传入 id 的个数算。
 route('PUT', '/tasks/batch/add-labels', (ctx) => {
   const ids = idList(ctx, 'task_ids', 'ids')
-  const labels = bodyObject(ctx)['labels']
-  if (Array.isArray(labels)) {
-    for (const task of db().tasks) {
-      if (!ids.includes(task.id)) continue
-      for (const label of labels as unknown[]) {
-        const value = String(label).trim()
-        if (value && !task.labels.includes(value)) task.labels.push(value)
-      }
-      task.updated_at = nowIso()
-    }
+  const rawLabels = bodyObject(ctx)['labels']
+  if (!Array.isArray(rawLabels)) return badRequest('请求参数错误')
+  const newLabels: string[] = []
+  for (const item of rawLabels as unknown[]) {
+    const label = String(item).trim()
+    if (!label || label.startsWith('分组:') || label.startsWith('subscription:') || newLabels.includes(label)) continue
+    newLabels.push(label)
   }
-  return { message: `已为 ${ids.length} 个任务添加标签`, success_count: ids.length }
+  if (newLabels.length === 0) return badRequest('没有可添加的有效标签')
+  let count = 0
+  for (const task of db().tasks) {
+    if (!ids.includes(task.id)) continue
+    const merged: string[] = []
+    for (const raw of [...task.labels, ...newLabels]) {
+      const label = raw.trim()
+      if (label && !merged.includes(label)) merged.push(label)
+    }
+    task.labels = merged
+    task.updated_at = nowIso()
+    count++
+  }
+  return { message: `已为 ${count} 个任务添加标签`, success_count: count }
 })
 
 // 批量改通知开关（issue #149），口径同服务端 BatchSetNotify：只改传了的开关（false 也算传了），

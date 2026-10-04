@@ -100,6 +100,16 @@ export interface TaskGroupSummary {
   count: number
 }
 
+/**
+ * 任务标签清单里的一项（issue #157，契约 L1）：任务用过的自定义标签。
+ * 只含用户自己加的标签，「分组:名称」与「subscription:ID」两类内部标签不会出现；服务端逐条 trim 后去重计数（区分大小写）。
+ */
+export interface TaskLabelSummary {
+  name: string
+  /** 带这个标签的任务数，同一任务里重复的只算一次 */
+  count: number
+}
+
 export const taskApi = {
   // 列表项，以及启用 / 禁用、新建 / 编辑 / 复制接口响应里的 data，从 v3.2.8 起多一个 enabled: boolean（启用开关位，与运行态无关，issue #133）。
   // 老后端不下发，页面用 taskLabels.ts 的 isTaskSwitchOn 读它，缺失时回退 status !== 0。
@@ -113,6 +123,13 @@ export const taskApi = {
   // 调用方必须把「请求失败」和「返回的不是数组」都当成「没有分组」静默处理，不能弹错。
   groups() {
     return request.get('/tasks/groups') as Promise<TaskGroupSummary[]>
+  },
+
+  // 全部任务标签（issue #157，契约 L1）：裸数组 [{ name, count }]，按 name 升序（字节序），任务表单与「批量添加标签」的候选用它。
+  // 老后端没有这个接口会 404；演示站没注册时会兜底回 { data: [] } 这种对象 ——
+  // 调用方必须把「请求失败」和「返回的不是数组」都当成「没有候选」静默处理，不能弹错（输入框照常可用）。
+  labels() {
+    return request.get('/tasks/labels') as Promise<TaskLabelSummary[]>
   },
 
   // push_scope 见 @/api/notification 的 NotifyPushScope：

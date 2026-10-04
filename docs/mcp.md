@@ -28,7 +28,7 @@ MCP 默认关闭。在面板 **系统设置 → MCP 服务** 里：
 
 | 权限范围 | 对应的工具 |
 |---|---|
-| `tasks` | list_tasks、get_task、get_task_log、run_task、stop_task、set_task_enabled、batch_task_action、create_task、update_task、batch_set_task_notify |
+| `tasks` | list_tasks、get_task、get_task_log、list_task_labels、run_task、stop_task、set_task_enabled、batch_task_action、create_task、update_task、batch_set_task_notify |
 | `logs` | list_logs、get_log |
 | `envs` | list_envs、export_envs、create_env、update_env、delete_env、batch_env_action、import_envs |
 | `scripts` | list_scripts、get_script_tree、read_script、list_script_versions、save_script、run_script、run_code、delete_script、rename_script、move_script、copy_script、batch_delete_scripts、rollback_script |
@@ -166,6 +166,7 @@ stdout 只输出 MCP 协议消息，就绪提示与错误都写到 stderr。
 | `list_tasks` | 分页查询任务，可按关键词、运行状态、分组、标签筛选；`enabled` 是启用开关，`status_text` 是运行状态 |
 | `get_task` | 按 ID 查看任务完整配置 |
 | `get_task_log` | 任务最近一次执行的日志（过长只保留末尾） |
+| `list_task_labels` | 全部任务用过的自定义标签及各自的任务数，按名称升序；不含「分组:名称」与订阅这两类内部标签（分组用 `list_tasks` 的 `group` 筛选）；标签名可传给 `list_tasks` 的 `label` 筛选任务（模糊匹配） |
 | `list_logs` | 执行记录，可按任务、结果筛选，适合巡检失败任务 |
 | `get_log` | 按执行记录 ID 查看日志正文（过长只保留末尾） |
 | `list_envs` | 查询环境变量，名称像凭据的变量值会被遮蔽 |

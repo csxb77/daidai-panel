@@ -6,7 +6,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, Close, Edit, Setting, Folder } from '@element-plus/icons-vue'
 import { useResponsive } from '@/composables/useResponsive'
 import { usePageActivity } from '@/composables/usePageActivity'
-import { ensureListPreferencesLoaded, readListPreference, setListPreferences, type ListPreferences } from '@/utils/listPreferences'
+import { ensureListPreferencesLoaded, readListPreference } from '@/utils/listPreferences'
 import ViewManagementDialog from './ViewManagementDialog.vue'
 
 const emit = defineEmits<{
@@ -192,31 +192,21 @@ function openManagementDialog() {
 }
 
 async function handleManagementSaved(allHidden: boolean, groupsHidden: boolean) {
-  // 「全部」与分组标签都不进 taskViewApi.reorder 的提交列表，弹窗只把结果回传上来，由这里经 listPreferences 同步到账户。
-  // 只在值【真的变了】时才写：什么都没改就点保存时不发请求 —— 服务端对这组偏好是稀疏存储，
-  // 写一次就等于替用户「占坑」存下默认值，会挡住他在别的域名 / IP 上存过、还没迁上来的自定义值。
-  // 两个开关都变了时合进同一个 patch、只调一次 setListPreferences：一次 PUT 带齐两个键，省一个请求。
-  // 这不是为了防丢键：服务端 preferenceWriteMu 已把读-合并-写串行化，分两次发也都会落库（见 listPreferences.ts setListPreferences 的说明）。
-  // 分组标签被隐藏时若正选中某个分组，下面 loadViews 末尾的 applyViewFallback 会把它回落掉。
-  const patch: Partial<ListPreferences> = {}
-  if (allHidden !== allTabHidden.value) {
-    allTabHidden.value = allHidden
-    patch.tasks_view_all_hidden = allHidden
-  }
-  if (groupsHidden !== groupTabsHidden.value) {
-    groupTabsHidden.value = groupsHidden
-    patch.tasks_view_groups_hidden = groupsHidden
-  }
-  if (Object.keys(patch).length > 0) {
-    setListPreferences(patch)
-  }
+  // 「全部」与顶栏分组页签都不进 taskViewApi.reorder 的提交列表，它们的显隐是账户偏好。
+  // #157 ③ 起由管理弹窗自己经 listPreferences.saveListPreferences 写进账户、【等服务端写入成功】才回传到这里
+  // （只写真的变了的键，口径见弹窗的 handleSave），这里只负责应用到顶栏。
+  // 原来是这里发 PUT 不管结果，弹窗却先提示了「已保存」：PUT 一失败，刷新后页签又出现。
+  // 分组页签被隐藏时若正选中某个分组，下面 loadViews 末尾的 applyViewFallback 会把它回落掉。
+  allTabHidden.value = allHidden
+  groupTabsHidden.value = groupsHidden
   await loadViews()
 }
 
 // 所有 view-change 都从这里发，发完顺手刷新一次分组清单。
 // 分组来自任务 labels：任务的增删改、导入、订阅拉取、App 端改分组都会让它变，而这些都发生在
-// index.vue 或别的端上 —— 按约定不为这件事去改 index.vue（高冲突文件），改由本组件在
-// 「挂载 / 每次切换筛选 / 页面重新可见」三个时机自己拉（另外两处调用见文件末尾）。
+// index.vue 或别的端上。本组件在「挂载 / 每次切换筛选 / 页面重新可见」三个时机自己拉（另外两处调用见文件末尾）；
+// #157 起 index.vue 在本页任务创建 / 更新 / 复制 / 删除 / 批量加标签 / 导入成功后也会调 expose 出去的 loadGroups，
+// 改了分组不用刷新页面，顶栏分组页签当场就对。
 function emitViewChange(filters: TaskViewFilter[], sortRules: TaskViewSortRule[]) {
   emit('view-change', filters, sortRules)
   void loadGroups()
@@ -387,6 +377,7 @@ watch(isPageActive, (active) => {
 
 // openCreateDialog / openManagementDialog / canManageViews：移动端「新建视图」「视图管理」两个入口
 // 由任务页工具栏的「+」菜单承担（本组件在移动端不渲染右侧那两个按钮），经这里打开同一个弹窗。
+// loadGroups：任务页在任务改动成功后调它刷新顶栏分组页签（#157，见 emitViewChange 上方的说明）。
 defineExpose({ loadViews, loadGroups, openCreateDialog, openManagementDialog, canManageViews })
 </script>
 
@@ -456,6 +447,7 @@ defineExpose({ loadViews, loadGroups, openCreateDialog, openManagementDialog, ca
       :groups-hidden="groupTabsHidden"
       :group-count="groups.length"
       @saved="handleManagementSaved"
+      @views-saved="loadViews"
       @edit="openEditDialog"
       @delete="doDeleteView"
     />

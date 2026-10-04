@@ -318,6 +318,30 @@ export function buildTaskGroups(): Array<{ name: string; count: number }> {
 }
 
 /**
+ * GET /tasks/labels 的返回体（issue #157，契约 L1），口径照抄服务端 service 层的 ListTaskLabelCounts：
+ * 裸数组 [{ name, count }]：任务 labels 逐条 trim、跳过空串；trim 后以 `分组:` 或 `subscription:` 开头的跳过
+ * （`my分组:beta` 这类前缀不在开头的保留）；count 是带这个标签的任务数，同一任务里重复的只算一次；
+ * 去重区分大小写；按 name 字节序升序；一个都没有时是 []。「按常用排」由前端自己做，这里不排 count。
+ */
+export function buildTaskLabels(): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>()
+  for (const task of db().tasks) {
+    // 同一任务里重复的标签只算一次
+    const seen = new Set<string>()
+    for (const raw of task.labels) {
+      const label = raw.trim()
+      if (!label || label.startsWith(TASK_GROUP_LABEL_PREFIX) || label.startsWith('subscription:')) continue
+      if (seen.has(label)) continue
+      seen.add(label)
+      counts.set(label, (counts.get(label) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((left, right) => compareByteOrder(left.name, right.name))
+}
+
+/**
  * 把原始标签翻译成展示标签，复刻 server/handler/task_query.go 的 buildPreparedTaskLabels：
  *   - `分组:xxx` 提到最前面；
  *   - `subscription:N` 换成订阅名（订阅已删除则显示「订阅任务」）。

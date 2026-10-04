@@ -31,6 +31,10 @@ func (h *TaskHandler) RegisterRoutes(r *gin.RouterGroup) {
 		// 全部任务分组（`分组:` 标签，App 建的分组就是它）的名称与任务数，给网页顶栏的分组标签用（#130）。
 		// 静态段 groups 与同层的 /:id/... 共存，和 /export、/views 是同一个形态；复用组上的 OpenAPIAccess("tasks")。
 		tasks.GET("/groups", middleware.RequireRole("viewer"), h.ListGroups)
+		// 全部任务用过的自定义标签与任务数（#157 契约 L1），给网页任务表单与「批量添加标签」的已有标签候选用。
+		// 与 /groups 同一个形态：静态段 labels 与同层的 /:id/... 共存；复用组上的 OpenAPIAccess("tasks")，
+		// 带 tasks 权限的应用令牌直接可用。对应的 MCP 只读工具是 list_task_labels。
+		tasks.GET("/labels", middleware.RequireRole("viewer"), h.ListLabels)
 		tasks.POST("/cron/parse", middleware.RequireRole("viewer"), h.CronParse)
 		tasks.GET("/cron/templates", middleware.RequireRole("viewer"), h.CronTemplates)
 

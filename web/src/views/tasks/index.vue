@@ -1103,6 +1103,8 @@ async function handleFormSubmit(data: any) {
     }
     formVisible.value = false
     loadTasks()
+    // 分组可能改了：顺手刷新顶栏分组页签，不用刷新页面（#157；下面复制 / 删除 / 批量加标签 / 导入同理）
+    void viewManagerRef.value?.loadGroups()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '操作失败')
   } finally {
@@ -1304,6 +1306,7 @@ async function handleCopy(task: any) {
     await taskApi.copy(task.id)
     ElMessage.success('任务已复制')
     loadTasks()
+    void viewManagerRef.value?.loadGroups()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '复制失败')
   } finally {
@@ -1516,6 +1519,7 @@ async function handleBatchAction(action: string) {
 // - 详情弹窗开着的正是被删的任务时关掉它，免得对着一条已删除的记录继续操作。
 function handleDeleteSuccess(payload: { mode: 'single' | 'batch'; taskIds: number[] }) {
   loadTasks()
+  void viewManagerRef.value?.loadGroups()
   if (payload.mode === 'batch') {
     clearSelection()
   } else {
@@ -1540,6 +1544,7 @@ function openBatchAddLabel() {
 function handleBatchLabelSuccess() {
   selectedIds.value = []
   loadTasks()
+  void viewManagerRef.value?.loadGroups()
 }
 
 // 批量设置通知（issue #149）。不要求先勾选：没勾选时弹窗只能选「全部任务」，
@@ -1661,6 +1666,7 @@ async function handleImport(event: Event) {
       ElMessage.warning(`${res.errors.length} 个导入错误`)
     }
     loadTasks()
+    void viewManagerRef.value?.loadGroups()
   } catch (err: any) {
     ElMessage.error(err?.response?.data?.error || '导入失败')
   }

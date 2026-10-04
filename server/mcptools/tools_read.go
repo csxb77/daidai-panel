@@ -24,6 +24,11 @@ func (t *toolset) registerReadTools(s *mcp.Server) {
 	addReadTool(s, "get_task_log", "查看任务最近一次日志",
 		"查看某个任务最近一次执行的日志正文；日志过长时只保留末尾（报错通常在最后）。",
 		t.getTaskLog)
+	addReadTool(s, "list_task_labels", "查询任务标签",
+		"列出全部任务用过的自定义标签，以及各自挂在多少个任务上（count），按名称升序。"+
+			"只含用户自己加的标签：「分组:名称」与「subscription:ID」两类内部标签不会出现，分组请用 list_tasks 的 group 筛选。"+
+			"标签名可以传给 list_tasks 的 label 参数筛选任务（那是模糊匹配）。",
+		t.listTaskLabels)
 	addReadTool(s, "list_logs", "查询执行记录",
 		"分页查询任务执行记录，可按任务、结果（成功 / 失败 / 运行中 / 已终止）筛选，适合巡检失败任务。不含日志正文，正文用 get_log 查看。",
 		t.listLogs)
@@ -154,6 +159,31 @@ func (t *toolset) getTaskLog(ctx context.Context, in taskIDInput) (any, error) {
 		return nil, err
 	}
 	return formatLogDetail(result), nil
+}
+
+// taskLabelItem 是 GET /tasks/labels 的一项（#157 契约 L1）：自定义标签名 + 带这个标签的任务数。
+type taskLabelItem struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// listTaskLabels 转发到 GET /tasks/labels（#157）。
+// 这个接口与 /tasks/groups 一样返回裸数组 [{name, count}]，而 call 只会把响应解成对象，
+// 裸数组到它手里会变成「无法解析的内容」，所以这里直接经 Dispatcher 取原始响应、单独解码；
+// 非 2xx 照旧交给 apiError，应用缺 tasks 权限时的提示与其它工具一致。
+func (t *toolset) listTaskLabels(ctx context.Context, _ emptyInput) (any, error) {
+	status, payload, err := t.d.Do(ctx, http.MethodGet, "/tasks/labels", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status > 299 {
+		return nil, apiError(status, payload)
+	}
+	var labels []taskLabelItem
+	if err := json.Unmarshal(payload, &labels); err != nil {
+		return nil, fmt.Errorf("面板接口返回了无法解析的内容（HTTP %d）", status)
+	}
+	return map[string]any{"total": len(labels), "labels": labels}, nil
 }
 
 // taskDetail 返回任务的全部字段外加 decorateTask 的派生字段（get_task、create_task、update_task 共用）。

@@ -2,8 +2,10 @@ import { authApi } from '@/api/auth'
 
 /**
  * 列表页 / 日志查看等界面的「个人偏好」（服务端 list 组，稀疏存储）：
- * 定时任务页 / 环境变量页的每页条数，任务页视图栏「全部」「分组标签」的显隐，
+ * 定时任务页 / 环境变量页的每页条数，任务页视图栏「全部」「顶栏分组页签」的显隐，
  * 以及「打开已结束的日志时定位到底部」（#147）。
+ * 写入有两种：setListPreferences 写本机缓存后发出去不管（即改即生效的开关用）；
+ * saveListPreferences 等服务端写入结果、失败回滚本机缓存（视图管理弹窗的保存用，#157 ③）。
  *
  * v3.3.1（issue #143 桌面端第 1 条）起跟随账户：换浏览器、换域名 / IP 都还在。
  * 此前前 4 项散在三个页面里各自读写 localStorage，而 localStorage 按 origin 隔离，换个地址打开就全没了。
@@ -36,7 +38,7 @@ export interface ListPreferences {
   envs_page_size: '20' | '50' | '100' | 'all'
   /** 任务页视图栏里的「全部」是否隐藏 */
   tasks_view_all_hidden: boolean
-  /** 任务页视图栏里的分组标签（来自任务 labels 的 `分组:` 标签）是否整体隐藏 */
+  /** 任务页视图栏里的顶栏分组页签（来自任务 labels 的 `分组:` 标签）是否整体隐藏 */
   tasks_view_groups_hidden: boolean
   /** 打开【已结束】的日志时是否定位到底部（#147）；运行中的日志始终自动跟随，不看它 */
   log_open_at_bottom: boolean
@@ -205,10 +207,11 @@ const locallyChanged = new Set<ListPreferenceKey>()
 /**
  * 一次改多项偏好：逐键校验 → 全部记脏 → 全部写本地缓存 → 后台只发【一次】PUT，带上这批全部键。
  *
- * 🔴 只在「用户动作」里调用（改每页条数、视图管理弹窗点保存且值真的变了），
+ * 🔴 只在「用户动作」里调用（改每页条数这类即改即生效的开关），
  *    不要挂进 watch：程序化应用服务端值时也会触发 watch，结果是多发一次 PUT，
  *    还会把这一键误记成「本地改过」，挡住后面的下行同步。
- * 同一个动作里要改好几项（如视图管理一次保存两个隐藏开关）时用它，不要连调几次 setListPreference：
+ *    视图管理弹窗的保存（两个隐藏开关）要等写入结果再提示，走下面的 saveListPreferences，不走这里（#157 ③）。
+ * 同一个动作里要改好几项时用它，不要连调几次 setListPreference：
  * 那样会同时发出好几个 PUT，请求数白白翻倍；合成一个请求，服务端也只需做一次「读 - 合并 - 写」。
  * 只提交这一批改动的键，服务端逐键合并，并用 preferenceWriteMu 把「读整行 - 合并 - 整列写回」串行化
  *（server/handler/user_preference.go）。所以同时到达的多个 PUT（两个标签页各改各的、ensure 的迁移补丁撞上
@@ -245,6 +248,59 @@ export function setListPreference<K extends ListPreferenceKey>(key: K, value: Li
   const patch: Partial<ListPreferences> = {}
   patch[key] = value
   setListPreferences(patch)
+}
+
+/**
+ * 与 setListPreferences 同一套校验与本机写入，但【等服务端写入结果】（#157 ③，视图管理弹窗的保存在用）：
+ * 成功才 resolve；失败时把这次写过的本机键回滚到写之前的值，再把错误原样抛给调用方，由它报错、不关弹窗。
+ *
+ * 为什么视图管理要等：它原来走 setListPreferences，先提示「视图设置已保存」并当场隐藏页签，PUT 发出去就不管了；
+ * PUT 一旦失败，刷新后 ensureListPreferencesLoaded 拿服务端的旧值把本机缓存冲回去，用户关掉的页签又出现了。
+ * 其它调用方（每页条数这类即改即生效的开关）仍用 setListPreferences：同步失败对它们只是「换个浏览器不记得」，不值得打断用户。
+ *
+ * 约束同 setListPreferences：只在用户动作里调用、只传真的变了的键（服务端稀疏存储，没改也写等于替用户占坑）。
+ * 回滚只动本机缓存与「本次会话改过」的记号；服务端那边 PUT 失败本来就没写进去。
+ */
+export async function saveListPreferences(patch: Partial<ListPreferences>): Promise<void> {
+  const accepted: Record<string, ListPreferenceValue> = {}
+  // 写之前的本机原值（null = 本机没存过）与这一键本来是否已记脏，回滚时原样放回去
+  const previous: { key: ListPreferenceKey; raw: string | null; wasChanged: boolean }[] = []
+  for (const key of LIST_PREFERENCE_KEYS) {
+    const value = parseWire(key, patch[key])
+    if (value === undefined) {
+      continue
+    }
+    accepted[key] = value
+    previous.push({ key, raw: readRaw(key), wasChanged: locallyChanged.has(key) })
+    locallyChanged.add(key)
+    writeRaw(key, serialize(value))
+  }
+  // 一个合法键都没有就不发（同 setListPreferences）
+  if (previous.length === 0) {
+    return
+  }
+  try {
+    await authApi.updateListPreferences(accepted)
+  } catch (err) {
+    for (const { key, raw, wasChanged } of previous) {
+      if (raw === null) {
+        // 本机原来没有这个键：删掉，读的时候回落到默认值
+        delete memoryOverrides[key]
+        try {
+          window.localStorage.removeItem(STORAGE_KEYS[key])
+        } catch {
+          // 隐私模式下存储不可用：上面已经清掉内存覆盖，读到的就是默认值
+        }
+      } else {
+        writeRaw(key, raw)
+      }
+      // 回滚后这一键不再算「本次会话改过」：还在路上的那次 ensure 的 GET 回来时，要允许它把服务端值写回本机
+      if (!wasChanged) {
+        locallyChanged.delete(key)
+      }
+    }
+    throw err
+  }
 }
 
 let loadPromise: Promise<void> | null = null

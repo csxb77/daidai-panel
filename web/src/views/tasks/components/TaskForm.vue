@@ -3,8 +3,10 @@ import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import CronInput, { DEFAULT_CRON_DAILY_MIDNIGHT, DEFAULT_CRON_EVERY_MINUTE } from './CronInput.vue'
 import StopScheduleInput from './StopScheduleInput.vue'
-import { mergeTaskLabels, splitTaskLabels } from '../taskLabels'
+import TaskLabelPicker from './TaskLabelPicker.vue'
+import { mergeTaskLabels, normalizeTaskNameCounts, splitTaskLabels } from '../taskLabels'
 import { useResponsive } from '@/composables/useResponsive'
+import { taskApi, type TaskGroupSummary } from '@/api/task'
 import type { PythonRuntimeInfo } from '@/api/deps'
 
 const props = withDefaults(defineProps<{
@@ -57,9 +59,16 @@ const form = ref({
   group_name: '',
 })
 
-const labelInput = ref('')
 const activeTab = ref('basic')
 const internalLabels = ref<string[]>([])
+// 标签选择器（#157）：输入框里没回车的字由它在保存前并进 form.labels（commitPending）。
+// 输入状态放在它自己身上、随弹窗内容一起销毁；labelPickerKey 每次打开都换一个，兜住「关窗动画没走完又打开」时
+// EP 不重建内容的那条缝 —— 否则上一个任务里没回车的字会留到下一个任务、保存时被并进去（#157 N3）。
+const labelPickerRef = ref<InstanceType<typeof TaskLabelPicker> | null>(null)
+const labelPickerKey = ref(0)
+// 「任务分组」下方的已有分组（#157）。清单来自 GET /tasks/groups，每次打开弹窗拉一次（本组件常驻挂载，onMounted 只跑一回）。
+// 失败、老面板 404 一律静默：成功过就留着上一次的清单，从没成功过就不显示这一排。
+const groupOptions = ref<TaskGroupSummary[]>([])
 const randomDelayMode = ref<'inherit' | 'disabled' | 'custom'>('inherit')
 // 日志保留天数只有两态：跟随全局（提交 null）/ 自定义天数。
 // 刻意不做「永久保留」第三态——那需要哨兵值，清理侧的分组 SQL 会再复杂一档（issue #144 / v3.3.2）。
@@ -170,7 +179,19 @@ watch(() => props.visible, (val) => {
     }
   }
   activeTab.value = 'basic'
+  if (val) {
+    labelPickerKey.value++
+    void loadGroupOptions()
+  }
 })
+
+async function loadGroupOptions() {
+  try {
+    groupOptions.value = normalizeTaskNameCounts(await taskApi.groups())
+  } catch {
+    // 静默：留着上一次的清单（见 groupOptions 的说明）
+  }
+}
 
 // 后端默认版本或运行时可用性变化时，若正在新建任务则重新计算默认 Python 版本
 watch([() => props.defaultPythonVersion, () => props.pythonRuntimes], () => {
@@ -220,18 +241,6 @@ watch(logRetentionMode, (mode) => {
   }
 })
 
-function addLabel() {
-  const val = labelInput.value.trim()
-  if (val && !form.value.labels.includes(val)) {
-    form.value.labels.push(val)
-  }
-  labelInput.value = ''
-}
-
-function removeLabel(label: string) {
-  form.value.labels = form.value.labels.filter(l => l !== label)
-}
-
 function handleSubmit() {
   // 上一发还在路上时直接忽略，避免重复提交
   if (props.submitting) {
@@ -259,6 +268,20 @@ function handleSubmit() {
     .filter(Boolean)
   if (successExitCodes.length === 0 || successExitCodes.some(code => !/^\d+$/.test(code) || Number(code) > 255)) {
     ElMessage.warning('成功退出码只能填写 0-255 的整数，多个值请用逗号分隔')
+    return
+  }
+  // 分组名不能带英文逗号（#157）：存储按英文逗号拼接，「京东,日常」读回来会变成分组「京东」加一个普通标签「日常」。
+  // 用户可能停在「高级设置」页签，切回「基本信息」让他看得见这一项
+  if (form.value.group_name.includes(',')) {
+    activeTab.value = 'basic'
+    ElMessage.warning('分组名不能包含英文逗号')
+    return
+  }
+  // 标签输入框里没按回车的字在这里并进 form.labels（#157 ①：原来会被静默丢掉、照样提示成功）。
+  // 必须在上面各项校验之后、组装请求体之前：emit 是同步的，返回时 form.labels 已经是新值。
+  // 有以「分组:」「subscription:」开头的段时它已提示过、原文留在输入框里：切回「基本信息」，中止提交
+  if (labelPickerRef.value && !labelPickerRef.value.commitPending()) {
+    activeTab.value = 'basic'
     return
   }
   const data = { ...form.value }
@@ -339,24 +362,33 @@ function handleSubmit() {
             </div>
           </el-form-item>
           <el-form-item label="标签">
-            <div class="label-area">
-              <el-tag
-                v-for="label in form.labels"
-                :key="label"
-                closable
-                @close="removeLabel(label)"
-              >{{ label }}</el-tag>
-              <el-input
-                v-model="labelInput"
-                size="small"
-                style="width: 120px"
-                placeholder="添加标签"
-                @keyup.enter="addLabel"
-              />
-            </div>
+            <!-- 弹窗是 destroy-on-close，选择器（连同输入框里没回车的字）关窗即销毁；:key 见 labelPickerKey 的说明 -->
+            <TaskLabelPicker :key="labelPickerKey" ref="labelPickerRef" v-model="form.labels" />
           </el-form-item>
           <el-form-item label="任务分组">
-            <el-input v-model="form.group_name" placeholder="例如 京东 / 日常 / 中国联通" />
+            <div class="group-field">
+              <el-input v-model="form.group_name" placeholder="例如 京东 / 日常 / 中国联通" />
+              <!-- 已有分组（#157）：点一下填进上面的输入框；输入框本身所见即所得，不存在「没回车就丢」。
+                   原生 button 的两条约定同 TaskLabelPicker：type="button"（防输入框里回车触发原生提交、整页刷新）
+                   + mousedown.prevent（点它不抢输入框焦点，手机上不收 / 不弹键盘） -->
+              <div v-if="groupOptions.length > 0" class="group-options">
+                <div class="group-options__title">已有分组</div>
+                <div class="group-options__chips" role="group" aria-label="已有分组">
+                  <button
+                    v-for="group in groupOptions"
+                    :key="group.name"
+                    type="button"
+                    class="group-chip"
+                    :aria-pressed="form.group_name.trim() === group.name"
+                    :title="`${group.name}（${group.count} 个任务）`"
+                    @mousedown.prevent
+                    @click="form.group_name = group.name"
+                  >
+                    <span class="group-chip__text">{{ group.name }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
           </el-form-item>
         </el-form>
       </el-tab-pane>
@@ -519,11 +551,76 @@ function handleSubmit() {
 </template>
 
 <style scoped lang="scss">
-.label-area {
+.group-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  // el-form-item 的内容区是 32px 行高，标题文字沿用它会被撑得很松
+  line-height: 1.5;
+}
+
+.group-options__title {
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.group-options__chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  // 分组通常只有几个；真有很多时限高、内部滚动，不把弹窗撑得很长
+  max-height: min(40vh, 240px);
+  overflow-y: auto;
+}
+
+// 「已有分组」chip：与 TaskLabelPicker.vue 的候选 chip（.label-picker__chip）同一套样式，改一边要同步另一边。
+// 多出来的只有当前值对应那一个的高亮（aria-pressed）
+.group-chip {
+  display: inline-flex;
   align-items: center;
+  max-width: 16em;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--el-border-color);
+  // 标签类小表面 → control 档
+  border-radius: var(--dd-radius-control);
+  background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    color var(--dd-motion-fast) var(--dd-ease-standard),
+    background-color var(--dd-motion-fast) var(--dd-ease-standard),
+    border-color var(--dd-motion-fast) var(--dd-ease-standard);
+
+  &:hover {
+    color: var(--el-color-primary);
+    border-color: var(--el-color-primary-light-5);
+    background: var(--el-color-primary-light-9);
+  }
+
+  &[aria-pressed='true'] {
+    color: var(--el-color-primary);
+    border-color: var(--el-color-primary);
+    background: var(--el-color-primary-light-9);
+  }
+
+  // 负 offset 把焦点环画在 chip 内侧：限高滚动时外扩的环会被容器裁掉
+  &:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--el-color-primary) 45%, transparent);
+    outline-offset: -1px;
+  }
+}
+
+.group-chip__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .advanced-field-block {
@@ -570,8 +667,9 @@ function handleSubmit() {
 }
 
 @media (max-width: 768px) {
-  .label-area {
-    align-items: stretch;
+  // 触屏点击区抬到 32px（与 TaskLabelPicker 的候选 chip 同一条）
+  .group-chip {
+    height: 32px;
   }
 
   .advanced-inline-input {

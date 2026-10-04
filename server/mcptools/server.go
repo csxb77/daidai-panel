@@ -56,6 +56,8 @@ var (
 		"get_system_info", "get_dashboard",
 		// #139 对齐开放 API
 		"get_script_tree", "list_script_versions", "export_envs", "list_backups",
+		// #157 任务的已有标签（GET /tasks/labels，返回裸数组）
+		"list_task_labels",
 	}
 	writeToolNames = []string{
 		"run_task", "stop_task", "set_task_enabled", "batch_task_action",
@@ -156,6 +158,7 @@ func adapt[In any](h func(context.Context, In) (any, error)) mcp.ToolHandlerFor[
 }
 
 // call 发起一次接口调用并把 2xx 响应解成 map；非 2xx 翻译成带面板原始提示的错误。
+// 返回裸数组的接口（例如 GET /tasks/labels）解不成 map，不能走这里，见 listTaskLabels。
 func (t *toolset) call(ctx context.Context, method, path string, query url.Values, body any) (map[string]any, error) {
 	status, payload, err := t.d.Do(ctx, method, path, query, body)
 	if err != nil {
