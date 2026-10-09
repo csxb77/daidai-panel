@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -24,7 +25,7 @@ var pythonInstalledPackagesFunc = listPythonInstalledPackages
 
 // pythonInstalledPackagesTimeout 只管 pip list 这一条命令（慢 NAS 上它也就几秒）。给足 60 秒：
 // 设得太短，慢机器上会悄悄退回逐条校验，等于没修。
-// NewPipCommandForPythonVersion 返回前做的 venv 健康检查（4 个子进程）不归它管。
+// 直接列时没有健康检查；走老路时，NewPipCommandForPythonVersion 返回前那遍 venv 健康检查（2 个子进程）不归它管。
 var pythonInstalledPackagesTimeout = 60 * time.Second
 
 // dependencyReconcileSlowLogThreshold：整轮启动校验超过这么久才打一行分类型耗时，正常启动不多刷日志。
@@ -200,43 +201,65 @@ func ReconcileDependenciesAfterRestart() {
 }
 
 // listPythonInstalledPackages 跑一次 pip list --format=json，列出这个 Python 版本已装的发行包（键是 PEP 503 规范名）。
-// 用的是安装依赖同一个 pip（NewPipCommandForPythonVersion），与逐条 pip show 判定的是同一个环境。三个坑（#156 核实记录）：
+// 用的是安装依赖同一个 pip（NewPipCommandForPythonVersion），与逐条 pip show 判定的是同一个环境。
+// 先直接用托管 venv 里的 pip 列（venv 健康时整个版本只起这 1 个子进程，#158），失败再走老路：
+// NewPipCommandForPythonVersion 做健康检查、坏了就修 / 重建 venv，再列一次。三个坑（#156 核实记录），两次尝试都遵守：
 //  1. 必须带 --disable-pip-version-check：pip ≤ 24.0 的普通 pip list 会联网检查自身版本，
 //     venv 里的 pip 是建 venv 时带进来的、不随镜像升级；
 //  2. 只解析 stdout：中断安装留下的 ~xxx 残目录会让 pip 往 stderr 打「Ignoring invalid distribution」，混进来 JSON 就解析失败；
 //  3. 带超时、超时按进程组杀，pip 卡住也拖不住启动。
 func listPythonInstalledPackages(pythonVersion string) (map[string]bool, error) {
-	cmd, err := NewPipCommandForPythonVersion(pythonVersion, []string{"list", "--format=json", "--disable-pip-version-check"})
+	args := []string{"list", "--format=json", "--disable-pip-version-check"}
+	// runPipList 跑一次 pip list 并解析，直接列与走老路共用：两次尝试只差「命令怎么构造」这一步。
+	runPipList := func(cmd *exec.Cmd) (map[string]bool, error) {
+		cmd.Env = SanitizePipEnv(os.Environ())
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		// 复用 runNodeABICommand：带超时、超时按进程组杀，再用 WaitDelay 兜住攥着输出管道不放的孙进程。
+		if err := runNodeABICommand(cmd, pythonInstalledPackagesTimeout); err != nil {
+			// stderr 只带最后一行：pip 的报错结论在最后，前面多是告警。
+			lastLine := strings.TrimSpace(stderr.String())
+			if idx := strings.LastIndexByte(lastLine, '\n'); idx >= 0 {
+				lastLine = strings.TrimSpace(lastLine[idx+1:])
+			}
+			return nil, fmt.Errorf("pip list 执行失败：%v %s", err, lastLine)
+		}
+
+		var rows []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+			return nil, fmt.Errorf("pip list 的输出不是预期的 JSON：%v", err)
+		}
+		installed := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			if key := CanonicalizePythonPackageName(row.Name); key != "" {
+				installed[key] = true
+			}
+		}
+		return installed, nil
+	}
+
+	// 托管 venv 里已经有 pip 就直接列（#158）：省掉解析 pip 时那遍 venv 健康检查（python -c + pip --version，
+	// 后者和 pip list 一样要导入几百个模块，慢 NAS 上一个就几秒）。找 pip 用的是老路里 Resolve 用的同一个函数，只看文件在不在。
+	// 直接列失败（venv 坏了、换镜像后 Python 小版本对不上、pip 只剩半截、超时、输出不是 JSON……）不打日志，直接走下面的老路：
+	// NewPipCommandForPythonVersion 会做健康检查，坏了就修 / 重建 venv，再列一次——「venv 损坏时发现并重建」靠的就是这一步，
+	// 重建时 Ensure 自己会打日志。
+	// 镜像不支持的版本不直接列：照旧由老路报「当前镜像不支持」，这个版本逐条校验。
+	if PythonVersionSupportedByCurrentRuntime(pythonVersion) {
+		if pipBin := resolveManagedPipBinaryInVenv(ManagedPythonVenvDir(pythonVersion)); pipBin != "" {
+			if installed, err := runPipList(exec.Command(pipBin, args...)); err == nil {
+				return installed, nil
+			}
+		}
+	}
+
+	cmd, err := NewPipCommandForPythonVersion(pythonVersion, args)
 	if err != nil {
 		return nil, err
 	}
-	cmd.Env = SanitizePipEnv(os.Environ())
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	// 复用 runNodeABICommand：带超时、超时按进程组杀，再用 WaitDelay 兜住攥着输出管道不放的孙进程。
-	if err := runNodeABICommand(cmd, pythonInstalledPackagesTimeout); err != nil {
-		// stderr 只带最后一行：pip 的报错结论在最后，前面多是告警。
-		lastLine := strings.TrimSpace(stderr.String())
-		if idx := strings.LastIndexByte(lastLine, '\n'); idx >= 0 {
-			lastLine = strings.TrimSpace(lastLine[idx+1:])
-		}
-		return nil, fmt.Errorf("pip list 执行失败：%v %s", err, lastLine)
-	}
-
-	var rows []struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
-		return nil, fmt.Errorf("pip list 的输出不是预期的 JSON：%v", err)
-	}
-	installed := make(map[string]bool, len(rows))
-	for _, row := range rows {
-		if key := CanonicalizePythonPackageName(row.Name); key != "" {
-			installed[key] = true
-		}
-	}
-	return installed, nil
+	return runPipList(cmd)
 }
 
 func shouldResumeRestoredDependency(dep model.Dependency) bool {

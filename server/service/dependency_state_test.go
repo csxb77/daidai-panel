@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -69,7 +70,7 @@ func TestDependencyInstalledLinuxAcceptsDpkgQueryInstalledStatus(t *testing.T) {
 	}
 }
 
-// 拿到托管 pip 时只问它一次（#156）：装着的、判缺的都是 4 个健康检查子进程 + 1 次 pip show。
+// 拿到托管 pip 时只问它一次（#156）：装着的、判缺的都是 1 次健康检查（2 个子进程）+ 1 次 pip show（#158 起解析托管 pip 不再查第二遍）。
 // 以前判缺还要把 bin/pip、bin/pip3 与 NewPipCommandForPythonVersion 解析出的同一个 pip 再各问一遍，共 12 个。
 func TestDependencyInstalledForPythonVersionAsksManagedPipOnce(t *testing.T) {
 	testutil.SetupTestEnv(t)
@@ -89,8 +90,76 @@ func TestDependencyInstalledForPythonVersionAsksManagedPipOnce(t *testing.T) {
 			t.Fatalf("%s: 判定结果应为 %v，实际 %v", tc.name, tc.want, got)
 		}
 		calls := readFakeVenvExecLog(t, execLog)
-		if len(calls) != 5 || calls[4] != "pip3 show "+tc.name || strings.Count(strings.Join(calls, "\n"), " show ") != 1 {
-			t.Fatalf("%s: 应只起 5 个子进程（4 个健康检查 + 1 次托管 pip show），实际 %d 个：%v", tc.name, len(calls), calls)
+		if len(calls) != 3 || calls[2] != "pip3 show "+tc.name || strings.Count(strings.Join(calls, "\n"), " show ") != 1 {
+			t.Fatalf("%s: 应只起 3 个子进程（1 次健康检查的 2 个 + 1 次托管 pip show），实际 %d 个：%v", tc.name, len(calls), calls)
+		}
+	}
+}
+
+// 解析托管 pip / python 时只做一遍健康检查（#158）：Ensure 返回 true 时刚查过，Resolve 不再自己查第二遍。
+// 健康的 venv 上各只起 2 个子进程：python -c 核对版本、pip3 --version。
+func TestResolveManagedBinariesCheckVenvHealthOnce(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	execLog := writeFakeManagedVenv(t, []string{"requests"}, "")
+	venvBin := filepath.Join(ManagedPythonVenvDir("3.12"), "bin")
+
+	for _, tc := range []struct {
+		name    string
+		resolve func(string) string
+		want    string
+	}{
+		{name: "pip", resolve: ResolveManagedPipBinaryForPythonVersion, want: filepath.Join(venvBin, "pip3")},
+		{name: "python", resolve: ResolveManagedPythonBinaryForPythonVersion, want: filepath.Join(venvBin, "python")},
+	} {
+		if err := os.WriteFile(execLog, nil, 0o644); err != nil {
+			t.Fatalf("reset exec log: %v", err)
+		}
+		if got := tc.resolve("3.12"); got != tc.want {
+			t.Fatalf("%s: 应解析到 %s，实际 %q", tc.name, tc.want, got)
+		}
+		calls := readFakeVenvExecLog(t, execLog)
+		if len(calls) != 2 || !strings.HasPrefix(calls[0], "python -c ") || calls[1] != "pip3 --version" {
+			t.Fatalf("%s: 只应做一遍健康检查（python -c + pip3 --version 两个子进程），实际 %d 个：%v", tc.name, len(calls), calls)
+		}
+	}
+}
+
+// 起 Python 任务时 Ensure 的健康检查已经核对过 venv 里解释器的版本，直接用它，不再进候选循环多起一次 python -c（#158）。
+// PATH 收窄成空目录（isolatePythonProbePath），免得系统 Python 版本探测去碰宿主机上真实的 python。
+func TestCreateManagedPythonCommandsReuseEnsureVersionCheck(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	execLog := writeFakeManagedVenv(t, []string{"requests"}, "")
+	isolatePythonProbePath(t)
+	venvPython := filepath.Join(ManagedPythonVenvDir("3.12"), "bin", "python")
+	workDir := t.TempDir()
+
+	for _, tc := range []struct {
+		name  string
+		build func() (*exec.Cmd, func(), error)
+	}{
+		{name: "script", build: func() (*exec.Cmd, func(), error) {
+			envVars := map[string]string{"DAIDAI_PYTHON_VERSION": "3.12"}
+			return createManagedPythonCommand(filepath.Join(workDir, "a.py"), nil, workDir, envVars, currentManagedRuntimePathsForPythonVersion("3.12"), "3.12")
+		}},
+		{name: "module", build: func() (*exec.Cmd, func(), error) {
+			envVars := map[string]string{"DAIDAI_PYTHON_VERSION": "3.12"}
+			return createManagedPythonModuleCommand("python3", "pip", []string{"--version"}, workDir, envVars)
+		}},
+	} {
+		if err := os.WriteFile(execLog, nil, 0o644); err != nil {
+			t.Fatalf("reset exec log: %v", err)
+		}
+		cmd, cleanup, err := tc.build()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		cleanup()
+		if cmd.Path != venvPython {
+			t.Fatalf("%s: 应直接用托管 venv 的 python（%s），实际 %q", tc.name, venvPython, cmd.Path)
+		}
+		calls := readFakeVenvExecLog(t, execLog)
+		if len(calls) != 2 || strings.Count(strings.Join(calls, "\n"), "python -c ") != 1 {
+			t.Fatalf("%s: 只应有健康检查的 2 个子进程、python -c 只起一次，实际 %d 个：%v", tc.name, len(calls), calls)
 		}
 	}
 }

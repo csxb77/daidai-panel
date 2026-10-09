@@ -46,7 +46,8 @@ func DependencyInstalledForPythonVersion(depType, name, pythonVersion string) bo
 	case model.DepTypePython:
 		pythonVersion = NormalizeDependencyPythonVersion(pythonVersion)
 		// 拿到托管 pip 就只问它一次：下面 venv 里的 bin/pip、bin/pip3 与 NewPipCommandForPythonVersion
-		// 解析出来的都是同一个 venv 的 pip，结论不会变，判缺时却要多起 7 个子进程（12 个降到 5 个，#156）。
+		// 解析出来的都是同一个 venv 的 pip，结论不会变，判缺时却要多起好几个子进程（#156）。
+		// 现在判缺从当初的 12 个降到 3 个：解析托管 pip 时一遍健康检查的 2 个 + 1 次 pip show（#158 起不再查第二遍）。
 		if managedPip := strings.TrimSpace(ResolveManagedPipBinaryForPythonVersion(pythonVersion)); managedPip != "" {
 			showCmd := exec.Command(managedPip, "show", name)
 			showCmd.Env = SanitizePipEnv(os.Environ())

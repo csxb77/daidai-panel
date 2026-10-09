@@ -669,6 +669,9 @@ func ensureManagedPythonVenv(syncCreate bool) bool {
 	return ensureManagedPythonVenvForVersion("", syncCreate)
 }
 
+// ensureManagedPythonVenvForVersion 每条返回 true 的路径，结尾都是一次通过的 managedPythonVenvHealthyForVersion。
+// 两个 ResolveManaged*BinaryForPythonVersion 与两个 createManagedPython* 靠这一点不再自己查第二遍（#158）：
+// 以后要给这里加缓存、「刚查过就直接返回 true」之类的捷径，必须同时改那四处，否则会把坏掉的 venv 里的 pip / python 交出去。
 func ensureManagedPythonVenvForVersion(pythonVersion string, syncCreate bool) bool {
 	pythonVersion = NormalizePythonVersionOrDefault(pythonVersion)
 	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
@@ -812,12 +815,13 @@ func ResolveManagedPipBinaryForPythonVersion(pythonVersion string) string {
 	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
 		return ""
 	}
-	EnsureManagedPythonVenvForVersion(pythonVersion)
-	venvDir := ManagedPythonVenvDir(pythonVersion)
-	if !managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
+	// Ensure 返回 true 时刚做过一遍通过的健康检查（或刚建好 / 修好 venv，结尾同样查过一遍），这里不再自己查第二遍：
+	// 每查一遍要起 2 个子进程（python -c 核对版本 + pip --version），慢 NAS 上一个就几秒（#158）。
+	// 返回 false（venv 建不出来也修不好）时照旧返回空，由调用方走各自原有的回退（系统 pip、venv 里残留的 pip）。
+	if !EnsureManagedPythonVenvForVersion(pythonVersion) {
 		return ""
 	}
-	return resolveManagedPipBinaryInVenv(venvDir)
+	return resolveManagedPipBinaryInVenv(ManagedPythonVenvDir(pythonVersion))
 }
 
 // ResolveManagedPythonBinary 返回面板默认版本托管 venv 的 python 可执行文件路径，
@@ -831,12 +835,11 @@ func ResolveManagedPythonBinaryForPythonVersion(pythonVersion string) string {
 	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
 		return ""
 	}
-	EnsureManagedPythonVenvForVersion(pythonVersion)
-	venvDir := ManagedPythonVenvDir(pythonVersion)
-	if !managedPythonVenvHealthyForVersion(venvDir, pythonVersion) {
+	// 同 ResolveManagedPipBinaryForPythonVersion：Ensure 返回 true 就不再查第二遍（#158）。
+	if !EnsureManagedPythonVenvForVersion(pythonVersion) {
 		return ""
 	}
-	return resolveManagedPythonBinaryInVenv(venvDir)
+	return resolveManagedPythonBinaryInVenv(ManagedPythonVenvDir(pythonVersion))
 }
 
 func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir string, envVars map[string]string, runtimePaths managedRuntimePaths, pythonVersion string) (*exec.Cmd, func(), error) {
@@ -844,15 +847,23 @@ func createManagedPythonCommand(scriptPath string, scriptArgs []string, workDir 
 	if !PythonVersionSupportedByCurrentRuntime(pythonVersion) {
 		return nil, nil, fmt.Errorf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion)
 	}
-	EnsureManagedPythonVenvForVersion(pythonVersion)
+	venvReady := EnsureManagedPythonVenvForVersion(pythonVersion)
 	runtimePaths = currentManagedRuntimePathsForPythonVersion(pythonVersion)
-	preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)
 	pythonBin := ""
-	for _, name := range []string{"python", "python3", "python" + pythonVersion} {
-		candidate, err := resolveManagedBinary(name, preferredDirs, runtimePaths.searchDirs)
-		if err == nil && managedPythonBinaryMatchesVersion(candidate, pythonVersion) {
-			pythonBin = candidate
-			break
+	if venvReady {
+		// Ensure 返回 true 时，它的健康检查刚用 python -c 核对过 venv 里这个解释器（resolveManagedPythonBinaryInVenv 找到的同一个文件）的版本，
+		// 直接用，不再进下面的候选循环多起一次 python -c（#158）。
+		pythonBin = resolveManagedPythonBinaryInVenv(ManagedPythonVenvDir(pythonVersion))
+	}
+	if pythonBin == "" {
+		// venv 不可用（建不出来、修不好）时照旧按原顺序找：托管 venv、Windows 常见安装目录、PATH，逐个核对版本。
+		preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)
+		for _, name := range []string{"python", "python3", "python" + pythonVersion} {
+			candidate, err := resolveManagedBinary(name, preferredDirs, runtimePaths.searchDirs)
+			if err == nil && managedPythonBinaryMatchesVersion(candidate, pythonVersion) {
+				pythonBin = candidate
+				break
+			}
 		}
 	}
 	if pythonBin == "" {
@@ -888,15 +899,22 @@ func createManagedPythonModuleCommand(interpreter string, moduleName string, mod
 		return nil, nil, fmt.Errorf("当前镜像不支持 Python %s，请切换到对应 Python 版本镜像或 all 镜像", pythonVersion)
 	}
 
-	EnsureManagedPythonVenvForVersion(pythonVersion)
+	venvReady := EnsureManagedPythonVenvForVersion(pythonVersion)
 	runtimePaths := currentManagedRuntimePathsForPythonVersion(pythonVersion)
-	preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)
 	pythonBin := ""
-	for _, name := range []string{"python", "python3", "python" + pythonVersion} {
-		candidate, err := resolveManagedBinary(name, preferredDirs, runtimePaths.searchDirs)
-		if err == nil && managedPythonBinaryMatchesVersion(candidate, pythonVersion) {
-			pythonBin = candidate
-			break
+	if venvReady {
+		// 同 createManagedPythonCommand：Ensure 已核对过版本，直接用 venv 里的解释器，不再多起一次 python -c（#158）。
+		pythonBin = resolveManagedPythonBinaryInVenv(ManagedPythonVenvDir(pythonVersion))
+	}
+	if pythonBin == "" {
+		// venv 不可用时照旧按原顺序找：托管 venv、Windows 常见安装目录、PATH，逐个核对版本。
+		preferredDirs := append([]string{runtimePaths.VenvBin}, windowsPythonPreferredDirsForVersion(pythonVersion)...)
+		for _, name := range []string{"python", "python3", "python" + pythonVersion} {
+			candidate, err := resolveManagedBinary(name, preferredDirs, runtimePaths.searchDirs)
+			if err == nil && managedPythonBinaryMatchesVersion(candidate, pythonVersion) {
+				pythonBin = candidate
+				break
+			}
 		}
 	}
 	if pythonBin == "" {

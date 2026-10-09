@@ -126,3 +126,84 @@ func TestMainWiresPythonLibcRepairAfterNodeABIRebuild(t *testing.T) {
 		"service.RepairPythonPackagesForLibcChange",
 	)
 }
+
+// main：两遍整棵脚本目录的遍历（隔离污染目录并清悬空软链、清通知脚本副本）放进同一个 go 语句在后台跑，不挡监听（#158），
+// 软链那遍在前；根目录两份通知辅助脚本照旧同步准备（开机任务一跑就要用）；都排在调度器起来之前。
+// 把任意一遍挪回同步路径都不行：慢盘上时间几乎全花在第一次读目录上，留在同步路径上的那遍会变成冷缓存上的第一遍，照样几秒。
+func TestMainRunsScriptTreeWalksInBackground(t *testing.T) {
+	calls := collectCallNamesInFunc(t, "../main.go", "main")
+	assertStartupCallOrder(t, "main", calls,
+		"service.EnsureBuiltinNotifyHelpers",
+		"service.QuarantineUnexpectedScriptEntriesOnStartup",
+		"service.CleanupManagedHelperCopiesUnderRoot",
+		"service.InitSchedulerV2",
+	)
+
+	// 再单独看 main 里每个 go 语句内部的调用：两遍遍历要在同一个 go 语句里，根目录 helper 不能在任何 go 语句里。
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "../main.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	inGo := map[string]bool{}
+	walksInSameGo := false
+	for _, decl := range parsed.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Recv != nil || fn.Name.Name != "main" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			goStmt, ok := node.(*ast.GoStmt)
+			if !ok {
+				return true
+			}
+			names := map[string]bool{}
+			ast.Inspect(goStmt.Call, func(inner ast.Node) bool {
+				if call, ok := inner.(*ast.CallExpr); ok {
+					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+						if pkg, ok := sel.X.(*ast.Ident); ok {
+							names[pkg.Name+"."+sel.Sel.Name] = true
+							inGo[pkg.Name+"."+sel.Sel.Name] = true
+						}
+					}
+				}
+				return true
+			})
+			if names["service.QuarantineUnexpectedScriptEntriesOnStartup"] && names["service.CleanupManagedHelperCopiesUnderRoot"] {
+				walksInSameGo = true
+			}
+			return false
+		})
+	}
+	if !walksInSameGo {
+		t.Fatalf("两遍整树遍历要放进同一个 go 语句（同一个后台协程，软链那遍先跑），实际 go 语句里的调用：%v", inGo)
+	}
+	if inGo["service.EnsureBuiltinNotifyHelpers"] {
+		t.Fatal("根目录两份通知辅助脚本只读写两个文件，要同步准备好：开机任务一跑就要用")
+	}
+}
+
+// ddp：每条命令都要走 bootstrap，不能再整棵遍历脚本目录（#158，慢盘上每条命令都要多等几秒）。
+// 会跑脚本的 ddp python、ddp task run 运行前各自清工作目录里的副本，整棵清理只留给面板启动时的后台协程。
+func TestDdpBootstrapDoesNotWalkScriptTree(t *testing.T) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, "../cmd/ddp/runtime.go", nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse cmd/ddp/runtime.go: %v", err)
+	}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "service" {
+				switch sel.Sel.Name {
+				case "CleanupManagedHelperCopiesUnderRoot", "QuarantineUnexpectedScriptEntriesOnStartup":
+					t.Fatalf("ddp 不应再整棵遍历脚本目录：%s 调用了 service.%s", fset.Position(call.Pos()), sel.Sel.Name)
+				}
+			}
+		}
+		return true
+	})
+}

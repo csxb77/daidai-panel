@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -806,5 +807,60 @@ func TestCleanupManagedHelperCopiesUnderRootRemovesManagedCopiesInNestedDirs(t *
 	}
 	if _, err := os.Stat(secondHelper); !os.IsNotExist(err) {
 		t.Fatalf("expected second nested helper removed, err=%v", err)
+	}
+}
+
+// 面板启动时在后台遍历（#158）：某个目录清理失败（这里用「名叫 notify.py 的目录」造出读错误）不能让整棵停下，
+// 其余目录照清，根目录的真 helper 不动，遍历完把这个错误交给调用方打日志。
+// 它只管「cleanupManagedHelperCopies 出错不中止」这一半：a/notify.py 这个目录本身读得了，WalkDir 的回调拿不到 err，
+// 另一半（读不了的目录跳过）见下一条。
+func TestCleanupManagedHelperCopiesUnderRootContinuesPastBrokenDir(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "scripts")
+	managedCopy := "// " + managedNotifyHelperToken + "\n"
+	// WalkDir 按字典序走，a 在 b 前面。
+	if err := os.MkdirAll(filepath.Join(root, "a", notifyPyFilename), 0o755); err != nil {
+		t.Fatalf("mkdir a/notify.py: %v", err)
+	}
+	rootHelper := filepath.Join(root, sendNotifyJSFilename)
+	laterCopy := filepath.Join(root, "b", sendNotifyJSFilename)
+	writeStartupScriptFile(t, rootHelper, managedCopy)
+	writeStartupScriptFile(t, laterCopy, managedCopy)
+
+	err := CleanupManagedHelperCopiesUnderRoot(root)
+	if err == nil {
+		t.Fatal("a/notify.py 读不了，应把这个错误交给调用方打日志")
+	}
+	if _, statErr := os.Stat(laterCopy); !os.IsNotExist(statErr) {
+		t.Fatalf("a 目录出错后 b 目录里的托管副本仍应清掉，stat err=%v（返回的错误：%v）", statErr, err)
+	}
+	if _, statErr := os.Stat(rootHelper); statErr != nil {
+		t.Fatalf("根目录的 helper 不能动，stat err=%v", statErr)
+	}
+}
+
+// 后台遍历时读不了的目录跳过，其余目录照清（#158）。遍历途中目录刚被脚本管理删掉走的也是这个分支：
+// ReadDir 报错后 WalkDir 带着 err 再回调一次。靠目录权限造读错误，Windows 与 root 上造不出来，跳过（CI 的 GitHub runner 是普通用户，会真跑）。
+func TestCleanupManagedHelperCopiesUnderRootSkipsUnreadableDir(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("靠目录权限造读错误，Windows 与 root 上造不出来")
+	}
+	root := filepath.Join(t.TempDir(), "scripts")
+	unreadable := filepath.Join(root, "a")
+	if err := os.MkdirAll(unreadable, 0o755); err != nil {
+		t.Fatalf("mkdir a: %v", err)
+	}
+	laterCopy := filepath.Join(root, "b", sendNotifyJSFilename)
+	writeStartupScriptFile(t, laterCopy, "// "+managedNotifyHelperToken+"\n")
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatalf("chmod a: %v", err)
+	}
+	// 用例结束先改回来，否则 t.TempDir 删不掉。
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o755) })
+
+	// 返回值不断言：a 读不了时，cleanupManagedHelperCopies 也可能先报一次错。
+	_ = CleanupManagedHelperCopiesUnderRoot(root)
+
+	if _, err := os.Stat(laterCopy); !os.IsNotExist(err) {
+		t.Fatalf("a 读不了时 b 里的托管副本仍应清掉，stat err=%v", err)
 	}
 }

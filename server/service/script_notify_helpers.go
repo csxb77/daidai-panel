@@ -761,9 +761,14 @@ func CleanupManagedHelperCopiesUnderRoot(scriptsDir string) error {
 	}
 
 	root := filepath.Clean(scriptsDir)
-	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	// 唯一调用方是面板启动时的后台协程（#158），可能正赶上脚本管理、订阅拉取在增删目录：
+	// 读不了 / 刚被删掉的目录跳过；某个目录清理失败也接着清其余目录，遍历完只把第一个错误交给调用方打日志
+	// （以前遇到第一个错误整棵停下，排在后面的目录都清不到）。
+	var firstErr error
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			// 读不了的目录（权限不够，或遍历途中刚被删掉：ReadDir 报错后 WalkDir 会带着 err 再回调一次）跳过，不影响其它目录。
+			return nil
 		}
 		if !d.IsDir() {
 			return nil
@@ -772,12 +777,16 @@ func CleanupManagedHelperCopiesUnderRoot(scriptsDir string) error {
 			return nil
 		}
 		// node_modules、__pycache__、.git 这类目录不会是任务的工作目录，面板也就不会往里放通知脚本副本，整棵跳过：
-		// 订阅仓库的 .git、真实的 node_modules 动辄上千个目录，启动和每条 ddp 命令都要白扫一遍（#156）。
+		// 订阅仓库的 .git、真实的 node_modules 动辄上千个目录，进去就是白扫一遍（#156）。
 		if ShouldHideScriptTreeEntryName(d.Name()) {
 			return filepath.SkipDir
 		}
-		return cleanupManagedHelperCopies(root, path)
+		if cleanupErr := cleanupManagedHelperCopies(root, path); cleanupErr != nil && firstErr == nil {
+			firstErr = cleanupErr
+		}
+		return nil
 	})
+	return firstErr
 }
 
 func ensureManagedHelperFile(path, content string) error {

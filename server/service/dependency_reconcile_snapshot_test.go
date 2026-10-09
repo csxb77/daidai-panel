@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -346,7 +347,7 @@ func TestReconcileDependenciesAfterRestartLogsSlowRoundByType(t *testing.T) {
 	}
 }
 
-// 用托管 venv 里冒充的 pip 端到端走一遍：4 条 Python 依赖只起一次 pip list（外加它前面的 4 个健康检查子进程），
+// 用托管 venv 里冒充的 pip 端到端走一遍：托管 pip 在时直接 pip list，不做健康检查（#158），4 条 Python 依赖只起这 1 个子进程；
 // 规范名匹配大小写与 - _ 的差异、带版本号的名字按主包判定，真缺的那条排进重装。
 func TestReconcileDependenciesAfterRestartListsPythonPackagesOnceWithManagedPip(t *testing.T) {
 	testutil.SetupTestEnv(t)
@@ -372,9 +373,83 @@ func TestReconcileDependenciesAfterRestartListsPythonPackagesOnceWithManagedPip(
 		t.Fatalf("只有 notexist-pkg 是真缺的，实际排进重装 %v", scheduled)
 	}
 	calls := readFakeVenvExecLog(t, execLog)
+	if len(calls) != 1 || calls[0] != "pip3 list --format=json --disable-pip-version-check" {
+		t.Fatalf("托管 pip 在时 4 条 Python 依赖应只起 1 个子进程（直接 pip list，不做健康检查、不逐条 pip show），实际 %d 个：%v", len(calls), calls)
+	}
+}
+
+// 托管 venv 坏了（pip 跑不起来）时：直接 pip list 失败 → 走老路，健康检查发现坏了 → 修不好 → 挪成 <venv>.broken-<时间> 再重建
+// → 在新 venv 上再列一次（#158）。「venv 损坏时能发现并重建」靠的就是这条回退。新 venv 是空的，两条依赖都排进重装。
+func TestReconcileDependenciesAfterRestartRebuildsBrokenManagedVenv(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	execLog := writeFakeManagedVenv(t, []string{"requests", "PyYAML"}, "")
+	venvDir := ManagedPythonVenvDir("3.12")
+
+	// 把托管 venv 弄坏：pip / pip3 不管什么子命令都报「No module named pip」并以 1 退出（换镜像后 Python 小版本变了就是这样）。
+	broken := "#!/bin/sh\necho \"pip3 $*\" >> '" + execLog + "'\necho \"ModuleNotFoundError: No module named 'pip'\" >&2\nexit 1\n"
+	for _, name := range []string{"pip", "pip3"} {
+		if err := os.WriteFile(filepath.Join(venvDir, "bin", name), []byte(broken), 0o755); err != nil {
+			t.Fatalf("write broken %s: %v", name, err)
+		}
+	}
+
+	// 新 venv 的模板：python 报 3.12，pip3 --version 正常，pip3 list 输出空列表；日志行带 new- 前缀，和旧 venv 区分开。
+	template := filepath.Join(t.TempDir(), "venv-template")
+	if err := os.MkdirAll(filepath.Join(template, "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir venv template: %v", err)
+	}
+	newScripts := map[string]string{
+		"python": "#!/bin/sh\necho \"new-python $*\" >> '" + execLog + "'\necho 3.12\n",
+		"pip3": "#!/bin/sh\necho \"new-pip3 $*\" >> '" + execLog + "'\n" +
+			"case \"$1\" in\n--version) echo 'pip 24.0 from /fake (python 3.12)' ;;\nlist) echo '[]' ;;\n*) exit 2 ;;\nesac\n",
+	}
+	for name, content := range newScripts {
+		if err := os.WriteFile(filepath.Join(template, "bin", name), []byte(content), 0o755); err != nil {
+			t.Fatalf("write template %s: %v", name, err)
+		}
+	}
+	// PATH 最前面放一个假的 python3.12：--version 报 3.12.13；-m venv DIR 把模板拷进 DIR。
+	// 要用 mkdir / cp，所以只能前置，不能用 isolatePythonProbePath 把 PATH 整个换掉。
+	fakeBin := t.TempDir()
+	bootstrap := "#!/bin/sh\necho \"python3.12 $*\" >> '" + execLog + "'\n" +
+		"if [ \"$1\" = \"--version\" ]; then echo 'Python 3.12.13'; exit 0; fi\n" +
+		"if [ \"$1\" = \"-m\" ] && [ \"$2\" = \"venv\" ]; then mkdir -p \"$3\" && cp -R '" + template + "/.' \"$3/\"; exit $?; fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "python3.12"), []byte(bootstrap), 0o755); err != nil {
+		t.Fatalf("write fake python3.12: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mustCreateReconcileDependency(t, model.DepTypePython, "requests", "3.12", model.DepStatusInstalled)
+	mustCreateReconcileDependency(t, model.DepTypePython, "pyyaml", "3.12", model.DepStatusInstalled)
+	originalRestartReinstallBatch := dependencyRestartReinstallBatchFunc
+	t.Cleanup(func() { dependencyRestartReinstallBatchFunc = originalRestartReinstallBatch })
+	var scheduled []string
+	dependencyRestartReinstallBatchFunc = func(deps []model.Dependency) {
+		for _, dep := range deps {
+			scheduled = append(scheduled, dep.Name)
+		}
+	}
+	logs := captureStandardLog(t)
+
+	ReconcileDependenciesAfterRestart()
+
+	if strings.Join(scheduled, ",") != "requests,pyyaml" {
+		t.Fatalf("重建出来的 venv 是空的，两条依赖都应排进重装，实际 %v", scheduled)
+	}
+	moved, _ := filepath.Glob(venvDir + ".broken-*")
+	if len(moved) != 1 {
+		t.Fatalf("坏掉的 venv 应被挪成 %s.broken-<时间>，实际 %v", venvDir, moved)
+	}
+	calls := readFakeVenvExecLog(t, execLog)
 	joined := strings.Join(calls, "\n")
-	if len(calls) != 5 || strings.Count(joined, "pip3 list") != 1 || strings.Contains(joined, " show ") {
-		t.Fatalf("4 条 Python 依赖应只起 5 个子进程（4 个健康检查 + 1 次 pip list），不再逐条 pip show，实际 %d 个：%v", len(calls), calls)
+	if len(calls) < 2 || calls[0] != "pip3 list --format=json --disable-pip-version-check" ||
+		!strings.Contains(joined, "python3.12 -m venv "+venvDir) ||
+		calls[len(calls)-1] != "new-pip3 list --format=json --disable-pip-version-check" {
+		t.Fatalf("应先直接 pip list（失败），再重建 venv，最后在新 venv 上 pip list，实际：\n%s", joined)
+	}
+	if strings.Contains(logs.String(), "列举 Python 3.12 已安装的包失败") {
+		t.Fatalf("重建后列举成功，不应退回逐条校验，实际日志：\n%s", logs.String())
 	}
 }
 
@@ -413,7 +488,8 @@ func TestListPythonInstalledPackagesRejectsNonJSONOutput(t *testing.T) {
 }
 
 // pip 卡住时按超时收尾，并且整组杀掉：冒充的 pip 挂着一个攥住 stdout 的孙进程，
-// 只杀 pip 本身的话要再等 WaitDelay（10 秒）才返回。
+// 只杀 pip 本身的话每次都要再等 WaitDelay（10 秒）才返回。
+// #158 起直接列、走老路各超时一次（各 1 秒：直接列超时后，健康检查照样通过，再列一次又卡住），6 秒上界照旧够用。
 func TestListPythonInstalledPackagesTimesOutAndKillsProcessGroup(t *testing.T) {
 	testutil.SetupTestEnv(t)
 	writeFakeManagedVenv(t, []string{"requests"}, "hang")

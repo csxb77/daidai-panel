@@ -187,19 +187,22 @@ func main() {
 	// 「已安装」却加载不了，重装按钮也修不好（#150）。同样排在启动校验之后，后台按原版本定点重装，不阻塞启动。
 	service.RepairPythonPackagesForLibcChange()
 	handler.FinalizePendingAutoUpdateOnStartup()
-	stepStarted = time.Now()
+	// 根目录那两份通知辅助脚本（notify.py / sendNotify.js）只读写两个文件，照旧同步准备好，开机任务一跑就能用。
 	if err := service.EnsureBuiltinNotifyHelpers(cfg.Data.ScriptsDir); err != nil {
 		log.Printf("prepare builtin notify helpers failed: %v", err)
 	}
-	if err := service.CleanupManagedHelperCopiesUnderRoot(cfg.Data.ScriptsDir); err != nil {
-		log.Printf("cleanup duplicated notify helpers failed: %v", err)
-	}
-	logSlowStartupStep("整理通知辅助脚本（遍历脚本目录）", stepStarted)
-	// 启动时先隔离脚本目录中的异常污染目录，避免继续影响脚本管理、备份和统计链路。
-	// 它还要遍历整棵脚本目录清理残留的 node_modules 软链，慢盘上也可能要几秒，同样计时。
-	stepStarted = time.Now()
-	service.QuarantineUnexpectedScriptEntriesOnStartup()
-	logSlowStartupStep("隔离脚本目录污染项、清理残留软链（遍历脚本目录）", stepStarted)
+	// 两遍整棵脚本目录的遍历放到后台（#158）：隔离顶层污染目录并清悬空的 node_modules 软链、清子目录里旧版面板留下的通知脚本副本。
+	// 慢盘上每遍几秒，以前挡在监听前面。只挪一遍没用：时间几乎全花在第一次读目录上，另一遍会变成冷缓存上的第一遍，照样几秒。
+	// 两遍放在同一个协程里、软链那遍排前面：悬空的面板软链会挡住那个目录里 Node 任务的 ESM import，越早清越好；
+	// 通知脚本副本每个任务运行前还会清自己的目录（cleanupManagedHelperCopies），这里只是兜底。
+	// 代价：悬空软链不再保证早于开机任务清掉，改为启动后几秒内清掉。
+	// 只删文件 / 软链、搬目录，不碰数据库；关停不等它，进程退出时停在哪一步都不留半成品。
+	go func() {
+		service.QuarantineUnexpectedScriptEntriesOnStartup()
+		if err := service.CleanupManagedHelperCopiesUnderRoot(cfg.Data.ScriptsDir); err != nil {
+			log.Printf("cleanup duplicated notify helpers failed: %v", err)
+		}
+	}()
 	// 每次启动都重建 /ql 兼容层：Magisk 重刷 zip、容器重建都会让它整个消失，
 	// 带「只跑一次」的标记反而会让重建后永远修不回来。全程 best-effort，不会阻塞启动。
 	service.EnsureQingLongCompatLayout()
