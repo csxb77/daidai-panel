@@ -25,6 +25,11 @@ const (
 	// 代价是每次截断会一口气少掉 5 万行历史输出，所以必须把丢弃计数如实告诉前端
 	// （见 snapshotWithOffset），否则它按数组长度猜下标就会静默跳过整整一块。
 	runLogTrimBatch = maxRunLogLines / 4
+	// maxDebugRuns / debugRunRetention 是「调试运行 / 运行代码」记录的上限与过期时长（#159 修复 C）。
+	// 原来这张表没有条数上限也不过期，网页和 APP 又从不调 DELETE：实测 50 次调试 RSS 29→216MB，闲置加强制 GC 也不降。
+	// 只在写入新记录时修剪（见 pruneDebugRunsLocked），不起后台协程。
+	maxDebugRuns      = 20
+	debugRunRetention = 30 * time.Minute
 )
 
 var scriptInterpreterMap = map[string][]string{
@@ -57,8 +62,57 @@ func newDebugRun() *debugRun {
 
 func (h *ScriptHandler) storeRun(runID string, run *debugRun) {
 	h.mu.Lock()
+	// 写入新记录前先修剪（#159 修复 C）：用户调试完离开后，下次再调试时内存就回到基线
+	h.pruneDebugRunsLocked()
+	if _, exists := h.debugRuns[runID]; !exists {
+		// run_id 按毫秒时间戳生成，同一毫秒连点两下会撞上同一个 id（沿用原来的覆盖行为）；
+		// 这时 order 里已经有它，不再追加第二份
+		h.order = append(h.order, runID)
+	}
 	h.debugRuns[runID] = run
 	h.mu.Unlock()
+}
+
+// pruneDebugRunsLocked 修剪调试运行注册表（#159 修复 C），调用方必须已持有 h.mu。照搬 ConsoleHandler.pruneConsoleRunsLocked，多一条过期规则：
+//  1. 先把 order 扫一遍：已经不在 map 里的残留项摘掉；结束超过 debugRunRetention（30 分钟）的，从 map 和 order 里一起删掉；
+//  2. 再从最老的一头淘汰已结束的记录，直到总数低于 maxDebugRuns（20 条，给即将写入的新记录留位）。
+//
+// 只淘汰已结束的：还在跑的记录一旦被删，用户正盯着的输出就断了，进程也会失去停止入口。
+// 全都在跑时宁可暂时超过上限，也不动它们、更不死循环。
+// 测试里直接构造的 Done=true 记录 finishedAt 是零值：不会按时间过期，只会按条数被淘汰。
+func (h *ScriptHandler) pruneDebugRunsLocked() {
+	now := time.Now()
+	kept := h.order[:0]
+	for _, runID := range h.order {
+		run, exists := h.debugRuns[runID]
+		if !exists {
+			// order 里的残留项（记录已被 DELETE 清掉），顺手摘掉
+			continue
+		}
+		if finishedAt := run.finishedAtTime(); !finishedAt.IsZero() && now.Sub(finishedAt) > debugRunRetention {
+			delete(h.debugRuns, runID)
+			continue
+		}
+		kept = append(kept, runID)
+	}
+	h.order = kept
+
+	for len(h.debugRuns) >= maxDebugRuns {
+		evicted := false
+		for i, runID := range h.order {
+			if !h.debugRuns[runID].isDone() {
+				continue
+			}
+			delete(h.debugRuns, runID)
+			h.order = append(h.order[:i], h.order[i+1:]...)
+			evicted = true
+			break
+		}
+		if !evicted {
+			// 一条都淘汰不掉（全在跑），不再死循环
+			return
+		}
+	}
 }
 
 func (h *ScriptHandler) loadRun(runID string) (*debugRun, bool) {
@@ -73,6 +127,13 @@ func (h *ScriptHandler) deleteRun(runID string) (*debugRun, bool) {
 	run, exists := h.debugRuns[runID]
 	if exists {
 		delete(h.debugRuns, runID)
+		// 同时从插入顺序里摘掉（#159 修复 C，照搬 deleteConsoleRun）
+		for i, id := range h.order {
+			if id == runID {
+				h.order = append(h.order[:i], h.order[i+1:]...)
+				break
+			}
+		}
 	}
 	h.mu.Unlock()
 	return run, exists
@@ -190,11 +251,15 @@ func (run *debugRun) stop() {
 		return
 	}
 
-	service.KillProcessGroup(run.Process)
+	// #159 修复 B：先给整组发 SIGTERM，5 秒后组里还有进程才 SIGKILL。
+	// TerminateProcessGroup 不阻塞（补刀在单独的协程里），所以在 run.mu 里调用没问题，停止接口照样立即返回。
+	service.TerminateProcessGroup(run.Process)
 	run.Status = "stopped"
 	exitCode := -1
 	run.ExitCode = &exitCode
 	run.Done = true
+	// 与 Done 同一处、同一把锁里写，保持「Done 为真 ⇔ finishedAt 非零」（#159 修复 C 的过期判断靠它）
+	run.finishedAt = time.Now()
 	run.Logs = append(run.Logs, "[调试运行已停止]")
 }
 
@@ -225,6 +290,13 @@ func (run *debugRun) isDone() bool {
 	return run.Done
 }
 
+// finishedAtTime 在 run.mu 里读出结束时刻，还在跑时是零值。给注册表判断「结束超过 30 分钟」用（#159 修复 C）。
+func (run *debugRun) finishedAtTime() time.Time {
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	return run.finishedAt
+}
+
 func (run *debugRun) finish(exitCode int, waitErr error, elapsed float64) {
 	run.mu.Lock()
 	defer run.mu.Unlock()
@@ -235,6 +307,8 @@ func (run *debugRun) finish(exitCode int, waitErr error, elapsed float64) {
 
 	run.ExitCode = &exitCode
 	run.Done = true
+	// 与 Done 同一处、同一把锁里写，保持「Done 为真 ⇔ finishedAt 非零」（#159 修复 C 的过期判断靠它）
+	run.finishedAt = time.Now()
 	if exitCode == 0 {
 		run.Status = "success"
 		run.Logs = append(run.Logs, fmt.Sprintf("[进程结束, 退出码: %d, 耗时: %.2f秒]", exitCode, elapsed))

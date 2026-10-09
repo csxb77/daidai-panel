@@ -17,10 +17,10 @@ import (
 	"daidai-panel/pkg/pathutil"
 )
 
+// ScriptResult 只回报退出码。#159 修复 D 删掉了原来的 Output / Truncated：
+// 那份整段输出没有任何调用方读（执行器自己从 onOutput 收尾部），白白在堆里多存一份。
 type ScriptResult struct {
 	ReturnCode int
-	Output     string
-	Truncated  bool
 }
 
 // 日志回调现在直接传原始输出片段。
@@ -57,6 +57,8 @@ type CommandExecutionPlan struct {
 	// 拿不到用户写的字面路径；而「删除任务时一并删除脚本」必须对字面路径做 Lstat 才能认出软链接
 	// （见 task_script_target.go）。只在解析出脚本文件时赋值，托管命令与 python -m 为空串。
 	ScriptToken string
+
+	ShouldCleanupProcessGroup func() bool // #159 修复 A：主命令结束后要不要清理它的进程组；nil = 不清（只有任务执行器的 runTask 会挂上判定）
 }
 
 type taskAccountSelection struct {
@@ -592,6 +594,14 @@ func parseTaskTimeoutSeconds(raw string) (int, error) {
 	return seconds * multiplier, nil
 }
 
+// leftoverProcessCleanupNotice 是 #159 修复 A 清理了残留后台进程时打进任务日志的那一行，前缀已登记到 panelMetaLinePrefixes。
+// 前后各一个 \n，和「被信号终止」那行同形：开头的 \n 让 conc 模式的 [ENV#N] 前缀单独占一行、提示行本身从行首开始，
+// isPanelMetaLine 才认得出；结尾的 \n 免得后面的「=== 执行结束」粘在这一行末尾。
+// 写的是「已发送结束信号，5 秒内不退出会被强制结束」而不是「已结束」：补刀在单独的协程里，面板在这 5 秒内退出时补不上。
+const leftoverProcessCleanupNotice = "\n[已结束残留的后台进程：主命令退出后，它的进程组里还有进程在运行（多为 nohup、& 放到后台的），" +
+	"已发送结束信号，5 秒内不退出会被强制结束。需要常驻请用 setsid nohup 命令 >/dev/null 2>&1 & 启动，" +
+	"或在「系统设置 → 任务运行」关闭「任务结束后清理残留进程」]\n"
+
 func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[string]string, maxLogSize int, onOutput OnOutputFunc, onProcessStart ...OnProcessStartFunc) (*ScriptResult, *os.Process, error) {
 	cmd, cleanup, err := buildCmd(plan, filepath.Dir(plan.FullPath), envVars)
 	if err != nil {
@@ -615,7 +625,7 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		onProcessStart[0](process)
 	}
 
-	var outputBuilder strings.Builder
+	// totalSize / truncated 决定 onOutput 什么时候开始截断（#159 修复 D 删掉了旁边那份没人读的 outputBuilder）
 	totalSize := 0
 	truncated := false
 
@@ -626,13 +636,11 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		if totalSize >= maxLogSize {
 			truncated = true
 			msg := "\n[日志已截断，超过最大大小限制]"
-			outputBuilder.WriteString(msg)
 			if onOutput != nil {
 				onOutput(msg)
 			}
 			return
 		}
-		outputBuilder.WriteString(chunk)
 		totalSize += len(chunk)
 		if onOutput != nil {
 			onOutput(chunk)
@@ -652,7 +660,6 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		// 超时被杀时进程的退出码没有意义（是信号导致的），沿用原来的约定值 -1
 		returnCode = -1
 		msg := fmt.Sprintf("\n[任务超时，已在 %d 秒后终止]", timeout)
-		outputBuilder.WriteString(msg)
 		if onOutput != nil {
 			onOutput(msg)
 		}
@@ -663,11 +670,11 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		// 这一行就是把这个静默现象变成可诊断的。
 		//
 		// 🔴 【必须先排除 timedOut，顺序不能反】
-		// 超时分支自己会 KillProcessGroup 发 SIGKILL，waitErr 里同样是「被信号终止」。
+		// 超时分支自己会对整组先发 SIGTERM、宽限期过后还在再 SIGKILL（#159 修复 B），waitErr 里同样是「被信号终止」。
 		// 不排除的话一次超时会同时打出「任务超时」和「被信号终止」两行互相矛盾的解释，
 		// 而且超时分支已经把退出码硬置成 -1，再解释一遍毫无信息量。
 		//
-		// 写法照抄上面的超时分支（同时写 outputBuilder 和 onOutput），
+		// 写法照抄上面的超时分支（直接写 onOutput），
 		// 所以 conc 模式下它和超时提示形状一致：会被 prefixedOutput 加上 [EnvName#N] 前缀，
 		// 开头那个 \n 让前缀单独占一行 —— 这是既有行为，不在本次改动范围内。
 		// Windows 上 describeTerminationSignal 恒返回空串，这个分支永远不会进。
@@ -675,7 +682,6 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		// 结尾必须带换行：后面紧跟的往往是执行器自己的提示行（「[面板正在关闭，任务已中断]」）或「=== 执行结束」，
 		// 不换行就粘在这一行行尾，isPanelMetaLine 按行首认不出那条提示，日志也难读。
 		msg := fmt.Sprintf("\n[脚本进程被信号终止：%s（退出码 -1）。常见原因：内存超限被系统 OOM Killer 杀掉、面板或用户手动停止、外部 kill]\n", signalName)
-		outputBuilder.WriteString(msg)
 		if onOutput != nil {
 			onOutput(msg)
 		}
@@ -686,10 +692,23 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 		}
 	}
 
+	// #159 修复 A：主命令自己结束（没有超时）以后，进程组里还活着的，只可能是它放到后台、又不占输出管道的子孙进程
+	// （nohup … >/dev/null &、Popen(DEVNULL)、没调 quit 的浏览器）。不清理的话它们会被 PID 1 收养，一直活到重启容器，
+	// 「重启面板」也释放不了。setsid 起的进程不在这个组里，不受影响。超时分支已经对整组 TERM→KILL 过，这里不再重复。
+	// 要不要清由执行器决定（plan.ShouldCleanupProcessGroup）：开机任务、总开关关闭、这次执行已被手动停止或面板正在关停时，判定都返回 false；
+	// 钩子（前置 / 后置脚本、task_before.sh 等）不经过这里，所以只覆盖主命令（conc 每个账号、desi 都走 runSingleCommand）。
+	// 先用 processGroupAlive 看一眼组里还有没有进程，组本来就空时不写那行提示。
+	// 用不阻塞的 TerminateProcessGroup：退出码、日志都已经是最终结果，不为残留进程推迟结算、多占并发槽位。
+	// 写 onOutput 而不是 emitChunk：和上面「任务超时」「被信号终止」两行同一写法，日志被截断后这一行照样会出现。
+	if !timedOut && plan.ShouldCleanupProcessGroup != nil && plan.ShouldCleanupProcessGroup() && processGroupAlive(process.Pid) {
+		TerminateProcessGroup(process)
+		if onOutput != nil {
+			onOutput(leftoverProcessCleanupNotice)
+		}
+	}
+
 	return &ScriptResult{
 		ReturnCode: returnCode,
-		Output:     outputBuilder.String(),
-		Truncated:  truncated,
 	}, process, nil
 }
 
@@ -713,7 +732,7 @@ func runSingleCommand(plan *CommandExecutionPlan, timeout int, envVars map[strin
 //
 // 正确顺序只有一种：**先等读协程读到 EOF，再调 Wait**。
 // 进程退出后写端关闭，读端必然拿到 EOF，所以这样不会卡死；
-// 超时分支里先 KillProcessGroup 也是同理，杀掉进程就会触发 EOF。
+// 超时分支里先对整组 SIGTERM、宽限期过后还在再 SIGKILL（#159 修复 B）也是同理，进程都结束了就会触发 EOF。
 //
 // 返回值：cmd.Wait() 的原始错误（保留 *exec.ExitError 供调用方断言）、是否因超时被杀、
 // 读取过程中的错误（EOF 视为正常结束，归一成 nil）。
@@ -758,8 +777,16 @@ func pumpAndWait(cmd *exec.Cmd, stdout io.Reader, timeout time.Duration, emit fu
 	case oc := <-outcomeCh:
 		return oc.waitErr, false, normalizePumpReadError(oc.readErr)
 	case <-timerC:
-		KillProcessGroup(cmd.Process)
-		// 杀掉进程 → 管道写端关闭 → 读协程读到 EOF → drained 有值 → Wait 返回。
+		// #159 修复 B：先对整组发 SIGTERM，给 trap 了 TERM 的脚本最多 groupTermGrace（5 秒）收尾；
+		// 组里的进程都退了就提前结束，到点还有进程（包括攥着管道、忽略 TERM 的后台进程）再整组 SIGKILL。
+		// 「超时杀整组」的语义不变。Windows 没有 SIGTERM（signalGroupTerm 恒为 false），照旧立刻 KillProcessGroup。
+		// 等的是「整组退空」而不是 outcome：outcome 到了只说明主进程和攥着输出管道的进程退了，
+		// 只等它会放过不攥管道、又忽略 TERM 的后台进程，而超时之后修复 A 不再清理，它们就留下来了。
+		// 任务主命令、任务钩子（60 秒）、订阅的拉取前指令 / 拉取后钩子（900 秒）都经这里，一视同仁。
+		if !signalGroupTerm(cmd.Process.Pid) || !waitProcessGroupGone(cmd.Process.Pid, groupTermGrace) {
+			KillProcessGroup(cmd.Process)
+		}
+		// 进程都结束 → 管道写端关闭 → 读协程读到 EOF → drained 有值 → Wait 返回。
 		// 所以这里等 outcomeCh 不会永久阻塞。
 		oc := <-outcomeCh
 		return oc.waitErr, true, normalizePumpReadError(oc.readErr)
@@ -870,7 +897,7 @@ func runConcurrentCommand(plan *CommandExecutionPlan, timeout int, envVars map[s
 		return nil, nil, fmt.Errorf("未匹配到可执行的账号")
 	}
 
-	var outputBuilder strings.Builder
+	// totalSize / truncated 决定 onOutput 什么时候开始截断（#159 修复 D 删掉了旁边那份没人读的 outputBuilder）
 	totalSize := 0
 	truncated := false
 	var outputMu sync.Mutex
@@ -881,13 +908,12 @@ func runConcurrentCommand(plan *CommandExecutionPlan, timeout int, envVars map[s
 		outputMu.Lock()
 		defer outputMu.Unlock()
 
-		// 【为什么要先算一份 text，两条路径写同一份】
+		// 【为什么要先算一份 text】
 		// 进来的东西有两种：
 		//   a) conc 自己生成的行（开始执行 / 执行完成 / 执行错误 / 截断标记），末尾【没有】换行；
 		//   b) prefixedOutput 转发的脚本原始输出片段，末尾本来就带 \n 或裸 \r。
-		// 老写法是无条件给 outputBuilder 补一个 "\n"、却完全不给 onOutput 补，两边都不对：
-		//   - 实时流（onOutput）里 a 类行会和紧跟其后的脚本输出粘成一行；
-		//   - 落盘（outputBuilder）里 b 类片段后面又多出一个空行。
+		// 老写法是无条件给已删掉的 outputBuilder 补一个 "\n"、却完全不给 onOutput 补：
+		// 实时流（onOutput）里 a 类行会和紧跟其后的脚本输出粘成一行。
 		// 现在统一成「本来就以换行/裸 \r 收尾就不动，否则才补一个 \n」，
 		// 既修掉粘行，也不会写重 \n；裸 \r 保持原样，进度条的覆盖刷新语义不受影响。
 		text := line
@@ -896,7 +922,6 @@ func runConcurrentCommand(plan *CommandExecutionPlan, timeout int, envVars map[s
 		}
 
 		if totalSize < maxLogSize {
-			outputBuilder.WriteString(text)
 			totalSize += len(text)
 			if onOutput != nil {
 				onOutput(text)
@@ -907,7 +932,6 @@ func runConcurrentCommand(plan *CommandExecutionPlan, timeout int, envVars map[s
 		if !truncated {
 			truncated = true
 			msg := "[日志已截断，超过最大大小限制]\n"
-			outputBuilder.WriteString(msg)
 			if onOutput != nil {
 				onOutput(msg)
 			}
@@ -981,8 +1005,6 @@ func runConcurrentCommand(plan *CommandExecutionPlan, timeout int, envVars map[s
 
 	return &ScriptResult{
 		ReturnCode: overallCode,
-		Output:     outputBuilder.String(),
-		Truncated:  truncated,
 	}, firstProcess, overallErr
 }
 

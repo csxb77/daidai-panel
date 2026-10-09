@@ -72,13 +72,16 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 			}
 		case "stop":
 			if task.Status == model.TaskStatusRunning {
+				stopped := false
 				if executor := service.GetTaskExecutor(); executor != nil {
-					executor.StopTask(id)
+					stopped = executor.StopTask(id)
 				}
-				if task.PID != nil && *task.PID > 0 {
-					// StopTask 已打标记，这里再显式标记一次覆盖按 PID 兜底场景（幂等）。
+				// #159 修复 B：执行器认领了停止（已对整组发过 TERM、安排了 KILL）就不再按 PID 补刀，
+				// 理由同单个停止（task_control.go 的 Stop）；只有执行器不认识这次执行时才按 PID 兜底，同样先 TERM。
+				if !stopped && task.PID != nil && *task.PID > 0 {
+					// 按 PID 兜底时显式打一次停止标记（幂等）。
 					service.MarkManualStop(id)
-					service.KillProcessByPid(*task.PID)
+					service.TerminateProcessByPid(*task.PID)
 				}
 				stopLogStatus := model.LogStatusAborted
 				var runningLog model.TaskLog

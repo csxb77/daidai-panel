@@ -642,19 +642,23 @@ func (s *SchedulerV2) AddJob(task *model.Task) error {
 }
 
 func (s *SchedulerV2) stopTaskBySchedule(taskID uint) {
+	stopped := false
 	executor := GetTaskExecutor()
 	if executor != nil {
-		executor.StopTask(taskID)
+		stopped = executor.StopTask(taskID)
 	}
 
 	var task model.Task
 	if database.DB.First(&task, taskID).Error != nil {
 		return
 	}
-	if task.PID != nil && *task.PID > 0 {
+	// #159 修复 B：执行器认领了这次停止（StopTask 返回 true），就已经对整组发过 TERM、安排了 5 秒后的 KILL，
+	// 这里不能再按库里的 PID 补一刀：立即 SIGKILL 会让宽限形同虚设，再发一个 TERM 会打断脚本正在跑的收尾。
+	// 只有执行器不认识这次执行（例如 ddp task run 在别的进程里跑起来的）时才按 PID 兜底，同样先 TERM。
+	if !stopped && task.PID != nil && *task.PID > 0 {
 		// 定时停止按 PID 兜底时也要先打停止标记，避免被结算成普通脚本失败。
 		markManualStop(taskID)
-		KillProcessByPid(*task.PID)
+		TerminateProcessByPid(*task.PID)
 	}
 	if task.Status == model.TaskStatusRunning {
 		inactiveStatus := ResolveTaskInactiveStatus(&task)

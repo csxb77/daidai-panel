@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand"
@@ -298,6 +299,8 @@ func (e *TaskExecutor) OnTaskFailed(req *ExecutionRequest, err error) {
 	})
 }
 
+// KillProcessGroup 立即对 p 所在的整个进程组发 SIGKILL（再补一个 p.Kill() 兜住 Windows 与「组长自己换了进程组」）。
+// 要先 SIGTERM、宽限期过后再 SIGKILL 的（超时、各类停止、关停、修复 A 的残留清理），用 TerminateProcessGroup。
 func KillProcessGroup(p *os.Process) {
 	if p == nil {
 		return
@@ -306,6 +309,8 @@ func KillProcessGroup(p *os.Process) {
 	p.Kill()
 }
 
+// KillProcessByPid 是 KillProcessGroup 的按 PID 版本，同样立即 SIGKILL。
+// 要先 SIGTERM、宽限期过后再 SIGKILL 的，用 TerminateProcessByPid。
 func KillProcessByPid(pid int) {
 	killGroupByPid(pid)
 	p, err := os.FindProcess(pid)
@@ -313,6 +318,69 @@ func KillProcessByPid(pid int) {
 		return
 	}
 	p.Kill()
+}
+
+// groupTermGrace 是「先 SIGTERM、再 SIGKILL」之间的宽限期（#159 修复 B）：超时、手动 / 批量 / 定时停止、
+// 调试运行停止、修复 A 的残留清理都用它，给 trap 了 TERM 的脚本、收到 TERM 会自己关浏览器的 Puppeteer 留出收尾时间。
+// 用 var 而不是 const，是为了测试里能调短（先例：handler/deps.go 的 dependencyOutputWaitDelay）。
+var groupTermGrace = 5 * time.Second
+
+// shutdownTermGrace 是面板关停时所有进程组共用的 TERM 宽限期（见 StopAllRunningTasks），
+// 加上 SignalStop 的 1 秒与 ShutdownSchedulerV2 的 3 秒结算等待，整体压在 main.go 的 8 秒关停预算里。
+var shutdownTermGrace = 2 * time.Second
+
+// waitProcessGroupGone 每 50ms 查一次以 pid 为组号的进程组：组里的进程都退了返回 true，等满 limit 还有进程返回 false。
+// limit <= 0 时只查一次（关停时共享的截止时间已经用完，后面几组只看一眼就决定要不要 KILL）。
+func waitProcessGroupGone(pid int, limit time.Duration) bool {
+	deadline := time.Now().Add(limit)
+	for processGroupAlive(pid) {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+// TerminateProcessGroup 先给 p 所在的整个进程组发 SIGTERM，groupTermGrace（5 秒）后组里还有进程才整组 SIGKILL（#159 修复 B）。
+// 不阻塞调用方：等待与补刀放在单独的协程里，HTTP 停止接口可以立即返回，修复 A 的残留清理也不会推迟结算。
+// TERM 发不出去（组已经不在、或 Windows）时直接走 KillProcessGroup，和改动前一致。
+//
+// 宽限期满后调 KillProcessGroup 而不是只发 Kill(-pid, SIGKILL)：多一个 p.Kill() 兜住「组长自己换了进程组」；
+// p 已经被 Wait 回收时 Go 只会返回 os: process already finished，不会误杀别的进程；
+// 组里只要还有成员，内核就不会把这个组号分配出去，所以 5 秒后的 Kill(-pid, …) 只会落在原来那一组上。
+// 代价：补刀协程随所在进程退出而消失，面板 / ddp 在宽限期内退出时，忽略 TERM 的进程会留下来（与改动前的残留一样）。
+func TerminateProcessGroup(p *os.Process) {
+	if p == nil {
+		return
+	}
+	if !signalGroupTerm(p.Pid) {
+		KillProcessGroup(p)
+		return
+	}
+	// 在发起协程之前读宽限期：测试会临时调短它，协程里再读全局变量会和测试收尾时的还原互相踩
+	grace := groupTermGrace
+	go func() {
+		if !waitProcessGroupGone(p.Pid, grace) {
+			KillProcessGroup(p)
+		}
+	}()
+}
+
+// TerminateProcessByPid 是 TerminateProcessGroup 的按 PID 版本（#159 修复 B），
+// 只给「执行器不认识这次执行、只能按库里记的 PID 兜底」的停止路径用（例如任务是 ddp task run 在另一个进程里跑起来的）。
+// 同样不阻塞：TERM 发不出去就立即 KillProcessByPid，发出去了就在协程里等 groupTermGrace，组还在才补刀。
+func TerminateProcessByPid(pid int) {
+	if !signalGroupTerm(pid) {
+		KillProcessByPid(pid)
+		return
+	}
+	grace := groupTermGrace
+	go func() {
+		if !waitProcessGroupGone(pid, grace) {
+			KillProcessByPid(pid)
+		}
+	}()
 }
 
 func (e *TaskExecutor) StopTask(taskID uint) bool {
@@ -346,10 +414,13 @@ func (e *TaskExecutor) StopTask(taskID uint) bool {
 	delete(e.runningProcesses, taskID)
 	e.processLock.Unlock()
 
-	// 杀进程放在锁外：KillProcessGroup 要走系统调用，拿着 processLock 杀会把 onStart 的进程登记、
+	// 杀进程放在锁外：发信号要走系统调用，拿着 processLock 发会把 onStart 的进程登记、
 	// HasRunningProcess 这些短临界区一起堵住。标记与请求都已经在锁内落定，这里只剩收尾。
+	// #159 修复 B：先给整组发 SIGTERM，让 trap 了 TERM 的脚本自己收尾，5 秒后组里还有进程才 SIGKILL。
+	// TerminateProcessGroup 不阻塞（补刀在单独的协程里），停止接口照样立即返回。
+	// 返回 true 即表示执行器已认领这次停止：调用方不要再按库里的 PID 补刀，否则紧跟的第二个信号会打断脚本的收尾。
 	for _, process := range victims {
-		KillProcessGroup(process)
+		TerminateProcessGroup(process)
 	}
 	return true
 }
@@ -601,18 +672,42 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 	}
 	e.processLock.Unlock()
 
-	count := 0
+	// #159 修复 B：所有进程组（任务进程，加上正在跑的钩子）先一起收到 SIGTERM，
+	// 给 trap 了 TERM 的脚本、收到 TERM 会自己关浏览器的 Puppeteer 一个收尾的机会；
+	// 然后共用一个 shutdownTermGrace（2 秒）的截止时间逐组等：先退出的不占后面的时间，到点还在的统一 SIGKILL。
+	// 这里必须阻塞到 KILL 落地再返回：Docker 停容器时 PID 1 一退出内核会收走整个命名空间，
+	// 但「重启面板」（退出码 1、容器不停）之后就没人再管这些进程组了，不等的话忽略 TERM 的进程会成为孤儿。
+	// 第二次调用（ShutdownSchedulerV2 里会再走一遍 HaltSchedulerV2）时进程表已经空了，立刻返回。
+	victims := make([]*os.Process, 0, len(hookVictims))
 	for _, processes := range processesByTask {
 		for _, process := range processes {
-			KillProcessGroup(process)
-			count++
+			victims = append(victims, process)
 		}
 	}
-	for _, process := range hookVictims {
-		KillProcessGroup(process)
-		count++
+	victims = append(victims, hookVictims...)
+
+	var termed []*os.Process
+	for _, process := range victims {
+		if signalGroupTerm(process.Pid) {
+			termed = append(termed, process)
+		} else {
+			// TERM 发不出去（组已经不在、或 Windows）：照旧立刻整组 KILL
+			KillProcessGroup(process)
+		}
 	}
-	return count
+	deadline := time.Now().Add(shutdownTermGrace)
+	killed := 0
+	for _, process := range termed {
+		if !waitProcessGroupGone(process.Pid, time.Until(deadline)) {
+			KillProcessGroup(process)
+			killed++
+		}
+	}
+	if killed > 0 {
+		// 事后判断「关停为什么慢了 2 秒」用：只有真有进程组被强制结束时才打
+		log.Printf("%d task process group(s) still running %s after SIGTERM, killed", killed, shutdownTermGrace)
+	}
+	return len(victims)
 }
 
 // halting 回答「面板是否已经在关停」：之后不再启动新的前置钩子，也不再跑后置脚本。
@@ -747,6 +842,17 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 	}
 
 	maxLogSize := model.GetRegisteredConfigInt("max_log_content_size")
+
+	// #159 修复 A：主命令自己结束后，要不要清理它进程组里留在后台的进程，由这里挂到 plan 上的判定决定。
+	// 开机任务按任务类型豁免，不论是开机自动触发还是手动点运行——这类任务常用来拉起常驻服务，
+	// 而且每次开机只跑一次，不会累积。总开关关闭时也不清。每次执行读一次配置，保存后对之后开始的执行生效。
+	// 判定推迟到主命令结束那一刻才做：这次执行已被手动停止或面板正在关停时，停止路径已经对整组发过 TERM、
+	// 也安排了 KILL，这里再发一次会把第二个信号打进脚本的收尾逻辑，也不该写「清理残留进程」那一行。
+	// 先清成 nil：plan 挂在请求上，万一被复用，不能沿用上一次执行留下的判定。
+	plan.ShouldCleanupProcessGroup = nil
+	if task.GetTaskType() != model.TaskTypeStartup && model.GetRegisteredConfigBool("cleanup_leftover_processes") {
+		plan.ShouldCleanupProcessGroup = func() bool { return e.runStopKind(run) == runStopNone }
+	}
 
 	timeout := task.Timeout
 	if timeout < 0 {
@@ -896,12 +1002,15 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 	}
 
-	var outputCollector strings.Builder
+	// #159 修复 D：只留输出的最后 outputTailLimit（1MiB）字节，不再整份累积（原来上限约 97.7MiB，
+	// 常驻大输出的任务会在堆里多存一份）。失败 / 成功摘要、依赖自动识别、运行时失败提示都只看尾部，
+	// 完整输出另有 TinyLog 与日志文件。
+	var outputTail []byte
 
 	onOutputWithCollect := func(chunk string) {
 		onOutput(chunk)
 		outputCollectorMu.Lock()
-		outputCollector.WriteString(chunk)
+		outputTail = appendOutputTail(outputTail, chunk)
 		outputCollectorMu.Unlock()
 	}
 
@@ -969,7 +1078,8 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			}
 		}
 
-		outputCollector.Reset()
+		// 不加锁：上一轮的进程已经结束、读协程已经排空，这时不会有并发写
+		outputTail = nil
 		onStart := func(process *os.Process) {
 			stopKind := e.registerRunningProcess(run, req.TaskID, process)
 			pid := process.Pid
@@ -994,7 +1104,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			retries++
 			lastExitCode = 1
 			outputCollectorMu.Lock()
-			lastFailureOutput = buildTaskFailureOutput(outputCollector.String(), err.Error())
+			lastFailureOutput = buildTaskFailureOutput(string(outputTail), err.Error())
 			outputCollectorMu.Unlock()
 			continue
 		}
@@ -1004,17 +1114,17 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			success = true
 			lastFailureOutput = ""
 			outputCollectorMu.Lock()
-			lastSuccessOutput = outputCollector.String()
+			lastSuccessOutput = string(outputTail)
 			outputCollectorMu.Unlock()
 			break
 		}
 		outputCollectorMu.Lock()
-		lastFailureOutput = outputCollector.String()
+		lastFailureOutput = string(outputTail)
 		outputCollectorMu.Unlock()
 
 		if depInstallCount < maxDepInstalls && model.GetRegisteredConfigBool("auto_install_deps") {
 			outputCollectorMu.Lock()
-			collected := outputCollector.String()
+			collected := string(outputTail)
 			outputCollectorMu.Unlock()
 			if e.detectAndInstallDeps(plan, collected, envVars, installedDeps, onOutput) {
 				depInstallCount++
@@ -1028,7 +1138,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		if hint := BuildRuntimeFailureHint(lastFailureOutput); hint != "" {
 			onOutput(hint + "\n")
 			outputCollectorMu.Lock()
-			lastFailureOutput = strings.TrimSpace(outputCollector.String())
+			lastFailureOutput = strings.TrimSpace(string(outputTail))
 			outputCollectorMu.Unlock()
 		}
 
@@ -1109,6 +1219,27 @@ func buildTaskNotificationChannelIDs(channelID *uint) []uint {
 		return nil
 	}
 	return []uint{*channelID}
+}
+
+// outputTailLimit 是 runTask 为摘要、依赖识别、运行时失败提示保留的输出尾部上限（#159 修复 D）。
+const outputTailLimit = 1 << 20
+
+// appendOutputTail 把 chunk 接到 buf 后面，只保留最后 outputTailLimit 字节的输出（#159 修复 D）。
+// 失败 / 成功摘要、依赖自动识别、运行时失败提示都只看尾部；完整输出另有 TinyLog 和日志文件。
+// 超过上限时从下一行的开头算起，避免窗口的第一行是半截（也顺带避开被切开的多字节字符）。
+// 底层数组最多约为上限的 2 倍：append 扩容时只拷贝窗口里的字节，旧数组随之被回收。
+func appendOutputTail(buf []byte, chunk string) []byte {
+	buf = append(buf, chunk...)
+	if len(buf) <= outputTailLimit {
+		return buf
+	}
+	buf = buf[len(buf)-outputTailLimit:]
+	// 窗口里唯一的换行就在末尾时（一整行就超过 1MiB，例如压成一行的报错、jq -c 的输出），不再往后切，
+	// 否则窗口会被切成空串，失败摘要和依赖识别什么都拿不到；这种情况保留这一行的后 1MiB
+	if i := bytes.IndexByte(buf, '\n'); i >= 0 && i < len(buf)-1 {
+		buf = buf[i+1:]
+	}
+	return buf
 }
 
 func buildTaskFailureOutput(output, errMessage string) string {
@@ -1230,6 +1361,9 @@ var panelMetaLinePrefixes = []string{
 	// 走的是不过滤的 failureExcerpt，所以登记它今天不改变任何行为；
 	// 登记只是守住「面板输出行必须在册」这条契约，免得以后有人把它挪进成功摘录。
 	"[脚本进程被信号终止：",
+	// #159 修复 A：主命令结束后清理了留在进程组里的后台进程（leftoverProcessCleanupNotice）。
+	// 成功的任务最容易出现这一行，不登记就会挤进成功通知那 30 行的日志摘录。
+	"[已结束残留的后台进程：",
 }
 
 func isPanelMetaLine(line string) bool {

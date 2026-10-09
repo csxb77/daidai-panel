@@ -80,12 +80,16 @@ func InitSchedulerV2() {
 }
 
 // schedulerShutdownWait 是关停时「等 worker 与执行收尾」两段等待合计的上限（原来是 5 秒 + 5 秒串行）。
-// 任务进程已被整组杀掉，正常几十毫秒就能结算完；卡住的多半是逃出进程组、还攥着输出管道的孙进程，
+// 任务进程已被整组终止，正常几十毫秒就能结算完；卡住的多半是逃出进程组、还攥着输出管道的孙进程，
 // 再等也没用，交给 MarkActiveTasksInterrupted 兜底。与 HTTP 关停（5 秒）并行，整体压在面板 8 秒的总兜底里。
-const schedulerShutdownWait = 4 * time.Second
+// #159 修复 B 起从 4 秒缩到 3 秒：HaltSchedulerV2 里多了最多 2 秒的 TERM 宽限（shutdownTermGrace），
+// 它本身就是结算等待的前半段；总账 max(1+2+3, 6.5, 5) + 1 = 7.5 秒，和改动前一样。
+const schedulerShutdownWait = 3 * time.Second
 
-// HaltSchedulerV2 是关停的第一步：不再触发、不再接新任务，并立即按进程组终止运行中的任务（runStopHalt）。
-// 可重复调用：SignalStop 内部只执行一次，StopAllRunningTasks 第二次调用时进程表已经空了。
+// HaltSchedulerV2 是关停的第一步：不再触发、不再接新任务，并按进程组终止运行中的任务（runStopHalt）。
+// 终止是先 SIGTERM、所有组共用最多 2 秒（shutdownTermGrace）的宽限、到点还在的再 SIGKILL（#159 修复 B），
+// 所以这一步最长约 1 秒（SignalStop）+ 2 秒。
+// 可重复调用：SignalStop 内部只执行一次，StopAllRunningTasks 第二次调用时进程表已经空了，立刻返回。
 func HaltSchedulerV2() {
 	// worker 会阻塞到任务结束，必须先中断执行中的进程，再回收 worker，
 	// 否则每次关机都要白等满一个等待超时。
@@ -101,7 +105,7 @@ func HaltSchedulerV2() {
 	}
 }
 
-// ShutdownSchedulerV2 先 HaltSchedulerV2，再等 worker 与执行收尾，两段共用一个 4 秒的截止时间。
+// ShutdownSchedulerV2 先 HaltSchedulerV2，再等 worker 与执行收尾，两段共用一个 3 秒的截止时间（schedulerShutdownWait）。
 // 保持无参签名：二十多个测试用 t.Cleanup(ShutdownSchedulerV2) 收尾。
 func ShutdownSchedulerV2() {
 	HaltSchedulerV2()

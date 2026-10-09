@@ -408,11 +408,11 @@ onBeforeUnmount(() => {
               单条命令超过 {{ timeoutText }} 会被强制结束。
             </div>
             <div class="console-notice__line">
-              要放到后台的进程请<b>自行重定向输出</b>（<code>nohup xxx &gt;/dev/null 2&gt;&amp;1 &amp;</code>），
+              要放到后台的进程请<b>自行重定向输出</b>（<code>setsid nohup xxx &gt;/dev/null 2&gt;&amp;1 &amp;</code>），
               否则本次运行会在命令本体退出约 2 秒后自行收尾，末尾只留一句「仍有后台进程持有输出管道」，
               <b>之后它的输出面板再也收不到</b>。运行结束后再关闭弹窗或清除记录都不会杀掉它，
               后台进程会留在容器里；只有<b>命令还在运行时</b>关窗或撞上超时，才会终止<b>整个进程组</b>。
-              真要留常驻进程，请用脚本管理或定时任务启动，别从这里起。
+              真要留常驻进程，也请这样用 <code>setsid</code> 启动：定时 / 手动任务结束时会清理留在进程组里的后台进程（开机任务除外），setsid 起的不受影响。
             </div>
           </el-alert>
 

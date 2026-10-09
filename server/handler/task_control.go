@@ -244,10 +244,15 @@ func (h *TaskHandler) Stop(c *gin.Context) {
 		return
 	}
 
-	if hasRecordedPID {
-		// 兜底杀孤儿 PID 前也打"手动停止"标记，覆盖进程未被内存追踪的场景。
+	// #159 修复 B：执行器认领了这次停止（stopped 为真），就已经对整组发过 SIGTERM、安排了 5 秒后的 SIGKILL，
+	// 这里不能再按库里的 PID 补一刀：立即 SIGKILL 会让宽限形同虚设（trap 了 TERM 的脚本来不及收尾），
+	// 再发一个 TERM 又会打断脚本正在跑的收尾逻辑。库里的 pid 是 onStart 写进去的，就是执行器登记的进程之一。
+	// 只有执行器不认识这次执行（例如 ddp task run 在别的进程里跑起来的）时才按 PID 兜底，同样先 TERM、不阻塞。
+	// 唯一的差异：允许多实例的任务一份在面板里跑、另一份同时由 ddp task run 跑着时，这里只停面板那份（以前两份都杀）。
+	if !stopped && hasRecordedPID {
+		// 兜底停孤儿 PID 前也打"手动停止"标记，覆盖进程未被内存追踪的场景。
 		service.MarkManualStop(uint(taskID))
-		service.KillProcessByPid(*task.PID)
+		service.TerminateProcessByPid(*task.PID)
 	}
 
 	inactiveStatus := service.ResolveTaskInactiveStatus(&task)

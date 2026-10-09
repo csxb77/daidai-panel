@@ -17,6 +17,9 @@ const props = defineProps<{
 // 标题、说明、取值范围仍取服务端 schema，不在 Web 另抄一份；schema 还没加载到时整项不渲染（卡片此时在 loading）
 const installTimeoutItem = computed(() => props.configSchema.dependency_install_timeout_minutes)
 const silentExitItem = computed(() => props.configSchema.detect_silent_exit)
+// v3.3.6（#159）新增的「任务结束后清理残留进程」直接放进本卡，写法同 detect_silent_exit：
+// 标题、说明取服务端 schema（APP 设置页按同一份 schema 渲染这个开关），schema 还没加载到时整项不渲染
+const leftoverCleanupItem = computed(() => props.configSchema.cleanup_leftover_processes)
 </script>
 
 <template>
@@ -87,6 +90,13 @@ const silentExitItem = computed(() => props.configSchema.detect_silent_exit)
         <el-switch v-model="form.detect_silent_exit" inline-prompt active-text="开" inactive-text="关" />
       </div>
       <span v-if="silentExitItem.description" class="form-hint">{{ silentExitItem.description }}</span>
+    </div>
+    <div v-if="leftoverCleanupItem" class="form-field">
+      <div class="switch-item">
+        <span class="switch-label">{{ leftoverCleanupItem.label }}</span>
+        <el-switch v-model="form.cleanup_leftover_processes" inline-prompt active-text="开" inactive-text="关" />
+      </div>
+      <span v-if="leftoverCleanupItem.description" class="form-hint">{{ leftoverCleanupItem.description }}</span>
     </div>
   </el-card>
 </template>

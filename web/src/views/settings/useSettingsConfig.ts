@@ -134,6 +134,7 @@ export function useSettingsConfig() {
     console_timeout_minutes: 30,
     dependency_install_timeout_minutes: 20,
     detect_silent_exit: true,
+    cleanup_leftover_processes: true,
     auto_add_cron: true,
     auto_del_cron: true,
     default_cron_rule: '',
@@ -271,6 +272,8 @@ export function useSettingsConfig() {
         console_timeout_minutes: readConfigNumber(cfgs, 'console_timeout_minutes', 30),
         dependency_install_timeout_minutes: readConfigNumber(cfgs, 'dependency_install_timeout_minutes', 20),
         detect_silent_exit: readConfigBool(cfgs, 'detect_silent_exit', true),
+        // 兜底值与服务端注册默认值一致（开），读不到时不会把它误显示成关
+        cleanup_leftover_processes: readConfigBool(cfgs, 'cleanup_leftover_processes', true),
         auto_add_cron: readConfigBool(cfgs, 'auto_add_cron', true),
         auto_del_cron: readConfigBool(cfgs, 'auto_del_cron', true),
         default_cron_rule: readConfigString(cfgs, 'default_cron_rule', ''),
@@ -470,7 +473,8 @@ export function useSettingsConfig() {
     void saveConfigKeys([
       'max_concurrent_tasks', 'log_retention_days',
       'max_log_content_size', 'random_delay', 'random_delay_extensions', 'auto_install_deps',
-      'console_timeout_minutes', 'dependency_install_timeout_minutes', 'detect_silent_exit'
+      'console_timeout_minutes', 'dependency_install_timeout_minutes', 'detect_silent_exit',
+      'cleanup_leftover_processes'
     ])
   }
 

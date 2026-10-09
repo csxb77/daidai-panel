@@ -208,6 +208,9 @@ func TestSummarizeTaskSuccessOutputDropsBannersAndMeta(t *testing.T) {
 		"[依赖已安装 (1/5)，自动重试执行]",
 		"签到: 成功",
 		"今日积分: +80",
+		// #159 修复 A 清理残留后台进程时打的那一行。成功的任务最容易出现它，漏登记就会挤进成功通知的摘录；
+		// 取自真实常量（去掉首尾换行），免得字面量与实现漂移。
+		strings.Trim(leftoverProcessCleanupNotice, "\n"),
 		"=== 执行结束 [2026-04-18 00:00:10] 耗时 10.00 秒 退出码 0 ===",
 	}, "\n")
 
@@ -215,7 +218,7 @@ func TestSummarizeTaskSuccessOutputDropsBannersAndMeta(t *testing.T) {
 	if strings.Contains(summary, "=== 开始执行") || strings.Contains(summary, "=== 执行结束") {
 		t.Fatalf("expected banner lines removed, got %q", summary)
 	}
-	for _, meta := range []string{"[执行前置脚本]", "[第 1 次重试", "[检测到缺失依赖", "[Node.js 依赖]", "[安装成功", "[依赖已安装"} {
+	for _, meta := range []string{"[执行前置脚本]", "[第 1 次重试", "[检测到缺失依赖", "[Node.js 依赖]", "[安装成功", "[依赖已安装", "[已结束残留的后台进程："} {
 		if strings.Contains(summary, meta) {
 			t.Fatalf("expected panel meta %q removed, got %q", meta, summary)
 		}

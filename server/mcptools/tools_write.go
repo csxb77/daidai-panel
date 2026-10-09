@@ -331,7 +331,8 @@ func (t *toolset) waitScriptRun(ctx context.Context, runID string, wait int) (an
 		}
 		data := objectOf(snapshot)
 		if done, _ := data["done"].(bool); done {
-			// 调试运行记录只存在面板内存里、没有过期清理，取完结果顺手清掉，免得越积越多。
+			// 调试运行记录只存在面板内存里；面板只在下一次启动调试 / 运行代码时，清理结束超过 30 分钟、或超出 20 条的旧记录。
+			// 取完结果顺手清掉，内存回收得更早。
 			_, _, _ = t.d.Do(ctx, http.MethodDelete, "/scripts/run/"+url.PathEscape(runID), nil, nil)
 			return scriptRunOutput(runID, data, true), nil
 		}

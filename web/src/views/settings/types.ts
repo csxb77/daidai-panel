@@ -15,6 +15,9 @@ export interface SettingsConfigForm {
   // 标题、说明、取值范围由卡片读服务端 schema，这里只是表单状态
   dependency_install_timeout_minutes: number
   detect_silent_exit: boolean
+  // v3.3.6（#159）新增，直接放进「任务运行」卡：定时 / 手动任务主命令结束后清理留在后台的进程（服务端注册项同名，默认开）。
+  // 标题、说明同样由卡片读服务端 schema，这里只是表单状态
+  cleanup_leftover_processes: boolean
   auto_add_cron: boolean
   auto_del_cron: boolean
   default_cron_rule: string

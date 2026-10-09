@@ -306,7 +306,9 @@ func main() {
 // 关停时间预算。宽限最短的是 Docker：docker stop / compose down / watchtower 默认只等 10 秒，到点直接 SIGKILL
 // （Windows 关控制台窗口约 5 秒、Magisk 动作按钮 2 秒，正常路径几十毫秒就能走完）。
 // 每一步都有上限，再加一个总兜底，保证 8 秒内退出，给 entrypoint 与 Docker 留出余量。
-// 任务结算的等待上限（4 秒）在 service.ShutdownSchedulerV2 里，与 HTTP 关停同时进行。
+// 终止任务时先 SIGTERM、所有进程组共用最多 2 秒的宽限再 SIGKILL（service.HaltSchedulerV2，#159）；
+// 任务结算的等待上限（3 秒）在 service.ShutdownSchedulerV2 里，与 HTTP 关停同时进行。
+// 总账：max(1+2+3, 6.5, 5) + 1 = 7.5 秒。
 const (
 	shutdownHardLimit = 8 * time.Second // 总兜底：任何一步卡住（例如唯一的数据库连接被恢复备份的长事务占着）都强制退出
 	shutdownHTTPWait  = 5 * time.Second // HTTP：SSE 已被取消，剩下的只有上传下载、恢复备份这类长请求，等不完就 Close
@@ -319,8 +321,8 @@ const (
 
 // shutdownPanel 是面板唯一的关停流程：收到 SIGTERM / SIGINT，或面板自己请求退出（重启 / 停止 / 在线升级）都走这里。
 // 顺序（时间预算见上面的常量）：
-//  1. 停调度、杀任务（HaltSchedulerV2）与 2. HTTP 关停同时开始，互不依赖：第 1 步卡住时 SSE 照样断开；
-//  3. 等任务结算（ShutdownSchedulerV2，≤4 秒），没结算完的标成中断；
+//  1. 停调度、终止任务（HaltSchedulerV2，先 TERM、共用 ≤2 秒宽限再 KILL）与 2. HTTP 关停同时开始，互不依赖：第 1 步卡住时 SSE 照样断开；
+//  3. 等任务结算（ShutdownSchedulerV2，≤3 秒），没结算完的标成中断；
 //  4. 自动更新 / 日志清理 / 资源监控关通道，备份、订阅两个调度等到共用的截止时间；
 //  5. 等 HTTP 关停结束；
 //  6. 最后关库：之后任何读写都会报 database is closed，所以必须排在所有收尾之后。

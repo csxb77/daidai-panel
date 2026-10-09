@@ -99,7 +99,8 @@ func readSettledLogContent(t *testing.T, logID uint) string {
 }
 
 // 研究 §6.1-3：关停有硬上限。runTask 卡住（模拟逃出进程组、攥着输出管道的孙进程：进程不登记、不理停止请求）时，
-// ShutdownSchedulerV2 也必须在约 4 秒内返回 —— worker 与执行两段等待共用一个截止时间，剩余时间算成 0 也不能变成无限等。
+// ShutdownSchedulerV2 也必须在约 3 秒内返回（#159 起结算等待从 4 秒缩到 3 秒，TERM 宽限挪到了 HaltSchedulerV2 里；
+// 这里没有登记进程，不受 TERM 宽限影响）—— worker 与执行两段等待共用一个截止时间，剩余时间算成 0 也不能变成无限等。
 // 截止时还没结算的执行：库里由 MarkActiveTasksInterrupted 标成中断，注入脚本的凭据被吊销
 // （结算里那句吊销等不到了，泄漏在临时目录里的凭据 7 天有效、重启后照样能用）。
 func TestShutdownSchedulerV2IsBoundedWhenRunIsStuck(t *testing.T) {
@@ -153,10 +154,10 @@ func TestShutdownSchedulerV2IsBoundedWhenRunIsStuck(t *testing.T) {
 		release.close()
 		t.Fatal("ShutdownSchedulerV2 never returned while a run was stuck; the shared deadline must bound both waits")
 	}
-	// 上界取 5 秒：等待本身共用 4 秒的截止时间，截止后还要写几次库（吊销凭据、标中断）。
-	// 两段各等 4 秒（共 8 秒）或剩余时间算成 0 变成无限等，都远超这个上界。
+	// 上界取 5 秒：等待本身共用 3 秒的截止时间，截止后还要写几次库（吊销凭据、标中断）。
+	// 两段各等 3 秒（共 6 秒）或剩余时间算成 0 变成无限等，都超过这个上界。
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("ShutdownSchedulerV2 must return within about 4s when a run is stuck, took %s", elapsed)
+		t.Fatalf("ShutdownSchedulerV2 must return within about 3s when a run is stuck, took %s", elapsed)
 	}
 
 	stored := reloadServiceTask(t, task.ID)

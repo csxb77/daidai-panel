@@ -159,6 +159,12 @@ var registeredSystemConfigSpecs = finalizeSystemConfigSpecs([]systemConfigSpec{
 	newTrimmedStringConfig("random_delay_extensions", "延迟文件后缀", "", "随机延迟仅对指定脚本后缀生效", "tasks"),
 	newBoolConfig("auto_install_deps", "自动安装缺失依赖", "true", "脚本缺依赖时自动尝试安装", "tasks"),
 	newBoolConfig("detect_silent_exit", "检测脚本半路静默结束", "true", "Node 任务因 Promise 永不完成而提前退出时判定为失败，而不是记成成功", "tasks"),
+	// #159 修复 A 的总开关：定时 / 手动任务的主命令结束后，结束它留在进程组里的后台进程（开机任务按类型豁免）。
+	// 默认开：库里没有这一行时 GetRegisteredConfigBool 回落到 true，存量用户升级后默认生效。
+	// runTask 每次执行现读一次，不需要进 handler.reloadRuntimeConfigKeys。
+	// ⚠️ APP 的系统设置页按 schema 渲染，这个开关会自动出现在 APP 里并能保存，所以说明文字必须对两端都适用，
+	// 不能写「仅网页端生效」之类的措辞。
+	newBoolConfig("cleanup_leftover_processes", "任务结束后清理残留进程", "true", "定时、手动任务的主命令结束后，结束它留在后台的进程（如 nohup、& 启动的），避免越积越多占用内存；开机任务不清理。需要常驻的进程请用 setsid nohup … & 启动，或关闭此项", "tasks"),
 	newEnumConfig(
 		"python_default_version",
 		"默认 Python 版本",

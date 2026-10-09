@@ -137,6 +137,9 @@ func stopConsoleRun(run *debugRun) bool {
 	exitCode := -1
 	run.ExitCode = &exitCode
 	run.Done = true
+	// 顺手写上结束时刻，保持 debugRun「Done 为真 ⇔ finishedAt 非零」这条不变式（#159 修复 C）；
+	// 命令行自己的注册表不读这个字段，行为零变化
+	run.finishedAt = time.Now()
 	run.Logs = append(run.Logs, "[命令已停止]")
 	return true
 }
@@ -415,8 +418,9 @@ func (h *ConsoleHandler) Run(c *gin.Context) {
 			// 必须让用户知道：命令本身结束了，但被它拉起来的后台进程还活着，
 			// 那些进程之后的输出面板收不到了。顺带给出正确姿势——WaitDelay 到点会关掉管道，
 			// 后台进程下次往 stdout 写就会吃到 EPIPE，重定向掉才能真正长期驻留。
+			// 推荐 setsid（#159）：脱离进程组才不会被「任务结束后清理残留进程」或停止 / 超时时的整组终止带走。
 			run.appendLog("[命令已结束；仍有后台进程持有输出管道，后续输出不再收集。" +
-				"若要让它长期驻留，请自行重定向输出，例如 nohup ... >/dev/null 2>&1 &]")
+				"若要让它长期驻留，请自行重定向输出并脱离进程组，例如 setsid nohup ... >/dev/null 2>&1 &]")
 		}
 		if outcome.TimedOut {
 			run.appendLog(fmt.Sprintf("[命令执行超时：已超过 %d 分钟上限，整个进程组已被终止]", int(timeout/time.Minute)))

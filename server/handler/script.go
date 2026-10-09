@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"daidai-panel/config"
 	"daidai-panel/pkg/pathutil"
@@ -43,11 +44,13 @@ type debugRun struct {
 	// Logs 被截断后切片下标就不再等于「第几行输出」，logOutputSince / logLen 靠它
 	// 把 offset 解释成只增不减的全局序号（见 script_runtime.go 的 trimLogsLocked）。
 	discardedLogs int
+	finishedAt    time.Time // 结束时刻（#159 修复 C），与 Done 在同一处、同一把锁里写，还在跑时为零值；注册表据它删掉结束超过 30 分钟的记录
 	mu            sync.Mutex
 }
 
 type ScriptHandler struct {
 	debugRuns map[string]*debugRun
+	order     []string // debugRuns 的插入顺序（#159 修复 C），淘汰时从最老的一头开始找，照搬 ConsoleHandler.order
 	mu        sync.Mutex
 }
 
