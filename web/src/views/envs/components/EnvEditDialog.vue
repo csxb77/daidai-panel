@@ -12,6 +12,8 @@ type EnvFormModel = {
   groups: string[]
   // 排序值（#131，即接口里的 position）。父组件打开编辑时带进来；emit 出去时只有用户真改过才会带
   position?: number | null
+  // 「重要」标记（APP #16）。父组件打开时带进来；emit 出去：新建只在打开时带 true，编辑只在拨过开关时带
+  important?: boolean
 }
 
 const props = withDefaults(defineProps<{
@@ -48,13 +50,15 @@ function normalizeGroupList(groups: string[]): string[] {
 }
 
 function createEmptyForm(): EnvFormModel {
-  return { id: 0, name: '', value: '', remarks: '', group: '', groups: [] }
+  return { id: 0, name: '', value: '', remarks: '', group: '', groups: [], important: false }
 }
 
 const form = ref<EnvFormModel>(createEmptyForm())
 const splitMode = ref(false)
 // 打开弹窗那一刻的排序值，用来判断用户到底改没改（契约 C5：只有改过才随请求发送）
 const initialPosition = ref<number | null>(null)
+// 打开弹窗那一刻的「重要」标记，同上：没拨过开关就不发，免得冲掉 APP 或另一个标签页刚改的标记
+const initialImportant = ref(false)
 const { dialogFullscreen } = useResponsive()
 
 const isCreate = computed(() => props.mode === 'create')
@@ -76,12 +80,15 @@ function syncForm() {
   const initialPositionValue =
     typeof initial.position === 'number' && Number.isFinite(initial.position) ? initial.position : null
   initialPosition.value = initialPositionValue
+  // 只认布尔 true；老数据、缺字段一律当作「不是重要变量」
+  initialImportant.value = initial.important === true
   form.value = {
     ...createEmptyForm(),
     ...initial,
     group: initialGroups.join(','),
     groups: initialGroups,
-    position: initialPositionValue
+    position: initialPositionValue,
+    important: initialImportant.value
   }
   splitMode.value = false
 }
@@ -123,7 +130,9 @@ function handleSave() {
       value: line.trim(),
       remarks,
       group,
-      groups
+      groups,
+      // 开了「重要」才带，拆出来的每一行都标；没开就不带这个键
+      ...(form.value.important ? { important: true } : {})
     }))
     emit('save', items)
   } else {
@@ -134,6 +143,10 @@ function handleSave() {
       remarks,
       group,
       groups
+    }
+    // 「重要」（APP #16）：新建只在开着时带 true；编辑只在拨过开关时带当前值（与下面的排序值同一个道理）
+    if (isCreate.value ? form.value.important : form.value.important !== initialImportant.value) {
+      payload.important = form.value.important === true
     }
     // 排序值（#131，契约 C5）只在编辑模式、并且用户真的改过时才带上。
     // 没改就不带：原值可能是青龙原样导入的大数、置顶留下的负数或小数，原样写回一遍没有意义，
@@ -224,6 +237,15 @@ watch(
         >
           <el-option v-for="group in groups" :key="group" :label="group" :value="group" />
         </el-select>
+      </el-form-item>
+      <!-- 「重要」标记（APP #16）：新建与编辑都能设。只是防误删的提醒，服务端不拦删除，所以文案不写「受保护」 -->
+      <el-form-item label="重要变量">
+        <div style="display: flex; align-items: center; gap: 8px; width: 100%">
+          <el-switch v-model="form.important" />
+          <span style="font-size: 12px; color: var(--el-text-color-secondary)">
+            列表里显示紫色「重要」标记，删除时多确认一次，批量删除会跳过它
+          </span>
+        </div>
       </el-form-item>
       <!-- 排序值（#131）只在编辑模式出现：新建和导入永远追加到普通区末尾，这里不让填。
            它就是列表接口里本来就有的 position，没有新增字段；拖拽改的也是它，两边天然一致。

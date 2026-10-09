@@ -1760,6 +1760,8 @@ route('GET', '/envs/export-all', () => ({
     group: env.group,
     groups: splitEnvGroups(env.group),
     enabled: env.enabled,
+    // 与服务端 ExportAll 一样永远带上（false 也带），APP #16
+    important: env.important,
   })),
 }))
 
@@ -1797,7 +1799,7 @@ route('PUT', '/envs/sort', (ctx) => {
   const body = bodyObject(ctx)
   const targetRaw = body['target_id']
   // position 是落点（契约 C4，与 PUT /tasks/sort 同名同义）：只认 "after"（去首尾空白、不区分大小写），
-  // 不传、空串、拼错一律按 before —— App 只传 source / target，行为不变。
+  // 不传、空串、拼错一律按 before —— 老客户端不带 position，行为不变；target 为空时不看它（一律移到本桶末尾）。
   // 🔴 与 env 行上的数值字段 position（桶内排序值，PUT /envs/:id 可写）同名不同义，别混用。
   const positionRaw = body['position']
   // 服务端这个字段是 string：传了数字、布尔、对象在 JSON 绑定时就 400；null 与不传同义
@@ -1832,7 +1834,8 @@ route('PUT', '/envs/by-name', (ctx) => {
     return { message: '更新成功', data: toEnvDict(existing), created: false }
   }
 
-  const created = createEnv(body)
+  // 服务端 UpsertByName 不收 important（只有 POST /envs、PUT /envs/:id 可设），这里一并丢掉
+  const created = createEnv({ ...body, important: undefined })
   return { message: '创建成功', data: toEnvDict(created), created: true }
 })
 
@@ -1849,6 +1852,8 @@ function createEnv(item: Record<string, any>) {
     group: Array.isArray(item['groups'])
       ? joinEnvGroups(item['groups'].map((group: unknown) => String(group)))
       : joinEnvGroups([String(item['group'] ?? '')]),
+    // 只认布尔 true，与服务端 Create / Import 新建行一致（APP #16）；POST /envs 与 import 都走这里
+    important: item['important'] === true,
     created_at: now,
     updated_at: now,
   }
@@ -2002,6 +2007,10 @@ route('PUT', '/envs/:id', (ctx) => {
   if (present('position') && (typeof body['position'] !== 'number' || !Number.isFinite(body['position']))) {
     return badRequest('请求参数错误')
   }
+  // important 是 *bool（APP #16）：不是布尔同样在 JSON 绑定时整单 400
+  if (present('important') && typeof body['important'] !== 'boolean') {
+    return badRequest('请求参数错误')
+  }
 
   if (present('name')) {
     const name = String(body['name']).trim()
@@ -2019,6 +2028,8 @@ route('PUT', '/envs/:id', (ctx) => {
     if (group !== env.group) updates.group = group
   }
   if (typeof body['enabled'] === 'boolean' && body['enabled'] !== env.enabled) updates.enabled = body['enabled']
+  // 「重要」标记：值变了才写，与服务端一致（类型已在最前面校验过）
+  if (typeof body['important'] === 'boolean' && body['important'] !== env.important) updates.important = body['important']
   // 桶内排序值（契约 C5）：越小越靠前，置顶区与普通区各自比较；值变了才写（类型已在最前面校验过）。
   // 🔴 与 PUT /envs/sort 请求体里的 position（"before" / "after" 落点）同名不同义。
   if (present('position') && body['position'] !== env.position) updates.position = body['position']

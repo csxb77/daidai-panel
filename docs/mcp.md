@@ -169,8 +169,8 @@ stdout 只输出 MCP 协议消息，就绪提示与错误都写到 stderr。
 | `list_task_labels` | 全部任务用过的自定义标签及各自的任务数，按名称升序；不含「分组:名称」与订阅这两类内部标签（分组用 `list_tasks` 的 `group` 筛选）；标签名可传给 `list_tasks` 的 `label` 筛选任务（模糊匹配） |
 | `list_logs` | 执行记录，可按任务、结果筛选，适合巡检失败任务 |
 | `get_log` | 按执行记录 ID 查看日志正文（过长只保留末尾） |
-| `list_envs` | 查询环境变量，名称像凭据的变量值会被遮蔽 |
-| `export_envs` | 不分页导出环境变量（格式与 `import_envs` 一致），敏感变量同样遮蔽；可用 `ids` 分批 |
+| `list_envs` | 查询环境变量，名称像凭据的变量值会被遮蔽；每条带 `important`（用户标为「重要」的变量，删除或替换导入前请先向用户确认，面板本身不拦删除） |
+| `export_envs` | 不分页导出环境变量（格式与 `import_envs` 一致），敏感变量同样遮蔽；输出带 `important`；可用 `ids` 分批 |
 | `list_scripts` | 脚本文件扁平列表（可按路径关键词过滤）；`tree: true` 返回面板原始目录树，更推荐用 `get_script_tree` |
 | `get_script_tree` | 脚本目录树（含空目录）；`path` 只看某个子目录，`max_depth` 限制展开层数 |
 | `read_script` | 按字节分段读取脚本内容，见下方「分段读取」 |
@@ -192,7 +192,7 @@ stdout 只输出 MCP 协议消息，就绪提示与错误都写到 stderr。
 | `batch_set_task_notify` ⚠️ | 批量打开 / 关闭失败、成功、终止通知，只改传入的开关、不改通知渠道；`ids` 指定任务，或 `all: true` 改全部任务；已在排队的那一次执行仍用旧设置 |
 | `create_env` / `update_env` ⚠️ / `delete_env` ⚠️ | 新建、修改、删除环境变量 |
 | `batch_env_action` ⚠️ | 批量 enable / disable / delete 环境变量 |
-| `import_envs` ⚠️ | 批量导入：`merge`（默认）覆盖「名称 + 备注」相同的变量、其余新增；`replace` 先删除全部现有变量再导入。导入前先校验变量名，并拒绝遮蔽后的值 |
+| `import_envs` ⚠️ | 批量导入：`merge`（默认）覆盖「名称 + 备注」相同的变量、其余新增；`replace` 先删除全部现有变量再导入。导入前先校验变量名，并拒绝遮蔽后的值。条目可带 `important`：`merge` 只会把已有变量标为重要、不会取消标记；`replace` 会连重要变量一起删除 |
 | `save_script` ⚠️ | 新建或覆盖脚本（保留历史版本，可用 `rollback_script` 回滚） |
 | `run_script` | 调试运行脚本并等待最多约 50 秒；仍在运行时返回 `run_id`，用同一个 `run_id` 再调用可继续取输出，加 `stop: true` 可停止 |
 | `run_code` | 直接执行一段代码（不落盘），`language` 可选 `shell`（或 `bash`）、`python`、`javascript`、`node`、`typescript`、`go`；工作目录是临时目录，脚本目录的绝对路径在环境变量 `DAIDAI_SCRIPTS_DIR` 里；等待与续取方式同 `run_script` |

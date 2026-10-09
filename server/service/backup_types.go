@@ -101,6 +101,7 @@ type BackupEnvVar struct {
 	Position  float64   `json:"position"`
 	SortOrder int       `json:"sort_order"`
 	Group     string    `json:"group"`
+	Important bool      `json:"important,omitempty"` // 「重要」标记（APP #16）；omitempty：普通变量不写这个键，老备份 / 青龙备份没有它，读出来都是 false
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

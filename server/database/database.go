@@ -333,6 +333,9 @@ func EnsureColumns() {
 		{"position", "REAL DEFAULT 10000"},
 		{"sort_order", "INTEGER DEFAULT 0"},
 		{"\"group\"", "VARCHAR(512) DEFAULT ''"},
+		// 「重要」标记（APP #16）。刻意写成与 GORM 建表写进 DDL 的 `important` numeric DEFAULT false 逐字一致（契约 S3），
+		// 不照抄别处布尔列的 BOOLEAN DEFAULT 0：由 TestEnsureColumnsAddsEnvVarImportantDefaultMatchingModelTag 钉住。
+		{"important", "NUMERIC DEFAULT false"},
 	})
 
 	ensureTableColumns("subscriptions", []columnDef{

@@ -154,7 +154,9 @@ func TestEnvVarsLegacyPositionDefaultSettlesAfterOneMigration(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"LEGACY_A", "LEGACY_B", "LEGACY_C"} {
-		if err := database.DB.Create(&model.EnvVar{Name: name, Value: name + "-value", Enabled: true}).Error; err != nil {
+		// 老表没有 important 列（v3.3.6 / APP #16 才加）。GORM 插入时总会带上 tag 里有默认值的列（零值换成默认值写进 INSERT），
+		// 往缺列的老表插 model 行会报 no column named important，这里要略过它。
+		if err := database.DB.Omit("important").Create(&model.EnvVar{Name: name, Value: name + "-value", Enabled: true}).Error; err != nil {
 			t.Fatalf("create legacy env %s: %v", name, err)
 		}
 	}

@@ -36,7 +36,8 @@ func (t *toolset) registerReadTools(s *mcp.Server) {
 		"按执行记录 ID 查看日志正文；过长时只保留末尾。",
 		t.getLog)
 	addReadTool(s, "list_envs", "查询环境变量",
-		"分页查询环境变量。名称像凭据的变量（含 TOKEN、SECRET、PASSWORD、COOKIE 等，或以 _KEY、_PWD、_CK 等结尾）的值会被遮蔽，并带 value_masked: true。",
+		"分页查询环境变量。名称像凭据的变量（含 TOKEN、SECRET、PASSWORD、COOKIE 等，或以 _KEY、_PWD、_CK 等结尾）的值会被遮蔽，并带 value_masked: true。"+
+			"每条带 important：用户标为「重要」的变量，删除或替换导入前务必先向用户确认。",
 		t.listEnvs)
 	addReadTool(s, "list_scripts", "查询脚本文件",
 		"列出脚本目录里的文件（默认扁平列表，可按路径关键词过滤），或返回目录树。",
@@ -447,8 +448,9 @@ func envMatchesKeyword(item map[string]any, lowerKeyword string) bool {
 }
 
 // slimEnv 输出环境变量的精简字段，敏感变量的值一律遮蔽（增删改的返回值也走这里）。
+// important 是「重要」标记（APP #16）：只提醒 AI 删除前先问用户，面板本身不拦删除。
 func slimEnv(item map[string]any) map[string]any {
-	out := pickFields(item, "id", "name", "remarks", "enabled", "group", "updated_at")
+	out := pickFields(item, "id", "name", "remarks", "enabled", "group", "important", "updated_at")
 	value := stringValue(item["value"])
 	if IsSensitiveEnvName(stringValue(item["name"])) {
 		out["value"] = MaskEnvValue(value)

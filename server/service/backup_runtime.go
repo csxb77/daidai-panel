@@ -1218,6 +1218,7 @@ func backupEnvVarFromModel(item model.EnvVar) BackupEnvVar {
 		Position:  item.Position,
 		SortOrder: item.SortOrder,
 		Group:     item.Group,
+		Important: item.Important,
 		CreatedAt: item.CreatedAt,
 		UpdatedAt: item.UpdatedAt,
 	}
@@ -1237,6 +1238,7 @@ func modelEnvVarFromBackup(item BackupEnvVar) model.EnvVar {
 		Position:  item.Position,
 		SortOrder: item.SortOrder,
 		Group:     item.Group,
+		Important: item.Important,
 		CreatedAt: item.CreatedAt,
 		UpdatedAt: item.UpdatedAt,
 	}

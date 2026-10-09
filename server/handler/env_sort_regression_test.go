@@ -45,7 +45,7 @@ func assertEnvListOrder(t *testing.T, engine *gin.Engine, token string, want ...
 	}
 }
 
-// envSortBody 拼 PUT /envs/sort 的请求体。position 为空串表示不带这个字段（App / 老客户端的写法）。
+// envSortBody 拼 PUT /envs/sort 的请求体。position 为空串表示不带这个字段（老客户端、v1.3.9 及以前的 APP 的写法）。
 func envSortBody(sourceID, targetID uint, position string) string {
 	if position == "" {
 		return fmt.Sprintf(`{"source_id":%d,"target_id":%d}`, sourceID, targetID)
@@ -128,7 +128,7 @@ func TestEnvMoveTopIsIdempotentForPinnedItem(t *testing.T) {
 }
 
 // #131：PUT /envs/sort 支持 position:"after"（契约 C4，与 /tasks/sort 同名同义）；
-// 不带或写成别的值一律按 before，App 只传 source/target 不受影响。
+// 不带或写成别的值一律按 before，老客户端不带这个键，行为不变。
 func TestEnvSortSupportsPositionAfter(t *testing.T) {
 	testutil.SetupTestEnv(t)
 
@@ -184,6 +184,53 @@ func TestEnvSortMovesPinnedItemToEndOfPinnedArea(t *testing.T) {
 		t.Fatalf("expected cross-bucket sort 400, got %d, body=%s", rec.Code, rec.Body.String())
 	}
 	assertEnvListOrder(t, engine, token, "P2", "P3", "P1", "N1")
+}
+
+// APP #16（契约 C3）：不带 target_id（或写成 null）= 把 source 移到它自己所在那个桶的末尾，此时不看 position。
+// 这是对外文档化的契约（apiData.ts「不传 target_id 表示移到本区末尾」），APP v1.4.0 起在没有筛选时
+// 把变量拖到可见列表末尾就发这种请求（永远带 "position":"after"），置顶项、普通项都会发；以前没有任何用例钉住它。
+func TestEnvSortWithoutTargetMovesSourceToEndOfItsBucket(t *testing.T) {
+	testutil.SetupTestEnv(t)
+
+	engine := newProtectedRouter()
+	user := testutil.MustCreateUser(t, "env-sort-null-target", "operator")
+	token := testutil.MustCreateAccessToken(t, user.Username, user.Role)
+	headers := map[string]string{"Authorization": "Bearer " + token}
+
+	p1 := &model.EnvVar{Name: "P1", Value: "1", Enabled: true, SortOrder: 1, Position: 1000}
+	p2 := &model.EnvVar{Name: "P2", Value: "2", Enabled: true, SortOrder: 1, Position: 2000}
+	a := &model.EnvVar{Name: "A", Value: "3", Enabled: true, Position: 1000}
+	b := &model.EnvVar{Name: "B", Value: "4", Enabled: true, Position: 2000}
+	c := &model.EnvVar{Name: "C", Value: "5", Enabled: true, Position: 3000}
+	mustCreateEnvVars(t, p1, p2, a, b, c)
+
+	steps := []struct {
+		body string
+		want []string
+	}{
+		// 不带 target_id 这个键：普通项移到普通区末尾
+		{fmt.Sprintf(`{"source_id":%d}`, a.ID), []string{"P1", "P2", "B", "C", "A"}},
+		// 显式写 null：同上
+		{fmt.Sprintf(`{"source_id":%d,"target_id":null}`, b.ID), []string{"P1", "P2", "C", "A", "B"}},
+		// 置顶项：移到置顶区末尾，仍是置顶（不会被甩进普通区）
+		{fmt.Sprintf(`{"source_id":%d,"target_id":null}`, p1.ID), []string{"P2", "P1", "C", "A", "B"}},
+		// target 为空时 position 不起作用：普通源带 after 也还是本桶末尾
+		{fmt.Sprintf(`{"source_id":%d,"target_id":null,"position":"after"}`, c.ID), []string{"P2", "P1", "A", "B", "C"}},
+		// 置顶源带 after 同理：APP v1.4.0 把置顶项拖到置顶区末尾时发的就是这个请求
+		{fmt.Sprintf(`{"source_id":%d,"target_id":null,"position":"after"}`, p2.ID), []string{"P1", "P2", "A", "B", "C"}},
+	}
+	for _, step := range steps {
+		rec := performJSONRequest(engine, http.MethodPut, "/api/v1/envs/sort", step.body, headers, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d, body=%s", step.body, rec.Code, rec.Body.String())
+		}
+		assertEnvListOrder(t, engine, token, step.want...)
+	}
+	for _, pinned := range []*model.EnvVar{p1, p2} {
+		if stored := reloadEnvVar(t, pinned.ID); stored.SortOrder != 1 {
+			t.Fatalf("%s 移到置顶区末尾后应仍是置顶，got sort_order=%d", pinned.Name, stored.SortOrder)
+		}
+	}
 }
 
 // #131：PUT /envs/:id 可写 position（契约 C5，桶内排序值）：值变化才写入，不传不动，非法值 400。

@@ -546,10 +546,12 @@ interface EnvSeed {
   group: string
   enabled?: boolean
   pinned?: boolean
+  important?: boolean
 }
 
 /**
  * 22 条环境变量（去重后 20 个不同的变量名），覆盖 6 个分组 + 凭据类的脱敏样本。
+ * 其中 3 条标为「重要」（APP #16）：TZ 同时置顶，用来看两枚标签并排；另两条是脚本依赖的配置类变量。
  * 分组依次是：通用 4 条、通知 5 条、备份 3 条、多账号 3 条、存储 4 条、监控 3 条
  * （S3_ENDPOINT / S3_BUCKET 的 group 写成「存储,备份」，同时算进这两个分组，不额外新增分组）。
  *
@@ -563,12 +565,12 @@ interface EnvSeed {
  * 就算是编的字符串，也不要写成看起来像真 key 的样子。
  */
 const ENV_SEEDS: EnvSeed[] = [
-  { name: 'TZ', value: 'Asia/Shanghai', remarks: '容器与脚本统一时区', group: '通用', pinned: true },
+  { name: 'TZ', value: 'Asia/Shanghai', remarks: '容器与脚本统一时区', group: '通用', pinned: true, important: true },
   { name: 'LOG_LEVEL', value: 'info', remarks: '脚本日志级别：debug/info/warn/error', group: '通用', pinned: true },
   { name: 'REQUEST_TIMEOUT', value: '10', remarks: '脚本内 HTTP 请求超时（秒）', group: '通用' },
   { name: 'HTTP_PROXY', value: 'http://127.0.0.1:7890', remarks: '仅拉取外部数据源时使用', group: '通用', enabled: false },
 
-  { name: 'NOTIFY_WEBHOOK_URL', value: 'https://hooks.example.com/services/T000000/B000000/****************', remarks: 'lib/notify.py 统一出口', group: '通知' },
+  { name: 'NOTIFY_WEBHOOK_URL', value: 'https://hooks.example.com/services/T000000/B000000/****************', remarks: 'lib/notify.py 统一出口', group: '通知', important: true },
   { name: 'SMTP_HOST', value: 'smtp.example.com', remarks: '运维告警邮件', group: '通知' },
   { name: 'SMTP_PORT', value: '465', remarks: 'SSL 端口', group: '通知' },
   { name: 'SMTP_USER', value: 'ops-bot@example.com', remarks: '发件账号', group: '通知' },
@@ -576,7 +578,7 @@ const ENV_SEEDS: EnvSeed[] = [
 
   { name: 'BACKUP_TARGET_DIR', value: '/opt/app/backups', remarks: '本地归档目录', group: '备份' },
   { name: 'BACKUP_RETENTION_DAYS', value: '14', remarks: '本地归档保留天数', group: '备份' },
-  { name: 'BACKUP_ENCRYPT_KEY', value: 'bk_live_****************', remarks: '归档加密口令', group: '备份' },
+  { name: 'BACKUP_ENCRYPT_KEY', value: 'bk_live_****************', remarks: '归档加密口令', group: '备份', important: true },
 
   // 刻意造的三条**同名**变量（多账号场景）。面板允许同名，运行时会按 name 分组用 & 拼给脚本，
   // v3.2.5 的「按变量名筛选」就是为这种场景做的 —— 少了它们，演示站的变量名下拉全是 (1)，
@@ -625,6 +627,7 @@ function buildEnvs(now: number): DemoEnvVar[] {
       position,
       sort_order: sortOrder,
       group: seed.group,
+      important: seed.important ?? false,
       created_at: iso(createdAt),
       updated_at: iso(createdAt + 3 * DAY_MS),
     }

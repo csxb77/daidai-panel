@@ -137,6 +137,8 @@ export interface DemoEnvVar {
   sort_order: number
   /** 逗号分隔的分组串，接口下发时会顺带拆成 groups 数组 */
   group: string
+  /** 「重要」标记（APP #16），toEnvDict 原样带出，与服务端 ToDict 一样永远有这个键 */
+  important: boolean
   created_at: string
   updated_at: string
 }

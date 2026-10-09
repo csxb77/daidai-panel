@@ -154,8 +154,9 @@ func appendEnvToSortBucket(tx *gorm.DB, env *model.EnvVar, sortOrder int) error 
 
 // reorderEnvWithinSortBucket 把 source 挪到同一个置顶桶里 target 的前面（insertAfter 时是后面），再把整桶重编号。
 //
-// targetID 为 nil 表示移到桶末尾（老客户端的写法，保留）。insertAfter 对应 PUT /envs/sort 的 position:"after"，
-// 与 PUT /tasks/sort 同名同义（契约 C4）：前端落在可见列表最后一行时发「插到上一行之后」，
+// targetID 为 nil 表示移到 source 所在桶的末尾，此时不看 insertAfter。这是对外文档化的契约（apiData.ts「不传 target_id 表示移到本区末尾」），
+// APP v1.4.0 起在没有筛选时拖到可见末尾就靠它，由 TestEnvSortWithoutTargetMovesSourceToEndOfItsBucket 钉住，别改语义。
+// insertAfter 对应 PUT /envs/sort 的 position:"after"，与 PUT /tasks/sort 同名同义（契约 C4）：网页落在可见列表最后一行时发「插到上一行之后」，
 // 不必再靠「target 为空 = 整桶末尾」—— 那样分页 / 筛选下拖到本页底部，会越过所有没显示的项被甩到整桶最后，
 // 置顶项也永远拖不到置顶区末尾（落点的下一行必然是普通项，会被当成跨区拦下来，issue #131）。
 func reorderEnvWithinSortBucket(tx *gorm.DB, sourceID uint, targetID *uint, insertAfter bool) error {
@@ -311,6 +312,8 @@ func (h *EnvHandler) Create(c *gin.Context) {
 		Remarks string   `json:"remarks"`
 		Group   string   `json:"group"`
 		Groups  []string `json:"groups"`
+		// 新建时可以直接标为重要（APP #16）；不传就是 false，请求与以前逐字节一致。不是布尔时整个请求 400。
+		Important bool `json:"important"`
 	}
 
 	var items []envItem
@@ -365,6 +368,7 @@ func (h *EnvHandler) Create(c *gin.Context) {
 			Enabled:   true,
 			SortOrder: envNormalSortOrder,
 			Position:  nextPos,
+			Important: item.Important,
 		}
 
 		if err := database.DB.Create(&env).Error; err != nil {
@@ -565,10 +569,12 @@ type updateEnvRequest struct {
 	Groups  *[]string `json:"groups"`
 	Enabled *bool     `json:"enabled"`
 	// Position 是桶内排序值（越小越靠前；置顶区与普通区各自比较），#131 起允许手填（契约 C5）。
-	// 可选：App 只发 name/value/remarks/group(s)，不传就不动。拖拽排序会把整桶重编号成 1000/2000/…，
-	// 手填的值只保证相对顺序。
+	// 可选：App 的编辑只发 name/value/remarks/group(s)，详情弹层的「标为重要 / 取消重要」只发 important，不传就不动。
+	// 拖拽排序会把整桶重编号成 1000/2000/…，手填的值只保证相对顺序。
 	// 🔴 与 PUT /envs/sort 请求体里的 position（"before" / "after" 落点）同名不同义，别混用。
 	Position *float64 `json:"position"`
+	// Important 是「重要」标记（APP #16）：指针，不传不动；false 是合法修改（取消重要）。不是布尔时绑定就 400、什么都不写。
+	Important *bool `json:"important"`
 }
 
 func (h *EnvHandler) Update(c *gin.Context) {
@@ -621,6 +627,11 @@ func (h *EnvHandler) Update(c *gin.Context) {
 	}
 	if req.Enabled != nil && *req.Enabled != env.Enabled {
 		updates["enabled"] = *req.Enabled
+	}
+	// 「重要」标记：值变了才写（全部没变时照旧回「未检测到字段变更」）。
+	// 网页编辑弹窗没拨开关、App 的编辑请求都不带这个键，所以整体回写不会冲掉别处刚改的标记。
+	if req.Important != nil && *req.Important != env.Important {
+		updates["important"] = *req.Important
 	}
 	if req.Position != nil {
 		// 排序值必须是有限数。JSON 本身写不出 NaN / Inf（1e999 这类溢出值在上面绑定时就报错了），这里是兜底：
@@ -825,7 +836,8 @@ func (h *EnvHandler) Sort(c *gin.Context) {
 		SourceID uint  `json:"source_id" binding:"required"`
 		TargetID *uint `json:"target_id"`
 		// Position 是落点：插到 target 的前面还是后面，与 PUT /tasks/sort 同名同义（契约 C4）。
-		// 只认 "after"，空串和拼错的值一律按 "before"，App 只传 source/target 不受影响。
+		// 只认 "after"，空串和拼错的值一律按 "before"；不带这个键（老脚本、v1.3.9 及以前的 APP）同样按 before。
+		// target 为空时不看它：一律移到 source 所在桶的末尾（见 reorderEnvWithinSortBucket）。
 		// 🔴 与 env 行上的数值字段 position（桶内排序值，PUT /envs/:id 可写）同名不同义，别混用。
 		Position string `json:"position"`
 	}
@@ -962,6 +974,8 @@ func (h *EnvHandler) ExportAll(c *gin.Context) {
 			"group":   e.Group,
 			"groups":  model.SplitEnvGroups(e.Group),
 			"enabled": e.Enabled,
+			// 「重要」标记永远带上（false 也带）；导入端只升不降，旧文件里的 false 不会取消标记（APP #16）。
+			"important": e.Important,
 		}
 	}
 
@@ -1112,6 +1126,9 @@ func (h *EnvHandler) Import(c *gin.Context) {
 
 		remarks, _ := item["remarks"].(string)
 		group, hasGroup := envGroupValueFromImportItem(item)
+		// 「重要」标记只认 JSON 布尔 true（APP #16），字符串 "true" 不算，与下面读 enabled 的口径一致。
+		// merge 命中已有变量时只升不降，见下方。
+		important, _ := item["important"].(bool)
 
 		enabled := true
 		if statusVal, ok := item["status"].(float64); ok {
@@ -1134,6 +1151,13 @@ func (h *EnvHandler) Import(c *gin.Context) {
 				if hasGroup {
 					updates["group"] = group
 				}
+				// 只升不降：文件里是 true 才写 true；false / 没这个键一律不动。
+				// 否则拿一份旧导出文件（老 APP 会把每条的 "important":false 原样带回）merge 一次，
+				// 用户后来标的重要变量就被静默取消了。取消标记只能在界面上显式操作，或显式 PUT {"important":false}。
+				// 🔴 别「顺手统一」成上面 hasGroup 那种「有键就写」的写法。
+				if important {
+					updates["important"] = true
+				}
 				database.DB.Model(&existing).Updates(updates)
 				imported++
 				continue
@@ -1154,10 +1178,21 @@ func (h *EnvHandler) Import(c *gin.Context) {
 			Enabled:   enabled,
 			SortOrder: envNormalSortOrder,
 			Position:  nextPos,
+			// 新建的行（merge 没命中、replace 清空后）按文件原样写「重要」标记。
+			Important: important,
 		}
 		if err := database.DB.Create(&env).Error; err != nil {
 			errors = append(errors, fmt.Sprintf("item %d: %s", i+1, err.Error()))
 			continue
+		}
+		if !enabled {
+			// EnvVar.Enabled 带 `default:true`：GORM 插入时会把零值 false 换成默认值 true 写进 INSERT，
+			// 文件里禁用的变量（enabled:false、青龙 status:1）导入后会被静默重新启用，「导出 → 替换导入」一圈禁用的全活了。
+			// 照 UpsertByName、restoreEnvVars 的做法，建完再补写一次 false（merge 命中走的是 map 更新，不受影响）。
+			// 补写失败时这一行已经建好（是启用的），照样算进导入数，同时在 errors 里点名，让调用方知道禁用状态没写进去。
+			if err := database.DB.Model(&model.EnvVar{}).Where("id = ?", env.ID).Update("enabled", false).Error; err != nil {
+				errors = append(errors, fmt.Sprintf("item %d: 已导入，但没能设为禁用: %s", i+1, err.Error()))
+			}
 		}
 		imported++
 	}

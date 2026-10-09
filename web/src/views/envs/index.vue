@@ -42,6 +42,8 @@ type EnvFormModel = {
   groups: string[]
   // 排序值（#131，即接口里的 position）。编辑时带进弹窗；弹窗只在用户真改过时才把它放进 save 的数据里
   position?: number | null
+  // 「重要」标记（APP #16）。弹窗规则：新建开着才带 true，编辑拨过开关才带
+  important?: boolean
 }
 
 const envList = ref<any[]>([])
@@ -695,7 +697,7 @@ function handlePageSizeSelect(value: string) {
 
 function openCreate() {
   editDialogMode.value = 'create'
-  currentEditEnv.value = { id: 0, name: '', value: '', remarks: '', group: '', groups: [] }
+  currentEditEnv.value = { id: 0, name: '', value: '', remarks: '', group: '', groups: [], important: false }
   showEditDialog.value = true
 }
 
@@ -707,7 +709,9 @@ function openDuplicate(row: any) {
     value: '',
     remarks: row.remarks || '',
     group: row.group || '',
-    groups: normalizeGroupList(row.groups?.length ? row.groups : row.group)
+    groups: normalizeGroupList(row.groups?.length ? row.groups : row.group),
+    // 复制同名变量多半是加一个账号，账号类变量不该跟着变成「重要」，所以固定关着
+    important: false
   }
   showEditDialog.value = true
 }
@@ -736,7 +740,8 @@ async function openEdit(row: any) {
     remarks: row.remarks || '',
     group: row.group || '',
     groups: normalizeGroupList(row.groups?.length ? row.groups : row.group),
-    position
+    position,
+    important: row.important === true
   }
   showEditDialog.value = true
 }
@@ -762,6 +767,10 @@ async function handleSave(data: EnvFormModel | EnvFormModel[]) {
       // 排序值（契约 C5）：弹窗只在用户真改过时才把 position 放进 data，有就带、没有就不带
       if (typeof data.position === 'number') {
         payload.position = data.position
+      }
+      // 「重要」同理：弹窗只在用户拨过开关时才放进 data，没拨就不带，免得冲掉别处刚改的标记
+      if (typeof data.important === 'boolean') {
+        payload.important = data.important
       }
       await envApi.update(data.id, payload)
       ElMessage.success('更新成功')
@@ -814,15 +823,40 @@ async function handleToggleTop(row: any) {
   }
 }
 
-async function handleDelete(id: number) {
+// 标为重要 / 取消重要（APP #16）：可撤销，不弹确认。写法照 handleToggleTop；只发 important 这一个键
+async function handleToggleImportant(row: any) {
   try {
-    await ElMessageBox.confirm('确定要删除该环境变量吗？', '确认删除', { type: 'warning' })
-    await envApi.delete(id)
+    await envApi.update(row.id, { important: !row.important })
+    ElMessage.success(row.important ? '已取消重要' : '已标为重要')
+    void loadData()
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '操作失败')
+  }
+}
+
+async function handleDelete(row: any) {
+  // 确认与请求分成两段 try：以前一个 catch 把「点了取消」和「删除失败」一起吞掉，删失败时界面上什么都不显示
+  try {
+    if (row.important) {
+      // 重要变量换一个专门的确认框（APP #16），点名变量。服务端不拦删除，这一道确认就是全部的防线
+      await ElMessageBox.confirm(`「${row.name}」已标记为重要变量，删除后无法恢复。确定要删除吗？`, '删除重要变量', {
+        type: 'warning',
+        confirmButtonText: '仍要删除'
+      })
+    } else {
+      await ElMessageBox.confirm('确定要删除该环境变量吗？', '确认删除', { type: 'warning' })
+    }
+  } catch {
+    // 点了取消
+    return
+  }
+  try {
+    await envApi.delete(row.id)
     ElMessage.success('删除成功')
     void loadData()
     void loadNames()
-  } catch {
-    // cancelled
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '删除失败')
   }
 }
 
@@ -856,17 +890,20 @@ async function handleToggle(row: any) {
  * 移动卡片上「编辑」是末行的一级按钮，同样不进菜单。
  * 「删除」不可撤销，必须留在菜单里并加 divided + danger，绝不能占主体位置。
  * 「置顶 / 取消置顶」是同一个 handleToggleTop 的两面，用 visible 按 row 状态互斥，
- * 避免出现「已置顶的行菜单里还挂着置顶」。
+ * 避免出现「已置顶的行菜单里还挂着置顶」。「标为重要 / 取消重要」（handleToggleImportant）同理。
  *
  * 🔴 这里【不要】再补「启用 / 禁用」：它在两端都已经外置成一级按钮（谁上了一级谁就不在菜单里），
  * 补进来就会变成「点了外面的禁用，展开菜单里还挂着一个禁用」。
  */
 function buildEnvActionItems(row: any): SplitButtonItem[] {
   const pinned = isTopPinned(row)
+  const important = row.important === true
   return [
     { key: 'duplicate', label: '复制同名变量' },
     { key: 'top', label: '置顶', visible: !pinned },
     { key: 'cancel-top', label: '取消置顶', visible: pinned },
+    { key: 'important', label: '标为重要', visible: !important },
+    { key: 'cancel-important', label: '取消重要', visible: important },
     { key: 'delete', label: '删除', danger: true, divided: true }
   ]
 }
@@ -874,20 +911,43 @@ function buildEnvActionItems(row: any): SplitButtonItem[] {
 function onEnvAction(key: string, row: any) {
   if (key === 'duplicate') openDuplicate(row)
   else if (key === 'top' || key === 'cancel-top') void handleToggleTop(row)
-  else if (key === 'delete') void handleDelete(row.id)
+  else if (key === 'important' || key === 'cancel-important') void handleToggleImportant(row)
+  else if (key === 'delete') void handleDelete(row)
 }
 
 async function handleBatchDelete() {
-  if (selectedIds.value.length === 0) return
+  // 只看当前列表里真实存在的勾选行（与「已选 N 项」同一口径），这样才知道哪些是重要变量
+  const selectedRows = envList.value.filter((row) => selectedIdSet.value.has(row.id))
+  if (selectedRows.length === 0) return
+  // 批量删除默认跳过重要变量（APP #16）：服务端不拦，所以在这里剔除，只发普通变量的 id
+  const skipped = selectedRows.filter((row) => row.important === true).length
+  const deletable = selectedRows.filter((row) => row.important !== true)
+  if (deletable.length === 0) {
+    // 全是重要变量：不发请求、不清勾选。轻量档下行菜单的单删照样能删重要变量（多一道确认），文案照此写
+    ElMessage.warning('选中的都是重要变量，没有可删除的。确需删除请在行菜单里逐个删除，或先取消「重要」标记')
+    return
+  }
+  // 确认与请求分成两段 try（同 handleDelete）：删除失败不再被当成「点了取消」吞掉
   try {
-    await ElMessageBox.confirm(`确定要删除选中的 ${selectedIds.value.length} 个环境变量吗？`, '批量删除', { type: 'warning' })
-    await envApi.batchDelete(selectedIds.value)
-    ElMessage.success('批量删除成功')
+    await ElMessageBox.confirm(
+      skipped > 0
+        ? `选中的 ${selectedRows.length} 个环境变量里有 ${skipped} 个是重要变量，将跳过它们，只删除其余 ${deletable.length} 个。`
+        : `确定要删除选中的 ${selectedRows.length} 个环境变量吗？`,
+      '批量删除',
+      { type: 'warning', ...(skipped > 0 ? { confirmButtonText: `删除 ${deletable.length} 个` } : {}) }
+    )
+  } catch {
+    // 点了取消
+    return
+  }
+  try {
+    const res = await envApi.batchDelete(deletable.map((row) => row.id))
+    ElMessage.success(`${res.message || '批量删除成功'}${skipped > 0 ? `，已跳过 ${skipped} 个重要变量` : ''}`)
     clearTableSelection()
     void loadData()
     void loadNames()
-  } catch {
-    // cancelled
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '批量删除失败')
   }
 }
 
@@ -966,17 +1026,42 @@ function handleSelectionChange(rows: any[]) {
 }
 
 async function handleImport(payload: { envs: any[]; mode: string }) {
-  // 在途锁：JSON 体积大时导入耗时长，不锁按钮连点会把同一份数据导多遍
+  // 在途锁：JSON 体积大时导入耗时长，不锁按钮连点会把同一份数据导多遍；也挡住下面数数、确认期间的连点
   importSubmitting.value = true
   try {
+    if (payload.mode === 'replace') {
+      // 替换会先清空面板上的全部变量（含重要变量），以前点「导入」直接清空、没有二次确认（APP 早就有）。
+      // 列表是分页的、还可能带着筛选，当前页数不全，所以现拉一次不带筛选的全量来数重要变量（all=1 上限 5000 条）；
+      // 数不出来就不点名，确认照弹
+      let importantCount = 0
+      try {
+        const res = await envApi.list({ all: 1 })
+        importantCount = (res.data || []).filter((row: any) => row.important === true).length
+      } catch {
+        // 不点名
+      }
+      try {
+        await ElMessageBox.confirm(
+          `替换会先删除面板上的全部环境变量，再写入这 ${payload.envs.length} 条。` +
+            (importantCount > 0 ? `面板上 ${importantCount} 个重要变量也会被清空，` : '') +
+            '这份内容里没有的变量将无法找回。',
+          '替换导入',
+          { type: 'warning', confirmButtonText: '清空并导入' }
+        )
+      } catch {
+        // 点了取消：什么都不发，导入弹窗保持打开（finally 会解开在途锁）
+        return
+      }
+    }
     const res = await envApi.import(payload.envs, payload.mode)
     ElMessage.success(res.message)
     showImportDialog.value = false
     void loadData()
     void loadGroups()
     void loadNames()
-  } catch {
-    ElMessage.error('导入失败')
+  } catch (err: any) {
+    // 弹服务端原话（如「请求体过大（最大 1MB）」），以前一律只说「导入失败」
+    ElMessage.error(err?.response?.data?.error || '导入失败')
   } finally {
     importSubmitting.value = false
   }
@@ -1309,7 +1394,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
             'env-card--disabled': !row.enabled
           }"
         >
-          <!-- 首行：拖拽手柄 → 复选框 → 状态灯 → 变量名 → 分组 / 置顶小标签 → 右上角「···」。
+          <!-- 首行：拖拽手柄 → 复选框 → 状态灯 → 变量名 →「重要」标签 → 分组 / 置顶小标签 → 右上角「···」。
                手机上不再有「只看这个变量名」的放大镜：变量名筛选在移动端整体不提供（见移动端工具栏的注释），
                留着它，点一下就会造出一个手机上看不见、也关不掉的变量名筛选。桌面表格那颗照旧。 -->
           <div class="dd-mobile-card__head">
@@ -1338,6 +1423,13 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                  同挂 .env-name 是为了沿用等宽字体、主题色与禁用卡的降档规则；字号由卡片作用域里的覆盖交还给 16px。
                  单行省略，:title 挂全名。 -->
             <span class="env-name dd-mobile-card__name" :title="row.name">{{ row.name }}</span>
+            <!-- 「重要」标签（APP #16）刻意放在下面的标签组【外面】、紧跟变量名：标签组 flex-basis 是 0，
+                 变量名一长它就被挤成 0 宽、整组裁掉；置顶还有左缘橙条兜底，「重要」没有别的视觉通道，
+                 所以它自己 flex-shrink:0 常驻，宁可让变量名早一点出省略号。 -->
+            <span v-if="row.important" class="important-chip" title="重要变量：删除时会再确认一次">
+              <el-icon><Lock /></el-icon>
+              重要
+            </span>
             <!-- 没有分组时什么都不显示（不再写灰字「未分组」）；置顶除了这枚标签，卡片左缘还有橙色色条。 -->
             <div
               v-if="row.groups.length > 0 || isTopPinned(row)"
@@ -1358,7 +1450,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                 置顶
               </span>
             </div>
-            <!-- 「···」菜单与桌面操作列的 ▾ 同一份 buildEnvActionItems / onEnvAction：复制同名变量、置顶 / 取消置顶、删除 -->
+            <!-- 「···」菜单与桌面操作列的 ▾ 同一份 buildEnvActionItems / onEnvAction：复制同名变量、置顶 / 取消置顶、标为重要 / 取消重要、删除 -->
             <DdMoreMenu
               :items="buildEnvActionItems(row)"
               :aria-label="`${row.name} 的更多操作`"
@@ -1507,6 +1599,12 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                   <el-icon :size="14"><Search /></el-icon>
                 </el-button>
               </el-tooltip>
+              <!-- 「重要」（APP #16）排在「置顶」前面，两枚一起靠在最右缘（靠的是上面按钮的 margin-right:auto）。
+                   与置顶标签一样不计入本列 min-width：只在标记过的行出现，变量名照常收缩出省略号、title 挂全名。 -->
+              <span v-if="row.important" class="important-chip" title="重要变量：删除时会再确认一次">
+                <el-icon><Lock /></el-icon>
+                重要
+              </span>
               <span v-if="isTopPinned(row)" class="pinned-chip">
                 <el-icon><Top /></el-icon>
                 置顶
@@ -2054,6 +2152,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 }
 
 :deep(.env-table--compact .pinned-chip),
+:deep(.env-table--compact .important-chip),
 :deep(.env-table--compact .group-pill) {
   padding-top: 2px;
   padding-bottom: 2px;
@@ -2190,8 +2289,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   height: 6px;
 }
 
-// 置顶标签缩到与分组标签同一尺寸；配色与字重不动，仍是全页统一的置顶金色
-.env-card .pinned-chip {
+// 置顶 / 重要标签缩到与分组标签同一尺寸；配色与字重不动（置顶金、重要紫）
+.env-card .pinned-chip,
+.env-card .important-chip {
   height: 20px;
   padding: 0 7px;
   line-height: 1;
@@ -2319,7 +2419,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 // 与「值」列「文本 + 复制按钮」的排法一致。
 // 🔴 min-width:0 才是省略号能生效的真正前提（允许 flex 项收缩到 min-content 以下），别删；
 //    flex-shrink 保持默认的 1，所以名字变长时照样收缩出省略号。
-// 🔴 原来靠 flex:1 把「置顶」标签顶到右缘的效果没有丢，改由 .env-name-filter-btn 的
+// 🔴 原来靠 flex:1 把「重要」「置顶」标签顶到右缘的效果没有丢，改由 .env-name-filter-btn 的
 //    margin-right:auto 承担（见下条规则），两处要一起看。
 .env-name {
   min-width: 0;
@@ -2342,8 +2442,8 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
 .env-name-filter-btn {
   flex-shrink: 0;
   // 接手 .env-name 原来那份 flex:1 的活：本格的剩余空间全归这条 auto 边距，
-  // 于是按钮贴着名字、后面的「置顶」标签仍然靠在最右缘（与改动前逐像素一致）。
-  // 没有「置顶」标签的行看不出区别（空白本来就在右边），别当成冗余删掉。
+  // 于是按钮贴着名字、后面的「重要」「置顶」标签仍然靠在最右缘（与改动前逐像素一致）。
+  // 两枚标签都没有的行看不出区别（空白本来就在右边），别当成冗余删掉。
   margin-right: auto;
   color: var(--el-text-color-secondary);
   padding: 2px;
@@ -2351,8 +2451,9 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   transition: color var(--dd-motion-fast) var(--dd-ease-standard);
 }
 
-// 置顶标签：纯色底 + 1px 边框（原胶囊渐变与内描边已去掉）
-.pinned-chip {
+// 置顶 / 重要标签：纯色底 + 1px 边框（原胶囊渐变与内描边已去掉），两枚同尺寸同形状，只差配色
+.pinned-chip,
+.important-chip {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -2363,9 +2464,21 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
   border-radius: var(--dd-radius-control);
   font-size: 12px;
   font-weight: 700;
+}
+
+.pinned-chip {
   color: #8a4b00;
   background: #ffd66b;
   border: 1px solid rgba(196, 118, 0, 0.28);
+}
+
+// 重要标签（APP #16）：紫色是语义识别色（同置顶金色，design-system §1 硬规则 1 允许写死），
+// 本页别处没用过紫色。和置顶一样明暗两态不变（一枚浅色贴纸）：字 #6d28d9 压浅紫底约 6:1，过 AA。
+// 颜色之外还有锁图标 +「重要」两个字，不只靠颜色传达状态。
+.important-chip {
+  color: #6d28d9;
+  background: #ede9fe;
+  border: 1px solid rgba(139, 92, 246, 0.35);
 }
 
 .env-value-text,

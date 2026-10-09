@@ -18,7 +18,7 @@ import (
 
 func (t *toolset) registerEnvBatchReadTools(s *mcp.Server) {
 	addReadTool(s, "export_envs", "导出环境变量",
-		"不分页导出环境变量（名称、值、备注、分组、启用状态），格式与 import_envs 的 envs 参数一致。"+
+		"不分页导出环境变量（名称、值、备注、分组、启用状态、是否重要），格式与 import_envs 的 envs 参数一致。"+
 			"名称像凭据的变量值会被遮蔽（带 value_masked: true），遮蔽后的值不能再拿去导入。变量很多时输出可能超过 64KB 被截断，可用 ids 分批导出。",
 		t.exportEnvs)
 }
@@ -29,7 +29,8 @@ func (t *toolset) registerEnvBatchWriteTools(s *mcp.Server) {
 		writeHints{destructive: true, idempotent: true}, t.batchEnvAction)
 	addWriteTool(s, "import_envs", "导入环境变量",
 		"批量导入环境变量。mode=merge（默认）：名称与备注都相同的已有变量会被覆盖值、分组与启用状态，其余新增；"+
-			"mode=replace：先删除面板上的全部环境变量再导入，原有变量不可恢复。导入前会先检查变量名格式，并拒绝 export_envs / list_envs 输出的遮蔽值。",
+			"mode=replace：先删除面板上的全部环境变量再导入，原有变量不可恢复。导入前会先检查变量名格式，并拒绝 export_envs / list_envs 输出的遮蔽值。"+
+			"条目可带 important：merge 只会把已有变量标为重要、不会取消标记；replace 会连重要变量一起删除。",
 		writeHints{destructive: true}, t.importEnvs)
 }
 
@@ -64,7 +65,7 @@ func (t *toolset) exportEnvs(ctx context.Context, in exportEnvsInput) (any, erro
 			continue
 		}
 		// 与 list_envs 同一套遮蔽：导出同样是 MCP 的输出，凭据不能因为换了个工具就进了 AI 的上下文。
-		out := pickFields(item, "name", "remarks", "group", "enabled")
+		out := pickFields(item, "name", "remarks", "group", "enabled", "important")
 		value := stringValue(item["value"])
 		if IsSensitiveEnvName(stringValue(item["name"])) {
 			out["value"] = MaskEnvValue(value)
@@ -95,6 +96,8 @@ type importEnvItem struct {
 	Remarks string `json:"remarks,omitempty" jsonschema:"备注；merge 模式下按「名称 + 备注」判断是否已存在"`
 	Group   string `json:"group,omitempty" jsonschema:"分组（多个分组用英文逗号分隔）"`
 	Enabled *bool  `json:"enabled,omitempty" jsonschema:"是否启用，默认 true"`
+	// 「重要」标记（APP #16）：只有 true 会转发给面板，见 importEnvs。
+	Important bool `json:"important,omitempty" jsonschema:"是否标为重要变量；merge 模式下只会把已有变量标为重要，不会取消标记"`
 }
 
 type importEnvsInput struct {
@@ -167,6 +170,10 @@ func (t *toolset) importEnvs(ctx context.Context, in importEnvsInput) (any, erro
 		}
 		if env.Enabled != nil {
 			item["enabled"] = *env.Enabled
+		}
+		// 只转发 true：面板 merge 时只升不降、新建默认 false，转发 false 没有任何效果。
+		if env.Important {
+			item["important"] = true
 		}
 		items = append(items, item)
 	}

@@ -19,6 +19,7 @@ type EnvVar struct {
 	Position  float64   `gorm:"default:10000;index" json:"position"` // 只能写 10000：写成 10000.0 与 DDL 对不上，每次 AutoMigrate 都整表重建（#156，见 database.go 补列处）
 	SortOrder int       `gorm:"default:0" json:"sort_order"`
 	Group     string    `gorm:"size:512;default:'';index" json:"group"`
+	Important bool      `gorm:"default:false" json:"important"` // 「重要」标记（APP #16）：只给客户端做醒目显示与删除前确认，服务端不拦删除；ToDict 永远带它，别加 omitempty
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -78,6 +79,7 @@ func (e *EnvVar) ToDict() map[string]interface{} {
 		"sort_order": e.SortOrder,
 		"group":      e.Group,
 		"groups":     SplitEnvGroups(e.Group),
+		"important":  e.Important,
 		"created_at": e.CreatedAt,
 		"updated_at": e.UpdatedAt,
 	}
