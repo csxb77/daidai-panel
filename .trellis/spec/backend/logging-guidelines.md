@@ -52,11 +52,15 @@
 **是什么**
 
 - **启动慢步骤**：`server/main.go` 的 `logSlowStartupStep(step, started)`，某一步用时 ≥ `startupStepSlowThreshold`（3 秒）才打一行
-  `[启动耗时] <步骤> 用时 <耗时>`（耗时按 10ms 取整，Go `Duration` 写法，如 `14.27s`）。目前计时五步（按 main 里的先后）：
-  `初始化配置与数据库`（`appboot.InitWithConfig`）、`启动校验已安装依赖`（`verifyInstalledDeps`）、`整理通知辅助脚本（遍历脚本目录）`、
-  `隔离脚本目录污染项、清理残留软链（遍历脚本目录）`（`service.QuarantineUnexpectedScriptEntriesOnStartup`：它末尾要遍历整棵脚本目录找悬空的 `node_modules` 软链，慢盘上也可能几秒）、
-  `初始化任务调度器`（`service.InitSchedulerV2`）。
+  `[启动耗时] <步骤> 用时 <耗时>`（耗时按 10ms 取整，Go `Duration` 写法，如 `14.27s`）。目前计时三步（按 main 里的先后）：
+  `初始化配置与数据库`（`appboot.InitWithConfig`）、`启动校验已安装依赖`（`verifyInstalledDeps`）、`初始化任务调度器`（`service.InitSchedulerV2`）。
   - 被计时的函数**保持直接调用**，不要包成传函数值的 helper：`service/startup_wiring_test.go` 按 AST 核对 main 里的调用顺序。
+  - v3.3.6（#158）起，两遍整棵脚本目录的遍历——`service.QuarantineUnexpectedScriptEntriesOnStartup`（隔离顶层污染目录、清悬空的面板式 `node_modules` 软链）
+    与 `service.CleanupManagedHelperCopiesUnderRoot`（清子目录里旧版面板留下的通知脚本副本）——放进 main 里同一个后台 `go` 协程，**不计时**：
+    v3.3.5 的两个步骤名 `整理通知辅助脚本（遍历脚本目录）`、`隔离脚本目录污染项、清理残留软链（遍历脚本目录）` 不会再出现。
+    后台只打它们原有的逐项与出错行（`unexpected script entry quarantined: …`、`leftover node_modules link removed: …`、`cleanup duplicated notify helpers failed: …`，
+    以及各自的 `… failed: …`）。不要给这个协程补耗时行：它不挡监听，耗时行只会被读成「启动慢」。根目录两份 helper（`service.EnsureBuiltinNotifyHelpers`）照旧同步准备，同样不计时。
+    放置与时序的契约见 `quality-guidelines.md`「场景：脚本目录污染隔离与 Windows 资源监控」。
   - 启动校验内部另有分类型的 `[启动校验] 校验 N 条已安装依赖耗时 …`，同样是 3 秒门槛，口径见 `quality-guidelines.md`「契约 S1」。
 - **关停**（`shutdownPanel` 及它调用的各步，标准库 `log`，进面板日志）：沿用既有的英文短句。正常路径打入口一行、`scheduler v2 stopped`、`backup scheduler stopped`、
   `subscription scheduler stopped`、`database closed`、`panel shutdown finished in <耗时>`（毫秒取整）；其余的行只在真发生时出现：
@@ -64,12 +68,19 @@
 | 时机 | 日志行 |
 |---|---|
 | 进入关停 | `received <signal>, shutting down panel` / `panel exit requested (code=N), shutting down panel` / `server failed: <err>` |
-| 杀任务 | `interrupted N running task process(es) during panel shutdown` |
+| 杀任务 | `interrupted N running task process(es) during panel shutdown`（N = 这次终止的任务进程数，含正在跑的钩子） |
+| 杀任务时有进程组扛过 TERM 宽限、被强制 KILL（v3.3.6，#159） | `N task process group(s) still running 2s after SIGTERM, killed`：只有真 KILL 了才打（N = 被 KILL 的进程组数），紧接着才是上一行；Magisk 部署下永远不出现（见表下） |
 | 某一步到点放手 | `scheduler v2: cron callbacks still running after 1s, not waiting for them`、`timed out waiting for scheduler workers to finish`、`timed out waiting for running task cleanup`、`backup scheduler stopped (a scheduled backup is still running, not waiting for it)`、`subscription scheduler stopped (a scheduled pull is still running, not waiting for it)`、`server graceful shutdown failed: <err>`、`close database failed: <err>` |
 | 截止时兜底 | `revoked N script token(s) of unsettled task run(s) during shutdown`、`marked N active task(s) as interrupted during shutdown` |
 | 总兜底（随后 `os.Exit(1)`） | `面板关停超过 8s 仍未完成，强制退出` |
 | 下次启动 | `removed N leftover task temp entries from <dir>`（真删了才打） |
 
+- **关停终止任务的宽限**（v3.3.6，#159 修复 B）：`StopAllRunningTasks` 先对所有登记的进程组（任务进程加正在跑的钩子）发 SIGTERM，
+  共用一个 `shutdownTermGrace`（2 秒）截止时间逐组等，到点还在的统一 SIGKILL。`… still running 2s after SIGTERM, killed` 只在 `killed > 0` 时打，
+  `2s` 是这次用的宽限（`termGrace`，Go `Duration` 写法）；它是事后判断「关停为什么多花了 2 秒」的唯一依据。
+  **Magisk 部署**（`playwrightMagiskRuntime()`：`DAIDAI_MAGISK_SHELL_VERSION` 非空，或 `IsMagiskModuleRuntime()`）关停时宽限为 0，
+  所有进程组立即整组 SIGKILL（与 v3.3.5 一致：模块动作按钮「停止」是 `kill -TERM` 面板、`sleep 2`、还在就 `kill -KILL`，装不下 SignalStop 的 1 秒加 2 秒宽限），
+  所以这一行在 Magisk 上永远不会打，杀任务时只有 `interrupted …` 那一行。手动 / 批量 / 定时停止、超时、调试运行停止不走这里，在 Magisk 上照旧先 TERM、5 秒后才 KILL。
 - **entrypoint**：`log()` / `fail()` 每行以 `YYYY/MM/DD HH:MM:SS`（`date '+%Y/%m/%d %H:%M:%S'`）开头，与 Go `log` 的默认格式一致，后面跟 `[entrypoint]` / `[entrypoint][ERROR]`；
   收到停止信号时打 `收到停止信号，等待面板收尾...`。
 
@@ -88,8 +99,81 @@
 2026/10/05 21:03:11 received terminated, shutting down panel
 2026/10/05 21:03:11 interrupted 2 running task process(es) during panel shutdown
 ……
-2026/10/05 21:03:11 panel shutdown finished in 18ms
+2026/10/05 21:03:11 panel shutdown finished in 64ms
 ```
+
+（v3.3.6 起终止任务先 TERM，等组退空是每 50ms 查一次，有任务在跑时关停通常要几十毫秒；有进程组扛满 2 秒宽限时，`interrupted …` 前面会多一行 `still running … killed`，总耗时也多出约 2 秒。）
+
+## 约定：面板日志接口只留尾部（v3.3.6，#159 修复 E）
+
+**是什么**
+
+- `GET /api/v1/system/panel-log`（`handler/system.go` 的 `PanelLog`，`RequireUserToken` + `RequireAdmin`）参数不变：`lines`（1~10000，其它值回落 100）、
+  `keyword`（子串匹配）、`level`（最低级别，`service.MatchPanelLogLevel`）。
+- 照旧用 `bufio.Scanner`（`Buffer(64KiB, 1MiB)`）**把整个 `panel.log` 从头扫一遍**，但只用一个长度为 `lines` 的环形缓冲留命中行：
+  第 `total` 条命中行写进 `ring[total%lines]`，扫完按文件顺序取最后 `min(total, lines)` 行。内存只和 `lines`（≤ 10000 行）有关，与文件大小无关；扫描耗时不变。
+- 响应与改动前逐字节一致：`{"data":{"logs":[…],"total":N,"level":"<原样回传>"}}`。
+  - `total` 是**全文件**命中筛选的行数（网页「共 N 行」），不是这次返回了几行；
+  - 一行都没命中时 `logs` 是 `null`，不是 `[]`；
+  - 文件不存在时仍是 `{"data":{"logs":[]}}`，没有 `total` / `level`；
+  - 某一行超过 1MiB 时 scanner 停在那里、之后的行静默不计（不查 `scanner.Err()`），与改动前相同，要改得单独立项并补用例。
+- 网页设置页只在「面板日志」子标签激活且页面可见时每 3 秒轮询（`usePanelLogViewer(isTabActive)`）；APP 只读 `logs`。
+
+**为什么**
+
+- 改动前整份读进 `[]string` 再取尾，panel.log 越大峰值越高（#159 调研：合成 100MB 文件时 RSS 212–282MB），设置页还会在后台每 3 秒拉一次。
+- 刻意照旧整文件扫描、只省内存：改成只读文件末尾一段的话，`total` 变成「末尾那段里的命中数」，按关键词 / 级别筛选也找不到前面的命中。
+
+**必须有的测试**：`handler/system_panel_log_test.go` 的 `TestPanelLogKeepsTailAndWholeFileTotal`——用例里的 oracle 就是改动前的算法（整份读、筛选、取尾）。
+25003 行加一行 70KiB 长行，覆盖 `lines=100`、`lines=10000`（环形缓冲绕好几圈）、`level=error`、关键词命中不足 `lines`（不绕圈）、关键词无命中（`logs` 为 `null`、`total` 为 0）、
+`lines=0` / `20000` 回落 100、关键词加级别；`logs` 按 JSON 原文逐项比，再比 `total` 与 `level`。文件不存在时响应体原样是 `{"data":{"logs":[]}}`。
+
+**错误写法**
+
+```go
+// 错误一：为了省时间 Seek 到文件末尾只读一段 —— total 不再是全文件命中数，网页「共 N 行」变小，前面的命中也筛不出来
+// 错误二：没命中时返回空切片 —— logs 从 null 变成 []，与改动前不一致
+tail := make([]string, 0, lines) // total == 0 时也非 nil，序列化成 []
+```
+
+## 约定：任务结束后清理残留进程的那一行任务日志（v3.3.6，#159 修复 A）
+
+**是什么**
+
+- 常量 `leftoverProcessCleanupNotice`（`server/service/script_runner.go`），前后各一个 `\n`：
+
+  ```text
+  \n[已结束残留的后台进程：主命令退出后，它的进程组里还有进程在运行（多为 nohup、& 放到后台的），已发送结束信号，5 秒内不退出会被强制结束。需要常驻请用 setsid nohup 命令 >/dev/null 2>&1 & 启动，或在「系统设置 → 任务运行」关闭「任务结束后清理残留进程」]\n
+  ```
+
+- **只在组里真有进程时写**：`runSingleCommand` 在主命令返回后判断
+  `!timedOut && plan.ShouldCleanupProcessGroup != nil && plan.ShouldCleanupProcessGroup() && processGroupAlive(process.Pid)`，
+  四条都成立才先 `TerminateProcessGroup(process)`、再写这一行；组里本来就空时不写。每次 `runSingleCommand` 最多一行。
+  不写的情形：超时（超时分支自己整组 TERM→KILL）、开机任务、系统配置 `cleanup_leftover_processes` 关闭、这次执行已被手动停止或面板正在关停
+  （`runTask` 挂的判定闭包要求 `runStopKind(run) == runStopNone`）、钩子（不经过 `runSingleCommand`）、Windows（`processGroupAlive` 恒为 false）。
+- **只进任务日志**：直接 `onOutput(leftoverProcessCleanupNotice)`，不经 `emitChunk`（与「任务超时」「被信号终止」两行同一写法，日志被截断后这一行照样出现），
+  进 TinyLog、日志文件与落库的日志正文；**不写面板日志**（不 `log.Printf`）。
+- **conc 模式**：每个账号各走一次 `runSingleCommand`，各自最多一行；`prefixedOutput` 给整段加 `[<变量名>#<N>] ` 前缀，
+  开头那个 `\n` 让前缀单独占一行，提示行本身仍从行首开始（日志里是 `[LEAK_ACC#1] ` 换行，下一行才是 `[已结束残留的后台进程：…]`）。
+- **面板元信息行**：前缀 `[已结束残留的后台进程：` 已登记进 `task_executor.go` 的 `panelMetaLinePrefixes`，成功摘要靠 `isPanelMetaLine` 滤掉它
+  （成功的任务最容易出现这一行，不登记就会挤进成功通知那 30 行摘录）。失败摘要的 `normalizeTaskFailureLines` 也只丢**这一个**前缀：
+  失败时它常常是最后一行，不丢的话 Python 摘要认不出最后一行的异常、通用摘要的「上下文」也会取成这行提示；
+  别改成整体套 `isPanelMetaLine`——`[脚本进程被信号终止：…]` 这类行对失败诊断有用。
+
+**为什么**
+
+- 文案写「已发送结束信号，5 秒内不退出会被强制结束」而不是「已结束」：补刀在 `TerminateProcessGroup` 起的协程里，面板或 `ddp task run` 在这 5 秒内退出时补不上。
+- 开头的 `\n` 让 conc 前缀单独成行、提示行从行首开始，`isPanelMetaLine` 才认得出；结尾的 `\n` 免得后面的「=== 执行结束」粘在这一行末尾。
+- 组空不写：没清理任何东西还写一行，只会让人以为脚本出了问题。
+
+**必须有的测试**
+
+- `service/task_process_cleanup_linux_test.go`（`//go:build linux`，WSL / CI 跑才算数）：`TestLeftoverProcessCleanupKillsBackgroundSleep`（恰好一行、`isPanelMetaLine` 认得出、
+  结束行仍是「退出码 0」、结算为成功）；`…SilentWhenGroupEmpty`、`…SparesSetsidProcess`、`…SkipsStartupTasks`、`…HonorsSwitch`、`…LeavesHooksAlone`、`…SkippedAfterManualStop` 都是 0 行；
+  `…CoversConcAccounts` 两行，各自前面是 `[LEAK_ACC#N] \n`。
+- `service/task_notification_test.go`：`TestSummarizeTaskSuccessOutputDropsBannersAndMeta`（用真实常量构造的行被成功摘要滤掉）；
+  `TestSummarizeTaskFailureOutputCondensesPythonTraceback` 的「末尾跟着清理残留进程的提示行」与 `TestSummarizeTaskFailureOutputGenericContextSkipsLeftoverNotice`
+  （失败摘要只丢这一行，`[脚本进程被信号终止：…]` 照旧能当上下文）。
 
 ## Scenario: 任务日志流中的终端覆盖刷新
 
@@ -189,20 +273,27 @@ for {
 
 ### 1. Scope / Trigger
 
-- Trigger: 修改 `server/service/log_cleanup.go`、`server/service/log_manager.go`、`server/handler/log.go`、
-  `server/handler/task_logs.go`、`server/cmd/ddp/commands.go` 的 `clean-logs`，或新增任何一处「清理日志」入口时必须看本节。
+- Trigger: 修改 `server/service/log_cleanup.go`、`server/service/log_manager.go`、`server/service/task_log_archive.go`、`server/handler/log.go`、
+  `server/handler/task_logs.go`、`server/cmd/ddp/commands.go` 的 `clean-logs`，或新增任何一处「清理日志」入口、任何删 `task_logs` 行的代码时必须看本节。
 - 原因: 「清理日志」在这个仓库里同时意味着**删 `task_logs` 行**和**删磁盘 `.log` 文件**两件事。
   v3.3.2 / issue #144 之前三个入口各做各的（自动清理删行也删文件、`/logs/clean` 只删行、`/tasks/clean-logs` 只删文件），
   同一句话在三个地方是三种结果，而这个不一致在规范里零记载——谁改都不知道另外两处存在。
+- v3.3.6 / issue #158 起多一层：仪表板的今日 / 昨日 / 执行趋势会把删掉的行加回来，前提是删行时先把它们按天并进 `task_log_daily_stats`，
+  所以删行本身只能经 `service.DeleteTaskLogs`。计数表、全部删除入口、恢复备份与两道护栏的完整契约在 `database-guidelines.md`
+  「删除 task_logs 一律经 `service.DeleteTaskLogs`」；本节只写清理与按条删这条链路上调用方要守的约定。
 
 ### 2. Signatures
 
+- 删 `task_logs` 行的唯一入口（v3.3.6）: `service.DeleteTaskLogs(tx *gorm.DB, where string, args ...interface{}) (int64, []string, error)`
+  ——同一事务里依次「把命中行按天并进 `task_log_daily_stats` → 取命中行里非空的 `log_path` → 带 `model.TaskLogDeleteGuardKey` 标记删行」，返回（删除行数, 路径, 错误）
+- 清理入口共用的删行 + 删文件: `cleanExpiredTaskLogRows(extraCond string, extraArg interface{}, days int, logDir string) (int64, int)`（包内函数，`extraCond` 只有 `task_id = ?` / `task_id NOT IN ?` 两种）
 - 行 + 文件一起清（按天数）: `service.CleanLogsOlderThan(days int) (int64, int)`
 - 行 + 文件一起清（按任务分组）: `service.CleanLogsByRetentionPolicy(globalDays int) (int64, int)`
 - 只删文件（按 `log_path`）: `service.DeleteLogFilesForRecords(logPaths []string, logDir string) int`
 - 只删文件（按 ModTime 扫盘）: `service.CleanOldLogs(logDir string, days int) int`
 - 正在写入的文件判定: `(*LogStreamManager).IsStreamOpen(filePath string) bool`
-- 入口: 自动清理 worker（`cleanupOldLogs`）、`DELETE /api/v1/logs/clean`、`DELETE /api/v1/tasks/clean-logs`、`ddp clean-logs`
+- 入口: 自动清理 worker（`cleanupOldLogs`）、`DELETE /api/v1/logs/clean`、`DELETE /api/v1/tasks/clean-logs`、`ddp clean-logs`；
+  按条删的 `DELETE /api/v1/logs/:id`、`DELETE /api/v1/logs/batch`、`POST /api/v1/logs/batch-delete`（handler 自己开事务调 `DeleteTaskLogs`，提交后 `DeleteLogFilesForRecords`）
 
 ### 3. Contracts
 
@@ -210,7 +301,16 @@ for {
 
 - **删 `task_logs` 行的代码路径必须同时按 `log_path` 删磁盘文件**，统一走 `CleanLogsOlderThan` /
   `CleanLogsByRetentionPolicy` / `DeleteLogFilesForRecords`，**不要再起第四条清理路径**。
-- 顺序固定是「先 `Pluck` 出 `log_path` → 删 DB 行 → 删文件」：行一删，路径就再也查不回来了。
+- 🔴 删行本身一律经 `service.DeleteTaskLogs`（v3.3.6 / #158；唯一例外是恢复备份勾「日志」时整表 `deleteAll`，计数随之整体换成备份里的），
+  **不要自己写 `Delete(&model.TaskLog{})`**：绕过它删掉的行不进执行趋势计数，仪表板的今日 / 昨日 / 趋势跟着变少，而且完全静默。源码语法扫描（`TestTaskLogDeletesOnlyGoThroughDeleteTaskLogs`）与 `testutil.SetupTestEnv`
+  挂的测试期 Delete 回调都会拦；测试代码要删日志也只能走 `DeleteTaskLogs` 或原生 `Exec`。
+- 顺序固定是「`database.DB.Transaction` 里调 `DeleteTaskLogs`（归档 → 取 `log_path` → 带标记删行）→ 事务提交之后再 `DeleteLogFilesForRecords(paths, logDir)`」：
+  行一删，路径就再也查不回来了；文件等提交之后再删，回滚时文件不动。
+  - `DeleteTaskLogs` 必须是这个事务里的**第一条语句**：WAL 下事务「先读后写」，中间若有别的进程（`ddp`）提交过写，后面的写直接报
+    `database is locked (517)`，`busy_timeout` 救不了。不要在它前面先 `Pluck` / `Count`。
+  - `where` 只能是代码里写死的 SQL 片段（`?` 占位）：它被原样拼进归档那条原生 SQL。三个清理入口的条件只在 `cleanExpiredTaskLogRows` 里拼这一份。
+  - 删行失败时事务整体回滚（行与计数都没动），`cleanExpiredTaskLogRows` 打 `log cleanup: delete TaskLog records failed: …` 后返回 `(0, 0)`，
+    **这一轮不按 `log_path` 删文件**；`CleanLogsOlderThan` / `CleanLogsByRetentionPolicy` 随后的 `CleanOldLogs` 按 ModTime 扫盘照旧无条件执行（与改动前相同）。
 - 🔴 **任何按 status 过滤 `task_logs` 的 WHERE 都必须写成 `(status IS NULL OR status <> ?)`**，
   绝不能只写 `status <> ?`。`task_logs.status` 是可空列（`model.TaskLog.Status` 是 `*int`），
   SQL 三值逻辑下 `NULL <> 2` 求值为 **NULL 而不是 TRUE**，只写后者会把所有 status 为 NULL 的历史行**整批静默漏掉**——
@@ -253,12 +353,19 @@ for {
 - 手动入口改走 `CleanLogsByRetentionPolicy` -> 删掉用户在这次操作里明确说要留的日志
 - 分组按目录名 `task_<ID>` 取天数 -> 恢复备份后 A 任务的保留天数被套到 B 任务上
 - 扫盘用全局天数而非 `max` -> 「行还在、文件没了」
+- 自己写 `Delete(&model.TaskLog{})`（v3.3.5 及以前本节写的「正确写法」）-> 行与文件一致了，但这批行没并进 `task_log_daily_stats`，
+  仪表板的今日 / 昨日 / 趋势**静默变少**（#158 的原症状）；语法扫描与测试期护栏让用例变红
+- 在同一事务里先读、再调 `DeleteTaskLogs` -> WAL 下撞 `database is locked (517)`
+- 事务提交之前就删文件 -> 回滚之后「行还在、文件没了」
+- `DELETE /logs/:id`、`DELETE /logs/batch`、`POST /logs/batch-delete` 的事务出错 -> 500「删除日志失败」（v3.3.6 起；以前单删误报 404「日志不存在」、
+  批删回 200「已删除 0 条日志」）。没出错、只是一条都没命中 -> 单删照旧 404「日志不存在」，批删照旧 200「已删除 0 条日志」
 
 ### 5. Good/Base/Bad Cases
 
-- Good: 自动清理跑完，设了 1 天的高频任务只剩当天日志，其余任务按全局天数保留，正在跑的那次执行的日志文件完好
+- Good: 自动清理跑完，设了 1 天的高频任务只剩当天日志，其余任务按全局天数保留，正在跑的那次执行的日志文件完好；
+  仪表板的 7 天趋势与今日 / 昨日卡片与清理前逐字段相同（v3.3.6）
 - Base: 没有任何任务设过 `log_retention_days` 时，`CleanLogsByRetentionPolicy` 的行为与按全局天数一刀切逐字节一致
-- Bad: 新加一处「清理日志」按钮，自己写一段 `Delete(&model.TaskLog{})` 就收工，文件留在盘上
+- Bad: 新加一处「清理日志」按钮，自己写一段 `Delete(&model.TaskLog{})` 就收工，文件留在盘上，也没经 `DeleteTaskLogs`，执行趋势跟着变少
 - Bad: 为了「三个入口统一」把手动清理也改成按任务分组
 - Bad: 觉得 `CleanOldLogs` 不删记录是遗漏，给它补上删行——`ddp clean-logs` 的语义随之改变，且文档没跟
 
@@ -271,6 +378,12 @@ for {
   - 任务设了比全局短的天数 -> 只有该任务的日志按短天数清，其余按全局
   - 任务设了比全局长的天数 -> 扫盘按 `max` 走，该任务在全局天数之前的文件没被扫走
   - 手动清理入口在有任务级天数的库上，结论与「按全局天数一刀切」一致
+  - 删行被 `BEFORE DELETE` 触发器拦下时整体回滚：计数表 0 行、行还在；`cleanExpiredTaskLogRows` 返回 `(0, 0)` 且按 `log_path` 那份文件还在
+    （`service/task_log_archive_test.go` 的 `TestDeleteTaskLogsRollsBackArchiveWhenDeleteFails`）
+  - 事务里的语句依次是 `INSERT INTO task_log_daily_stats` → `SELECT log_path FROM task_logs` → `DELETE FROM task_logs`（`TestDeleteTaskLogsArchiveIsFirstStatementInTransaction`）
+  - 三个清理入口、单删、两个批删、删任务（单个与两个批量入口）各真删掉 > 0 行之后：计数表各列之和 = 删除数，仪表板 range=1 / 7 / 30 逐字段不变
+    （`handler/task_log_trend_history_test.go` 的 `TestDashboardTrendSurvivesEveryLogDeletionEntry`）
+  - 单删、批删的事务出错回 500「删除日志失败」，计数表 0 行、行还在（`TestLogDeleteFailureReturns500AndKeepsCounts`）
 
 ### 7. Wrong vs Correct
 
@@ -286,21 +399,32 @@ db.Model(&model.TaskLog{}).Pluck("log_path", &paths)
 
 // 错误三：删文件前不问有没有人正在写它。
 os.Remove(filepath.Join(logDir, relPath))
+
+// 错误四：v3.3.5 及以前写在本节的「正确写法」——先 Pluck 再自己 Delete。行与文件一致了，
+// 可这批行没并进 task_log_daily_stats，仪表板的今日 / 昨日 / 趋势跟着变少（#158）；
+// 测试期护栏会让它直接报「task_logs 只能经 service.DeleteTaskLogs 删除」。
+pathQuery.Pluck("log_path", &paths)
+deleteQuery.Delete(&model.TaskLog{})
 ```
 
 #### Correct
 
 ```go
-// 先 Pluck 再 Delete；WHERE 两处都要带上 (status IS NULL OR status <> ?)。
-pathQuery := db.Model(&model.TaskLog{}).
-    Where("started_at < ? AND (status IS NULL OR status <> ?)", cutoff, model.LogStatusRunning).
-    Where("log_path IS NOT NULL AND log_path <> ''")
-deleteQuery := db.
-    Where("started_at < ? AND (status IS NULL OR status <> ?)", cutoff, model.LogStatusRunning)
+// 删行一律经 DeleteTaskLogs：同一事务里「并入执行趋势计数 → 取 log_path → 带标记删行」，
+// 事务提交之后再删文件；WHERE 照旧带上 (status IS NULL OR status <> ?)，只在这里拼一份。
+where := "started_at < ? AND (status IS NULL OR status <> ?)"
+args := []interface{}{cutoff, model.LogStatusRunning}
 
+var deleted int64
 var paths []string
-pathQuery.Pluck("log_path", &paths)
-result := deleteQuery.Delete(&model.TaskLog{})
+if err := database.DB.Transaction(func(tx *gorm.DB) error {
+    var err error
+    deleted, paths, err = DeleteTaskLogs(tx, where, args...) // 必须是这个事务里的第一条语句
+    return err
+}); err != nil {
+    log.Printf("log cleanup: delete TaskLog records failed: %v", err)
+    return 0, 0 // 整体回滚：行与计数都没动，这一轮也不按 log_path 删文件
+}
 // 删文件统一走它：内部逐条过 IsStreamOpen + ResolveWithinBase，并清掉被删空的 task_ 目录。
-DeleteLogFilesForRecords(paths, logDir)
+return deleted, DeleteLogFilesForRecords(paths, logDir)
 ```

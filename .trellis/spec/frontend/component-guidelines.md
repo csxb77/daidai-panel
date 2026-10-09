@@ -841,7 +841,7 @@ indentCompartment.reconfigure([indentUnit.of(' '.repeat(width)), EditorState.tab
 - `GET /api/notifications/types` -> `[{type, name, fields: NotifyFieldDefinition[]}]`
   真源：`server/model/notify_channel_registry.go`（22 渠道 / 93 字段槽 / 56 唯一键）
 - `GET /api/configs` -> `{data: {key: {...}}}`
-  真源：`server/model/system_config_registry.go`（53 项）
+  真源：`server/model/system_config_registry.go`（56 项）
 
 ### 3. Contracts
 
@@ -865,7 +865,7 @@ indentCompartment.reconfigure([indentUnit.of(' '.repeat(width)), EditorState.tab
 - 系统配置：首个 `GET /configs` 失败或还没返回时点任一保存 -> `submitConfigs` 拦下、不发 `PUT /configs/batch`，
   提示「配置还没加载成功，请点刷新后再保存」/「配置还在加载，请稍后再保存」。
   去掉这道闸 = 「面板外观」保存把已存的 `rounded` 写回 `square`、「任务运行」保存把没显示的两项重置成默认值，不报错
-- 系统配置：专属卡里给从兜底区挪来的项（依赖安装超时 / 检测脚本半路静默结束 / 界面圆角）写死标签、选项或 min/max ->
+- 系统配置：专属卡里给从兜底区挪来的项（依赖安装超时 / 检测脚本半路静默结束 / 界面圆角）或直接放进专属卡的项（v3.3.6 的任务结束后清理残留进程）写死标签、选项或 min/max ->
   服务端改了注册表后 Web 与 APP 显示分叉，无任何报错；一律读 `configSchema`
 
 ### 5. Good/Base/Bad Cases
@@ -884,6 +884,7 @@ indentCompartment.reconfigure([indentUnit.of(' '.repeat(width)), EditorState.tab
 系统配置侧没有前端自动化测试，改 `useSettingsConfig.ts` / 设置页卡片后浏览器实测：
 - DevTools 拦掉 `GET /configs` 进「通用设置」：「面板外观」「其它配置项」「任务运行」「代理设置」的保存都只出「配置还没加载成功，请点刷新后再保存」，Network 里没有 `PUT /configs/batch`，页面圆角不变；放行后刷新、改一项再保存，请求体只有那一个键
 - 「任务运行」：「依赖安装超时(分钟)」标题 / 说明 /「取值范围 5 - 720」/ 占位 20 都来自 schema；填 3 保存提示「「依赖安装超时(分钟)」需在 5-720 之间」且不发请求
+- 「任务运行」：「任务结束后清理残留进程」开关排在「检测脚本半路静默结束」之后，标题与说明来自 schema、默认开；只拨它再保存，请求体只有 `cleanup_leftover_processes` 一个键
 - 「其它配置项」只剩运行时日志输出、守护方式（只读）、systemd 服务名（只读）三项
 - 演示站：清空「依赖安装超时」保存、切走再切回，输入框显示 20，改别的项能正常保存
 
@@ -908,9 +909,10 @@ const currentChannelFields = computed(() =>
 > `mpnews`，而另外两处都有。
 
 > **系统配置侧走的是「专属表单 + schema 兜底」两层**：
-> `useSettingsConfig.ts` 的 `configForm` 保留 47 个键的硬编码，因为它们绑着
+> `useSettingsConfig.ts` 的 `configForm` 保留 50 个键的硬编码，因为它们绑着
 > SVG 上传、取色器实时预览、图片压缩、镜像源弹窗、备份内容 CSV ↔ 复选框等定制控件
-> （v3.2.9 又从兜底区挪进 3 项：依赖安装超时、检测脚本半路静默结束进「任务运行」卡，界面圆角进「面板外观」卡）；
+> （v3.2.9 又从兜底区挪进 3 项：依赖安装超时、检测脚本半路静默结束进「任务运行」卡，界面圆角进「面板外观」卡；
+> v3.3.6 新增的任务结束后清理残留进程没进过兜底区，直接放进「任务运行」卡）；
 > 其余项由 `settings/systemConfigSchema.ts` + `components/ExtraConfigCard.vue`
 > 按服务端 schema 兜底渲染（挂在「通用设置」标签右栏，当前只剩「面板与运行时」组 3 项）。
 > **谁进兜底区是拿 `configForm` 的键去减算出来的**，所以服务端加配置项时 Web 不用改，它会自己冒出来。
@@ -1736,5 +1738,185 @@ async function handleConfirm() {
   const cleaned = Array.from(new Set(labels.value.map(label => label.trim()).filter(Boolean)))
   if (cleaned.length === 0) return ElMessage.warning('请输入至少一个标签') // 再做空值校验
   // ...
+}
+```
+
+---
+
+## Scenario: 环境变量的「重要」标记与删除确认（v3.3.6，APP #16）
+
+### 1. Scope / Trigger
+
+- 触发：改 `web/src/views/envs/index.vue` 的 `handleDelete` / `handleBatchDelete` / `handleImport` / `handleToggleImportant` / `buildEnvActionItems`、名称列或移动卡片首行；
+  改 `EnvEditDialog.vue` 的「重要变量」开关或 `handleSave`；改 `api/env.ts` 的 `EnvPayload` / `EnvUpdatePayload`；
+  或者在别的列表页给删除加「专门确认 / 批量删除跳过」时，必须看本节。
+- 背景：APP #16 ②「重要变量醒目显示、防误删」。PRD D1 定的是轻量档：**服务端不拦删除**（脚本、开放 API、MCP、ddp、老 APP 照样能删），
+  「专门确认」「批量删除跳过」只在客户端做，网页这几道确认就是全部防线。所以界面文案不写「受保护」「无法删除」。
+- 服务端契约（`ToDict` 永远带 `important`、`PUT /envs/:id` 的 `important` 是 `*bool`、merge 导入只升不降）见 backend `index.md` 的契约 E1；
+  配色、与「值」列遮蔽锁的区分见 `design-system.md` §1.3。
+
+### 2. Signatures
+
+```ts
+// api/env.ts
+EnvPayload.important?: boolean        // 新建：开着才带 true，没开不带这个键
+EnvUpdatePayload.important?: boolean  // 编辑：false 是合法修改（取消重要）；编辑弹窗只在拨过开关时带
+```
+
+- `views/envs/index.vue`：
+  - `handleToggleImportant(row)`：`envApi.update(row.id, { important: !row.important })`，只发这一个键；
+  - `buildEnvActionItems(row)` 在置顶两项之后加 `{ key: 'important', label: '标为重要', visible: !important }`、`{ key: 'cancel-important', label: '取消重要', visible: important }`，
+    由 `onEnvAction` 分发；桌面操作列 ▾ 与移动卡片「···」（`DdMoreMenu`）用的是同一份数组；
+  - `handleDelete(row)`（v3.3.6 起收整行，原来收 `id`；唯一调用点是 `onEnvAction`）、`handleBatchDelete()`、`handleImport(payload: { envs: any[]; mode: string })`；
+  - `openCreate` 与 `openDuplicate` 给 `important: false`，`openEdit` 给 `row.important === true`。
+- `EnvEditDialog.vue`：`EnvFormModel.important?: boolean`、`initialImportant = ref(false)`；「重要变量」`el-switch` 在「分组」之后、「排序值」之前，新建与编辑都显示。
+- `EnvImportDialog.vue`：不变，只解析 JSON、`emit('import', { envs, mode })`，不发请求。
+
+### 3. Contracts
+
+**显示**
+- 标签写法：`<span v-if="row.important" class="important-chip" title="重要变量：删除时会再确认一次"><el-icon><Lock /></el-icon>重要</span>`。
+- 桌面名称列：放在「置顶」标签**之前**，两枚一起靠在最右缘。靠的是 `.env-name-filter-btn` 的 `margin-right: auto`，不是 `.env-name` 撑满（它是 `flex: 0 1 auto`）。
+- 移动卡片：放在变量名**之后**、`.env-card__tags` 标签组**之外**，`flex-shrink: 0` 常驻；标签组的 `v-if` 不改。
+  标签组是 `flex: 1 1 0`，变量名一长整组就被挤成 0 宽裁掉；置顶还有左缘橙条兜底，「重要」没有别的视觉通道，宁可让变量名早一点出省略号。
+
+**设置入口**
+- 行菜单「标为重要 / 取消重要」：可撤销，不弹确认；成功提示「已标为重要 / 已取消重要」后 `loadData()`，失败弹 `err?.response?.data?.error || '操作失败'`。
+- 编辑弹窗 `EnvEditDialog.handleSave` 的发送规则：
+
+  | 场景 | 请求体里的 `important` |
+  |---|---|
+  | 新建单条 | 开着才带 `true`，关着不带这个键 |
+  | 新建 + 按行拆分 | 开着时拆出的**每一项**都带 `true`，关着都不带 |
+  | 编辑 | 只在 `form.important !== initialImportant` 时带当前值；父组件 `handleSave` 的编辑分支在 `typeof data.important === 'boolean'` 时才放进 `EnvUpdatePayload` |
+
+  理由同排序值（契约 C5）：弹窗打开时读到的旧值不能冲掉 APP 或另一个标签页刚改的标记；服务端对不带这个键的整体回写不动标记。
+- 「复制同名变量」固定 `important: false`：复制同名变量多半是加一个账号，账号类变量不该跟着变成重要。
+
+**删除**
+- 🔴 **确认与请求分两段 `try`**：第一段只包确认框，catch 就是点了取消，直接 `return`；第二段包请求，catch 弹服务端原话
+  （`err?.response?.data?.error || '删除失败'`，批量是 `'批量删除失败'`）。v3.3.5 及以前一个 catch 同时吞掉「点了取消」和「删除失败」，删失败时界面上什么都不显示。
+- 单删 `handleDelete(row)`：重要变量弹专门确认，正文点名
+  `「${row.name}」已标记为重要变量，删除后无法恢复。确定要删除吗？`，标题「删除重要变量」，`type: 'warning'`，按钮「仍要删除」；
+  普通变量沿用「确定要删除该环境变量吗？」/「确认删除」。
+- 批量删除 `handleBatchDelete()`（桌面批量条与手机批量栏共用）：
+  1. `selectedRows = envList.value.filter(row => selectedIdSet.value.has(row.id))`，与「已选 N 项」（`selectedCountInCurrentPage`）同一口径。
+     不能直接用 `selectedIds`：它可能含已不在列表里的 id，也看不出哪些行是重要变量。
+  2. 拆成重要 K 条与可删 N−K 条。全是重要变量时 `ElMessage.warning('选中的都是重要变量，没有可删除的。确需删除请在行菜单里逐个删除，或先取消「重要」标记')`，**不发请求、不清勾选**。
+  3. K > 0：确认框正文「选中的 N 个环境变量里有 K 个是重要变量，将跳过它们，只删除其余 N−K 个。」，按钮「删除 N−K 个」；K = 0 沿用原文案「确定要删除选中的 N 个环境变量吗？」。
+  4. 只发可删项的 id；成功提示是 `res.message`，K > 0 时再接「，已跳过 K 个重要变量」。
+
+**替换导入**
+- 二次确认写在父组件 `handleImport`：它是本页唯一发导入请求、能调 `envApi` 的地方；本页弹窗一律「弹窗只 emit、父组件调接口」。
+- `mode === 'replace'` 的顺序：
+  1. 先置 `importSubmitting`（在数数之前，挡住数数与确认期间的连点）；
+  2. `envApi.list({ all: 1 })`，**不带任何筛选**，数 `important === true` 的条数。列表是分页的、还可能带着筛选，当前页数不全；
+     `all=1` 有 5000 条硬上限，超大库可能少数，只影响文案里的数字。数数失败就不点名，确认照弹；
+  3. 标题「替换导入」、按钮「清空并导入」，正文「替换会先删除面板上的全部环境变量，再写入这 N 条。[面板上 K 个重要变量也会被清空，]这份内容里没有的变量将无法找回。」
+     （K = 0 时没有方括号里那半句；与 APP 同文案）；
+  4. 点取消：什么都不发，导入弹窗保持打开（`finally` 解开在途锁）。
+- merge 导入不弹这个确认框（merge 不删变量，服务端对 `important` 只升不降）。
+- 导入失败弹服务端原话 `err?.response?.data?.error || '导入失败'`（如「请求体过大（最大 1MB）」），不再一律「导入失败」。
+
+**名称列 `min-width` 账本：188 → 204 → 230 → 296**（账记在 `index.vue` 名称列上方的注释里）
+- `.env-name-wrap` 是 `flex` + `gap: 8px`，每多一个子元素，净增 = 元素自身宽度 + 一份 gap 8px：
+
+  | 变化 | 新增元素 | 净增 |
+  |---|---|---|
+  | 188 → 204 | 名称**前**的 8px 状态圆点 | 8 + 8 = 16px |
+  | 204 → 230 | 名称**后**的「只看这个变量名」按钮（图标 14 + padding 2×2 = 18px） | 18 + 8 = 26px |
+  | 230 → 296（v3.3.6） | 名称后的「重要」标签（约 58px） | 58 + 8 = 66px |
+
+- **置顶标签不计入，「重要」计入**。置顶标签从没进过这本账；「重要」是浏览器实测后加的：1280×900、侧栏展开，230 时既置顶又重要的行变量名只剩约 29px、可见 2 个字符，
+  加宽 66px 后约 11 个，正好是 v3.3.5 时只置顶的行能看到的量。变量名长时两枚都有的行照样会出省略号，`title` 挂全名兜底。
+- 改 `.important-chip` / `.pinned-chip` 的 padding、字号、图标，或改 `.env-name-filter-btn` 的 padding，要回来重算这本账，并在 1280 宽、侧栏展开时实测。
+
+### 4. Validation & Error Matrix
+
+- 单删 / 批量删除 / 导入的请求失败（DevTools 拦截）-> 弹服务端原话，或「删除失败 / 批量删除失败 / 导入失败」，不能静默
+- 单删重要变量时点「取消」-> 不发 `DELETE /envs/:id`
+- 批量删除勾 2 个重要 + 1 个普通 -> 确认框写「有 2 个是重要变量，将跳过它们」、按钮「删除 1 个」，请求体只有那 1 个 id，成功提示带「，已跳过 2 个重要变量」
+- 批量删除只勾了重要变量 -> warning，不发请求，勾选保留
+- 编辑弹窗只改备注就保存 -> 请求体没有 `important` 键；先在另一个标签页标为重要、再在本页保存，标记仍在
+- 替换导入：`all=1` 数数失败 -> 确认照弹、不点名；K = 0 -> 没有「面板上 K 个重要变量也会被清空」那半句；点取消 -> 不发 `POST /envs/import`，导入弹窗不关
+- merge 导入 -> 不弹「替换导入」确认
+- 行菜单里「标为重要」「取消重要」同时出现 -> `visible` 写错（两者按 `row.important === true` 互斥）
+- 把「重要」标签挪进移动卡片的 `.env-card__tags` -> 变量名一长，整组连同「重要」被裁掉
+
+### 5. Good/Base/Bad Cases
+
+- Good：服务端不拦的保护，确认框点名对象和数量；跳过了几个，在确认框和成功提示里都写明；确认与请求分两段 `try`
+- Base：存量数据升级后全是 `false` -> 列表、单删、批量删除的观感与 v3.3.5 一致，只是行菜单多了「标为重要」、替换导入多了一道确认
+- Bad：确认框写「受保护 / 无法删除」（行菜单里照样能删）；在 `EnvImportDialog` 里调 `envApi`；编辑弹窗每次保存都带上开关的值；批量删除拿 `selectedIds` 原数组发请求
+
+### 6. Tests Required
+
+- `cd web && npm run build`（含 vue-tsc）；演示站 `npm run build:demo` 之后必须再跑一次 `npm run build` 还原 `web/dist`。
+- 服务端：`cd server && go test ./handler -run "TestEnv|TestCreate|TestUpdate|TestImport|TestUpsertByName|TestMCPEnvToolsCarryImportant|TestMCPListEnvs" -count=1`。
+  其中 `TestEnvDeleteIgnoresImportantFlag` 钉住「服务端不拦删除」（网页确认是唯一防线的前提），
+  `TestEnvImportantFlagCreateUpdateAndList` 钉住「不带 `important` 的整体 PUT 不动标记」（编辑弹窗只发拨过的开关靠的就是它）。
+- 浏览器实测（仓库无前端单测）：
+  - 1280 与 1920 宽 × 明暗 × 直角 / 圆角：只重要、只置顶、两者都有三种行，标签靠在最右缘、「重要」在前；1280×900 侧栏展开时两者都有的行可见约 11 个字符，悬停能看到全名
+  - 行菜单（桌面 ▾ 与手机「···」）里「标为重要」「取消重要」互斥出现，点了以后标签随之出现或消失
+  - 编辑弹窗：只改备注保存时 DevTools 里请求体没有 `important`；拨开关保存生效；新建时开着开关、按行拆分时开着开关，生成的每一行都是重要变量；复制同名变量时开关是关的
+  - 单删、批量删除（桌面与手机批量栏）、替换导入按上面的矩阵各走一遍；用 CDP `Fetch.failRequest` 让删除失败，界面弹出错误
+  - 375 宽手机卡片：变量名超长时「重要」仍紧跟在名字后面
+  - 演示站：`TZ` 同时显示「重要」「置顶」，`NOTIFY_WEBHOOK_URL`、`BACKUP_ENCRYPT_KEY` 显示「重要」；设置与取消可用；导出的 JSON 带 `important`
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```ts
+// 一个 catch 同时吞掉「点了取消」和「删除失败」：删失败时界面上什么都不显示
+async function handleDelete(id: number) {
+  try {
+    await ElMessageBox.confirm('确定要删除该环境变量吗？', '确认删除', { type: 'warning' })
+    await envApi.delete(id)
+    ElMessage.success('删除成功')
+  } catch {
+    // cancelled
+  }
+}
+
+// 拿 selectedIds 原数组发请求：可能含已不在列表里的 id，重要变量也被一起删掉
+await envApi.batchDelete(selectedIds.value)
+```
+
+```ts
+// 编辑弹窗每次都带开关的值：弹窗打开时的旧值会冲掉 APP / 另一个标签页刚改的标记
+payload.important = form.value.important
+```
+
+#### Correct
+
+```ts
+async function handleDelete(row: any) {
+  try {
+    if (row.important) {
+      await ElMessageBox.confirm(`「${row.name}」已标记为重要变量，删除后无法恢复。确定要删除吗？`, '删除重要变量', {
+        type: 'warning',
+        confirmButtonText: '仍要删除'
+      })
+    } else {
+      await ElMessageBox.confirm('确定要删除该环境变量吗？', '确认删除', { type: 'warning' })
+    }
+  } catch {
+    return // 点了取消
+  }
+  try {
+    await envApi.delete(row.id)
+    ElMessage.success('删除成功')
+    void loadData()
+  } catch (err: any) {
+    ElMessage.error(err?.response?.data?.error || '删除失败')
+  }
+}
+```
+
+```ts
+// 新建只在开着时带 true；编辑只在拨过开关时带当前值
+if (isCreate.value ? form.value.important : form.value.important !== initialImportant.value) {
+  payload.important = form.value.important === true
 }
 ```

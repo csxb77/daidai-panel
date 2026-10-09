@@ -171,7 +171,8 @@ database.DB.
 - 延迟计算：`func (e *TaskExecutor) ResolveExecutionDelay(req *ExecutionRequest) time.Duration`（只算时长，**不得 sleep**）
 - 延迟等待：`func (s *SchedulerV2) EnqueueDelayed(delay time.Duration, reqFunc func() *ExecutionRequest)`
 - 关停两段：`func (s *SchedulerV2) SignalStop()`（等正在跑的 cron 回调最多 `schedulerCronCallbackWait` = 1 秒）/ `func (s *SchedulerV2) WaitWorkers(timeout time.Duration) bool`；
-  包级入口 `func HaltSchedulerV2()`（SignalStop + StopAllRunningTasks，可重复调用）/ `func ShutdownSchedulerV2()`（保持无参，`schedulerShutdownWait` = 4 秒），面板关停的整体顺序见「场景：停机收尾」
+  包级入口 `func HaltSchedulerV2()`（SignalStop + StopAllRunningTasks，可重复调用；v3.3.6 起 StopAllRunningTasks 先 SIGTERM、所有进程组共用最多 `shutdownTermGrace` = 2 秒宽限再 SIGKILL，见「场景：任务进程组的清理与终止」）/
+  `func ShutdownSchedulerV2()`（保持无参，`schedulerShutdownWait` = 3 秒，v3.3.6 前是 4 秒），面板关停的整体顺序见「场景：停机收尾」
 - 并发数热生效：`func (s *SchedulerV2) SetWorkerCount(n int) (previous int, applied int)` / `func (s *SchedulerV2) GetWorkerCount() int` / `func ApplySchedulerWorkerCount()`
 - 配置键：`max_concurrent_tasks` -> `SchedulerConfig.WorkerCount`（启动时）-> `SetWorkerCount()`（保存后热生效）
 - 请求字段：`ExecutionRequest.DelayResolved bool`、包内 `taskLog *model.TaskLog` / `tinyLog *TinyLog`
@@ -188,7 +189,9 @@ database.DB.
   前两步是 `HaltSchedulerV2()`，后两步在 `ShutdownSchedulerV2()` 里（它开头会再调一次 `HaltSchedulerV2`，重复调用无害）。v3.3.5 起每一步都有上限：
   - `SignalStop` 等正在跑的 cron 回调**最多 1 秒**，到点打一行日志放手：回调要读写库，唯一的连接被恢复备份这类长事务占着时会一直卡，而杀任务排在它后面（原来无限等）。
   - 面板关停（`server/main.go` 的 `shutdownPanel`）里，HTTP 关停（`server.Shutdown(5s)`）**先起协程、与 `HaltSchedulerV2` 同时开始**：`HaltSchedulerV2` 卡住时 SSE 照样断开。
-  - `WaitWorkers` 与 `executor.Wait` **共用一个 4 秒截止时间**（原来 5 秒 + 5 秒串行），传给它们的剩余时间**至少 1ms**：两者都把 `<= 0` 当成「一直等」，算成 0 就变回无限等。
+  - `StopAllRunningTasks` 先对所有进程组（任务进程与正在跑的钩子）发 SIGTERM、共用最多 2 秒的宽限、到点还在的统一 SIGKILL，阻塞到 KILL 落地再返回（v3.3.6，#159；Magisk 部署下宽限为 0、立即整组 KILL）。
+    TERM 宽限就发生在 `HaltSchedulerV2` 这一步里，口径见「场景：任务进程组的清理与终止」。
+  - `WaitWorkers` 与 `executor.Wait` **共用一个 3 秒截止时间**（原来 5 秒 + 5 秒串行；v3.3.6 起从 4 秒缩到 3 秒，把位置让给上一条的 2 秒宽限，总账不变），传给它们的剩余时间**至少 1ms**：两者都把 `<= 0` 当成「一直等」，算成 0 就变回无限等。
   - 截止时先 `revokeUnsettledScriptTokens` 吊销仍在执行窗口里（没结算完）的执行注入脚本的凭据，再 `MarkActiveTasksInterrupted` 把它们标成中断。
 - 队列容量与并发数解耦。`Enqueue` 保持非阻塞 + 满时返回错误的语义，**不得**改成阻塞入队（会卡死 cron 线程）。
 - 任何入队失败路径都必须保证任务状态不停留在 `queued` 假象上——包括 `EnqueueDelayed` 到期后重新入队失败这条新路径。
@@ -327,7 +330,8 @@ s.executeTask(req)
 - 单任务停止入口：`PUT /api/v1/tasks/:id/stop`
 - 批量停止入口：`PUT /api/v1/tasks/batch` with `action="stop"`
 - 定时停止入口：`func (s *SchedulerV2) stopTaskBySchedule(taskID uint)`
-- CLI 停止入口：`ddp stop`
+- CLI 停止入口：`ddp task stop`（`cmd/ddp/commands.go` 的 `stopTaskNow`）
+- 按库里 PID 兜底：`func TerminateProcessByPid(pid int)`（v3.3.6 起手动、批量、定时三个停止入口用它；直接调立即 SIGKILL 的 `KillProcessByPid` 的停止入口只剩 `ddp task stop`）
 - 任务运行状态：`model.RunAborted`
 - 日志状态：`model.LogStatusAborted`
 - 任务字段：`Task.NotifyOnAbort bool`
@@ -341,7 +345,11 @@ s.executeTask(req)
 - Aborted 不触发成功通知，也不触发失败通知；仅当 `notify_on_abort=true` 时发送终止通知。
 - Aborted 必须单独统计，不能增加成功数或失败数；成功率只使用 `success / (success + failed)`。
 - 停止标记必须在杀进程之前写入，避免任务完成 `defer` 先执行导致仍被结算成失败。
-- 定时停止使用 PID 兜底杀进程时，也必须打停止标记，不能只 `KillProcessByPid`。
+- 🔴 **按库里的 PID 兜底只在 `StopTask` 返回 false 时做**（v3.3.6，#159）：返回 true 说明执行器已经认领这次停止（对登记的进程组发了 SIGTERM、安排了 5 秒后的 SIGKILL，库里的 pid 就是其中之一），
+  紧跟着再按 PID 补一刀，要么是立即 SIGKILL（宽限形同虚设），要么是第二个 TERM（打断脚本正在跑的收尾）。
+  手动停止（`task_control.go` 的 `Stop`）、批量停止（`task_batch.go` 的 `case "stop"`）、定时停止（`stopTaskBySchedule`）一律写成先记下 `stopped := executor.StopTask(id)`，
+  再 `if !stopped && pid > 0 { 打停止标记; TerminateProcessByPid(pid) }`。兜底时照旧必须先打停止标记，不能只发信号。
+  `ddp task stop` 是一次性进程，异步补刀活不到 5 秒后，仍是 `MarkManualStop` + 立即 `KillProcessByPid`。进程组怎么终止见「场景：任务进程组的清理与终止」。
 - 自然失败、依赖失败、脚本超时、面板异常退出导致的中断仍按失败处理，不得被误改成 Aborted。
 - 新字段必须在 `database.EnsureColumns()` 中补列，保证老 SQLite 数据库升级后默认不发送终止通知。
 
@@ -360,6 +368,7 @@ s.executeTask(req)
 - Good：长驻任务配置了定时停止，晚上到点被停止后显示「已终止」，不发送失败通知，不增加失败统计，仪表盘终止统计 +1。
 - Base：用户手动点击停止，任务列表和日志列表显示「已终止」，成功率不受影响。
 - Bad：定时停止只杀 PID 不打停止标记，任务执行完成时收到非 0 退出码，被误判为失败。
+- Bad：`StopTask` 返回 true 之后照旧按库里的 PID `KillProcessByPid`（v3.3.5 及以前的写法）—— 紧跟在 TERM 后面的 SIGKILL 让 trap 了 TERM 的脚本来不及收尾。
 - Bad：把 Aborted 当成功写入统计，导致用户分不清自然完成和计划终止。
 
 ### 6. Tests Required
@@ -371,6 +380,8 @@ s.executeTask(req)
 - handler：
   - 创建任务时 `notify_on_abort` 能保存并回传。
   - `PUT /tasks/:id/stop` 把运行中日志改成 `LogStatusAborted`，任务 `last_run_status` 改成 `RunAborted`。
+  - 执行器认领了停止时不再按 PID 补刀（Linux，`handler/task_stop_graceful_linux_test.go` 的 `TestStopTaskEndpointLetsScriptHandleSigterm`，断言点见「场景：任务进程组的清理与终止」）。
+    批量停止与定时停止里同样的 `!stopped` 条件目前没有用例守着（已知缺口），改那两处时照单个停止的写法核对。
 - scheduler：
   - 定时停止必须打停止标记，并把运行中日志兜底改成 `LogStatusAborted`。
 - notification / stats：
@@ -397,6 +408,16 @@ if task.PID != nil {
 ```
 
 ```go
+// 错误：执行器已经认领了停止（StopTask 返回 true：已对整组发 TERM、安排了 5 秒后的 KILL），又按库里的 PID 立即补一刀 SIGKILL，
+// 宽限形同虚设，trap 了 TERM 的脚本来不及收尾（v3.3.5 及以前的写法）。
+executor.StopTask(taskID)
+if task.PID != nil && *task.PID > 0 {
+    markManualStop(taskID)
+    KillProcessByPid(*task.PID)
+}
+```
+
+```go
 // 错误：命中停止标记后伪装成自然成功，统计上无法区分主动终止和真实成功。
 if consumeManualStop(taskID) {
     return model.RunSuccess, model.LogStatusSuccess, true
@@ -406,9 +427,16 @@ if consumeManualStop(taskID) {
 #### Correct
 
 ```go
-// 正确：杀进程前先打停止标记，完成结算时统一写入 Aborted。
-markManualStop(taskID)
-KillProcessByPid(*task.PID)
+// 正确：执行器认领了就不按 PID 兜底；只有执行器不认识这次执行（例如 ddp task run 在别的进程里跑的）才兜底。
+// 兜底照旧先打停止标记（完成结算统一写入 Aborted），再用 TerminateProcessByPid：先 TERM、5 秒后组还在才 KILL，不阻塞接口。
+stopped := false
+if executor := GetTaskExecutor(); executor != nil {
+    stopped = executor.StopTask(taskID)
+}
+if !stopped && task.PID != nil && *task.PID > 0 {
+    markManualStop(taskID)
+    TerminateProcessByPid(*task.PID)
+}
 ```
 
 ```go
@@ -776,7 +804,7 @@ if err != nil {
 ### 1. Scope / Trigger
 
 - 触发：修改 `server/service/resource_monitor*.go`、`server/handler/script_file_ops.go`、`server/service/backup*.go`、`server/service/script_dir_guard.go`、
-  `script_notify_helpers.go` 的 `CleanupManagedHelperCopiesUnderRoot`、`server/main.go` 里脚本目录扫描、备份恢复、资源监控或启动期清理逻辑时必须看本节。
+  `script_notify_helpers.go` 的 `CleanupManagedHelperCopiesUnderRoot`、`server/cmd/ddp/runtime.go` 的 `bootstrap`、`server/main.go` 里脚本目录扫描、备份恢复、资源监控或启动期清理逻辑时必须看本节。
 - 原因：Windows 运行态如果只实现 Linux 资源采集，仪表板会长期显示 `0 B / 0 B`；脚本目录如果混入 `%SystemDrive%` 这类异常目录，会污染脚本管理、统计和备份恢复链路。
 
 ### 2. Signatures
@@ -787,8 +815,11 @@ if err != nil {
 - 相对路径判断：`ShouldIgnoreScriptRelativePath(relPath string) bool`
 - 启动期隔离名单（命中即搬走）：`quarantinedScriptDirNames`（`service/script_dir_guard.go`，目前只有 `%systemdrive%`）
 - 启动期隔离：`QuarantineUnexpectedScriptEntriesOnStartup()`，末尾调 `removeLeftoverManagedNodeModulesLinks(scriptsDir, managedNodeModules string)`。
-  `main` 里直接调用并计时（遍历整棵脚本目录，慢盘上也可能几秒）：步骤名 `隔离脚本目录污染项、清理残留软链（遍历脚本目录）`，口径见 `logging-guidelines.md`「约定：启动耗时与关停日志」。
-- 通知脚本副本清理：`CleanupManagedHelperCopiesUnderRoot(scriptsDir string) error`（`service/script_notify_helpers.go`）
+  `main` 里和 `CleanupManagedHelperCopiesUnderRoot` 放进**同一个后台 `go` 协程**（软链那遍在前），在 `InitSchedulerV2` 之前启动，不等待、不计时（v3.3.6，#158；以前同步调用并计时，挡在监听前面）。
+  根目录两份 helper 的 `EnsureBuiltinNotifyHelpers` 只读写两个文件，照旧同步执行（开机任务一跑就要用）。日志口径见 `logging-guidelines.md`「约定：启动耗时与关停日志」。
+- 通知脚本副本清理：`CleanupManagedHelperCopiesUnderRoot(scriptsDir string) error`（`service/script_notify_helpers.go`），清理范围不变：
+  读不了或已消失的目录跳过（`WalkDir` 回调拿到 err 时 `return nil`）；单个目录 `cleanupManagedHelperCopies` 出错不中止、接着清其余目录，遍历完返回第一个错误（没有就 nil）。
+  唯一调用方是 main 里的后台协程（出错打 `cleanup duplicated notify helpers failed: …`）；**ddp 不再调用**（`cmd/ddp/runtime.go` 的 `bootstrap` 只保留 `EnsureBuiltinNotifyHelpers`）。
 
 ### 3. Contracts
 
@@ -799,7 +830,7 @@ if err != nil {
   - 为什么：`__pycache__` 是脚本根目录里被 import 的模块（如面板放的 `notify.py`）每次运行都会重新生成的；`node_modules` 可能是用户自己 `npm install` 的真目录（搬走后 `require` 直接失败），
     也可能是 Node 任务运行时面板自建、被 SIGKILL 来不及删的软链。旧写法每次启动都把它们搬一遍，#156 的用户隔离区里已经攒到 `__pycache__.duplicate-34`、`node_modules.duplicate-10`。
   - 已经搬进 `quarantine/scripts/` 的副本不自动删（用户可手动删 `__pycache__.duplicate-*`、`node_modules.duplicate-*`）。
-- **启动时只清「悬空的面板式」`node_modules` 软链**（`removeLeftoverManagedNodeModulesLinks`，在隔离循环之后调；v3.3.5 回归复核后收窄）：
+- **启动后在后台协程里只清「悬空的面板式」`node_modules` 软链**（`removeLeftoverManagedNodeModulesLinks`，在隔离循环之后调；v3.3.5 回归复核后收窄）：
   - 先解析脚本根：`filepath.EvalSymlinks(scriptsDir)`，失败退回原值；解析结果 `Lstat` 仍不是目录（Windows junction：Go 1.23 起 `EvalSymlinks` 不解析它、原样返回）时，
     再 `os.Readlink` 补一层（得到绝对路径才用）。不解析的话，脚本目录本身是软链 / junction（脚本放到别的盘、NAS 上）时 `WalkDir` 只访问根这一项、不进链接，整棵树一条都清不到。
   - 然后 `WalkDir` 整棵树，下面三条**同时满足**才删，其余一律不动：
@@ -810,10 +841,28 @@ if err != nil {
   - `.git`、`__pycache__` 等 `ShouldHideScriptTreeEntryName` 命中的目录整棵跳过；读不了的目录跳过；删除失败只打日志。不往 quarantine 里搬任何东西。
   - 为什么要清悬空的：`ensureManagedNodeModulesAccess` 只在不存在时才建、从不修已有的，悬空软链留着会一直挡住那个目录里的任务（ESM 的 `import` 没有 `NODE_PATH` 兜底，一直报找不到模块）。
     托管目录被删（依赖全卸光、数据目录被清过）、数据目录搬家都会造出它；以前靠「隔离把顶层那个软链搬走」顺手自愈。
-  - 🔴 为什么不删不悬空的：它与面板现在会建的等价，留着无害；而且启动时**并不是**没有进程在用它——`ddp task run` 是另一个进程，二进制 / Magisk 下被强杀的面板还可能留下仍在跑的孤儿任务，
+  - 🔴 为什么不删不悬空的：它与面板现在会建的等价，留着无害；而且启动时**并不是**没有进程在用它（v3.3.6 起这一遍在后台跑，开机任务可能正同时在跑，更不能删不悬空的）——`ddp task run` 是另一个进程，二进制 / Magisk 下被强杀的面板还可能留下仍在跑的孤儿任务，
     删掉它们正在用的软链，正在 `require` 的依赖会突然消失（回归复核实测：v3.3.5 第二波按「目标等于托管目录就删」，正在用这条软链的 node 进程报 `ENOENT` 退出）。
 - **`CleanupManagedHelperCopiesUnderRoot` 遍历时遇到 `ShouldHideScriptTreeEntryName` 命中的目录（`node_modules`、`__pycache__`、`.git` 等）直接 `SkipDir`**：
-  它们不会是任务的工作目录，面板不会往里放通知脚本副本；订阅仓库的 `.git`、真实 `node_modules` 动辄上千个目录，启动和每条 `ddp` 命令都要白扫一遍。
+  它们不会是任务的工作目录，面板不会往里放通知脚本副本；订阅仓库的 `.git`、真实 `node_modules` 动辄上千个目录，进去就是白扫一遍。
+- 🔴 **两遍整树遍历都不在同步启动路径上，只挪一遍没用**（v3.3.6，#158）：慢盘上时间几乎全花在「第一次读目录」上，谁排第一谁付。
+  只把副本扫描挪走，软链那遍就变成冷缓存上的第一遍，那几秒原样出现在下一行日志里（#158 日志里那遍软链遍历「不到 3 秒、没打日志」，只是因为它排第二）。
+  实测（3560 个目录，另有 8000 个两遍都跳过的 `.git` 目录；只看比例，NAS 冷盘按同样结构放大到秒级）：
+
+| 环境 | 副本扫描（每个目录盲开 2 次文件） | 软链遍历（不开文件） |
+|---|---|---|
+| WSL ext4，每轮先 `drop_caches` | 252–255ms | 单独冷跑 243–368ms；紧跟在副本扫描后面只要 13–16ms |
+| Windows NTFS（热缓存） | 460–527ms | 233–288ms |
+| WSL 访问 `/mnt/c`（9p，近似 Docker Desktop 的绑定挂载） | 9.8–11.6s | 4.2–4.7s（冷热一样） |
+
+  - 两遍放进同一个协程、不合并：合并只省后台 IO（本地盘十几毫秒，9p 上约 10 秒），却要统一根目录解析（软链那遍先 `EvalSymlinks`，副本扫描不解析）、错误策略与根目录文件排除，改动面和回归面都更大（backlog）。
+  - 不做「一次性标记」：副本还有写入路径（恢复 v1.9.7 及以前做的备份、订阅仓库里提交了托管副本、手动把根目录的 helper 拷进子目录），打了标记就再也不清了。
+  - 后台协程只删文件 / 软链、搬目录，不碰数据库、不做登记，关停不等它（单个 `os.Remove` / `os.Rename` 是原子的，进程退出时停在哪一步都不留半成品）；没有 `recover`（两个函数只做文件操作，读码没有 panic 来源）。
+- **时序窄缝（已接受）**：悬空的面板式软链从「一定早于开机任务清掉」变成「启动后几秒内清掉」。只影响「数据目录搬家后第一次启动、开机任务恰好是那个目录里用 ESM `import` 的 Node 脚本」：那一次报找不到包，之后正常（CommonJS 有 `NODE_PATH` 兜底）。
+  这条窄缝不可接受时，只把 `QuarantineUnexpectedScriptEntriesOnStartup` 挪回同步位置即可（代价是本地盘上启动又多一次冷遍历）。
+- 子目录里的通知脚本副本「挡住根目录新 helper」由每次执行前的按次清理负责：`BuildNotifyHelperEnv` 清工作目录、`script_runner.go` 的 `buildCmd` 清脚本所在目录，
+  任务执行器、调试运行 / 运行代码、`ddp python`、`ddp task run` 都经过它们，启动时那遍整树扫描只是兜底。
+  例外：`ddp shell` 的工作目录就是脚本根目录，`cleanupManagedHelperCopies` 遇到根目录直接返回，按次清理是空操作；ddp 不再整树清以后，进 shell 再 `cd` 到子目录跑脚本时，子目录里的旧副本只靠面板下次启动的后台遍历清掉（已接受）。
 - 脚本文件树、脚本统计、备份打包、备份恢复复制链路都必须复用同一套 `ShouldIgnoreScript*` 判断，避免有的地方隐藏、有的地方继续打包。
 - 备份恢复遇到命中异常规则的脚本相对路径时必须跳过，不能把污染目录重新写回脚本根目录。
 - 备份恢复写回脚本目录、日志目录、`panel.log` 这类 live 资源时，禁止“先清空 live，再逐步复制”；必须先把新内容完整写入同目录 staging 位置，确认成功后再原子切换到 live 目录/文件。
@@ -828,6 +877,8 @@ if err != nil {
 - 同样是面板式软链，但目标还在（或 `Stat` 报「不存在」以外的错）→ 不动：与面板现建的等价，`ddp task run`、孤儿任务可能正在用。
 - `node_modules` 是指向别处的软链（悬空与否）、相对路径软链 → 不动。
 - 脚本目录本身是软链 / junction → 解析成真实目录后照常清理；根链接本身、里面的脚本不动。
+- 后台遍历途中目录被删（脚本管理、订阅拉取正在增删目录）或读不了 → 跳过，其余目录照清；某个目录的副本清理失败 → 接着清其余目录，遍历完返回第一个错误，main 打一行 `cleanup duplicated notify helpers failed: …`。
+- 启动后几秒内（后台遍历还没走到）就有开机任务跑在带悬空面板软链的目录里 → 这一次 ESM `import` 可能报找不到包（已接受的窄缝，见上）。
 - quarantine 目标重名 → 追加 `.duplicate-N` 后缀，不能覆盖旧证据目录。
 - 备份恢复中遇到 `%SystemDrive%/...` 相对路径 → 直接跳过，不报错中断整个恢复流程。
 - 备份恢复 staging 构建失败 → 直接返回错误，live 目录/文件必须保持恢复前原样，不能出现“旧数据已删，新数据没写完”的半恢复状态。
@@ -842,6 +893,10 @@ if err != nil {
 - Bad：清软链时按名字删所有 `node_modules` 软链，或删前不比对目标 —— 用户指向自己项目的软链被删。
 - Bad：不悬空的面板软链也删（v3.3.5 第二波的写法，以为「启动时没人在用」）—— `ddp task run`、孤儿任务正在 `require` 的依赖突然消失，node 进程报 `ENOENT` 退出。
 - Bad：直接 `WalkDir(scriptsDir)`、不先解析脚本根 —— 脚本目录本身是软链 / junction 时一条都清不到；只用 `EvalSymlinks` 也不够，Windows junction 它原样返回。
+- Bad：把任意一遍整树遍历挪回同步启动路径，或只把其中一遍挪到后台 —— 留在同步路径上的那遍变成冷缓存上的第一遍，慢盘上照样几秒（#158）。
+- Bad：ddp 的 `bootstrap` 重新整树扫（`CleanupManagedHelperCopiesUnderRoot` / `QuarantineUnexpectedScriptEntriesOnStartup`）—— 每条 ddp 命令都要多等几秒；
+  会跑脚本的 `ddp python`、`ddp task run` 运行前已经各自清了自己的目录。
+- Bad：副本扫描回调里遇到 err 照旧 `return err` —— 后台遍历正赶上目录被删时整棵停下，排在后面的目录都清不到。
 
 ### 6. Tests Required
 
@@ -859,6 +914,15 @@ if err != nil {
   里面不悬空的面板软链、根链接本身与里面的脚本都不动。
 - 突变：把实现换回第二波（不判悬空、不解析脚本根），上面三条都红。
 - `TestCleanupManagedHelperCopiesUnderRootSkipsHiddenDirs`：普通子目录里的托管副本照清，`node_modules` / `.git` / `__pycache__` 里的不被遍历。
+- `TestCleanupManagedHelperCopiesUnderRootContinuesPastBrokenDir`（v3.3.6）：`a/notify.py` 是个目录（读它报错）、`b/sendNotify.js` 是托管副本、根目录也有一份托管 helper：
+  返回非 nil 的错误；`b` 里的副本被删；根目录那份不动。它只管「单个目录出错不中止」这一半：`a/notify.py` 这个目录本身读得了，`WalkDir` 回调拿不到 err。
+- `TestCleanupManagedHelperCopiesUnderRootSkipsUnreadableDir`（v3.3.6）：空目录 `a` 先 `chmod 0`（`t.Cleanup` 里改回 0755，否则 `t.TempDir` 删不掉）、`b` 里有托管副本：调用后 `b` 的副本被删（返回值不断言）。
+  管另一半「读不了 / 已消失的目录跳过」。靠目录权限造读错误，Windows 与 root 上 `t.Skip`，只在 Linux 普通用户下真跑（WSL 默认用户 uid 1000、CI 的 GitHub runner）。
+  突变：只把回调退回 `return err` 时只有这条红、上一条照样绿——两条缺一不可。
+- `TestMainRunsScriptTreeWalksInBackground`（`service/startup_wiring_test.go`，AST 读 `../main.go`）：调用顺序 `EnsureBuiltinNotifyHelpers` → `QuarantineUnexpectedScriptEntriesOnStartup` → `CleanupManagedHelperCopiesUnderRoot` → `InitSchedulerV2`（各恰好一次）；
+  两遍遍历在**同一个** `go` 语句里；`EnsureBuiltinNotifyHelpers` 不在任何 `go` 语句里。
+- `TestDdpBootstrapDoesNotWalkScriptTree`（同上，AST 读整个 `../cmd/ddp/runtime.go`）：不出现 `service.CleanupManagedHelperCopiesUnderRoot` 或 `service.QuarantineUnexpectedScriptEntriesOnStartup` 调用。
+  两条 AST 用例按相对路径读源码：在 WSL 里跑交叉编译的测试二进制时，要在仓库（或整个工作区副本）的 `server/service` 目录里跑。
 - ⚠️ 软链用例用面板自己的 `createManagedDirectoryLink` 建链（Windows 上是 `mklink /J` 建 junction，其它平台 `os.Symlink`），建不了就 `t.Skip`；
   相对路径软链那段只在类 Unix 上验。Windows 上跑过不算数：必须交叉编译到 Linux / WSL 再跑一遍（`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go test -c ./service`）。
 - `TestCreateBackupSkipsQuarantinedScriptEntriesInArchive`
@@ -919,6 +983,12 @@ _ = filepath.WalkDir(scriptsDir, func(path string, d fs.DirEntry, err error) err
     }
     return nil
 })
+```
+
+```go
+// 错误：只把副本扫描挪到后台，软链那遍留在同步路径（#158）——它变成冷缓存上的第一遍，慢盘上照样挡住监听几秒
+go service.CleanupManagedHelperCopiesUnderRoot(cfg.Data.ScriptsDir)
+service.QuarantineUnexpectedScriptEntriesOnStartup()
 ```
 
 #### Correct
@@ -988,6 +1058,19 @@ _ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
     _ = os.Remove(path) // 失败只打日志
     return nil
 })
+```
+
+```go
+// 正确：根目录两份 helper 同步准备好；两遍整树遍历放进同一个后台协程（软链那遍在前），排在 InitSchedulerV2 之前、不等它
+if err := service.EnsureBuiltinNotifyHelpers(cfg.Data.ScriptsDir); err != nil {
+    log.Printf("prepare builtin notify helpers failed: %v", err)
+}
+go func() {
+    service.QuarantineUnexpectedScriptEntriesOnStartup()
+    if err := service.CleanupManagedHelperCopiesUnderRoot(cfg.Data.ScriptsDir); err != nil {
+        log.Printf("cleanup duplicated notify helpers failed: %v", err)
+    }
+}()
 ```
 
 ---
@@ -1824,7 +1907,9 @@ if closeAt := findClosingQuote(value[1:], quote); closeAt < 0 {
 - **`RunInlineScript` 还有订阅钩子（`subscription_hook.go`）这个调用方**，`RunHookScript` 也同时服务 `task_after.sh` / `extra.sh`。采集逻辑必须对它们完全 no-op（靠上面那个门禁），不得改变这些调用方的输出与退出码。
 - 后置脚本自身的 `export` **不回传** —— 它跑完任务就结束了，没有下游消费方。
 - 失败分级要精确：基线没落盘 = bootstrap 压根没跑（绝大多数用户没有全局 `task_before.sh`），必须**完全静默**；基线在但最终快照缺失 = 钩子跑了而 `trap` 没能落盘（用户自己装了 EXIT trap，或进程被 SIGKILL），必须**出声**，否则用户以为 `export` 生效了。
-- **新增任何「面板自己打进任务日志」的元信息行（`[前置脚本环境变量] …`、`[前置脚本执行失败: …]`、`[后置脚本执行失败: …]` 等），必须同步登记到 `task_executor.go` 的 `panelMetaLinePrefixes`**，否则它会混进任务成功通知的日志摘录（`summarizeTaskSuccessOutput`，上限 30 行 / 1500 字符），把用户真正想看的脚本输出挤掉。这个失败模式同样是静默的：任务照常成功，只是通知里看不到有用内容。
+- **新增任何「面板自己打进任务日志」的元信息行（`[前置脚本环境变量] …`、`[前置脚本执行失败: …]`、`[后置脚本执行失败: …]`、v3.3.6 修复 A 的 `[已结束残留的后台进程：…]` 等），必须同步登记到 `task_executor.go` 的 `panelMetaLinePrefixes`**，否则它会混进任务成功通知的日志摘录（`summarizeTaskSuccessOutput`，上限 30 行 / 1500 字符），把用户真正想看的脚本输出挤掉。这个失败模式同样是静默的：任务照常成功，只是通知里看不到有用内容。
+  失败摘要（`summarizeTaskFailureOutput`）**不整体套** `isPanelMetaLine`：「[脚本进程被信号终止：…]」这类行对诊断有用。新增的行如果会落在失败输出末尾、干扰失败摘要（Python 摘要认不出最后一行的异常、通用摘要的「上下文」取成这行提示），
+  要另在 `normalizeTaskFailureLines` 里按前缀单独丢掉（TrimSpace 之后比前缀），目前只有 `[已结束残留的后台进程：` 这一种（v3.3.6）。
 
 ### 4. Validation & Error Matrix
 
@@ -2677,8 +2762,8 @@ fi
      **只看仍然存在的订阅**：已删订阅留下的悬空旧标签（E9）不挡删除。读订阅列表失败 → 整段跳过删除（`[跳过自动删除]`，计入失败）。
      快照过期（标签或命令被改、已被删）→ 不改 + `[保留任务] …同步期间…`；标签本就不带（`detach` 新旧相同）→ 静默、不刷屏；出错 → `failed++` + `[解除关联失败]`。
      汇总 `[共解除关联 N 个任务]`；解除关联也算变更（不再打 `[同步完成] 本次未对定时任务做任何变更`）。
-- **条件删除**：一个事务里先删该任务的 `task_logs`，再 `DELETE FROM tasks WHERE id=? AND command=?`；
-  `RowsAffected≠1` 或任一步出错就回滚（日志原样恢复）；提交后再 `RemoveJob`。
+- **条件删除**：一个事务里先经 `DeleteTaskLogs(tx, "task_id = ?", task.ID)` 把该任务的 `task_logs` 并入执行趋势计数再删（v3.3.6，#158；它必须是事务第一条语句，这里本来就是，见「场景：执行日志删除与执行趋势归档」），
+  再 `DELETE FROM tasks WHERE id=? AND command=?`；`RowsAffected≠1` 或任一步出错就回滚（日志与刚并入的计数一起原样恢复）；提交后再 `RemoveJob`。删日志出错的文案仍是 `删除历史日志失败: %w`。
   **顺序不能反**：`task_logs` 对 `tasks` 有外键（`PRAGMA foreign_keys=ON`），先删任务会 `FOREIGN KEY constraint failed`，
   每一条有历史日志的失效任务都删不掉。
   任一步出错 → `failed++` + `[自动删除任务失败]`；快照过期（命令被改、已被删）→ 不删 + `[保留任务] …同步期间…`。
@@ -2815,7 +2900,8 @@ if verdict == staleTaskDelete {
         // err → failed++ + [解除关联失败]；!changed → 快照过期时 [保留任务] …同步期间…，标签本就不带则静默；否则 detached++ + [解除关联]
         continue // 解除关联之后绝不能再走删除：条件删除只比对 id+command，不看 labels
     }
-    // 事务：先删 task_logs，再 DELETE … WHERE id=? AND command=?；RowsAffected≠1 或出错就回滚
+    // 事务：先经 DeleteTaskLogs 把 task_logs 并入执行趋势计数再删（事务第一条），再 DELETE … WHERE id=? AND command=?；
+    // RowsAffected≠1 或出错就回滚（计数一起回滚）
     removed, err := deleteSubscriptionTaskIfUnchanged(task)
     // ...
 }
@@ -3690,7 +3776,7 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 - 执行窗口：`func (e *TaskExecutor) beginExecuting(taskID uint) *executingRun` / `func (e *TaskExecutor) endExecuting(run *executingRun)`（幂等）
 - 准备阶段窗口：`preparedRuns map[*ExecutionRequest]*executingRun` + `func (e *TaskExecutor) closePreparedRun(req *ExecutionRequest)`
 - 每次执行的停止意图：`executingRun.stop runStopKind`（`runStopNone` / `runStopManual` / `runStopHalt`）+ `executingRun.stopCh`
-- 停止入口：`func (e *TaskExecutor) StopTask(taskID uint) bool` / `func (e *TaskExecutor) StopAllRunningTasks() int`（返回杀掉的进程数，含钩子）
+- 停止入口：`func (e *TaskExecutor) StopTask(taskID uint) bool` / `func (e *TaskExecutor) StopAllRunningTasks() int`（返回终止的进程数，含钩子；v3.3.6 起两者都先 SIGTERM，见「场景：任务进程组的清理与终止」）
 - 重试等待：`func (e *TaskExecutor) waitRetryInterval(run *executingRun, d time.Duration) bool`
 - 进程登记释放：`func (e *TaskExecutor) releaseRunProcesses(run *executingRun)`
 - 关停（v3.3.5）：
@@ -3713,14 +3799,22 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
   - `halting()` 为真时**不启动**任务后置脚本、`task_after.sh`、`extra.sh`，也不再启动新的前置钩子（任务前置脚本、`task_before.sh`）。每个钩子最长 60 秒，关停等不起。
   - **不发失败通知**：判据是这次执行 `runStopKind(run) == runStopHalt` 且没成功。任务自己先失败、关停时正卡在后置钩子里，同样算被关停打断，不发。
   - `last_run_status` 仍记 `RunFailed`（不是 Aborted）。
+  - 🔴 **停止种类在主命令返回那一刻读，读到 `runStopHalt` 一律按失败结算**（v3.3.6，#159 修复 B 改成先 TERM 之后补的回归修复）：`runCommandWithPlanFunc` 一返回就读 `haltedThisRound := e.runStopKind(run) == runStopHalt`，
+    为真时这一轮不论退出码都不走成功那条 `break`（`IsSuccessExitCode(rc) && !haltedThisRound` 才算成功），照常走失败分支（依赖自动安装、运行时失败提示与改前同一条路径），
+    下一轮开头的停止检查写「取消后续执行」后跳出、不再起新进程（`MaxRetries=0` 时直接出循环，没有这一行）；随后照常写「任务已中断」「跳过后置脚本」、不发任何通知。
+    原因：关停改成先 SIGTERM 后，trap 了 TERM、收完尾以 0 退出的脚本会被判成成功——记成功、不写「任务已中断」、还发成功通知。与手动停止按 `runStopManual` 判已终止同一思路：看这次执行收到的停止种类，不看退出码。
+    读到的还是 `runStopNone`，说明主命令在关停之前就自己返回了，照旧按退出码判（成功就记成功）。脚本自己退出时没有「被信号终止」那行，退出码照实记（改前被 KILL 是 -1）。
+    `StopAllRunningTasks` 在发任何信号之前，已在 `processLock` 里把 `run.stop` 置成 `runStopHalt`，所以进程因 TERM 退出时一定读得到，没有竞态。
   - 前置 / 后置钩子进程登记在 `executingRun.hookProcesses`，刻意不进 `runningProcesses` / `processes`：**只有 `StopAllRunningTasks` 读这张表、按进程组杀**；
     `StopTask` 不读它，手动停止照旧跑后置脚本、结算 Aborted，行为不变。
   - `halted` 只由 `StopAllRunningTasks` 置位（生产上只有 `HaltSchedulerV2` 调它）。之后才开窗的执行（worker 恰好在关停前取到请求）在 `newExecutingRunLocked` 里**生来带 `runStopHalt`**：
     不起前置钩子、主进程一次不起；关停瞬间才起来的钩子由 `registerHookProcess` 直接杀掉、不登记。
-  - 只有截止（`ShutdownSchedulerV2` 的 4 秒）前**没结算完**的执行才由 `MarkActiveTasksInterrupted` 标「面板正在关闭或重启，任务已被中断」；
+  - 只有截止（`ShutdownSchedulerV2` 的 3 秒，v3.3.6 前是 4 秒）前**没结算完**的执行才由 `MarkActiveTasksInterrupted` 标「面板正在关闭或重启，任务已被中断」；
     截止时先 `revokeUnsettledScriptTokens` 吊销它们的脚本凭据（结算 defer 里那句吊销等不到了）。面板关停的整体顺序见「场景：停机收尾」。
 - **结算只摘自己登记的 pid**，禁止 `delete(e.runningProcesses, taskID)`：多实例下先结算的那次会把另一次仍在跑的进程一起抹掉，之后停不掉它，`HasRunningProcess` 也会误报「没有进程在跑」——「删除任务时一并删除脚本」正是靠它兜底，会把还在跑的任务的脚本删掉。
-- **杀进程不要持锁**：锁内只收集 victim 列表与落定标记，出锁后再 `KillProcessGroup`（Unix 下是 syscall，持锁会把进程登记、`HasRunningProcess` 这些短临界区堵住）。
+- **杀进程不要持锁**：锁内只收集 victim 列表与落定标记，出锁后再发信号——`StopTask` 出锁后调 `TerminateProcessGroup`，`StopAllRunningTasks` 出锁后才 `signalGroupTerm`、等共享宽限、补 `KillProcessGroup`
+  （Unix 下是 syscall，持锁会把进程登记、`HasRunningProcess` 这些短临界区堵住；关停那最多 2 秒的宽限更不能拿着锁等）。
+  `Terminate*` 不阻塞（等待与补刀在单独的协程里），所以调试运行的 `debugRun.stop()` 可以在 `run.mu` 里调它。
 - 面板自己打进任务日志的停止提示行（`[任务已被手动停止，…`、`[面板正在关闭，…`；「取消后续执行」「终止刚启动的进程」「任务已中断」「跳过后置脚本」都挂在这两个前缀下）必须登记进 `panelMetaLinePrefixes`，否则成功通知的日志摘录会被这些行顶掉用户真正想看的脚本输出。
 
 ### 4. Validation & Error Matrix
@@ -3729,13 +3823,15 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 - 停止落在重试等待 → `stopCh` 立刻唤醒，不等满 `RetryInterval`，不再起下一轮。
 - 停止命中已登记进程 + `MaxRetries>0` → 杀进程**并且**置停止意图，重试循环不得续跑。
 - `AllowMultipleInstances=true`，停止后才启动的实例 → 不受上一次停止影响，正常执行。
-- 关机 → 窗口内执行不再起新进程、不再启动前置 / 后置钩子，正在跑的钩子按进程组杀；没成功的写「[面板正在关闭，任务已中断]」「[面板正在关闭，跳过后置脚本]」（各占一行），
+- 关机 → 窗口内执行不再起新进程、不再启动前置 / 后置钩子，正在跑的钩子按进程组终止（v3.3.6 起与任务进程一起先 TERM、共享宽限再 KILL）；没成功的写「[面板正在关闭，任务已中断]」「[面板正在关闭，跳过后置脚本]」（各占一行），
   `last_run_status` 记失败（不是 Aborted），不发失败通知。
-- 关机时主进程已经成功、还没轮到后置脚本 → 只写「[面板正在关闭，跳过后置脚本]」，照常记成功（成功通知照旧异步发出，面板随即退出，不保证送达）。
+- 关机时主进程收到 TERM、在 trap 里收完尾以 0 退出 → 照样按失败结算（`haltedThisRound`）：`MaxRetries>0` 时「取消后续执行」「任务已中断」「跳过后置脚本」三行，`MaxRetries=0` 时后两行；
+  成功、失败通知都不发；结束行里的退出码照实是 0，没有「被信号终止」那行。
+- 关机时主进程已经成功、还没轮到后置脚本（主命令返回那一刻停止种类还是 `runStopNone`）→ 只写「[面板正在关闭，跳过后置脚本]」，照常记成功（成功通知照旧异步发出，面板随即退出，不保证送达）。
 - 关停之后才开窗的执行 → 生来带 `runStopHalt`：前置钩子与主进程都不起，日志「取消后续执行」「任务已中断」「跳过后置脚本」三行，记失败。
 - 已经进入后置钩子阶段才关停 → 正在跑的钩子整组被杀，后面的钩子一起来就被杀；这次执行照常在 `runTask` 里结算（输出不丢），
   失败的不发失败通知（`run.stop` 已是 `runStopHalt`），成功的照常记成功。「跳过后置脚本」的判断在进入后置阶段时已经做过，所以这种情况日志里没有那两行提示。
-- 执行卡在读输出里（逃出进程组的孙进程攥着管道）→ `runTask` 结算不了，等到 `ShutdownSchedulerV2` 的 4 秒截止：凭据吊销，库里由 `MarkActiveTasksInterrupted` 标中断，这次输出丢失。
+- 执行卡在读输出里（逃出进程组的孙进程攥着管道）→ `runTask` 结算不了，等到 `ShutdownSchedulerV2` 的 3 秒截止：凭据吊销，库里由 `MarkActiveTasksInterrupted` 标中断，这次输出丢失。
 - 任务此刻没有任何执行在窗口里 + 外部入口打了任务级标记 → 下一次执行开窗时先 `consumeManualStop` 清掉残留，不得串到这一次。
 
 ### 5. Good/Base/Bad Cases
@@ -3757,6 +3853,9 @@ if li, err := os.Lstat(literalAbs); err == nil && li.Mode().IsRegular() && sameF
 - 关机结算（`service/panel_shutdown_test.go`，断言点见「场景：停机收尾」）：被打断的跳过三种后置脚本、不发失败通知、两行提示各占一行且被 `isPanelMetaLine` 认出
   （`TestHaltedRunSkipsPostHooksAndFailureNotify`、`TestShutdownInterruptNoticesAreStandalonePanelMetaLines`）；正在跑的前置 / 后置钩子整组被杀、关停后开窗的执行不起钩子
   （`TestHaltKillsRunningPreHookAndSkipsNewOnes`、`TestHaltKillsRunningPostHook`）；手动停止照旧跑后置脚本、结算 Aborted（`TestManualStopStillRunsPostHooks`）。
+- 关停先 TERM 之后的结算（Linux，`service/task_process_cleanup_linux_test.go`）：`TestShutdownSettlesTermTrappedZeroExitAsInterrupted`（trap TERM 后以 0 退出，`MaxRetries=1`、成功失败通知都开：
+  有收尾标记；`RunFailed`；「取消后续执行」「任务已中断」「跳过后置脚本」各自整行；等 500ms 后本地 webhook 探针 0 次）、
+  `TestShutdownAfterMainCommandSucceededStillSettlesAsSuccess`（关停落在后置脚本里：照旧 `RunSuccess`，主命令输出在，没有「任务已中断」）。突变：去掉 `!haltedThisRound`，第一条红。
 - 准备阶段失败 / `runTask` 内 panic → 窗口必须关闭（之后 `StopTask` 不得恒 true）。
 - 结算只释放自己的进程登记（另一实例仍可被停止）。
 - 停止提示行必须在 `panelMetaLinePrefixes` 里。
@@ -3775,10 +3874,18 @@ go test ./...
 #### Wrong
 
 ```go
-// 错误：只杀进程就返回，重试循环照常起下一轮。
+// 错误：只终止进程就返回，重试循环照常起下一轮。
 if procs, ok := e.runningProcesses[taskID]; ok {
-    KillProcessGroup(procs)
+    TerminateProcessGroup(procs)
     return true
+}
+```
+
+```go
+// 错误：关停先 TERM 后只看退出码 —— trap 了 TERM、收完尾以 0 退出的脚本被记成成功、不写「任务已中断」、还发成功通知
+if task.IsSuccessExitCode(result.ReturnCode) {
+    success = true
+    break
 }
 ```
 
@@ -3790,10 +3897,22 @@ time.Sleep(time.Duration(task.RetryInterval) * time.Second)
 #### Correct
 
 ```go
-// 正确：杀进程 + 给此刻窗口里的每一次执行置停止意图（出锁后再 kill）。
+// 正确：终止进程 + 给此刻窗口里的每一次执行置停止意图（出锁后再发信号）。
+// TerminateProcessGroup 先 TERM、groupTermGrace（5 秒）后组还在才 KILL，补刀在协程里，StopTask 照样立即返回。
 victims := e.markStopForTask(taskID, runStopManual) // 锁内
 for _, p := range victims {                          // 锁外
-    KillProcessGroup(p)
+    TerminateProcessGroup(p)
+}
+```
+
+```go
+// 正确：主命令一返回就读停止种类；被关停打断的这一轮不论退出码都按失败走，由下一轮开头的停止检查跳出
+result, _, err := runCommandWithPlanFunc(plan, effectiveTimeout, envVars, maxLogSize, onOutputWithCollect, onStart)
+haltedThisRound := e.runStopKind(run) == runStopHalt
+// ……err 分支……
+if task.IsSuccessExitCode(result.ReturnCode) && !haltedThisRound {
+    success = true
+    break
 }
 ```
 
@@ -4700,11 +4819,13 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
 
 - 触发：修改 `server/service/dependency_reconcile.go`（`ReconcileDependenciesAfterRestart`、`listPythonInstalledPackages`）、
   `dependency_state.go` 的 `DependencyInstalledForPythonVersion`、`python_package_name.go` 的 `CanonicalizePythonPackageName`，
+  `runtime_exec.go` 的 `ensureManagedPythonVenvForVersion`、`ResolveManagedPipBinaryForPythonVersion` / `ResolveManagedPythonBinaryForPythonVersion`、`createManagedPythonCommand` / `createManagedPythonModuleCommand`（后四个靠下面的 I7 不再自查），
   或 `main.go` 里 `verifyInstalledDeps()` 的位置时必须看本节。
 - 背景（#156）：启动校验在 HTTP 监听**之前**同步执行。以前对每条「已安装」依赖串行起子进程：装着的 Python 依赖每条 5 个、判缺的 12 个（Linux 1 个 dpkg-query，Node 0 个），
   慢 NAS 上整轮 3 分 35 秒，这段时间面板打不开；带版本号 / extras 的依赖逐条 `pip show` 永远判缺，每次重启都排进后台重装。
   改成快照后 #156 实测整轮从约 100 个子进程 / 14 秒降到 6 个 / 0.7 秒（WSL 真实 venv，10 条 Python + 2 条 Linux + 2 条 Node + 1 条排队：
   改前 93~100 个子进程、7.7~20.5 秒，改后 6 个、0.43~0.70 秒；单条判缺从 12 个子进程降到 5 个）。
+  v3.3.6（#158，日志里 Python 校验 18 秒）再去掉重复的 venv 健康检查：托管 venv 健康时快照每个版本只起 1 个子进程，单条判缺降到 3 个。
 
 ### 2. Signatures
 
@@ -4721,8 +4842,12 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
 | `pipListHiddenPackageNames` | `python` / `wsgiref` / `argparse` | pip list 写死不列（pip 的 `stdlib_pkgs`）、pip show 却查得到的名字 |
 | `dependencyInstalledFunc`（既有） | `DependencyInstalledForPythonVersion` | 逐条判定 |
 
-- 命令：`NewPipCommandForPythonVersion(version, []string{"list", "--format=json", "--disable-pip-version-check"})`，`cmd.Env = SanitizePipEnv(os.Environ())`，
-  经 `runNodeABICommand(cmd, pythonInstalledPackagesTimeout)` 执行（`SetPgid` + 超时 `KillProcessGroup` + `WaitDelay` 兜住攥着管道的孙进程）。
+- 命令（v3.3.6 起最多两次尝试，参数都是 `list --format=json --disable-pip-version-check`）：
+  1. 直接列：`PythonVersionSupportedByCurrentRuntime(version)` 且 `resolveManagedPipBinaryInVenv(ManagedPythonVenvDir(version))` 非空（只看文件在不在，`pip3` 优先于 `pip`，与老路里 Resolve 用的是同一个函数）时，
+     `exec.Command(pipBin, args...)`，成功就返回；
+  2. 没有托管 pip，或第 1 步有任何失败（起不来、非 0 退出、超时、JSON 不对）：**不打日志**，走老路 `NewPipCommandForPythonVersion(version, args)` 再列一次。
+  两次都经函数内的闭包 `runPipList(cmd)`：`cmd.Env = SanitizePipEnv(os.Environ())`、stdout / stderr 分开收，经 `runNodeABICommand(cmd, pythonInstalledPackagesTimeout)` 执行
+  （`SetPgid` + 超时 `KillProcessGroup` + `WaitDelay` 兜住攥着管道的孙进程）。
 - 名称规范化：`CanonicalizePythonPackageName(spec)`，与 `POST /deps` 查重是同一个函数，不另写一套。
 
 ### 3. Contracts
@@ -4743,10 +4868,21 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
 - **pip list 的三个坑**（缺一个都会让快照静默失效或拖住启动）：
   1. 必须带 `--disable-pip-version-check`：pip ≤ 24.0 的普通 `pip list` 会联网自检版本，venv 里的 pip 是建 venv 时带进来的，不随镜像升级；
   2. **只解析 stdout**，stderr 单独收：中断安装留下的 `~xxx` 残目录会让 pip 往 stderr 打 `Ignoring invalid distribution`，混进来 JSON 就解析失败；
-  3. 超时 ≥ 60 秒、超时按进程组杀。它只管 pip list 这一条，`NewPipCommandForPythonVersion` 返回前的 4 个 venv 健康检查子进程不归它管；
+  3. 超时 ≥ 60 秒、超时按进程组杀。它只管 pip list 这一条：直接列时没有健康检查；走老路时 `NewPipCommandForPythonVersion` 返回前那遍 venv 健康检查（2 个子进程）不归它管；
      设得太短，慢机器会悄悄退回逐条校验，等于没修。
+  两次尝试都遵守这三条。
 - **失败回退**：版本不支持、pip 坏了、超时、JSON 解析失败 → 这个版本整体退回逐条 `dependencyInstalledFunc`，语义与改动前一致；
-  **每个版本只试一次、只打一行原因**，不按依赖重试。
+  每个版本**最多跑两次 pip list**（直接列一次；失败再经健康检查列一次），调用方仍**每个版本只调一次 `pythonInstalledPackagesFunc`、只打一行原因**（原因取老路的错误），不按依赖重试。
+  不区分「直接列超时」与「直接列失败」：极慢环境里最多多等一个超时窗口，那种环境退回逐条校验本来就慢得多。
+- **venv 损坏时照样能发现并重建**（快路径不能丢掉这条，v3.3.6）：直接列失败 → 老路 `NewPipCommandForPythonVersion` → `ResolveManagedPipBinaryForPythonVersion` → `EnsureManagedPythonVenvForVersion` 做健康检查，
+  坏了先修 pip，修不好挪成 `<venv>.broken-<时间>` 再重建（重建时 Ensure 自己打 `managed python … venv created …` 一类日志，这里不另打）→ 在新 venv 上再列一次。
+  快路径只要求「pip 跑得起来」、不核对 venv 里 python 的小版本：小版本对不上时 pip 装在带版本号的 `lib/pythonX.Y/site-packages` 里会导入失败，直接列失败，照样走到这一步。
+- 🔴 **I7：`ensureManagedPythonVenvForVersion` 每条返回 true 的路径，结尾都是一次通过的 `managedPythonVenvHealthyForVersion`**（v3.3.6，`runtime_exec.go` 函数头有同义注释）：
+  首查通过、加锁后复查通过、修好 pip 后查过、新建后查过、新建并修好 pip 后查过，五条都是；返回 false 的是版本不支持、没有数据目录、`syncCreate=false`（只起后台协程去建）、建不出也修不好。
+  - 两个 `ResolveManaged{Pip,Python}BinaryForPythonVersion` 靠它不再自己查第二遍（每查一遍 2 个子进程：`python -c` 核对版本 + `pip --version`）：Ensure 为 true 时直接返回 `resolveManaged{Pip,Python}BinaryInVenv(ManagedPythonVenvDir(v))`，为 false 时返回空串，由调用方走各自原有的回退。
+  - 两个 `createManagedPython*` 同理：Ensure 为 true 时直接用 `resolveManagedPythonBinaryInVenv(...)`（健康检查核对版本用的就是这个文件），不再进候选循环、不再起那次 `managedPythonBinaryMatchesVersion`；
+    为 false 或取不到时，原候选循环（托管 venv、Windows 常见安装目录、PATH，逐个核对版本）一字不改。每次起 Python 任务的辅助子进程因此 4 → 3 个。
+  - 以后给 Ensure 加缓存、「刚查过就直接返回 true」之类的捷径，**必须同时改这四处**，否则会把坏掉的 venv 里的 pip / python 交出去。
 - **Node.js / Linux** 照旧逐条 `dependencyInstalledFunc`（只 stat 目录 / 起一个 dpkg-query 或 apk，本来就便宜）。
 - **两类 `[启动校验]` 日志行**（标准库 `log`，进面板日志）：
   - 列举失败，每个版本一行：`[启动校验] 列举 Python <版本> 已安装的包失败，该版本依赖改为逐条校验：<原因>`。
@@ -4755,7 +4891,8 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
   - 整轮慢日志，只在 ≥ `dependencyReconcileSlowLogThreshold`（3 秒）时打一行：`[启动校验] 校验 N 条已安装依赖耗时 X（Python a / Node.js b / Linux c）`。
     N 是两轮实际判定过的记录数（stale 轮通常为 0）；X 是整轮总耗时（含写库）；a / b / c 只算判定本身（Python 含建快照那次 pip list），都按毫秒取整。没超阈值不打，正常启动不刷日志。
 - **`DependencyInstalledForPythonVersion` 去重**：`ResolveManagedPipBinaryForPythonVersion` 拿到托管 pip 就只跑它一次 `pip show`；
-  拿不到（版本不支持、venv 坏了）才按原顺序试 venv 里残留的 `bin/pip`、`bin/pip3`、`Scripts/pip.exe` 与系统 pip。语义零变化，判缺 12 → 5 个子进程，恢复备份、Playwright 状态卡片跟着变快。
+  拿不到（版本不支持、venv 坏了）才按原顺序试 venv 里残留的 `bin/pip`、`bin/pip3`、`Scripts/pip.exe` 与系统 pip。语义零变化，判缺 12 → 5 个子进程
+  （v3.3.6 起 → 3 个：解析托管 pip 时一遍健康检查的 2 个 + 1 次 `pip show`），恢复备份、Playwright 状态卡片跟着变快。
 
 ### 4. Validation & Error Matrix
 
@@ -4766,8 +4903,10 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
 | stale 轮，名字含 `= > < ~ ! [ @ ;` | 不查快照，逐条 `dependencyInstalledFunc`：带 `[恢复备份]` 的 installing 续装，queued 置 failed，其余 installing / removing 置 failed（与改快照之前一致） |
 | stale 轮，裸包名 | 查快照，主包在 → 同步成已安装 |
 | 快照里没有 `python` / `wsgiref` / `argparse` | 逐条 `pip show` 问一次 |
-| 镜像不支持该 Python 版本 / venv 坏了 | 该版本逐条校验 + 一行原因日志 |
-| pip list 超过 60 秒 | 整个进程组被杀，该版本逐条校验 + 一行原因日志 |
+| 托管 pip 在、健康 | 直接 `pip list`，整个版本只起这 1 个子进程，不做健康检查 |
+| 托管 pip 在、但跑不起来（venv 坏了、换镜像后 Python 小版本对不上、pip 只剩半截、输出不是 JSON） | 直接列失败不打日志，走老路：健康检查发现坏了就修 / 重建 venv 后再列；重建成功则快照照常生效、日志里没有「列举失败」 |
+| 镜像不支持该 Python 版本 / venv 坏了且修不好、重建不出来 | 该版本逐条校验 + 一行原因日志 |
+| pip list 超过 60 秒 | 整个进程组被杀，走老路再列一次（最坏多等一个 60 秒窗口）；还不行就该版本逐条校验 + 一行原因日志 |
 | stdout 不是 JSON | 该版本逐条校验 + 一行原因日志 |
 | stderr 有 `Ignoring invalid distribution ~xxx` | 不影响，快照照常生效 |
 | venv 里是 pip ≤ 24.0、开机网络没通 | 不联网，快照照常生效（靠 `--disable-pip-version-check`） |
@@ -4775,11 +4914,13 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
 
 ### 5. Good/Base/Bad Cases
 
-- Good：25 条 Python + 26 条 Linux + 10 条 Node 的面板重启时，每个 Python 版本只起一次 pip list（外加它前面的 4 个健康检查）；`requests==2.31.0` 判已装，不再每次重装。
+- Good：25 条 Python + 26 条 Linux + 10 条 Node 的面板重启时，每个 Python 版本只起一次 pip list（托管 venv 健康时整个版本只起这 1 个子进程）；`requests==2.31.0` 判已装，不再每次重装。
 - Base：只有 Node / Linux 依赖 → 一次 pip list 都不跑，行为与改动前一致。
 - Bad：合并 stdout / stderr；不带 `--disable-pip-version-check`；超时只给几秒；列举失败时每条依赖都重试一次 pip list；
   把规范名判定塞进 `DependencyInstalledForPythonVersion`（恢复备份跟着改语义）；用例建了 Python 记录却不给 `pythonInstalledPackagesFunc` 打桩。
 - Bad：stale 轮也一律按主包查快照（v3.3.5 第二波的写法）—— 恢复备份装到一半的 `requests==2.31.0` 被记成已安装、不再续装，排队中一步没执行的 `PyYAML==6.0` 也被记成已安装。
+- Bad：直接列失败就返回、不回退老路 —— 坏掉的 venv 不会被健康检查发现、也不会重建，这个版本白白退回逐条校验。
+- Bad：给 `ensureManagedPythonVenvForVersion` 加「刚查过就返回 true」的捷径，却不改两个 Resolve 与两个 `createManagedPython*`（违反 I7）—— 坏 venv 里的 pip / python 被直接交出去。
 
 ### 6. Tests Required
 
@@ -4792,17 +4933,27 @@ cmd, err = buildLinuxDependencyInstallCommandFunc(dep.Name)
   - `TestReconcileDependenciesAfterRestartFallsBackPerVersionWhenSnapshotFails`：只有列举失败的版本逐条判定；该版本**恰好一行**原因日志且带原因；成功的版本不打。
   - `TestReconcileDependenciesAfterRestartSkipsSnapshotWithoutPythonDeps`、`TestReconcileDependenciesAfterRestartAsksPipShowForNamesPipListHides`、
     `TestReconcileDependenciesAfterRestartLogsSlowRoundByType`（默认阈值下不打；阈值调成 0 时断言「校验 3 条已安装依赖耗时」与「（Python … / Node.js … / Linux …」）。
-  - `TestReconcileDependenciesAfterRestartListsPythonPackagesOnceWithManagedPip`：冒充的托管 venv 端到端，4 条 Python 依赖只起 5 个子进程（4 个健康检查 + 1 次 pip list），不出现 `pip show`。
-  - `TestListPythonInstalledPackagesReadsOnlyStdout`（冒充的 pip 往 stderr 打告警，且不带 `--disable-pip-version-check` 就报错）、`TestListPythonInstalledPackagesRejectsNonJSONOutput`、
-    `TestListPythonInstalledPackagesTimesOutAndKillsProcessGroup`（超时调成 1 秒，孙进程攥着 stdout 时 6 秒内返回）。
-- `server/service/dependency_state_test.go`：`TestDependencyInstalledForPythonVersionAsksManagedPipOnce`。
+  - `TestReconcileDependenciesAfterRestartListsPythonPackagesOnceWithManagedPip`：冒充的托管 venv 端到端，4 条 Python 依赖**恰好 1 个子进程**，就是 `pip3 list --format=json --disable-pip-version-check`（v3.3.6 起不做健康检查、不出现 `pip show`）。
+  - `TestReconcileDependenciesAfterRestartRebuildsBrokenManagedVenv`（v3.3.6）：托管 venv 的 `pip` / `pip3` 不管什么子命令都报 `ModuleNotFoundError: No module named 'pip'` 并退 1；
+    PATH **前置**一个假的 `python3.12`（`--version` 报 3.12.13，`-m venv DIR` 时 `mkdir -p` + `cp -R` 拷入健康模板，模板的 `pip3 list` 输出 `[]`、日志带 `new-` 前缀；要拷文件，所以不能用 `isolatePythonProbePath` 整体替换 PATH）：
+    第一个子进程是旧 venv 的 `pip3 list …`（失败）、中间有 `python3.12 -m venv <venv>`、最后一个是 `new-pip3 list …`；`<venv>.broken-*` 恰好一个；两条依赖都排进重装；日志里没有「列举 Python 3.12 已安装的包失败」。
+    突变：直接列失败后不回退 → 这条红（逐条判定那条路照样会重建，但最后一个子进程变成 `pip3 show`，还会打出回退日志）。
+  - `TestListPythonInstalledPackagesReadsOnlyStdout`（冒充的 pip 往 stderr 打告警，且不带 `--disable-pip-version-check` 就报错）、`TestListPythonInstalledPackagesRejectsNonJSONOutput`（两次尝试都拿到非 JSON，错误里仍含「JSON」）、
+    `TestListPythonInstalledPackagesTimesOutAndKillsProcessGroup`（超时调成 1 秒，孙进程攥着 stdout 时 6 秒内返回；v3.3.6 起直接列、走老路各超时一次，WSL 实测约 2.2–2.4 秒，不整组杀的话每次多等 10 秒 WaitDelay，照样红）。
+- `server/service/dependency_state_test.go`：
+  - `TestDependencyInstalledForPythonVersionAsksManagedPipOnce`：装着的、判缺的都**恰好 3 个子进程**：`python -c …`、`pip3 --version`、`pip3 show NAME`。
+  - `TestResolveManagedBinariesCheckVenvHealthOnce`（v3.3.6）：健康的假 venv 上 `ResolveManagedPipBinaryForPythonVersion("3.12")` 得到 `<venv>/bin/pip3`、`ResolveManagedPythonBinaryForPythonVersion("3.12")` 得到 `<venv>/bin/python`，
+    各恰好 2 个子进程：第一个以 `python -c ` 开头，第二个是 `pip3 --version`。
+  - `TestCreateManagedPythonCommandsReuseEnsureVersionCheck`（v3.3.6）：先 `isolatePythonProbePath`；`createManagedPythonCommand` 与 `createManagedPythonModuleCommand`（`python3 -m pip`）的 `cmd.Path` 都是 `<venv>/bin/python`，
+    各 2 个子进程、`python -c` 只出现一次；cleanup 照常调用。
+  - 冒充的 venv（`writeFakeManagedVenv`）是 sh 脚本，Windows 上 `t.Skip`：要交叉编译到 Linux / WSL 跑才算数。
 - 🔴 **任何会走到 `ReconcileDependenciesAfterRestart` 且建了 Python 记录的用例都必须给 `pythonInstalledPackagesFunc` 打桩**
   （既有的如 `backup_restore_regression_test.go` 的 `TestReconcileDependenciesAfterRestartSettlesQueuedRecords`），否则 CI 会真去建 venv、跑 pip。
 - 修改后至少运行：
 
 ```bash
 cd server
-go test ./service -run "ReconcileDependencies|ListPythonInstalledPackages|DependencyInstalled" -count=1
+go test ./service -run "ReconcileDependencies|ListPythonInstalledPackages|DependencyInstalled|ResolveManagedBinaries|CreateManagedPythonCommands" -count=1
 ```
 
 ### 7. Wrong vs Correct
@@ -4823,22 +4974,40 @@ installed := snapshot[strings.ToLower(dep.Name)]
 dependencyStillInstalled := func(dep model.Dependency) bool {
     return snapshot[CanonicalizePythonPackageName(dep.Name)]
 }
+
+// 错误五：直接列失败就返回、不回退老路 —— 坏掉的 venv（换镜像后 Python 小版本变了）不会被健康检查发现，也不会重建
+if pipBin := resolveManagedPipBinaryInVenv(ManagedPythonVenvDir(version)); pipBin != "" {
+    return runPipList(exec.Command(pipBin, args...))
+}
 ```
 
 #### Correct
 
 ```go
-cmd, err := NewPipCommandForPythonVersion(version, []string{"list", "--format=json", "--disable-pip-version-check"})
+args := []string{"list", "--format=json", "--disable-pip-version-check"}
+runPipList := func(cmd *exec.Cmd) (map[string]bool, error) { // 直接列与老路共用，两次都遵守三个坑
+    cmd.Env = SanitizePipEnv(os.Environ())
+    var stdout, stderr bytes.Buffer
+    cmd.Stdout, cmd.Stderr = &stdout, &stderr // 只解析 stdout
+    if err := runNodeABICommand(cmd, pythonInstalledPackagesTimeout); err != nil { // 超时按进程组杀
+        return nil, fmt.Errorf("pip list 执行失败：%v %s", err, lastLine) // lastLine：stderr 最后一行
+    }
+    // json.Unmarshal(stdout.Bytes(), &rows)，键一律过 CanonicalizePythonPackageName
+}
+// 先直接用托管 venv 里的 pip 列：健康时整个版本只起这 1 个子进程；失败不打日志
+if PythonVersionSupportedByCurrentRuntime(version) {
+    if pipBin := resolveManagedPipBinaryInVenv(ManagedPythonVenvDir(version)); pipBin != "" {
+        if installed, err := runPipList(exec.Command(pipBin, args...)); err == nil {
+            return installed, nil
+        }
+    }
+}
+// 老路：健康检查，坏了就修 / 重建 venv，再列一次（「venv 损坏时发现并重建」靠这一步）
+cmd, err := NewPipCommandForPythonVersion(version, args)
 if err != nil {
     return nil, err
 }
-cmd.Env = SanitizePipEnv(os.Environ())
-var stdout, stderr bytes.Buffer
-cmd.Stdout, cmd.Stderr = &stdout, &stderr // 只解析 stdout
-if err := runNodeABICommand(cmd, pythonInstalledPackagesTimeout); err != nil { // 超时按进程组杀
-    return nil, fmt.Errorf("pip list 执行失败：%v %s", err, lastLine) // lastLine：stderr 最后一行
-}
-// json.Unmarshal(stdout.Bytes(), &rows)，键一律过 CanonicalizePythonPackageName
+return runPipList(cmd)
 
 // dependencyStillInstalled(dep, staleRound) 里，查快照之前先放过 stale 轮的例外：
 // 带版本约束 / extras / url / marker 的记录逐条精确判定（恢复备份续装、排队中置失败与改前一致）
@@ -4974,7 +5143,7 @@ go func() {
   - 三条 SSE（`log.go` 的 `Stream`、`deps.go` 的 `LogStream`、`subscription.go` 的 `PullStream`），或新增长连接。
   - `docker/entrypoint.sh` 的 trap / `shutdown()` / `log()`；`service/task_temp_cleanup.go`，或任务临时文件创建处的前缀与形状。
   - 任何调用 `GetSchedulerV2()` / `GetTaskExecutor()` 的地方，或给 `*SchedulerV2` 新增方法：关停第 3 步之后它们是 nil，见下文「关停后的全局调度器」。
-  - 被关停打断的那次执行怎么结算，见「执行器的「执行窗口」与 per-run 停止」。
+  - 被关停打断的那次执行怎么结算，见「执行器的「执行窗口」与 per-run 停止」；任务进程组怎么终止（先 TERM、共享 2 秒宽限、Magisk 立即 KILL），见「任务进程组的清理与终止」。
 - 背景（#156 专项调研在 WSL 里模拟 PID 1 实测，v3.3.4 及以前）：
   - 停容器时 entrypoint 转手 `kill` 就 `exit 0`，PID 1 几毫秒内退出，内核把面板整组 SIGKILL：任务停在「运行中」、执行日志正文为空，`node_modules` 软链残留，
     `daidai.db` 只有 4 KB、数据全在 1.8 MB 的 `-wal` 里，`/tmp` 漏下装着全部环境变量与 7 天有效脚本凭据的任务临时文件（jwt 密钥存在数据目录，重启后凭据照样能用）。
@@ -4991,7 +5160,8 @@ go func() {
   - `func logSlowStartupStep(step string, started time.Time)` + `startupStepSlowThreshold = 3s`（日志口径见 `logging-guidelines.md`「约定：启动耗时与关停日志」）。
 - `service`：
   - `func HaltSchedulerV2()`：`SignalStop` + `StopAllRunningTasks`，可重复调用。
-  - `func ShutdownSchedulerV2()`：**保持无参**（二十多个测试 `t.Cleanup(ShutdownSchedulerV2)`）；`schedulerShutdownWait = 4s`；`SignalStop` 里的 `schedulerCronCallbackWait = 1s`。
+  - `func ShutdownSchedulerV2()`：**保持无参**（二十多个测试 `t.Cleanup(ShutdownSchedulerV2)`）；`schedulerShutdownWait = 3s`（v3.3.6 前 4s）；`SignalStop` 里的 `schedulerCronCallbackWait = 1s`；
+    `StopAllRunningTasks` 的共享 TERM 宽限 `shutdownTermGrace = 2s`（`task_executor.go` 的 `var`，测试可调短）。
   - `func ShutdownBackupScheduler(deadline time.Time)` / `func ShutdownSubscriptionScheduler(deadline time.Time)`：只有 `shutdownPanel` 调。
   - `func CleanupLeakedTaskTempEntriesOnStartup()`（`task_temp_cleanup.go`）；内部 `cleanupLeakedTaskTempEntries(dir string) int`、`isLeakedTaskTempEntry(entry os.DirEntry) bool`、表 `leakedTaskTempPatterns`。
   - 执行器侧的 `halted` / `hookProcesses` / `revokeUnsettledScriptTokens` 见「执行窗口」一节。
@@ -5007,14 +5177,16 @@ go func() {
 |---|---|---|
 | 兜底 | 最先装 `time.AfterFunc(8s)`：打「面板关停超过 8s 仍未完成，强制退出」后 `os.Exit(1)` | 8 秒 |
 | 2 | **先起协程** `server.Shutdown(5s)`：关监听 → 调 `RegisterOnShutdown` 注册的 `cancelRequests` → 所有请求 ctx 取消、SSE 收流；超时就 `Close` | 5 秒，与 1 / 3 / 4 并行 |
-| 1 | `HaltSchedulerV2`：`SignalStop`（不再触发、不再入队；等正在跑的 cron 回调 ≤ 1 秒）+ `StopAllRunningTasks`（按进程组杀任务进程与钩子、标 `runStopHalt`、置 `halted`） | ≈ 1 秒 |
-| 3 | `ShutdownSchedulerV2`：`WaitWorkers` 与 `executor.Wait` 共用一个 4 秒截止时间（剩余至少 1ms）→ `revokeUnsettledScriptTokens` → `MarkActiveTasksInterrupted` → 把 `globalScheduler` / `globalExecutor` 置 nil（之后的调用点见「关停后的全局调度器」） | 4 秒 |
+| 1 | `HaltSchedulerV2`：`SignalStop`（不再触发、不再入队；等正在跑的 cron 回调 ≤ 1 秒）+ `StopAllRunningTasks`（标 `runStopHalt`、置 `halted`；任务进程与钩子的进程组一起 SIGTERM，共用 `shutdownTermGrace` 截止逐组等，到点还在的统一 SIGKILL；Magisk 部署宽限为 0、立即整组 KILL） | ≈ 1 + 2 秒 |
+| 3 | `ShutdownSchedulerV2`：`WaitWorkers` 与 `executor.Wait` 共用一个 3 秒截止时间（剩余至少 1ms）→ `revokeUnsettledScriptTokens` → `MarkActiveTasksInterrupted` → 把 `globalScheduler` / `globalExecutor` 置 nil（之后的调用点见「关停后的全局调度器」） | 3 秒 |
 | 4 | 关自动更新、日志清理、资源监控的通道；备份调度、订阅调度**同时**（各一个协程）`cron.Stop`，正在跑的作业共用截止「关停开始后 6.5 秒」，**不取消**作业 | 到 6.5 秒 |
 | 5 | `<-httpDone` | 通常立刻 |
 | 6 | `database.Close(1s)`，**必须最后**：之后任何读写都报 `sql: database is closed` | 1 秒 |
 | 收尾 | 回到 main：`cleanupPIDFile()`；退出码非 0 才 `os.Exit(code)`，0 时 main 正常返回 | — |
 
-- 总账：max(1 + 4, 6.5, 5) + 1 = 7.5 秒 < 8 秒 < Docker 默认的 10 秒。总兜底管住其余意外，例如唯一的数据库连接被恢复备份的长事务占着，`MarkActiveTasksInterrupted` 拿不到连接。
+- 总账：max(1 + 2 + 3, 6.5, 5) + 1 = 7.5 秒 < 8 秒 < Docker 默认的 10 秒。总兜底管住其余意外，例如唯一的数据库连接被恢复备份的长事务占着，`MarkActiveTasksInterrupted` 拿不到连接。
+  v3.3.6（#159）第 1 步多了最多 2 秒的 TERM 宽限，第 3 步同时从 4 秒缩到 3 秒：TERM 宽限本身就是结算等待的前半段，进程被 KILL 后结算通常只要几十毫秒；
+  不缩的话 max(1 + 2 + 4, 6.5, 5) + 1 = 8 秒，正好撞上总兜底。Magisk 部署第 1 步不给宽限，仍约 1 秒。
 - HTTP 关停必须与第 1 步**同时开始**：第 1 步可能卡住（cron 回调要读写库），串行写在后面 SSE 就断不开。
 - 两个 cron 不各写死 1 秒：走到这一步任务已经结算完，多等不影响别的，能让本来来得及跑完的定时拉取跑完（git 在 stash push 与 pop 之间被杀会把用户改动留在 stash 里）。
 
@@ -5099,7 +5271,8 @@ SQLite 关最后一个连接时会自动 checkpoint 并删掉 `-wal` / `-shm`，
 - 旧 docker.sock 一键更新的辅助脚本（`handler/system_update.go` 的 `buildPanelUpdateHelperScript`）：`docker rm -f` 之前先 `docker stop -t 10 <容器> >/dev/null 2>&1 || true`。
   `rm -f` 等于直接 SIGKILL；stop 失败时 `rm -f` 照样兜底。
 - **不加**：compose `stop_grace_period`、Dockerfile `STOPSIGNAL` / `init`、entrypoint 内部超时。理由：面板 8 秒内必退；tini 只转发给直接子进程，entrypoint 本来就是那个子进程；用 NAS 图形界面部署的用户拿不到 compose 配置。
-  `packaging/linux/daidai-panel.service` 的 `TimeoutStopSec=30s` 只是余量。Magisk 动作按钮「TERM 后等 2 秒再 KILL」本轮不改（backlog）。
+  `packaging/linux/daidai-panel.service` 的 `TimeoutStopSec=30s` 只是余量。Magisk 动作按钮「TERM 后等 2 秒再 KILL」（`Magisk/action.sh`）不改：它是模块外壳，在线升级改不到，
+  改了只惠及重刷 zip 的用户（改成轮询等待、升外壳版本进 backlog）。作为让步，Magisk 部署下面板关停不给 TERM 宽限、立即整组 KILL（v3.3.6，见「任务进程组的清理与终止」）。
 
 ### 4. Validation & Error Matrix
 
@@ -5107,8 +5280,12 @@ SQLite 关最后一个连接时会自动 checkpoint 并删掉 `-wal` / `-shm`，
 |---|---|
 | 正常停容器 / Ctrl+C，开着实时日志 | 面板日志 `panel shutdown finished in` 几十毫秒；SSE 以 `done` 事件结束；任务按失败结算并写两行「[面板正在关闭，…]」；软链清掉；只剩 `daidai.db`；`/tmp` 无残留；下次启动没有 `recovered` |
 | 第 1 步卡住（cron 回调拿不到库连接，例如恢复备份的长事务占着唯一连接） | `SignalStop` 1 秒后放手、接着杀任务；HTTP 照样关、SSE 照样以结束事件断开；后面的写库也拿不到连接时，8 秒兜底 `os.Exit(1)`（不删 PID 文件，systemd 显示 failed） |
-| 任务派生了逃出进程组、攥着输出管道的孙进程（`pumpAndWait` 等不到 EOF，`runTask` 卡住） | 4 秒截止：凭据吊销、`MarkActiveTasksInterrupted` 标中断，这次输出丢失。`node_modules` 软链留着（不悬空，与面板现建的等价、无害；之后托管目录没了、变悬空时，由下次启动的 `removeLeftoverManagedNodeModulesLinks` 清），临时文件留给下次启动的 `CleanupLeakedTaskTempEntriesOnStartup`。孙进程本身**不保证**被清理：Docker 里随 PID 1 退出被内核收走，二进制 / Magisk 下成孤儿。spec 与发布说明都**不承诺**「一定清理」 |
-| Windows | `killGroup` 是空操作，只杀直接子进程：孙进程攥管道更常见，走上一行的 4 秒路径（关控制台窗口约 5 秒上限） |
+| 任务派生了逃出进程组、攥着输出管道的孙进程（`pumpAndWait` 等不到 EOF，`runTask` 卡住） | 3 秒截止：凭据吊销、`MarkActiveTasksInterrupted` 标中断，这次输出丢失。`node_modules` 软链留着（不悬空，与面板现建的等价、无害；之后托管目录没了、变悬空时，由下次启动的 `removeLeftoverManagedNodeModulesLinks` 清），临时文件留给下次启动的 `CleanupLeakedTaskTempEntriesOnStartup`。孙进程本身**不保证**被清理：Docker 里随 PID 1 退出被内核收走，二进制 / Magisk 下成孤儿。spec 与发布说明都**不承诺**「一定清理」 |
+| Windows | `killGroup` 是空操作、`signalGroupTerm` 恒为 false（不等 TERM 宽限，立即 `p.Kill()`），只杀直接子进程：孙进程攥管道更常见，走上一行的 3 秒路径（关控制台窗口约 5 秒上限） |
+| 组里有忽略 TERM 的进程（`trap '' TERM` 的脚本、继承了忽略的子进程） | 共用的 2 秒宽限到点统一 SIGKILL，面板日志多一行 `N task process group(s) still running 2s after SIGTERM, killed`（`StopAllRunningTasks` 自己打，所以排在 `HaltSchedulerV2` 那行 `interrupted N running task process(es) during panel shutdown` 之前）；关停最多慢 2 秒 |
+| 脚本 trap 了 TERM、收完尾以 0 退出 | 仍按失败结算（`runStopHalt`），写「任务已中断」「跳过后置脚本」，成功、失败通知都不发（见「执行窗口」一节） |
+| Magisk 部署 | 不发 TERM，所有进程组立即整组 SIGKILL（与 v3.3.5 一致）：动作按钮 TERM 后只等 2 秒就 KILL 面板，装不下 1 秒 + 2 秒宽限 |
+| 对忽略 TERM 的任务点了停止，5 秒内又重启面板 | `StopTask` 已把进程摘出进程表，关停时看不到它；补刀协程随旧进程退出：这个进程成为孤儿（已接受，改前停止是立即 SIGKILL，没有这个窗口） |
 | 定时备份 / 定时拉取正在跑 | 等到关停开始后 6.5 秒，不取消；到点不再等（Docker 里随后被 SIGKILL；备份非原子写盘、git stash 中途被杀见 backlog） |
 | 正在装依赖 | 不取消；记录停在 installing，下次启动的对账改成已安装 / 续装 / 「操作因服务重启而中断」，不会卡住 |
 | 关停开始后才轮到的钩子 | `halting()` 拦住不启动；正好撞上的那一下由 `registerHookProcess` 立刻杀掉 |
@@ -5139,7 +5316,7 @@ SQLite 关最后一个连接时会自动 checkpoint 并删掉 `-wal` / `-shm`，
 计时一律只断言上界（WSL 墙钟会跳；shell 侧用 `/proc/uptime`）。
 
 - `server/service/panel_shutdown_test.go`：
-  - `TestShutdownSchedulerV2IsBoundedWhenRunIsStuck`：`runCommandWithPlanFunc` 卡住、不登记进程、不理停止 → `ShutdownSchedulerV2` 5 秒内返回（两段各等 4 秒，或剩余时间算成 0 变成无限等，都远超）；
+  - `TestShutdownSchedulerV2IsBoundedWhenRunIsStuck`：`runCommandWithPlanFunc` 卡住、不登记进程、不理停止 → `ShutdownSchedulerV2` 5 秒内返回（等待共用 3 秒截止；两段各等 3 秒共 6 秒，或剩余时间算成 0 变成无限等，都超过这个上界；不登记进程，不受 TERM 宽限影响）；
     任务不再是运行中 / 排队中，`last_run_status == RunFailed`，日志含「面板正在关闭或重启」；该次执行注入脚本的凭据按 jti 进了 `TokenBlocklist`。
   - `TestHaltedRunSkipsPostHooksAndFailureNotify`：先跑不关停的对照（`[执行后置脚本]` 出现、webhook 探针收到失败通知；Linux 上三个标记文件写出），证明链路是通的。
     关停那条：`[执行后置脚本]` 不出现；任务后置脚本、`task_after.sh`、`extra.sh` 的标记文件都不存在；`[面板正在关闭，任务已中断]` 与 `[面板正在关闭，跳过后置脚本]` 各自整行出现且 `isPanelMetaLine` 认得；
@@ -5157,6 +5334,8 @@ SQLite 关最后一个连接时会自动 checkpoint 并删掉 `-wal` / `-shm`，
     再对开着自动添加的订阅调 `syncSubscriptionTasks`：不 panic；任务行落库（命令、cron 正确）；同步日志有「[自动添加任务] 」。
   - `TestSchedulerV2NilReceiverAddAndRemoveJob`：nil 调度器的 `AddJob` / `UpdateJob` 返回 nil、`RemoveJob` 不 panic、`HasJob` 为 false、`ScheduledEntryCount` 为 -1。
   - 突变：去掉 `AddJob` / `RemoveJob` 开头的 nil 判断，第二条 panic；第一条要 `syncSubscriptionTasks` 的判空与 `AddJob` 的 nil 判断**同时**去掉才红（两处互为兜底），两处都要留。
+- `server/service/task_process_cleanup_linux_test.go`（`//go:build linux`，v3.3.6 先 TERM 的关停，断言点与跑法见「场景：任务进程组的清理与终止」）：`TestShutdownTermsAllGroupsWithinSharedGrace`、
+  `TestShutdownSettlesTermTrappedZeroExitAsInterrupted`、`TestShutdownAfterMainCommandSucceededStillSettlesAsSuccess`、`TestShutdownKillsImmediatelyOnMagisk`、`TestTermLetsParentCloseDetachedChild/面板关停`。
 - `server/service/shutdown_wiring_test.go` 的 `TestMainShutdownOrder`（AST 读 `../main.go`，注释里出现函数名不算）：
   - `shutdownPanel`：`time.AfterFunc` → `service.HaltSchedulerV2` → `service.ShutdownSchedulerV2` → `service.ShutdownBackupScheduler` → `service.ShutdownSubscriptionScheduler` → `database.Close`；
     `server.Shutdown` 在 `go` 语句里、写在 `HaltSchedulerV2` 之前，两者之间没有任何 `<-` 接收。
@@ -5328,4 +5507,676 @@ func (s *SchedulerV2) AddJob(task *model.Task) error {
     }
     // ……
 }
+```
+
+---
+
+## 场景：任务进程组的清理与终止（v3.3.6，#159 修复 A / B）
+
+### 1. Scope / Trigger
+
+- 触发：改下面任何一处都必须看本节。
+  - 信号原语：`service/process_unix.go` / `process_windows.go` 的 `killGroup` / `killGroupByPid` / `signalGroupTerm` / `processGroupAlive`；
+    `task_executor.go` 的 `KillProcessGroup` / `KillProcessByPid` / `TerminateProcessGroup` / `TerminateProcessByPid` / `waitProcessGroupGone` / `groupTermGrace` / `shutdownTermGrace`。
+  - 任何「停止 / 终止任务进程」的入口：`StopTask`、`StopAllRunningTasks`、`script_runner.go` 的 `pumpAndWait` 超时分支、handler `task_control.go` 的 `Stop`、`task_batch.go` 的 `case "stop"`、
+    `scheduler_v2.go` 的 `stopTaskBySchedule`、`handler/script_runtime.go` 的 `debugRun.stop`。
+  - 修复 A：`runSingleCommand` 末尾的清理段、`runTask` 里挂 `plan.ShouldCleanupProcessGroup` 的那几行、常量 `leftoverProcessCleanupNotice`、系统配置 `cleanup_leftover_processes`。
+- 背景（#159，research 实测）：
+  - 修复 A：主命令正常结束后不清理进程组。脚本放到后台、不占输出管道的子孙进程（`nohup … >/dev/null &`、`Popen(DEVNULL)`、没 `quit` 的浏览器 / driver）被 PID 1 收养，
+    活到重启容器为止，「重启面板」也释放不了。留 20MB 子进程的任务跑 20 次，容器内存 52.7→516MB，面板 RSS 只 35→38MB。
+  - 修复 B：超时 / 停止 / 关停一律直接对进程组 SIGKILL。Puppeteer 默认 `detached:true` 把浏览器放进独立进程组、收尾挂在 SIGTERM 上，每被打断一次留下约 125–140MB 的进程树。
+- 进程组只在 Linux（含 Magisk 的 chroot）上成立；Windows 二进制的行为与改动前一致。
+
+### 2. Signatures
+
+| 符号 | 位置 | 语义 |
+|---|---|---|
+| `signalGroupTerm(pid int) bool` | `process_unix.go` / `process_windows.go` | `syscall.Kill(-pid, SIGTERM) == nil`；false = 组已经不在（ESRCH）或信号发不出去，调用方改走立即 KILL。pid <= 1 恒为 false；Windows 恒为 false |
+| `processGroupAlive(pid int) bool` | 同上 | `syscall.Kill(-pid, 0) == nil`，只检查不发信号；还没被回收的僵尸也算「还在」。pid <= 1 恒为 false；Windows 恒为 false |
+| `waitProcessGroupGone(pid int, limit time.Duration) bool` | `task_executor.go` | 每 50ms 查一次 `processGroupAlive`，组空了返回 true，等满 `limit` 还有进程返回 false；`limit <= 0` 只查一次 |
+| `TerminateProcessGroup(p *os.Process)` | 同上 | **不阻塞**：`signalGroupTerm` 失败 → 直接 `KillProcessGroup(p)`；成功 → 起协程 `if !waitProcessGroupGone(p.Pid, grace) { KillProcessGroup(p) }`。`grace := groupTermGrace` 在起协程**之前**读（测试会临时调短它，协程里再读全局变量会和收尾时的还原互相踩）；`p == nil` 直接返回 |
+| `TerminateProcessByPid(pid int)` | 同上 | 同上，补刀用 `KillProcessByPid(pid)`；只给「执行器不认识这次执行、只能按库里的 PID 兜底」的停止路径用 |
+| `KillProcessGroup(p)` / `KillProcessByPid(pid)` | 同上 | 语义不变：立即整组 SIGKILL（`killGroup` / `killGroupByPid`）再补一个 `p.Kill()`。`KillProcessByPid` 与 `killGroupByPid` 对 pid <= 1 直接返回 |
+| `var groupTermGrace = 5 * time.Second` | 同上 | 超时、手动 / 批量 / 定时停止、调试运行停止、修复 A 补刀的宽限。用 `var` 只为测试能调短（先例：`handler/deps.go` 的 `dependencyOutputWaitDelay`） |
+| `var shutdownTermGrace = 2 * time.Second` | 同上 | 面板关停时所有进程组共用的宽限；Magisk 部署下关停改用 0 |
+| `CommandExecutionPlan.ShouldCleanupProcessGroup func() bool` | `script_runner.go` | 修复 A 的判定，nil = 不清。用字段而不是给函数加参数：`runCommandWithPlanFunc` 的签名被约 40 个测试桩原样照抄 |
+| `const leftoverProcessCleanupNotice` | 同上 | 修复 A 写进任务日志的提示行 |
+| 配置 `cleanup_leftover_processes` | `model/system_config_registry.go` | `newBoolConfig("cleanup_leftover_processes", "任务结束后清理残留进程", "true", <说明>, "tasks")`，紧跟在 `detect_silent_exit` 后面 |
+
+### 3. Contracts
+
+**调用点矩阵**（新增停止入口照这张表选原语）：
+
+| 路径 | 写法 | 阻塞 |
+|---|---|---|
+| 超时：`pumpAndWait` 的 `timerC` 分支（任务主命令、任务钩子 60 秒、订阅拉取前指令 / 拉取后钩子 900 秒共用） | `if !signalGroupTerm(pid) \|\| !waitProcessGroupGone(pid, groupTermGrace) { KillProcessGroup(cmd.Process) }`，最后照旧 `<-outcomeCh` | 是，最多 5 秒 |
+| 手动停止（网页、开放 API、MCP `stop_task`）/ 批量停止 / 定时停止 | `StopTask` 出锁后对每个 victim `TerminateProcessGroup`；返回 false 才 `MarkManualStop` + `TerminateProcessByPid(库里的 pid)` | 否，接口立即返回 |
+| 调试运行 / 运行代码停止（`debugRun.stop`） | `service.TerminateProcessGroup(run.Process)`，在 `run.mu` 里调 | 否 |
+| 修复 A 的残留清理 | `TerminateProcessGroup(process)` | 否，不推迟结算 |
+| 面板关停（`StopAllRunningTasks`） | 任务进程与正在跑的钩子一起 `signalGroupTerm`；共用 `deadline := time.Now().Add(termGrace)`，逐组 `waitProcessGroupGone(pid, time.Until(deadline))`，到点还在的 `KillProcessGroup` | 是，最多 2 秒（Magisk 0） |
+| 保持立即 KILL：`killRunningProcess`（onStart 发现停止早于进程登记）、`registerHookProcess` 里关停之后才起来的钩子、`ddp task stop`、系统命令行的停止 / 超时 / 清除、依赖安装取消、`runNodeABICommand` 的超时（Node ABI 重建、启动校验的 pip list）、`DebugClear` 的 `killIfRunning`、v1 调度器 | `KillProcessGroup` / `KillProcessByPid` | — |
+
+- 保持立即 KILL 的理由：刚 exec 的进程来不及装收尾逻辑，关停路径上也不能再起一个 2 秒后才补刀的协程；`ddp` 是一次性进程，异步补刀协程活不到 5 秒后，要改就得阻塞 5 秒；系统命令行跑的是管理员临时敲的命令，不是任务。
+
+**修复 A：主命令自己结束后清理它的进程组**
+
+- 清理点只有一处，在 `runSingleCommand` 末尾、`return` 之前：
+  `if !timedOut && plan.ShouldCleanupProcessGroup != nil && plan.ShouldCleanupProcessGroup() && processGroupAlive(process.Pid) { TerminateProcessGroup(process); onOutput(leftoverProcessCleanupNotice) }`。
+  - 只覆盖任务主命令：conc 每个账号各走一次 `runSingleCommand`，desi 经 `RunCommandWithPlan` 也走它。钩子（任务前置 / 后置脚本、`task_before.sh`、`task_after.sh`、`extra.sh`）走 `runInlineScript` / `runHookScript`，**永远不清**（把钩子也纳入进来在 backlog）。
+  - 超时分支已经对整组 TERM→KILL 过，所以要 `!timedOut`。
+- 判定由 `runTask` 挂在 plan 上，每次执行读一次配置（保存后对之后开始的执行生效，不需要进 `reloadRuntimeConfigKeys`）：
+
+  ```go
+  plan.ShouldCleanupProcessGroup = nil // plan 挂在请求上，万一被复用，不能沿用上一次执行的判定
+  if task.GetTaskType() != model.TaskTypeStartup && model.GetRegisteredConfigBool("cleanup_leftover_processes") {
+      plan.ShouldCleanupProcessGroup = func() bool { return e.runStopKind(run) == runStopNone }
+  }
+  ```
+
+  - 开机任务按**任务类型**豁免，不看触发方式（开机自动触发、手动点运行都不清）：这类任务常用来拉起常驻服务，每次开机只跑一次、不会累积。`GetTaskType()` 把空值归成 cron、非法值归成空串，都按非开机任务处理（与调度器口径一致）。
+  - 闭包推迟到主命令结束那一刻才读停止种类：已被手动停止 / 面板正在关停的执行，组由停止路径负责（已经发过 TERM、安排了 KILL），这里再发会把第二个信号打进脚本的收尾，也不该写提示行。
+  - 其它调用方（`ParseCommandExecutionPlan` 直接产出的 plan）是 nil，等于不清理。
+- **不改变执行结果、不推迟结算**：退出码、成功 / 失败判定、重试、通知、日志正文都不变（只多一行提示）；补刀在协程里。
+  推迟的话，「每分钟一次、还留了个忽略 TERM 的后台进程」的任务每次都会多占 5 秒并发槽位、拖住单实例闸门（下一次触发被跳过）、虚增 5 秒耗时。
+- `setsid`、`start_new_session=True`、`os.setsid()` 起的进程不在这个组里，修复 A、停止、超时、关停都不碰它们——这是给用户的常驻出口。
+- 总开关 `cleanup_leftover_processes`：tasks 组、默认 true。库里没有这一行时 `GetRegisteredConfigBool` 回落到 true，存量用户升级后默认生效；回退 v3.3.5 后这一行是未注册的键，网页兜底区与 APP 都不渲染、不回写。
+  网页在「系统设置 → 任务运行」卡（`TaskExecutionCard.vue`，「检测脚本半路静默结束」之后），标题与说明取服务端 schema。
+  🔴 **APP 的系统设置页按 schema 渲染，这个开关会自动出现在 APP 里并能保存**，所以说明文字必须对两端都适用（不能写「仅网页生效」之类）。改说明要重新生成演示站 fixtures（`go run ./cmd/gen-demo-fixtures`）。
+- 提示行（常量 `leftoverProcessCleanupNotice`）：
+  - 前缀 `[已结束残留的后台进程：`，已登记进 `panelMetaLinePrefixes`（成功的任务最容易出现这一行）；失败摘要只在 `normalizeTaskFailureLines` 里丢这一个前缀，不整体套 `isPanelMetaLine`（规则见「任务前后置钩子的环境变量回传」里那条登记约定）。
+  - 前后各一个 `\n`：开头的让 conc 模式的 `[ENV#N] ` 前缀单独占一行、提示行本身从行首开始（`isPanelMetaLine` 按行首认）；结尾的免得后面的「=== 执行结束」粘在这一行末尾。
+  - 只在判定为真**且** `processGroupAlive` 为真时写，组本来就空就不写；每次 `runSingleCommand` 最多一行（conc 下每个账号最多一行）；
+    经 `onOutput` 进任务日志（TinyLog、日志文件、落库正文），不进面板日志；写 `onOutput` 而不是 `emitChunk`，日志被截断后这一行照样会出现。
+  - 文案写「已发送结束信号，5 秒内不退出会被强制结束」而不是「已结束」：补刀协程随所在进程退出而消失。
+
+**修复 B：先 SIGTERM，宽限期过后还在才 SIGKILL**
+
+- 超时等的是「**整组退空**」，不是 outcome：outcome 到了只说明主进程和攥着输出管道的进程退了；只等 outcome 会放过不攥管道、又忽略 TERM 的后台进程，而超时之后修复 A 不再清理（`!timedOut`），「超时杀整组」就失效了。
+  宽限对所有超时一视同仁，与任务类型、总开关都无关（开机任务超时同样整组终止）。
+  组长被 TERM 杀掉时 waitErr 同样是「被信号终止」，`runSingleCommand` 里「必须先排除 timedOut」那条理由不变；被停止 / 超时的任务，「被信号终止」那行多数从 `killed(9)` 变成 `terminated(15)`。
+- 🔴 **执行器认领了停止，就不再按库里的 PID 兜底**：`StopTask` 返回 true 表示执行器已经对登记的每个进程组发了 TERM、安排了 KILL（库里的 `pid` 是 onStart 写的，就是其中之一）。
+  三个入口一律 `stopped := executor.StopTask(id)`，`if !stopped && pid > 0 { MarkManualStop(id); TerminateProcessByPid(pid) }`（Wrong / Correct 见「主动停止任务的 Aborted 独立状态」）。
+  - 紧跟一刀立即 SIGKILL 会让宽限形同虚设；几毫秒内连发两次 TERM 会打断 trap 的收尾（Node 的 Puppeteer 处理函数会先清掉信号监听，第二个 TERM 按默认动作直接杀掉 node）。
+  - 唯一的行为差异：允许多实例的任务一份在面板执行器里跑、另一份同时由 `ddp task run` 跑着时，在面板上点停止只停面板那份（以前两份都杀）。
+- 面板关停：
+  - **必须阻塞到 KILL 落地再返回**：Docker 停容器时 PID 1 一退出，内核会收走整个命名空间；但「重启面板」（退出码 1、容器不停）之后就没人再管这些进程组了，不等的话忽略 TERM 的进程成为孤儿。
+  - 所有组**共用一个截止时间**：先退出的不占后面的时间；每组各等一遍会变成「忽略 TERM 的组数 × 2 秒」。
+  - 只有真有组被 KILL 时才打 `N task process group(s) still running 2s after SIGTERM, killed`（`StopAllRunningTasks` 自己打，排在 `HaltSchedulerV2` 的 `interrupted N running task process(es) during panel shutdown` 之前），用来事后判断「关停为什么慢了 2 秒」。
+  - 第二次调用（`ShutdownSchedulerV2` 开头会再走一遍 `HaltSchedulerV2`）时进程表已经空了，立刻返回。
+  - 🔴 **Magisk 部署下关停宽限为 0**：`playwrightMagiskRuntime()`（认 `DAIDAI_MAGISK_SHELL_VERSION`，否则看 `IsMagiskModuleRuntime()`；`service.sh` 拉起面板时两个都会命中）为真时 `termGrace = 0`，
+    `termGrace > 0 && signalGroupTerm(pid)` 短路，**一个 TERM 都不发**，所有组立即 `KillProcessGroup`（与 v3.3.5 一致），那行 `… killed` 日志也不会出现。
+    原因：模块管理器动作按钮「停止」是 `kill -TERM` 面板、`sleep 2`、还在就 `kill -KILL`（`Magisk/action.sh`），`SignalStop` 最多 1 秒加 2 秒宽限装不下；面板先被 KILL 的话，忽略 TERM 的组没人补刀、成了孤儿。
+    `action.sh` 是模块外壳，在线升级改不到，只能面板这边让步。手动停止、超时、调试运行停止用 `groupTermGrace`、不读这个 `termGrace`，在 Magisk 上照旧先 TERM、5 秒后 KILL。
+  - 🔴 **被关停打断的执行一律按失败结算**：先 TERM 之后，trap 了 TERM、以 0 退出的脚本不能被记成成功，判据是主命令返回那一刻的 `runStopHalt`，见「执行器的「执行窗口」与 per-run 停止」。
+  - 时间预算：`HaltSchedulerV2` ≈ 1 秒（`SignalStop`）+ 2 秒（宽限），`ShutdownSchedulerV2` 的结算等待从 4 秒缩到 3 秒，总账仍是 7.5 秒，见「停机收尾」。
+
+**pid <= 1 保护**
+
+- `signalGroupTerm` / `processGroupAlive` 对 pid <= 1 一律视为「组不在」；`KillProcessByPid` 与 `killGroupByPid` 对 pid <= 1 直接返回（`TerminateProcessByPid(1)` 发不出 TERM、转到 `KillProcessByPid(1)`，同样什么都不做）。
+- 原因：按库里 PID 兜底的调用方只挡了 `<= 0`，而库里的 pid 来自任务记录，恢复备份、脏数据都可能让它变成 0 或 1。
+  pid 0 → `Kill(0, …)` 打的是面板自己的进程组；pid 1 → `kill(-1, SIGKILL)` 打到面板有权限打的所有进程（容器里以 root 跑时连 nginx 和全部任务一起被杀，网页打不开、要重启容器才恢复；Magisk / 裸机上是整台机器）。
+  `kill(-1)` 不打 PID 1 与调用者自己：面板进程本身还活着，它有权限打的其余进程全没了，所以很难一眼看出是面板干的。
+- 🔴 这条保护**不能写用例验证**：去掉保护的突变下，用例自己就会执行 `kill(-1, SIGKILL)`，把跑测试那台机器上能杀的进程全杀掉。改这几个函数时只能靠代码评审守住，别删。
+
+**Windows**
+
+- `signalGroupTerm` / `processGroupAlive` 恒为 false，`killGroup` / `killGroupByPid` 是空实现：所有路径立即 `p.Kill()`（只结束直接子进程），宽限等待立刻结束，修复 A 永远不会触发。停止、超时、关停的行为与改动前一致。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 |
+|---|---|
+| 定时 / 手动任务的主命令退出，组里还有后台进程，开关开着 | 整组 TERM，5 秒后还在才 KILL；日志多一行 `[已结束残留的后台进程：…]`；退出码、成功判定、结束行都不变，结算不等宽限 |
+| 组里本来就空 | 不清理、不写提示 |
+| 开机任务（自动触发、手动点运行都算）/ 总开关关闭 | 不清理、不写提示 |
+| `setsid` 起的后台进程 | 不在组里，任何路径都不碰 |
+| 前置 / 后置脚本、`task_before.sh` 等钩子留下的后台进程 | 不清理（只覆盖主命令） |
+| conc 模式两个账号各留一个后台进程 | 各清各的组；两行提示，各自前面有单独一行 `[ENV#N] ` |
+| 已被手动停止 / 面板关停的执行，主命令收完尾正常退出 | 修复 A 不发第二个信号、不写提示（组归停止路径负责）；手动停止照旧结算为已终止 |
+| 超时，脚本 trap 了 TERM | 在宽限内完成收尾；`[任务超时，已在 N 秒后终止]` 照旧；结算为失败 |
+| 超时，组里有忽略 TERM 的进程（攥不攥输出管道都算） | 宽限到点整组 KILL；耗时 ≥ 超时 + 宽限；能正常结算 |
+| 开机任务超时，组里有后台进程 | 同样整组终止（开机豁免只管修复 A） |
+| 手动 / 批量 / 定时停止、调试运行停止 | 接口立即返回；组先收到 TERM，5 秒后还在才 KILL；手动停止结算 Aborted |
+| `StopTask` 返回 false 且库里有 pid（例如 `ddp task run` 在别的进程里起的） | 打停止标记 + `TerminateProcessByPid`，同样先 TERM |
+| 库里的 pid 是 0 或 1 | 不发任何信号 |
+| 关停，组里有忽略 TERM 的进程 | 共用的 2 秒截止后统一 KILL，打一行 `N task process group(s) … killed` |
+| 父进程 trap TERM 去关掉自己用 `setsid` 起的子进程（Puppeteer 默认 detached 的模式） | 超时、手动停止、关停三条路径都 0 残留（直接整组 KILL 的话父进程来不及，独立组里的子进程成孤儿） |
+| Magisk 部署关停 | 不发 TERM，所有组立即整组 KILL |
+| Windows | 全部立即 `p.Kill()`，修复 A 不触发 |
+| 已接受：对忽略 TERM 的任务点了停止，5 秒内又重启面板 | `StopTask` 已把进程摘出进程表，关停时看不到它；补刀协程随旧进程退出：这个进程成孤儿（改前停止是立即 KILL，没有这个窗口） |
+| 已接受：修复 A、各类停止起的补刀协程还没到点，面板或 `ddp task run` 就退出了 | 补刀随进程消失，忽略 TERM 的残留留下来（与改动前一样）；`ddp task run` 结算后几百毫秒就退出，这种情况几乎必然 |
+| 已接受：主命令结束之后、结算之前（后置钩子阶段，每个最长 60 秒）点停止 | `StopTask` 对已经清理过的组再发一次 TERM；仍比改前的直接 SIGKILL 温和 |
+| 已接受：组里只剩一个还没被回收的僵尸 | `processGroupAlive` 算「还在」：偶尔多写一行提示，或让宽限多等一小会儿，无害 |
+| 管不到：`setsid` 逃出去的进程、Node 被 OOM 直接杀掉时留下的浏览器 | 修复 A / B 都碰不到（backlog） |
+
+### 5. Good/Base/Bad Cases
+
+- Good：每分钟一次、脚本里 `nohup … &` 留了个 20MB 子进程的任务，跑几天容器内存不再上涨；日志里每次一行提示，用户据此改成 `setsid nohup … &`、改成开机任务，或关掉开关。
+- Good：超时、点停止、停容器时，Puppeteer 脚本收到 TERM 自己 `browser.close()`，独立进程组里的浏览器 0 残留。
+- Base：没有后台进程的普通脚本，日志、退出码、耗时与改动前一致；Windows 上一切照旧。
+- Bad：把清理放进 `pumpAndWait` 的正常分支（research 原型）—— 钩子也被清（违反「只覆盖主命令」）；不分任务类型、不看停止状态、直接 KILL、不写日志。
+- Bad：把「TERM → 轮询 → KILL」塞进 `killGroup` / `KillProcessByPid`（research 原型）—— HTTP 停止接口卡 5 秒、关停每组串行各等 5 秒，依赖安装取消、系统命令行、onStart 竞态这些不该变的路径一起变了。
+- Bad：`StopTask` 之后照旧无条件 `KillProcessByPid` 补刀；超时分支 TERM 后只等 outcome；修复 A 同步等宽限；关停对每个组各等一遍宽限；Magisk 上关停照样等 2 秒宽限。
+
+### 6. Tests Required
+
+**跑法**
+
+- 进程组断言只在 Linux 成立：带 `//go:build linux` 的用例交叉编译到 WSL / CI 跑才算数，Windows 本机全绿不算。
+
+```powershell
+$env:PATH = "D:\软件目录\Go\bin;" + $env:PATH; cd server
+$env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
+go test -c -o <scratch>\service.test ./service; go test -c -o <scratch>\handler.test ./handler
+```
+
+- WSL 里的命令写进 `.sh` 再 `wsl -u root -e sh <脚本>` 跑：从 PowerShell 直接传 `-test.v` 会被拆成 `-test` 与 `.v`。这组新用例不读仓库里的文件，二进制可以单独拷到 `/root` 下跑（WSL 默认用户不是 root）。
+  和时序有关的用例至少 `-test.count=20` 跑一遍，看结果分布。
+- 回归正则：`-test.run 'Leftover|Sigterm|Grace|Detached|Timeout|Shutdown|Halt|Stop|Executing|Settle|Prepared|Panic|PumpAndWait|DescribeTermination|Magisk'`。
+  既有用例必须保持全绿：`TestShutdownInterruptNoticesAreStandalonePanelMetaLines`、`TestHaltKillsRunningPreHookAndSkipsNewOnes`、`TestHaltKillsRunningPostHook`、`TestShutdownSchedulerV2IsBoundedWhenRunIsStuck`、
+  `TestManualStopStillRunsPostHooks`、`manual_stop_executing_window*`、`TestPumpAndWaitKeepsTailOutput`、`TestDescribeTerminationSignal*`
+  （其中起的辅助子进程没有 `Setpgid`，`signalGroupTerm` 返回 false 后立即 KILL，行为与改前一致，但仍要实跑）。
+
+**用例写法约定**（`service/task_process_cleanup_linux_test.go` 开头有同义注释）
+
+- 脚本写进 `config.C.Data.ScriptsDir`，调 `executor.runTask`（异步的用 `runTaskAsync`，收尾时会 `StopAllRunningTasks` 并等结算）；每条用例一个独一无二的 `sleep 8641xx` 当标记，
+  扫 `/proc/*/cmdline` 数存活的标记进程（`/proc/<pid>/stat` 状态 Z / X 不算）；断言一律「轮询到期限为止」（`cleanupTestPollLimit` = 3 秒），不用固定 sleep；
+  `overrideTermGraces(t, group, shutdown)` 调短宽限，必须在 `runTaskAsync` 之前调（`t.Cleanup` 后进先出，还原要排在「等 runTask 跑完」之后）；`killMarkerProcessesOnCleanup` 收掉残留。
+- 🔴 靠 trap 的用例，必须等脚本写出就绪标记（trap 装好之后才 `echo ready > xxx.flag`）、且 `HasRunningProcess` 为真才发信号（`waitScriptReady`）。
+  只等 `HasRunningProcess` 不够：它在 onStart 时就为真，那时 bash 还在跑 bootstrap、trap 没装上，TERM 按默认动作直接杀掉 bash（以 143 退出，trap 不执行）。
+- 🔴 放到后台的标记进程一律重定向输出（`… >/dev/null 2>&1 &`），专测「攥着管道」的除外：否则断言失败或做突变时，攥着管道的孙进程让 `pumpAndWait` 等不到 EOF，用例卡到 `go test` 的 10 分钟超时，而不是干脆地变红。
+- 🔴 放到后台之后，要等 `/proc/$!/comm` 变成 `sleep` 才往下走（`waitBackgroundSleepSnippet`，最多约 5 秒）：否则清理可能发生在 fork / `nohup` / `setsid` 生效之前，
+  分不清「被清理了」和「还没起来」，setsid 那条还可能在 `setsid()` 生效之前就被当成组内进程误伤。
+- `nohup sleep N >/dev/null 2>&1 &` 之后换行再写下一条命令：`…&; echo spawned` 是 bash 语法错误（退出码 2）。
+- 非交互 bash 里 `setsid sleep N … &` 的 `$!` 就是 sleep 本身（自成会话与进程组，整组 KILL 打不到它），模拟 Puppeteer 的 detached 子进程靠的就是这一点。
+
+**用例**
+
+| 用例 | 断言 |
+|---|---|
+| `TestLeftoverProcessCleanupKillsBackgroundSleep`（定时、手动两个子用例） | 结算后 3 秒内标记进程归零；日志恰好一行提示且被 `isPanelMetaLine` 认出；脚本输出与「退出码 0」结束行照旧；`RunSuccess` |
+| `TestLeftoverProcessCleanupSparesSetsidProcess` | `setsid nohup sleep …` 起的还活着；没有提示行 |
+| `TestLeftoverProcessCleanupSkipsStartupTasks`（触发方式 startup、manual 两个子用例） | 开机任务留下的进程还活着；没有提示行（`runTask` 不看触发方式，这对子用例守的是「将来改成按触发方式判定」时手动那条变红） |
+| `TestLeftoverProcessCleanupHonorsSwitch` | 配置写成 false 后进程还活着；没有提示行 |
+| `TestLeftoverProcessCleanupSilentWhenGroupEmpty` | 脚本只 `echo clean`：没有提示行；`RunSuccess` |
+| `TestLeftoverProcessCleanupCoversConcAccounts` | `task leak.sh conc LEAK_ACC`，两个账号各留一个：都被清掉；两行提示，各自前面是单独一行的 `[LEAK_ACC#N] ` |
+| `TestLeftoverProcessCleanupLeavesHooksAlone` | 前置脚本留下的进程还活着；没有提示行 |
+| `TestLeftoverProcessCleanupDoesNotDelaySettlement` | 后台进程忽略 TERM、宽限调成 2 秒：`runTask` 一返回，标记进程**还活着**；2 秒 + 3 秒内归零（补刀生效） |
+| `TestLeftoverProcessCleanupSkippedAfterManualStop` | 主命令 trap TERM 后以 0 退出、后台进程忽略 TERM，就绪后 `StopTask`：没有提示行；`RunAborted` |
+| `TestTimeoutSendsSigtermBeforeSigkill` | Timeout=1，trap 里写收尾标记：就绪标记与收尾标记都在；超时提示照旧；`RunFailed` |
+| `TestTimeoutKillsTermIgnoringGroupAfterGrace` | `trap '' TERM; sleep 864111`、宽限 500ms：耗时 ≥ 1.5 秒；进程已不在；正常结算为失败 |
+| `TestTimeoutStillKillsWholeGroupForStartupTask` | 开机任务超时：后台标记进程归零 |
+| `TestTimeoutKillsTermIgnoringBackgroundOutsideThePipe` | 后台进程重定向输出、忽略 TERM（标记 864112），前台 `sleep 30` 收到 TERM 就退：宽限过后后台进程同样归零。**唯一**能区分「等整组退空」与「只等 outcome」的用例 |
+| `TestStopTaskReturnsImmediatelyAndSendsSigterm` | 就绪后 `StopTask` 200ms 内返回；3 秒内出现收尾标记；`RunAborted` |
+| `TestStopTaskKillsTermIgnoringGroupAfterGrace` | 停止那一刻进程还活着（只发了 TERM），宽限过后归零；`RunAborted` |
+| `TestShutdownTermsAllGroupsWithinSharedGrace` | 三个任务（A trap TERM 写标记，B、C 都忽略 TERM），共享宽限 1 秒：`StopAllRunningTasks` 返回 3、耗时在 [0.8, 1.5) 秒；A 写出了标记；B、C 归零。必须两个忽略 TERM 的组，「每组各等一遍」才会变成约 2 秒 |
+| `TestShutdownSettlesTermTrappedZeroExitAsInterrupted` / `TestShutdownAfterMainCommandSucceededStillSettlesAsSuccess` | 断言点见「执行器的「执行窗口」与 per-run 停止」 |
+| `TestShutdownKillsImmediatelyOnMagisk`（Magisk、其它部署两个子用例，`t.Setenv` 设 `DAIDAI_MAGISK_SHELL_VERSION`、清空 `DAIDAI_MAGISK_MODULE`） | Magisk：`StopAllRunningTasks` 500ms 内返回，主进程被 `killed(9)` 结束；其它部署：≥ 1.5 秒（等满 2 秒宽限），主进程被 `terminated(15)` 结束；两种最终都 0 残留 |
+| `TestTermLetsParentCloseDetachedChild`（超时、手动停止、面板关停三个子用例） | 父进程 `trap 'kill $child; exit 0' TERM` 关掉自己 `setsid` 起的子进程：三条路径都 0 残留 |
+| `TestStopTaskEndpointLetsScriptHandleSigterm`（`handler/task_stop_graceful_linux_test.go`） | `InitSchedulerV2` + `RunNow`，库里有 pid 且就绪后 `PUT /tasks/:id/stop`：1 秒内 200；3 秒内出现收尾标记（trap 里先 `sleep 0.3` 再写，否则「TERM 后紧跟 SIGKILL」的突变偶尔测不出来）；再等到注入的脚本凭据被吊销（这次执行彻底收完尾） |
+| `TestDebugStopSendsSigtermFirst`（同一文件） | `POST /scripts/run-code`（bash，标记文件用 `t.TempDir()` 下的绝对路径），就绪后 `PUT /scripts/run/:run_id/stop`：1 秒内 200，`done=true`、`status=stopped`；收尾标记出现 |
+| `TestSummarizeTaskSuccessOutputDropsBannersAndMeta`、`TestSummarizeTaskFailureOutputCondensesPythonTraceback`（末尾跟提示行的子用例）、`TestSummarizeTaskFailureOutputGenericContextSkipsLeftoverNotice`（跨平台） | 提示行取自真实常量（`strings.Trim(leftoverProcessCleanupNotice, "\n")`）：成功摘要滤掉它；失败摘要仍走 Python 摘要、通用摘要的「上下文」不取它，「被信号终止」那行照旧能当上下文 |
+| `go test ./model`、`go test ./cmd/gen-demo-fixtures` | 分组中文名护栏通过；`configs.json` 与注册表逐字一致（只用生成器改，不手改） |
+
+**突变清单**（每条改完跑对应用例必须变红，再改回）
+
+- 删掉 `runSingleCommand` 里的清理段 → `KillsBackgroundSleep`、`CoversConcAccounts` 红；挪进 `pumpAndWait` 的正常分支 → `LeavesHooksAlone` 红。
+- 去掉任务类型判断 → `SkipsStartupTasks` 红；去掉开关判断 → `HonorsSwitch` 红；判定闭包恒为 true → `SkippedAfterManualStop` 红；
+  去掉 `processGroupAlive` 前置判断 → `SilentWhenGroupEmpty` 红；`TerminateProcessGroup` 换成同步等宽限 → `DoesNotDelaySettlement` 红。
+- 超时 TERM 后只等 outcome → 只有 `TimeoutKillsTermIgnoringBackgroundOutsideThePipe` 红；超时、`StopTask`、关停任一路径改回直接 `KillProcessGroup` → `TermLetsParentCloseDetachedChild` 对应子用例红；关停每组各等一遍 → `SharedGrace` 红。
+- 恢复 handler 里 `StopTask` 之后无条件的 `KillProcessByPid` → `TestStopTaskEndpointLetsScriptHandleSigterm` 红；去掉 Magisk 判断 → `ShutdownKillsImmediatelyOnMagisk` 的 Magisk 子用例红；
+  `normalizeTaskFailureLines` 不丢提示行 → 两条失败摘要用例红。
+- 没有用例守着的：批量停止、定时停止里的 `!stopped` 条件（照单个停止的写法核对）；pid <= 1 保护（见上，不能写）。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误（示意，research 原型的做法）：把「TERM、轮询 5 秒、KILL」塞进 killGroup，所有调用方一起阻塞——
+// HTTP 停止接口卡 5 秒，关停对每个组串行各等 5 秒，依赖安装取消、系统命令行、onStart 竞态这些不该变的路径也跟着变了
+func killGroup(p *os.Process) {
+    syscall.Kill(-p.Pid, syscall.SIGTERM)
+    for i := 0; i < 100 && syscall.Kill(-p.Pid, 0) == nil; i++ {
+        time.Sleep(50 * time.Millisecond)
+    }
+    syscall.Kill(-p.Pid, syscall.SIGKILL)
+}
+```
+
+```go
+// 错误：超时 TERM 之后只等 outcome —— 不攥管道、又忽略 TERM 的后台进程活下来，而超时之后修复 A 不再清理
+case <-timerC:
+    signalGroupTerm(cmd.Process.Pid)
+    select {
+    case oc := <-outcomeCh:
+        return oc.waitErr, true, normalizePumpReadError(oc.readErr)
+    case <-time.After(groupTermGrace):
+        KillProcessGroup(cmd.Process)
+    }
+```
+
+```go
+// 错误：关停对每个组各等一遍宽限（N 个忽略 TERM 的组就是 N × 2 秒）；Magisk 上也照样等宽限
+for _, p := range victims {
+    if signalGroupTerm(p.Pid) && !waitProcessGroupGone(p.Pid, shutdownTermGrace) {
+        KillProcessGroup(p)
+    }
+}
+```
+
+#### Correct
+
+```go
+// 正确：超时阻塞到整组退空（最多 groupTermGrace），发不出 TERM 或到点还有进程才整组 KILL，最后照旧等 outcome
+case <-timerC:
+    if !signalGroupTerm(cmd.Process.Pid) || !waitProcessGroupGone(cmd.Process.Pid, groupTermGrace) {
+        KillProcessGroup(cmd.Process)
+    }
+    oc := <-outcomeCh
+    return oc.waitErr, true, normalizePumpReadError(oc.readErr)
+```
+
+```go
+// 正确：关停时所有组先一起 TERM，共用一个截止时间逐组等，到点还在的统一 KILL；Magisk 部署宽限为 0、一个 TERM 都不发
+termGrace := shutdownTermGrace
+if playwrightMagiskRuntime() {
+    termGrace = 0
+}
+var termed []*os.Process
+for _, p := range victims {
+    if termGrace > 0 && signalGroupTerm(p.Pid) {
+        termed = append(termed, p)
+    } else {
+        KillProcessGroup(p)
+    }
+}
+deadline := time.Now().Add(termGrace)
+for _, p := range termed {
+    if !waitProcessGroupGone(p.Pid, time.Until(deadline)) {
+        KillProcessGroup(p)
+        killed++
+    }
+}
+```
+
+```go
+// 正确：修复 A 只在主命令自己结束、执行器判定要清、组里真有进程时才清；不阻塞，提示行经 onOutput 只进任务日志
+if !timedOut && plan.ShouldCleanupProcessGroup != nil && plan.ShouldCleanupProcessGroup() && processGroupAlive(process.Pid) {
+    TerminateProcessGroup(process)
+    if onOutput != nil {
+        onOutput(leftoverProcessCleanupNotice)
+    }
+}
+```
+
+---
+
+## 场景：调试运行记录的上限与任务输出尾部（v3.3.6，#159 修复 C / D）
+
+### 1. Scope / Trigger
+
+- 触发：修改 `handler/script.go` 的 `debugRun` / `ScriptHandler`、`handler/script_runtime.go` 的 `storeRun` / `deleteRun` / `pruneDebugRunsLocked` / `debugRun.finish` / `debugRun.stop`、
+  `handler/system_console.go` 的 `stopConsoleRun`；`service/script_runner.go` 的 `ScriptResult` 与 `runSingleCommand` / `runConcurrentCommand` 的输出处理；
+  `service/task_executor.go` 里 `runTask` 的 `outputTail` / `appendOutputTail`，或新写「读任务输出做摘要 / 依赖识别」的代码时必须看本节。
+- 背景（#159，research 实测）：
+  - 修复 C：「调试运行 / 运行代码」的记录 `ScriptHandler.debugRuns` 没有条数上限也不过期，网页和 APP 从不调 DELETE（v1.0.0 起）。50 次调试 RSS 29→216MB，闲置加强制 GC 也不降。
+  - 修复 D：常驻大输出的任务在堆里存两份输出：`runSingleCommand` 的 `outputBuilder`（经 `ScriptResult.Output` 返回，没人读）和 `runTask` 的 `outputCollector`（封顶约 97.7MiB，只用于摘要与依赖识别）。
+
+### 2. Signatures
+
+- `debugRun.finishedAt time.Time`：结束时刻，还在跑时为零值；`func (run *debugRun) finishedAtTime() time.Time`（在 `run.mu` 里读）。
+- `ScriptHandler.order []string`：`debugRuns` 的插入顺序（照搬 `ConsoleHandler.order`）。
+- `const maxDebugRuns = 20`、`const debugRunRetention = 30 * time.Minute`（`handler/script_runtime.go`）。
+- `func (h *ScriptHandler) pruneDebugRunsLocked()`：调用方必须已持有 `h.mu`；照搬 `ConsoleHandler.pruneConsoleRunsLocked`，多一条过期规则。
+- `type ScriptResult struct { ReturnCode int }`：v3.3.6 删掉了 `Output` / `Truncated`。
+- `const outputTailLimit = 1 << 20`、`func appendOutputTail(buf []byte, chunk string) []byte`（`service/task_executor.go`，纯函数，可以单独测）。
+
+### 3. Contracts
+
+**调试运行注册表**
+
+- 只在写入新记录时修剪：`storeRun` 持有 `h.mu`，先 `pruneDebugRunsLocked()`、再写入、再把 runID 追加进 `order`；**不起后台协程**。用户调试完离开后，下次再调试时内存就回到基线。
+- 修剪规则：
+  1. 先扫一遍 `order`：已经不在 map 里的残留项摘掉；`finishedAt` 非零、且距今**超过** 30 分钟的，从 map 和 `order` 里一起删掉；
+  2. 再 `for len(h.debugRuns) >= maxDebugRuns`：从 `order` 最老的一头找第一条 `isDone()` 为真的淘汰；一条都淘汰不掉（全在跑）就停下，宁可暂时超过上限，也不死循环。写入之后最多 20 条（全在跑时除外）。
+- 🔴 只淘汰已结束的：还在跑的记录一旦被删，用户正盯着的输出就断了，进程也失去停止入口。淘汰按**插入顺序**，不是结束顺序。
+- 🔴 不变式「`Done` 为真 ⇔ `finishedAt` 非零」：`finish()`、`stop()`、`stopConsoleRun` 三处都在置 `Done = true` 的同一处、同一把锁（`run.mu`）里写 `finishedAt = time.Now()`。
+  命令行自己的注册表不读这个字段，`stopConsoleRun` 写它只为守住不变式。测试里直接构造的 `Done: true` 记录 `finishedAt` 是零值：不会按时间过期，只会按条数被淘汰，正好符合预期。
+- `deleteRun`（`DELETE /scripts/run/:run_id`）同时从 `order` 摘掉（照搬 `deleteConsoleRun`）；`run_id` 按毫秒时间戳生成，同一毫秒撞上同一个 id 时沿用原来的覆盖行为，`order` 不追加第二份。
+- 对外语义：被修剪掉（过期或按条数淘汰）的记录再查日志返回 404「运行记录不存在」。修剪只发生在**下一次启动调试运行 / 运行代码时**，所以结束超过 30 分钟不等于一定 404
+  （`apiData.ts` 的 scripts-run-logs 写的是「最早启动的已结束记录会先被清掉……清理发生在下一次启动调试运行 / 运行代码时」）。
+  网页和 APP 在 done 之后不再轮询；MCP `run_script` 取完结果顺手 DELETE（`mcptools/tools_write.go` 的 `waitScriptRun`）。
+
+**任务输出只留尾部**
+
+- `ScriptResult` 只回报退出码：整段输出没有任何调用方读。`runSingleCommand` / `runConcurrentCommand` 里不再有 `outputBuilder`，`totalSize` / `truncated` 保留（它们决定 `onOutput` 什么时候开始截断）。
+  **要读输出一律从 `onOutput` 收**，测试也一样（`TestRunCommandSupportsManagedDependencyCommand` 改成从 onOutput 收集）。
+- `runTask` 里只有 `outputTail []byte`：`onOutputWithCollect` 在 `outputCollectorMu` 里 `outputTail = appendOutputTail(outputTail, chunk)`；每轮重试开头 `outputTail = nil`（不加锁：上一轮的进程已结束、读协程已排空）。
+- 🔴 尾部不变量：`len(outputTail) <= 1MiB`；一定是完整输出的**后缀**；从某一行的行首开始（窗口起点落在行中间时，切到窗口里第一个换行之后，顺带避开被切开的多字节字符）。
+  唯一例外：窗口里唯一的换行就是最后一个字节（一整行就超过 1MiB，例如压成一行的报错、`jq -c` 的输出）时不再往后切，保留这一行的后 1MiB——**不能切成空串**，否则失败摘要与依赖识别什么都拿不到。
+  底层数组最多约为上限的 2 倍（append 扩容时只拷贝窗口里的字节）。
+- 只读尾部的：失败摘要（`buildTaskFailureOutput` / `lastFailureOutput`）、成功摘要（`lastSuccessOutput`）、依赖自动识别（`detectAndInstallDeps`，取窗口里的第一个匹配）、运行时失败提示（`BuildRuntimeFailureHint`）。完整输出另有 TinyLog 与日志文件。
+- 已接受：报错之后又输出了超过 1MiB，依赖识别与失败摘要拿不到那条报错。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 |
+|---|---|
+| 18 条已结束 + 2 条在跑，再写入 5 条已结束 | 总数保持 20；最老的已结束记录被淘汰；在跑的两条与最新一条都在 |
+| 3 条结束于 31 分钟前、1 条 29 分钟前、1 条在跑，再写入一条 | 31 分钟前的 3 条被删；其余保留，`order` 同步只剩 3 条 |
+| 23 条全在跑 | 全部保留，不死循环 |
+| 结束超过 30 分钟、但没人再启动调试，查日志 | 仍能查到（修剪只在写入新记录时发生） |
+| 输出不到 1MiB | 原样保留 |
+| 3MiB 长短不一、夹带多字节字符的行 | 结果 ≤ 1MiB、是后缀、从行首开始、最后一行完整、UTF-8 合法 |
+| 一次 `onOutput` 就灌进约 1.9MiB | 压到 1MiB 以内，仍从行首开始 |
+| 单行 2MiB 加换行 | 非空，是这一行的后缀、以这一行的结尾收尾 |
+| 报错之前已经输出约 1.5MiB | 运行时失败提示（如 ESM 兼容提示）照样出现在日志里 |
+
+### 5. Good/Base/Bad Cases
+
+- Good：每天在网页里调试几十次脚本，面板内存回到基线，不再越积越高。
+- Base：正在跑的调试、刚结束的调试，查日志与改动前一致；常规大小的任务输出，失败 / 成功摘要、依赖识别都不变。
+- Bad：起后台协程按时间清；淘汰运行中的记录；只在 `finish()` 写 `finishedAt`（被停止的记录永不过期）；`deleteRun` 不同步 `order`（`order` 越来越长）。
+- Bad：`appendOutputTail` 只判 `i >= 0` 就往后切（设计原稿的写法）—— 一整行超过 1MiB 时窗口被切成空串。
+- Bad：给 `ScriptResult` 加回 `Output`，或让摘要读完整输出 —— 又在堆里多存一份。
+
+### 6. Tests Required
+
+- `handler/script_runtime_test.go`（Windows 本机即可）：
+  - `TestDebugRunRegistryEvictsOldestFinishedRunsBeyondLimit`、`TestDebugRunRegistryNeverEvictsRunningRuns`：断言点见上表。
+  - `TestDebugRunRegistryExpiresRunsFinishedOver30Minutes`：先存进去、再把结束时刻拨回去（`storeRun` 每次写入都会修剪，先拨的话前几条会在后面的写入里提前被删）；断言 map 与 `order` 都剩 3 条。
+  - `TestDebugRunFinishAndStopRecordFinishedAt`：`finish()`、`stop()` 都写下不早于调用前的结束时刻；`stop()` 停的对象用测试二进制自己起的子进程（`TestDebugRunStopHelperProcess`，没有 `Setpgid`，TERM 发不出去、立即 KILL），10 秒内退出。
+  - 既有的 `TestConsoleStopUsesConsoleWording`、`TestConsoleRunRegistry*`、`TestDebugRunFinishDoesNotOverrideStoppedStatus` 保持全绿。
+- `service/task_output_tail_test.go`：
+  - `TestAppendOutputTailKeepsLastMiB`：四个子用例（小输入原样拼接；3MiB 多字节行；单块约 1.9MiB；单行 2MiB 加换行），断言点见上表。
+  - `TestRunTaskFailureHintSurvivesOutputBeyondTail`：桩 `runCommandWithPlanFunc` 先吐约 1.5MiB 填充行、再吐 ESM 报错、返回 1，关掉 `auto_install_deps`：日志里有含「ESM 模块」的提示；`RunFailed`。
+- 突变：去掉 `i < len(buf)-1` → 单行 2MiB 子用例红；改成只留前 1MiB → `FailureHintSurvivesOutputBeyondTail` 红。
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：只要找到换行就往后切。一整行超过 1MiB 时，窗口里唯一的换行就是最后一个字节，切完是空串
+buf = buf[len(buf)-outputTailLimit:]
+if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+    buf = buf[i+1:]
+}
+```
+
+```go
+// 错误：不看是否结束就按条数淘汰 —— 用户正盯着的调试输出断了，进程也失去停止入口
+for len(h.debugRuns) >= maxDebugRuns {
+    delete(h.debugRuns, h.order[0])
+    h.order = h.order[1:]
+}
+```
+
+#### Correct
+
+```go
+buf = append(buf, chunk...)
+if len(buf) <= outputTailLimit {
+    return buf
+}
+buf = buf[len(buf)-outputTailLimit:]
+// 窗口里唯一的换行就在末尾（一整行超过 1MiB）时不再往后切，保留这一行的后 1MiB
+if i := bytes.IndexByte(buf, '\n'); i >= 0 && i < len(buf)-1 {
+    buf = buf[i+1:]
+}
+return buf
+```
+
+```go
+// 正确：从最老的一头找第一条已结束的淘汰；一条都淘汰不掉就停下，宁可暂时超限
+for len(h.debugRuns) >= maxDebugRuns {
+    evicted := false
+    for i, runID := range h.order {
+        if !h.debugRuns[runID].isDone() {
+            continue
+        }
+        delete(h.debugRuns, runID)
+        h.order = append(h.order[:i], h.order[i+1:]...)
+        evicted = true
+        break
+    }
+    if !evicted {
+        return
+    }
+}
+```
+
+---
+
+## 场景：执行日志删除与执行趋势归档（v3.3.6，#158）
+
+### 1. Scope / Trigger
+
+- 触发：任何删除 `task_logs` 行的代码（**含测试代码**）；`service/task_log_archive.go`、`model/task_log_daily_stat.go`；`handler/system.go` 的 `Dashboard`；
+  `backup_runtime.go` 的 `buildBackupManifest` / `restoreBackupManifest` 日志段、`backup_types.go` 的 `BackupPayload`；`testutil.SetupTestEnv` 的护栏回调；两份模型清单（`appboot.allModels`、`testutil.SetupTestEnv` 的 AutoMigrate）时必须看本节。
+- 背景（#158）：今日 / 昨日 / 按天趋势每次请求都现场 COUNT `task_logs`，而清理是物理删除：日志保留 1 天时，趋势里只剩今天和昨天（昨天还被删掉一部分），更早的随清理消失。
+  v3.3.6 改成任何删除都先在同一个事务里把要删的行按天并入新表 `task_log_daily_stats`，趋势 = 现存 + 计数表。状态写入点一处不改、不需要升级回填，时区语义与现算逐行一致。
+
+### 2. Signatures
+
+- `func DeleteTaskLogs(tx *gorm.DB, where string, args ...interface{}) (int64, []string, error)`（`service/task_log_archive.go`）：返回（删掉的行数, 这些行里非空的 `log_path`, 错误）。
+- `model.TaskLogDailyStat`：`Day string`（`gorm:"primaryKey;size:10" json:"day"`）、`Success / Failed / Aborted / Other int64`（`gorm:"not null;default:0"`，json 同名小写），表名 `task_log_daily_stats`。
+  DDL：``CREATE TABLE `task_log_daily_stats` (`day` text,`success` integer NOT NULL DEFAULT 0,`failed` integer NOT NULL DEFAULT 0,`aborted` integer NOT NULL DEFAULT 0,`other` integer NOT NULL DEFAULT 0,PRIMARY KEY (`day`))``，
+  SQLite 自动建 `sqlite_autoindex_task_log_daily_stats_1`，不再加别的索引。两份模型清单都要登记（生产启动路径建出的 DDL 与 testutil 建出的逐字一致）；
+  存量库升级只多一条 `CREATE TABLE`、不回填，连跑两次 AutoMigrate 不出现 `__temp` 重建。
+- `model.TaskLogDeleteGuardKey = "daidai:task_logs_delete_archived"`：`DeleteTaskLogs` 给自己那条 Delete 打的 GORM Statement Settings 标记。放在 model 包，因为 testutil 不能 import service（成环）。
+- 备份：`BackupPayload.TaskLogDailyStats []model.TaskLogDailyStat` `json:"task_log_daily_stats,omitempty"`，跟着「日志」勾选项走；老备份没有这个键 = nil。不加 `BackupSelection` 开关、不改 `Version`。
+- 接口不变：`GET /system/dashboard` 的响应字段、类型、`daily_stats[].date`（`Format("01-02")`，APP 依赖）与 `range` 规则（1~90，否则 7）都不变，只是数字包含计数表。
+
+### 3. Contracts
+
+**`DeleteTaskLogs` 是删除 task_logs 行的唯一入口**
+
+- 生产代码删 `task_logs` 一律经它；唯一的例外是 `restoreBackupManifest` 勾「日志」且非青龙时的 `deleteAll(tx, "task_logs")`（计数表整体换成备份里的，不需要并入）。
+- 依次三步，任一步出错立即返回、由调用方的事务回滚（计数不会多出来）：
+  1. 归档：`INSERT INTO task_log_daily_stats (day, success, failed, aborted, other) SELECT COALESCE(substr(created_at, 1, 10), ''), SUM(status IS 0), SUM(status IS 1), SUM(status IS 3), SUM(status IS NULL OR status NOT IN (0, 1, 3)) FROM task_logs WHERE (<where>) GROUP BY 1 ON CONFLICT(day) DO UPDATE SET …`（四列各自累加）。
+     用 `IS` 不用 `=`：`status = 0` 遇到 NULL 得 NULL，SUM 会少算。`GROUP BY` 遇到空集不产出行，一行都没命中时不插全 0 的计数行。`substr` 只在 SELECT / GROUP BY 里，WHERE 仍是调用方的条件、照常走索引。
+  2. 取路径：`tx.Model(&model.TaskLog{}).Where(where, args...).Where("log_path IS NOT NULL AND log_path <> ''").Pluck("log_path", &paths)`，必须排在删行之前（行一删 `log_path` 就查不回来了）。
+  3. 删行：`tx.Set(model.TaskLogDeleteGuardKey, true).Where(where, args...).Delete(&model.TaskLog{})`，返回 `RowsAffected`。
+- 调用方必须遵守：
+  1. `tx` 必须是事务（`database.DB.Transaction` 的 tx，或 `database.DB.Begin()` 的 tx）。传 `database.DB` 是违约：三条语句各自提交，中途崩溃就会出现「同一批行既在计数里、又还在 task_logs 里」。
+  2. 🔴 **它必须是这个事务里的第一条语句**：WAL 下事务「先读后写」，中间若有别的进程（`ddp`）提交过写，随后的写直接报 `database is locked (517)`，`busy_timeout` 救不了。归档的 `INSERT … SELECT` 是写语句，打头就一开始拿到写锁。
+     只有 `DeleteTaskLogs` 内部的语句顺序有用例锁着，各调用点靠代码结构与评审守住。
+  3. `where` 只能是代码里写死的 SQL 片段（`?` 占位），**禁止拼用户输入**：它被原样拼进原生 SQL。
+  4. 事务提交之后再 `DeleteLogFilesForRecords(paths, logDir)` 删磁盘文件；回滚时文件不动。
+- 列含义：`day` = 被删行 `created_at` **存储文本**的前 10 个字符（`YYYY-MM-DD`，写入时面板时区的日期），与仪表板「拿带偏移的文本按字典序比较」落到的是同一天，面板时区改过也一样；
+  `success / failed / aborted` = 被删时 status 为 0 / 1 / 3 的行数；`other` = 被删时 status 为 NULL（老数据）、运行中或其它值的行，只计入「今日 / 昨日执行」总数，不进三条折线。
+  一天一行，不按任务细分。表名刻意不含 `task_logs` 子串（#153 的执行计划护栏按这个子串截查询）。
+- 🔴 不变量：每一行日志要么还在 `task_logs`，要么已经并入计数表**恰好一次**。状态写入点（结算、各类停止、重启恢复）一处不改：它们一律 `Updates` 现存行、不用 `Save`，
+  行被删后影响 0 行，不会被「UPDATE 0 行就 INSERT」补回来；被删时还在运行的行计入 other，之后结算的 UPDATE 影响 0 行，不会再算一次。
+- **统一不减**：任何删除都先并入，趋势只增不减；误跑出来的尖峰只能靠恢复备份消掉（「重置执行趋势」入口在 backlog）。升级前已经清掉的历史补不回来。
+
+**调用点矩阵**
+
+| # | 入口 | 位置 | `where` | 事务 | 出错时 | 磁盘文件 |
+|---|---|---|---|---|---|---|
+| D1 | 自动清理 worker（`CleanLogsByRetentionPolicy`） | `log_cleanup.go` 的 `cleanExpiredTaskLogRows` | `started_at < ? AND (status IS NULL OR status <> ?)`，按任务分组时再拼 ` AND task_id = ?` / ` AND task_id NOT IN ?` | 每组新开一个 | 打 `log cleanup: delete TaskLog records failed: …`，返回 (0, 0)，**不按 log_path 删文件** | 提交后按路径删 |
+| D2 | `DELETE /logs/clean` → `CleanLogsOlderThan` | 同上 | 同 D1（不分组） | 新开一个 | 同 D1（接口照旧 200，删了 0 条） | 同 D1 |
+| D3 | `DELETE /tasks/clean-logs` → `CleanLogsOlderThan` | 同上 | 同 D2 | 新开一个 | 同 D2 | 同 D1 |
+| D4 | `DELETE /logs/:id` | `handler/log.go` 的 `Delete` | `id = ?` | 新开 | 500「删除日志失败」；删了 0 行照旧 404「日志不存在」 | 提交后按路径删 |
+| D5 | `DELETE /logs/batch`、`POST /logs/batch-delete` | `handler/log.go` 的 `BatchDelete` | `id IN ?` | 新开 | 500「删除日志失败」；0 行照旧 200「已删除 0 条日志」 | 同上 |
+| D6 | `DELETE /tasks/:id` | `task_mutate.go` 的 `Delete` | `task_id = ?` | 新开 | 忽略（与改动前一致，不拦流程） | 不取路径，随后 `RemoveTaskLogDirs` 整目录收走 |
+| D7 | `PUT /tasks/batch`（`action=delete`）、`DELETE /tasks/batch/delete` | `task_batch.go` 的 `Batch` / `BatchDelete` | `task_id = ?` | 每个任务新开 | 同 D6 | 同 D6 |
+| D8 | 订阅同步自动删失效任务 | `subscription.go` 的 `deleteSubscriptionTaskIfUnchanged` | `task_id = ?` | 现有事务的第一条 | `删除历史日志失败: %w`，整体回滚（计数一起回滚） | 不删（与改动前一致） |
+| D9a | 恢复备份：勾「日志」且 `manifest.Source != "qinglong"` | `backup_runtime.go` 的 `restoreBackupManifest` | ——（`deleteAll` 两张表，再 upsert 写回计数） | 恢复事务的第一批语句 | 整体回滚 | `restoreLogFiles` 整目录替换（不变） |
+| D9b | 恢复备份：只勾「任务」，或青龙导入（`Logs \|\| Tasks`） | 同上 | `1 = 1` | 恢复事务的第一条 | 整体回滚 | 不删（路径不用） |
+
+- 只在出错时才有的行为变化：D4 / D5 数据库出错从「404 日志不存在 / 200 已删除 0 条」变成 500「删除日志失败」；D1~D3 删行失败时不再按 `log_path` 删文件
+  （`CleanLogsOlderThan` / `CleanLogsByRetentionPolicy` 随后无条件跑的 `CleanOldLogs` 按 ModTime 扫盘照旧，老文件照样可能被扫走，与改动前一样）。
+- 新增删除入口时：照 D4 的写法开事务、调 `DeleteTaskLogs`、提交后删文件，并在 `TestDashboardTrendSurvivesEveryLogDeletionEntry` 里补一个子用例。
+
+**仪表板 `GET /system/dashboard`**
+
+- 🔴 一次请求的**全部读取**（任务三计数、今日四计数、环境变量 / 订阅 / 今天之前的任务数、昨日四计数、最近 10 条、计数表、按天三计数）放进同一个 `database.DB.Transaction(func(tx *gorm.DB) error {…})`，读的是同一个 WAL 快照；
+  **事务里一律用 `tx`**：连接池只有 1 个连接，事务里再碰 `database.DB` 会自己等自己。
+  原因：删除可能排进任意两条查询之间——落在「读计数表」和「按天现算」之间，被删的行两边都数不到；反过来又会算两次。
+  DSN 没有 `_txlock`，这是延迟 BEGIN 的只读事务，不拿写锁、不会 517；代价是请求期间独占唯一的连接（7 天视图约 30 条、90 天约 280 条覆盖索引计数，总工作量不变，只是不再被插队）。
+  原有查询的顺序与条件一字不改（#153 的口径锁与执行计划护栏照旧成立）。
+- 计数表只读一次，范围 `[min(today - (range-1), yesterday), today]`（`day` 字符串比较）：range=1 时昨天不在趋势里，「昨日执行」卡片照样要加。
+- 加法：`today_logs += success + failed + aborted + other`（总数连 other 一起加，与现算口径一致）；`success_logs / failed_logs / aborted_logs` 加对应列；`yesterday_*` 同理；
+  `daily_stats` 每天只加三列（other 不进折线）。成功率、较昨日、「近 N 天」合计都由前端从这些字段算，自动对齐，前端不改。
+- 只看现存、**不加**计数表：侧栏角标 `logs_failed_today`（`system_badges.go`：与 Dashboard 一致的只是时间边界，数字可能不同——角标点进去要能看到那几条日志）、`/system/stats` 的 `logs.*`、`/tasks/:id/stats`。
+- 执行计划护栏（`handler/task_log_query_plan_test.go` 的 `TestTaskLogHotQueriesUseQueryIndexes`）：截获条件是 SQL 含 `task_logs` **或** `task_log_daily_stats`；
+  仪表板 7 天视图恰好 29 条 task_logs 计数、1 条最近 10 条、**1 条计数表查询**，后者的计划必须含 `SEARCH task_log_daily_stats USING INDEX sqlite_autoindex_task_log_daily_stats_1`。仪表板上新增查询要先在这里补断言。
+- 已接受：未来日期的行被删后按自己的日期归档，不回到今天。
+
+**备份 / 恢复**
+
+- 备份勾「日志」时，计数（`day` 升序）与日志在 `buildBackupManifest` 的**同一个读事务**里取：两次读之间碰上一次清理的话，同一批行会既在日志里、又在计数里，恢复后重复计数。计数为空时这个键被 omitempty 省略。
+- 恢复（`restoreBackupManifest`，这一段必须是恢复事务里的第一批语句）：
+
+| 情形 | `task_logs` | `task_log_daily_stats` |
+|---|---|---|
+| 新备份，勾「日志」 | 清空后写回备份里的（任务对不上的照旧跳过，**不并计**） | 清空后写回备份里的 |
+| 老备份（没有这个键），勾「日志」 | 同上 | 清零 |
+| 勾了「任务」没勾「日志」（含老 JSON 备份） | 现存日志经 `DeleteTaskLogs(tx, "1 = 1")` 并入计数后清空（任务 id 会重排，外键不允许留着） | 原有 + 并入的 |
+| 青龙导入，识别出任务或日志文件 | 同上（青龙勾「日志」时也照旧整表替换日志） | 同上，**不清零**：青龙包里没有呆呆面板的执行历史，清零只会丢信息 |
+| 「任务」「日志」都没勾 | 不动 | 不动 |
+
+- 写回计数用 upsert（`INSERT … VALUES (?, ?, ?, ?, ?) ON CONFLICT(day) DO UPDATE SET` 四列累加），不用 `Create`：手工拼过的备份里同一天出现两次时累加，不让整次恢复因主键冲突回滚。
+- 青龙按 `manifest.Source == "qinglong"` 判断（只由 `backup_qinglong.go` 写成 qinglong）。青龙清单仍在有日志文件时设 `Logs = true`，它还要驱动 `restoreLogFiles` 拷青龙日志文件，`backup_qinglong.go` 不改。
+- 新面板的备份在 v3.3.5 上恢复：未知键被忽略，计数丢失、日志照常。
+
+**护栏**
+
+- 语法扫描 `service/task_log_archive_test.go` 的 `TestTaskLogDeletesOnlyGoThroughDeleteTaskLogs`：按相对路径 `..` 遍历 `server/` 下全部非 `_test.go` 的 `.go` 文件（跳过 `data`、`testdata`、`node_modules` 与以 `.` 开头的目录，`server/data` 里可能放着用户脚本），`go/parser` + `go/ast`：
+  1. `X.Delete(&model.TaskLog{...})` 恰好 1 处，且在 `DeleteTaskLogs` 里；
+  2. `deleteAll(_, "task_logs")` 恰好 1 处，且在 `restoreBackupManifest` 里；
+  3. 字符串字面量先 `strconv.Unquote` 解码（`"…\n…"` 里的 `\n`、`\t` 变回真的空白），再合并空白、去掉引号与反引号、忽略大小写，含 `delete from task_logs` 一律报错（多行原生 SQL、`"DELETE FROM\n task_logs"`、反引号包住的表名都算）；
+  4. `X.Table("task_logs")` 调用一律报错（读也不行，用 `Model(&model.TaskLog{})`）。
+
+  「恰好 1 处」防的是扫描规则失灵（目录走错、一个文件都没扫到）之后空跑通过。运行时拼出来的 SQL（`Exec("DELETE FROM " + table)`）扫不到，靠 `deleteAll` 那条规则与代码评审。
+  在 WSL 里跑交叉编译的 Linux 测试二进制做全包回归时，二进制要放进整个工作区的副本里跑，否则扫不到文件、「恰好 1 处」会红——这是环境问题，不是回归。
+- 测试期 GORM 回调：`testutil.SetupTestEnv` 在每次新建的 `database.DB` 上注册 `Callback().Delete().Before("gorm:delete").Register("testutil:task_logs_delete_guard", …)`：
+  `db.Statement.Table == "task_logs"` 且没带 `TaskLogDeleteGuardKey` 时 `AddError("task_logs 只能经 service.DeleteTaskLogs 删除（先并入执行趋势计数，#158）")`，一行不删。
+  标记只挂在 `DeleteTaskLogs` 那一条语句上，不串到同一事务里的下一条；别的表不受影响；原生 `Exec("DELETE …")` 不走 Delete 回调链，由扫描第 3 条兜。
+- 🔴 **测试代码同样受约束**：测试里要删日志，也走 `DeleteTaskLogs`（自己包一层 `database.DB.Transaction`）或原生 `Exec`；直接 `Delete(&model.TaskLog{})`、`Delete(&logs)`、`Table("task_logs")…Delete` 会被回调拦下、用例红。
+
+**已接受的边角**（发布说明与 issue 回复都不承诺）
+
+- 删掉**运行中**的日志后（D4 / D5 不拦运行中的行）、执行结束之前面板重启：启动恢复（`markTaskLogInterrupted`）找不到运行中的行，会另建一行失败，同一次执行在趋势里算两次（other 1 + 失败 1）。
+  用例钉住；修法（删日志接口拒删运行中的行）在 backlog，修的时候要同步改那条用例。
+- 外部工具写入的「秒级精度、零点整、偏移串小于当前偏移」的行，可能落到相邻一天。
+- 删任务（D6 / D7）删日志失败时照旧被忽略，随后删任务因外键失败也被忽略，接口照样回「删除成功」（既有问题，与计数无关）。
+- 性能：批量删 2 万行约 +33%（1.05→1.40 秒），稳态一轮清理（约 360 行）约 +10ms；D6~D8 多一次 `log_path` 取值；恢复「只勾任务」/ 青龙导入多一次全表按天分组。
+
+### 4. Validation & Error Matrix
+
+| 情形 | 结果 |
+|---|---|
+| 任何入口删掉一批日志 | 计数表各列之和 = 删除数；range=1 / 7 / 30 的 today_* / yesterday_* / daily_stats 删前删后逐字段相等 |
+| 两天 × status 0 / 1 / 2 / 3 / NULL | 按 `created_at` 前 10 位分成两行；2 与 NULL 进 other；同一天再删一批，ON CONFLICT 累加 |
+| 删不存在的行 | 返回 0，不插计数行 |
+| 东八区写入、改成 UTC 后再删 | 键 = 删前 `substr(created_at,1,10)`（`07:30+08:00` 那行在 UTC 下仍记在当天，不是前一天） |
+| 删行失败（数据库错误、触发器 `RAISE(ABORT)`） | 整个事务回滚：计数表不变、日志行还在；D4 / D5 回 500「删除日志失败」；D1~D3 返回 (0, 0) 且不按 log_path 删文件 |
+| D8 删任务失败或快照过期 | 日志与计数一起回滚 |
+| 仪表板读取途中有清理 | 清理拿不到唯一的连接，等仪表板事务提交；前后读到的趋势相等 |
+| range=1 | 「昨日执行」同样加上计数表 |
+| 恢复：新备份勾日志 / 老备份勾日志 / 只勾任务 / 青龙导入 / 都没勾 | 见上面的恢复矩阵 |
+| 手工拼的备份里 day 重复 | upsert 累加，恢复不回滚 |
+| 测试里直接 `Delete(&model.TaskLog{})` | 回调报错、一行不删 |
+| 生产代码新增 `Delete(&model.TaskLog{})`、含 `DELETE FROM task_logs` 的字符串、`Table("task_logs")` | 语法扫描红 |
+| 删掉运行中的那行后、执行结束前重启 | 同一次执行算两次（已接受） |
+
+### 5. Good/Base/Bad Cases
+
+- Good：每分钟一次、日志只保留 1 天的任务，7 天趋势每天都是 1440 左右，不再只剩今天和昨天；删一条日志、删任务、批量清理之后，仪表板的数字都不变。
+- Base：从不删日志的用户，计数表一直是空的，仪表板数字与改动前一致。
+- Bad：在事务外先 Pluck 再 Delete、错误被吞（改动前 D4 / D5 的写法：失败时误报 404，或回「已删除 0 条」）；自己写 `Delete(&model.TaskLog{})`、不经 `DeleteTaskLogs`——执行趋势跟着变少，测试期护栏也会拦下。
+- Bad：`DeleteTaskLogs` 之前先在同一事务里跑一条 SELECT（先读后写，撞上 ddp 的写就 517）；传 `database.DB` 而不是 tx。
+- Bad：仪表板不开事务，或在事务里用 `database.DB`（自己等自己）；计数表下界只取趋势第一天（range=1 时昨日漏加）；今日 / 昨日总数漏加 other。
+- Bad：恢复写回计数用 `Create`（重复 day 主键冲突、整次恢复回滚）；青龙导入清零计数；角标、`/system/stats` 也加计数表。
+
+### 6. Tests Required
+
+跑法：Windows 本机即可（没有进程组断言），CI 跑同一套。时区相关用例先 `service.ApplyPanelTimezone(model.DefaultPanelTimezone)` 并在 Cleanup 还原，跨零点照 `settledLocalToday`。
+
+| 用例 | 文件 | 断言 |
+|---|---|---|
+| `TestDeleteTaskLogsArchivesEachStatusIntoItsStoredDay` | `service/task_log_archive_test.go` | 两天 × 0/1/2/3/NULL：返回行数 = 删除数、路径 = 非空那些；计数两行逐列正确；同一天再删累加；删不存在的行不插计数行 |
+| `TestDeleteTaskLogsKeysByStoredPrefixAfterTimezoneChange` | 同上 | 归档键 = 删前 `substr(created_at,1,10)` |
+| `TestDeleteTaskLogsRollsBackArchiveWhenDeleteFails` | 同上 | BEFORE DELETE 触发器：事务返回错误、计数 0 行、日志还在；同条件下直接调 `cleanExpiredTaskLogRows` 返回 (0, 0) 且按 log_path 那份文件还在（断言对象不用 `CleanLogsOlderThan`：它随后的 ModTime 扫盘会干扰） |
+| `TestDeleteTaskLogsArchiveIsFirstStatementInTransaction` | 同上 | 自定义 GORM logger 挂在 `database.DB.Session` 上，事务里恰好 3 条语句，依次以 `INSERT INTO task_log_daily_stats` → `SELECT log_path FROM task_logs` → `DELETE FROM task_logs` 开头（去掉反引号再比） |
+| `TestTaskLogDeletesOnlyGoThroughDeleteTaskLogs` | 同上 | 语法扫描四条 + 两个「恰好 1 处」 |
+| `TestTaskLogDeleteGuardRejectsUnmarkedDelete` | 同上 | 护栏自测：三种没带标记的删法都报护栏错误、行数不变；`DeleteTaskLogs` 通过；标记不串到同一事务的下一条；别的表不受影响（护栏坏了这条会红，否则别的用例会空跑） |
+| `TestDeleteSubscriptionTaskIfUnchangedArchivesLogsWithTask` | 同上 | D8：成功时计数 = 被删日志按天按状态的分布；删任务失败时计数 0 行、日志仍在（D8 没有 HTTP 入口，只在 service 层验证） |
+| `TestBackupManifestCarriesTaskLogDailyStatsWithLogs`、`TestRestoreLogsReplacesTaskLogDailyStats`、`TestRestoreTasksOnlyArchivesExistingLogs`、`TestRestoreLegacyLogsBackupClearsTaskLogDailyStats`、`TestQingLongImportKeepsTaskLogDailyStats`、`TestBackupRestoreRoundTripDoesNotDoubleCount` | `service/backup_task_log_daily_stats_test.go` | 清单带计数（只勾任务时没有这个键）；勾日志整体替换（重复 day 合计）；只勾任务并入；老备份清零；青龙不清零；tgz 往返不重复计数 |
+| `TestDashboardTrendSurvivesEveryLogDeletionEntry` | `handler/task_log_trend_history_test.go` | 表驱动 D1、D2、D3、D4、D5a、D5b、D6、D7a、D7b 九个子用例：每个入口真的删掉了行（D1~D3 的期望数在删前按同一条件现数，且 > 0）；计数表各列之和 = 删除数；range=1 / 7 / 30 三份仪表板删前删后逐字段相等 |
+| `TestDashboardAddsArchivedCountsIncludingRangeOne` | 同上 | 直接插计数行：today_logs 含 other；不带 range、range=1 / 7 / 30 的昨日都加上（昨天那行带 other，抓「昨日漏加 other」）；range=7 看不到 7 天前那行、range=30 看得到；角标、`/system/stats`、`/tasks/:id/stats` 与插入前逐字节相同 |
+| `TestDashboardReadsOneSnapshotWhileLogsAreDeleted` | 同上 | 在「读计数表」那条查询的回调里起 goroutine 清理：7 天合计删前 = 交错那次 = 清理后。回调里**只能等 goroutine 起来**，不能等清理进入事务（正确实现下清理要等仪表板事务提交才拿得到连接，等它会死锁）；去掉事务实测 12→0→12 |
+| `TestDeletingRunningLogThenRecoveryCountsTwice` | 同上 | 已接受的例外：删运行中日志后今日 1（other）、失败 0；`RecoverAbandonedActiveTasks` 后今日 2、失败 1 |
+| `TestLogDeleteFailureReturns500AndKeepsCounts` | 同上 | 触发器拦下删行：`DELETE /logs/:id`、`DELETE /logs/batch` 都是 500「删除日志失败」；计数 0 行；日志行还在 |
+| `TestTaskLogHotQueriesUseQueryIndexes`（改） | `handler/task_log_query_plan_test.go` | 见上面的执行计划护栏 |
+| `TestTaskLogDailyStatsAutoMigrateDoesNotRebuildTable` | `database/task_log_daily_stats_migration_test.go` | `SetupTestEnv` 后表已存在；再连跑两次 AutoMigrate 不出现 `task_log_daily_stats__temp`、除 SELECT / PRAGMA 外 0 条写语句；DDL 含 ``PRIMARY KEY (`day`)`` 与 `NOT NULL DEFAULT 0` |
+
+- 必须仍绿：`system_dashboard_counts_test.go`（口径锁，一字不改）、`system_aborted_stats_test.go`、`system_badges_test.go`、`log_cleanup_regression_test.go`、`task_delete_scripts_test.go`、
+  `log_retention_message_test.go` / `task_log_retention_test.go`、`TestBackupPayloadModelsHaveNoJSONHiddenFields` 与 `backup_*_test.go`。
+- 突变（各做一次，改回后全绿）：去掉仪表板事务 → `ReadsOneSnapshot` 红；`DeleteTaskLogs` 去掉归档 → `SurvivesEveryLogDeletionEntry` 红；去掉 Delete 的标记 → 大面积红（护栏拦下）；
+  计数表下界改回趋势第一天 → `IncludingRangeOne` 红；今日或昨日总数漏加 other → 同上；去掉青龙判断 → `TestQingLongImportKeepsTaskLogDailyStats` 红；upsert 换回 `Create` → `TestRestoreLogsReplacesTaskLogDailyStats` 红；
+  取路径挪到归档之前 → `FirstStatementInTransaction` 红；`cleanExpiredTaskLogRows` 出错后照旧按路径删文件 → `RollsBackArchiveWhenDeleteFails` 红。
+- 修改后至少运行：
+
+```bash
+cd server
+go test ./service -run "DeleteTaskLogs|TaskLogDelete|ArchivesLogsWithTask|TaskLogDailyStats|RestoreTasksOnly|BackupRestoreRoundTrip" -count=1
+go test ./handler -run "TestDashboard|TestDeletingRunningLog|TestLogDeleteFailure|TestTaskLogHotQueries|TestSystemDashboard|TestSystemBadges|TestTaskDelete|TestTaskBatch" -count=1
+go test ./database -run "TaskLogDailyStats" -count=1
+go test ./...
+```
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```go
+// 错误：事务外先 Pluck 再 Delete，错误被吞（失败时误报 404 /「已删除 0 条」）；
+// 不经 DeleteTaskLogs，被删的行从执行趋势里消失，测试期护栏也会把这条 Delete 拦下
+var paths []string
+database.DB.Model(&model.TaskLog{}).Where("id IN ? AND log_path IS NOT NULL AND log_path <> ''", req.IDs).Pluck("log_path", &paths)
+result := database.DB.Where("id IN ?", req.IDs).Delete(&model.TaskLog{})
+service.DeleteLogFilesForRecords(paths, config.C.Data.LogDir)
+```
+
+```go
+// 错误：仪表板的现算与读计数表不在同一个快照里，中间插进一次清理就少算（或多算）
+database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusSuccess).Count(&s)
+database.DB.Where("day >= ? AND day <= ?", firstDay, todayKey).Find(&archivedRows)
+```
+
+#### Correct
+
+```go
+// 正确：开事务，DeleteTaskLogs 是事务里的第一条语句（where 是代码里写死的常量）；出错回 500，提交之后才删磁盘文件
+var deleted int64
+var paths []string
+if err := database.DB.Transaction(func(tx *gorm.DB) error {
+    var err error
+    deleted, paths, err = service.DeleteTaskLogs(tx, "id IN ?", req.IDs)
+    return err
+}); err != nil {
+    response.InternalError(c, "删除日志失败") // 已整体回滚：行与计数都没动，文件也不删
+    return
+}
+service.DeleteLogFilesForRecords(paths, config.C.Data.LogDir)
+```
+
+```go
+// 正确：一次请求的全部读取放进同一个只读事务，事务里一律用 tx；计数表只读一次，下界取 min(趋势第一天, 昨天)
+_ = database.DB.Transaction(func(tx *gorm.DB) error {
+    // ……原有的全部计数，database.DB 换成 tx，顺序与条件一字不改……
+    first := today.AddDate(0, 0, -(rangeDays - 1))
+    if yesterday.Before(first) {
+        first = yesterday
+    }
+    var archivedRows []model.TaskLogDailyStat
+    tx.Where("day >= ? AND day <= ?", first.Format("2006-01-02"), today.Format("2006-01-02")).Find(&archivedRows)
+    // 今日 / 昨日总数加四列（含 other），三条折线与成功 / 失败 / 终止只加对应列
+    return nil
+})
 ```

@@ -45,6 +45,24 @@
 - `web/src/views`
 - 必要时 `stores` / `utils`
 
+**给已有表加一个对外字段**（v3.3.6 环境变量 `important`，APP #16）：一个布尔字段就牵动下面这些地方，漏哪一处都不报错、构建照样全绿：
+
+- [ ] **`ToDict` 永远下发，不加 omitempty**：独立发版的 APP 靠「有没有这个布尔键」做形状探测、不看版本号——键在且是布尔 = 新面板；
+      键不在 = 老面板，整套相关界面隐藏、一个请求都不发。加了 omitempty，`false` 就不下发，新面板上没标记的变量会被 APP 当成老面板。
+- [ ] **补列**：`EnsureColumns` 的补列写法与 GORM 建表写进 DDL 的逐字一致（契约 S3）；「先造缺列老表、再插 model 行」的测试要 `Omit` 新列
+      （GORM 插入总会带上有默认值的列）。细则在 backend `database-guidelines.md`。
+- [ ] **handler 的四个入口**：Create、Update（`*bool`，不传不动）、Export、Import。Import 的 merge 碰到旧文件怎么办要先想清楚：
+      旧导出文件、老 APP 的导出再导入会把 `false` 原样带回来，`important` 因此定成「只升不降」。
+- [ ] **备份**：`service/backup_types.go` 的结构体加字段，`backup_runtime.go` 的两个映射函数（`backupEnvVarFromModel` / `modelEnvVarFromBackup`）也要加——
+      **手写副本，没有护栏**，漏了就是备份恢复一次值就没了；老备份、青龙备份没有这个键时恢复成什么，要写清楚。
+- [ ] **MCP**：工具层的 `pickFields` 是白名单（`slimEnv`、`exportEnvs`），不加就不出现；导入工具的条目结构体同步；`docs/mcp.md` 工具表同步。
+- [ ] **`web/src/views/api-docs/apiData.ts`**（手写副本，没有护栏）：响应示例、`responseFields`、新建 / 修改的 bodyParams、MCP 工具表。
+- [ ] **演示站**：`web/src/demo/types.ts`、`adapter.ts`（读写与类型校验照服务端口径，包括「哪个路由不收这个键」）、`fixtures/business.ts` 的种子。
+- [ ] **APP**：读取点与形状探测；APP 仓库 `.trellis/spec/frontend/panel-contract.md`「已验证的兼容底线」表登记字段与起始版本。
+- [ ] **整体回写的入口**（网页编辑弹窗、APP 编辑）：用户没改这一项时请求体里不带这个键，否则弹窗打开时读到的旧值会冲掉别处刚改的值。
+
+> 契约原文：backend `index.md` 的契约 E1；网页侧见 `frontend/component-guidelines.md`「环境变量的『重要』标记与删除确认」。
+
 ### 配置项变更
 
 要一起检查：
@@ -295,6 +313,23 @@ CI（`.github/workflows/checks.yml`）会跑 `go test ./...`，其中 `TestCommi
 - 通知开关
 - 前端状态刷新
 
+### 仪表板与执行统计的口径
+
+v3.3.6（#158）起「执行了几次」有两种口径，改统计、加统计入口之前先确认动的是哪一种：
+
+| 口径 | 用在哪 | 删日志之后 |
+|---|---|---|
+| 现存 `task_logs` + 按天计数表 `task_log_daily_stats` | `GET /system/dashboard` 的今日（`today_logs` / `success_logs` / `failed_logs` / `aborted_logs`）、昨日（`yesterday_*`）与 `daily_stats`：网页仪表板的执行趋势、今日执行、成功率与较昨日，APP 首页趋势，MCP `get_dashboard` | 不变少（统一不减） |
+| 只看现存 `task_logs` | 侧栏「今日失败」角标（`GET /system/badges` 的 `logs_failed_today`）、系统概况 `GET /system/stats`、`GET /tasks/:id/stats` | 跟着变少 |
+
+- [ ] 清理日志之后，仪表板（加计数表）与日志列表、侧栏角标、系统概况（只看现存）对不上，比如仪表板今天的执行数大于日志列表里今天的条数，
+      **这是对的**，别「修」成一致；新加统计入口先决定归哪一种，并写进接口说明（`apiData.ts`）。
+- [ ] **改仪表板口径要同步演示站**：`web/src/demo/db.ts` 的数字全是现算的（文件头「设计要点」第 3 条），仪表板另加 `archivedDaily`，
+      三处删日志的路由先 `archiveDemoLogs` 再删；`buildSystemBadges` / `buildSystemStats` 照旧只算现存。只改服务端不改这里，演示站会静默显示旧口径。
+- [ ] 删 `task_logs` 的新入口一律经 `service.DeleteTaskLogs`（护栏会拦别的写法），细则在 backend `database-guidelines.md`。
+- [ ] 用例：`TestDashboardTrendSurvivesEveryLogDeletionEntry` 逐个删除入口断言仪表板不变；
+      `TestDashboardAddsArchivedCountsIncludingRangeOne` 同时断言只看现存的三个接口不受计数表影响。
+
 ---
 
 ## 跨层改动的最小检查清单
@@ -326,6 +361,10 @@ CI（`.github/workflows/checks.yml`）会跑 `go test ./...`，其中 `TestCommi
       也不得比接口多给一点（权限范围仍由 Open API 应用的 scope 决定）
 - [ ] 新增开放接口时五处都过了吗：查询在 service、演示站 mock、`apiData.ts`（含写死的 MCP 工具数与工具表）、
       MCP 工具 + `docs/mcp.md`、客户端连老面板 404 静默降级？（清单见上文「新增一个开放接口」）
+- [ ] 给已有表加对外字段：`ToDict` 永远下发（APP 靠键做形状探测）、导入导出、备份的两个映射函数、MCP、`apiData.ts`、演示站都同步了吗？
+      （清单见上文「接口字段变更」里的「给已有表加一个对外字段」）
+- [ ] 改了仪表板或统计接口的口径：演示站 `db.ts` 跟上了吗？改的是「加计数表」的那种，还是「只看现存」的那种？
+      （见上文「仪表板与执行统计的口径」）
 - [ ] 调用方需要区分「这个函数为什么返回 false」时，是自己**猜**（用别的状态近似推断）
       还是被调方**明说**？近似推断会在某个分支上静默失配
       （`reloadOnce` 返回 false 有离线 / 限次 / 存储不可用 / 未保存内容四种原因，
