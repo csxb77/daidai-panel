@@ -22,6 +22,10 @@ func killGroup(p *os.Process) {
 }
 
 func killGroupByPid(pid int) {
+	// pid <= 1 不发信号：Kill(0, …) / Kill(-1, …) 会打到面板自己的进程组 / 所有能打的进程，理由同 KillProcessByPid 与下方 signalGroupTerm。
+	if pid <= 1 {
+		return
+	}
 	syscall.Kill(-pid, syscall.SIGKILL)
 }
 

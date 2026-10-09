@@ -49,6 +49,8 @@ func (h *SystemHandler) Badges(c *gin.Context) {
 		data["tasks_running"] = tasksRunning
 
 		// 与 Dashboard 的「今日」口径保持一致：本地时区的自然日零点起。
+		// 一致的只是时间边界：角标只数现存的日志，不加 #158 归档进 task_log_daily_stats 的计数
+		// （角标点进去要能看到那几条日志），所以两边的数字可能不同。
 		now := time.Now()
 		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		var logsFailedToday int64

@@ -312,6 +312,14 @@ func KillProcessGroup(p *os.Process) {
 // KillProcessByPid 是 KillProcessGroup 的按 PID 版本，同样立即 SIGKILL。
 // 要先 SIGTERM、宽限期过后再 SIGKILL 的，用 TerminateProcessByPid。
 func KillProcessByPid(pid int) {
+	// pid <= 1 一律不动手，口径同 process_unix.go 的 signalGroupTerm / processGroupAlive：
+	// pid 0 时 Kill(-0, …) 打的是面板自己的进程组；pid 1 时 Kill(-1, SIGKILL) 会打到面板有权限打的所有进程
+	// （容器里以 root 跑时 nginx 连同全部任务一起被杀，面板网页打不开、要重启容器才恢复；Magisk / 裸机上是整台机器）。
+	// pid 来自库里的任务记录，恢复备份、脏数据都可能让它变成 0 或 1，而调用方只挡了 <= 0
+	// （TerminateProcessByPid 对 pid 1 发不出 TERM，正是转到这里立即 KILL）。
+	if pid <= 1 {
+		return
+	}
 	killGroupByPid(pid)
 	p, err := os.FindProcess(pid)
 	if err != nil {
@@ -327,6 +335,7 @@ var groupTermGrace = 5 * time.Second
 
 // shutdownTermGrace 是面板关停时所有进程组共用的 TERM 宽限期（见 StopAllRunningTasks），
 // 加上 SignalStop 的 1 秒与 ShutdownSchedulerV2 的 3 秒结算等待，整体压在 main.go 的 8 秒关停预算里。
+// Magisk 部署下关停不用它：动作按钮只等 2 秒，关停时所有进程组立即整组 KILL（理由见 StopAllRunningTasks）。
 var shutdownTermGrace = 2 * time.Second
 
 // waitProcessGroupGone 每 50ms 查一次以 pid 为组号的进程组：组里的进程都退了返回 true，等满 limit 还有进程返回 false。
@@ -672,7 +681,7 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 	}
 	e.processLock.Unlock()
 
-	// #159 修复 B：所有进程组（任务进程，加上正在跑的钩子）先一起收到 SIGTERM，
+	// #159 修复 B：所有进程组（任务进程，加上正在跑的钩子）先一起收到 SIGTERM（Magisk 部署例外，见下面的 termGrace），
 	// 给 trap 了 TERM 的脚本、收到 TERM 会自己关浏览器的 Puppeteer 一个收尾的机会；
 	// 然后共用一个 shutdownTermGrace（2 秒）的截止时间逐组等：先退出的不占后面的时间，到点还在的统一 SIGKILL。
 	// 这里必须阻塞到 KILL 落地再返回：Docker 停容器时 PID 1 一退出内核会收走整个命名空间，
@@ -686,16 +695,29 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 	}
 	victims = append(victims, hookVictims...)
 
+	// TERM 宽限在这里按部署决定：Magisk 部署下不给宽限，所有进程组立即整组 SIGKILL（与 v3.3.5 一致）。
+	// 模块管理器里的动作按钮「停止」是 kill -TERM 面板、sleep 2、面板还在就 kill -KILL（Magisk/action.sh），动作按钮只等 2 秒；
+	// 走到这里之前 SignalStop 可能已经用掉 1 秒，再等 2 秒宽限就装不下：面板先被 KILL，忽略 TERM 的任务进程组没人补刀、成了孤儿。
+	// action.sh 是模块外壳，在线升级改不到它（只有重刷 zip 才会换），只能面板这边让步。
+	// Magisk 判断直接复用 playwrightMagiskRuntime（名字带 playwright 只因它最早给 Playwright 默认目录用）：
+	// IsMagiskModuleRuntime 之外也认 service.sh 拉起面板时 export 的 DAIDAI_MAGISK_SHELL_VERSION，不另起一套口径。
+	// 其它部署（Docker 默认等 10 秒、systemd 30 秒、二进制）照旧共享 shutdownTermGrace；
+	// 手动 / 批量 / 定时停止、超时、调试运行停止不经过 action.sh，在 Magisk 上也照旧先 TERM、5 秒后 KILL。
+	termGrace := shutdownTermGrace
+	if playwrightMagiskRuntime() {
+		termGrace = 0
+	}
+
 	var termed []*os.Process
 	for _, process := range victims {
-		if signalGroupTerm(process.Pid) {
+		if termGrace > 0 && signalGroupTerm(process.Pid) {
 			termed = append(termed, process)
 		} else {
-			// TERM 发不出去（组已经不在、或 Windows）：照旧立刻整组 KILL
+			// 不给宽限（Magisk），或 TERM 发不出去（组已经不在、或 Windows）：立刻整组 KILL
 			KillProcessGroup(process)
 		}
 	}
-	deadline := time.Now().Add(shutdownTermGrace)
+	deadline := time.Now().Add(termGrace)
 	killed := 0
 	for _, process := range termed {
 		if !waitProcessGroupGone(process.Pid, time.Until(deadline)) {
@@ -705,7 +727,7 @@ func (e *TaskExecutor) StopAllRunningTasks() int {
 	}
 	if killed > 0 {
 		// 事后判断「关停为什么慢了 2 秒」用：只有真有进程组被强制结束时才打
-		log.Printf("%d task process group(s) still running %s after SIGTERM, killed", killed, shutdownTermGrace)
+		log.Printf("%d task process group(s) still running %s after SIGTERM, killed", killed, termGrace)
 	}
 	return len(victims)
 }
@@ -1096,6 +1118,14 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 			effectiveTimeout = *plan.TimeoutOverride
 		}
 		result, _, err := runCommandWithPlanFunc(plan, effectiveTimeout, envVars, maxLogSize, onOutputWithCollect, onStart)
+		// 主命令一返回就读一次停止种类。#159 修复 B 起面板关停是先 SIGTERM：trap 了 TERM、收完尾以 0 退出的脚本，
+		// 退出码会被判成成功，于是这次执行记成成功、不写「任务已中断」、还发成功通知，违反 runStopHalt 的契约（按失败结算、不发通知）。
+		// 读到 runStopHalt 时这一轮不论退出码都按失败处理：不走下面成功那条 break，照常走失败分支，由循环开头的停止检查拦住重试；
+		// 「任务已中断」和不发通知（haltedByShutdown）随之自然生效。重试、last_run_status、执行器写的「取消后续执行 / 任务已中断 /
+		// 跳过后置脚本」都和改前「立即 KILL」时一样；不同的只是脚本自己退出、没有「被信号终止」那行，退出码照实记（改前是 -1）。
+		// 读到的还是 runStopNone，说明主进程在关停之前就自己返回了，照旧按退出码判，成功就照常记成功。
+		// 手动停止（runStopManual）不看这里：结算按这次执行收到的停止种类判成已终止，退出码是多少都一样。
+		haltedThisRound := e.runStopKind(run) == runStopHalt
 		if err != nil {
 			onOutput(fmt.Sprintf("[执行错误: %s]\n", err.Error()))
 			if strings.Contains(err.Error(), "illegal instruction") || strings.Contains(err.Error(), "core dumped") {
@@ -1110,7 +1140,7 @@ func (e *TaskExecutor) runTask(req *ExecutionRequest, taskLog *model.TaskLog, ti
 		}
 
 		lastExitCode = result.ReturnCode
-		if task.IsSuccessExitCode(result.ReturnCode) {
+		if task.IsSuccessExitCode(result.ReturnCode) && !haltedThisRound {
 			success = true
 			lastFailureOutput = ""
 			outputCollectorMu.Lock()
@@ -1530,6 +1560,13 @@ func normalizeTaskFailureLines(output string) []string {
 			continue
 		}
 		if strings.HasPrefix(line, "=== 开始执行") || strings.HasPrefix(line, "=== 执行结束") {
+			continue
+		}
+		// #159 修复 A 清理残留后台进程时打的那行提示（leftoverProcessCleanupNotice）经 onOutput 进了输出尾部，
+		// 失败时它常常就是最后一行：不丢掉的话，Python 摘要认不出最后一行的异常而放弃，通用摘要的「上下文」也会取成这行提示。
+		// 只丢这一种：别的面板行（例如「[脚本进程被信号终止：…]」）对失败诊断有用，失败摘要刻意不整体套 isPanelMetaLine。
+		// 成功摘要本来就靠 isPanelMetaLine 滤掉它，在这里先丢不改变成功摘要的结果。
+		if strings.HasPrefix(line, "[已结束残留的后台进程：") {
 			continue
 		}
 		if line == "Traceback (most recent call last):" {

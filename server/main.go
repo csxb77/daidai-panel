@@ -304,9 +304,12 @@ func main() {
 }
 
 // 关停时间预算。宽限最短的是 Docker：docker stop / compose down / watchtower 默认只等 10 秒，到点直接 SIGKILL
-// （Windows 关控制台窗口约 5 秒、Magisk 动作按钮 2 秒，正常路径几十毫秒就能走完）。
+// （Windows 关控制台窗口约 5 秒、Magisk 动作按钮 2 秒，正常路径几十毫秒就能走完；Magisk 下关停终止任务是立即 KILL，见下）。
 // 每一步都有上限，再加一个总兜底，保证 8 秒内退出，给 entrypoint 与 Docker 留出余量。
 // 终止任务时先 SIGTERM、所有进程组共用最多 2 秒的宽限再 SIGKILL（service.HaltSchedulerV2，#159）；
+// Magisk 部署例外：关停时不给 TERM 宽限，所有进程组立即整组 SIGKILL（与 v3.3.5 一致）。动作按钮「停止」是
+// kill -TERM 面板、sleep 2、还在就 kill -KILL（Magisk/action.sh），SignalStop 的 1 秒加 2 秒宽限装不下，面板先被 KILL 的话
+// 忽略 TERM 的任务会成孤儿；action.sh 是模块外壳，在线升级改不到，只能面板这边让步。
 // 任务结算的等待上限（3 秒）在 service.ShutdownSchedulerV2 里，与 HTTP 关停同时进行。
 // 总账：max(1+2+3, 6.5, 5) + 1 = 7.5 秒。
 const (

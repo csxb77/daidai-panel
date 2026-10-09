@@ -22,6 +22,7 @@ import (
 //   - 修复 A：定时 / 手动任务的主命令正常结束后，清理它进程组里留在后台的进程；
 //     开机任务、总开关关闭、setsid 起的、钩子留下的、已被停止的执行都不清；真清理了才写一行提示。
 //   - 修复 B：超时、手动停止、面板关停，一律先对整组 SIGTERM，宽限期过后还在才 SIGKILL。
+//     关停另有两条：被关停打断的执行即便 trap 了 TERM、以 0 退出，也按失败结算；Magisk 部署下关停不给宽限，立即整组 KILL。
 //
 // 公共写法（设计稿 §4）：
 //   - 脚本写进 config.C.Data.ScriptsDir，同步调 executor.runTask（同 panel_shutdown_test.go 的真实进程用例）；
@@ -668,6 +669,157 @@ func TestShutdownTermsAllGroupsWithinSharedGrace(t *testing.T) {
 	}
 	for _, c := range cases {
 		waitChan(t, c.done, nil, "关停后 runTask 迟迟没有结算")
+	}
+}
+
+// 被面板关停打断的执行一律按失败结算（runStopHalt 的契约），即便脚本 trap 了 TERM、收完尾以 0 退出：
+// 修复 B 起关停先发 SIGTERM，这类脚本的退出码会被判成成功——不拦的话记成成功、不写「任务已中断」、还发成功通知。
+// 与手动停止（trap 后以 0 退出照样判已终止）同一思路：看这次执行收到的停止种类，不看退出码。
+// 成功、失败通知都开着，用本地 webhook 探针确认一条都不发（D15）。
+// MaxRetries 设成 1：这一轮照常走失败分支，下一轮开头被停止检查拦下、写「取消后续执行」，不再起新进程（与改前立即 KILL 时一样）。
+func TestShutdownSettlesTermTrappedZeroExitAsInterrupted(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	requireUsableBash(t)
+	// 探针数的是这个渠道收到的所有请求，成功通知、失败通知都算
+	channelID, hits := newFailureNotifyProbe(t)
+
+	// sleep 30 放在就绪标记之前起、并重定向输出：标记出现时它已经在组里，TERM 一到就跟着退出
+	script := "trap 'echo done > halt-term.flag; exit 0' TERM\n" +
+		"sleep 30 >/dev/null 2>&1 &\n" +
+		"echo ready > halt-ready.flag\n" +
+		"wait\n"
+	task, req, taskLog, tinyLog := newCleanupRunReq(t, "halt_graceful.sh", script, func(tk *model.Task) {
+		tk.NotifyOnSuccess = true
+		tk.NotifyOnFailure = true
+		tk.NotificationChannelID = &channelID
+		tk.MaxRetries = 1
+	})
+	executor := NewTaskExecutor()
+	done := runTaskAsync(t, executor, req, taskLog, tinyLog)
+
+	scriptsDir := config.C.Data.ScriptsDir
+	waitScriptReady(t, executor, task.ID, filepath.Join(scriptsDir, "halt-ready.flag"))
+	executor.StopAllRunningTasks()
+	waitChan(t, done, nil, "关停后 runTask 迟迟没有结算")
+
+	// 先确认用例真的走到了「收到 TERM、在 trap 里收尾后以 0 退出」这条路，否则下面几条断言证明不了什么
+	if _, err := os.Stat(filepath.Join(scriptsDir, "halt-term.flag")); err != nil {
+		t.Fatalf("关停应先发 SIGTERM，让脚本在 trap 里收尾后以 0 退出；没有收尾标记：%v", err)
+	}
+	if stored := reloadServiceTask(t, task.ID); stored.LastRunStatus == nil || *stored.LastRunStatus != model.RunFailed {
+		t.Fatalf("被面板关停打断的执行应按失败结算(%d)，退出码 0 也一样，实际 %v", model.RunFailed, stored.LastRunStatus)
+	}
+	content := readSettledLogContent(t, taskLog.ID)
+	for _, line := range []string{"[面板正在关闭，取消后续执行]", "[面板正在关闭，任务已中断]", "[面板正在关闭，跳过后置脚本]"} {
+		if !containsLine(content, line) {
+			t.Fatalf("日志里应有单独一行 %q，log=%q", line, content)
+		}
+	}
+	// 通知是异步发的：等一会儿再看探针（同 TestHaltedRunSkipsPostHooksAndFailureNotify）
+	time.Sleep(500 * time.Millisecond)
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("被面板关停打断的执行不发任何通知（D15），探针却收到 %d 次请求", got)
+	}
+}
+
+// 上一条的反面：主命令在关停之前就已经成功返回（关停落在后置脚本里），这次执行照旧记成功——
+// 停止种类是在主命令返回那一刻读的，那时还是 runStopNone。正在跑的后置脚本被整组终止，日志不写「任务已中断」。
+func TestShutdownAfterMainCommandSucceededStillSettlesAsSuccess(t *testing.T) {
+	testutil.SetupTestEnv(t)
+	requireUsableBash(t)
+
+	// 后置脚本写出就绪标记后阻塞，关停时它正在跑。sleep 30 放在就绪标记之前起、并重定向输出：
+	// 标记出现时它已经在组里，TERM 一到就和 bash 一起退出
+	after := "sleep 30 >/dev/null 2>&1 &\necho started > post-ready.flag\nwait\n"
+	task, req, taskLog, tinyLog := newCleanupRunReq(t, "main_ok.sh", "echo main-done\n", func(tk *model.Task) { tk.TaskAfter = &after })
+	executor := NewTaskExecutor()
+	done := runTaskAsync(t, executor, req, taskLog, tinyLog)
+
+	readyFlag := filepath.Join(config.C.Data.ScriptsDir, "post-ready.flag")
+	if !waitForCondition(15*time.Second, func() bool {
+		_, err := os.Stat(readyFlag)
+		return err == nil
+	}) {
+		t.Fatal("后置脚本迟迟没有写出就绪标记")
+	}
+	executor.StopAllRunningTasks()
+	waitChan(t, done, nil, "关停后 runTask 迟迟没有结算")
+
+	if stored := reloadServiceTask(t, task.ID); stored.LastRunStatus == nil || *stored.LastRunStatus != model.RunSuccess {
+		t.Fatalf("主命令在关停之前已经成功返回，应照旧记成功(%d)，实际 %v", model.RunSuccess, stored.LastRunStatus)
+	}
+	content := readSettledLogContent(t, taskLog.ID)
+	if !strings.Contains(content, "main-done") || strings.Contains(content, "[面板正在关闭，任务已中断]") {
+		t.Fatalf("主命令的输出应在、且成功的执行不写「任务已中断」，log=%q", content)
+	}
+}
+
+// Magisk 部署下面板关停不给 TERM 宽限，所有进程组立即整组 KILL（与 v3.3.5 一致）；其它部署照旧共享宽限。
+// 模块管理器动作按钮的「停止」是 kill -TERM 面板、sleep 2、还在就 kill -KILL（Magisk/action.sh）：
+// SignalStop 最多 1 秒加 2 秒宽限装不进去，面板先被 KILL，忽略 TERM 的任务进程组成了孤儿；action.sh 在线升级改不到。
+// 部署判断认 service.sh export 的 DAIDAI_MAGISK_SHELL_VERSION。环境变量都用 t.Setenv 设、子用例结束自动还原，
+// 这组用例不调 t.Parallel，不会和同包别的用例同时跑。宽限显式设成 2 秒（同默认值），计时断言不随默认值漂移。
+func TestShutdownKillsImmediatelyOnMagisk(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		magisk     bool
+		marker     string
+		wantSignal string
+	}{
+		{name: "Magisk：立即整组 KILL", magisk: true, marker: "864131", wantSignal: "killed(9)"},
+		{name: "其它部署：照旧等 TERM 宽限", magisk: false, marker: "864132", wantSignal: "terminated(15)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testutil.SetupTestEnv(t)
+			requireUsableBash(t)
+			killMarkerProcessesOnCleanup(t, tc.marker)
+			// 另一个标志先清空：Magisk 那条要证明的是「认 DAIDAI_MAGISK_SHELL_VERSION」
+			t.Setenv("DAIDAI_MAGISK_MODULE", "")
+			if tc.magisk {
+				t.Setenv("DAIDAI_MAGISK_SHELL_VERSION", "1")
+			} else {
+				t.Setenv("DAIDAI_MAGISK_SHELL_VERSION", "")
+				if IsMagiskModuleRuntime() {
+					t.Skip("当前机器上存在 Magisk 模块标记文件，模拟不出非 Magisk 部署")
+				}
+			}
+			overrideTermGraces(t, groupTermGrace, 2*time.Second)
+
+			// 组里有一个忽略 TERM 的后台进程（重定向掉输出、不攥管道），它让「照旧等宽限」的计时有区分度；
+			// 主进程 bash 自己对 TERM 是默认动作，它被哪个信号结束，说明关停有没有先发 TERM：
+			// Magisk 下只有 SIGKILL（killed(9)，与 v3.3.5 一致），其它部署先被 SIGTERM 结束（terminated(15)）。
+			script := "nohup sh -c 'trap \"\" TERM; exec sleep " + tc.marker + "' >/dev/null 2>&1 &\n" +
+				waitBackgroundSleepSnippet +
+				"echo ready > magisk-ready.flag\n" +
+				"sleep 30\n"
+			task, req, taskLog, tinyLog := newCleanupRunReq(t, "magisk_ignore.sh", script, nil)
+			executor := NewTaskExecutor()
+			done := runTaskAsync(t, executor, req, taskLog, tinyLog)
+
+			waitScriptReady(t, executor, task.ID, filepath.Join(config.C.Data.ScriptsDir, "magisk-ready.flag"))
+			if !waitForCondition(cleanupTestPollLimit, func() bool { return len(markerProcessPIDs(tc.marker)) == 1 }) {
+				t.Fatalf("写出就绪标记后，忽略 TERM 的 sleep %s 应当已经在跑，实际存活 %v", tc.marker, markerProcessPIDs(tc.marker))
+			}
+
+			start := time.Now()
+			if count := executor.StopAllRunningTasks(); count != 1 {
+				t.Fatalf("应终止 1 个进程组，实际 %d", count)
+			}
+			elapsed := time.Since(start)
+			if tc.magisk && elapsed >= 500*time.Millisecond {
+				t.Fatalf("Magisk 部署下关停不给 TERM 宽限、应立即整组 KILL（远小于 2 秒），实际用了 %s", elapsed)
+			}
+			if !tc.magisk && elapsed < 1500*time.Millisecond {
+				t.Fatalf("非 Magisk 部署照旧先 TERM、等满 2 秒的共享宽限再 KILL（组里有忽略 TERM 的进程），实际只用了 %s", elapsed)
+			}
+			if !waitForCondition(cleanupTestPollLimit, func() bool { return len(markerProcessPIDs(tc.marker)) == 0 }) {
+				t.Fatalf("忽略 TERM 的进程最终都应被整组 KILL，sleep %s 仍存活 %v", tc.marker, markerProcessPIDs(tc.marker))
+			}
+			waitChan(t, done, nil, "关停后 runTask 迟迟没有结算")
+			if content := readSettledLogContent(t, taskLog.ID); !strings.Contains(content, "[脚本进程被信号终止："+tc.wantSignal) {
+				t.Fatalf("主进程应被 %s 结束（Magisk 下关停不发 TERM、直接 KILL；其它部署先发 TERM），log=%q", tc.wantSignal, content)
+			}
+		})
 	}
 }
 

@@ -429,7 +429,8 @@ func TestQuarantineCleansDanglingLinksWhenScriptsDirIsLink(t *testing.T) {
 }
 
 // CleanupManagedHelperCopiesUnderRoot 遍历时整棵跳过 node_modules、__pycache__、.git：任务不会在这些目录里跑，
-// 面板也不会往里放通知脚本副本；订阅仓库的 .git、真实 node_modules 动辄上千个目录，启动和每条 ddp 命令都要白扫（#156）。
+// 面板也不会往里放通知脚本副本；订阅仓库的 .git、真实 node_modules 动辄上千个目录，面板每次启动都要在后台白扫一遍
+// （#156；v3.3.6 起 ddp 不再整树扫、启动时改在后台跑，#158）。
 func TestCleanupManagedHelperCopiesUnderRootSkipsHiddenDirs(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "scripts")
 	managedCopy := "// " + managedNotifyHelperToken + "\n"
