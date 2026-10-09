@@ -1553,14 +1553,17 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
         style="width: 100%"
       >
         <el-table-column type="selection" width="44" />
-        <!-- min-width 188 → 204 → 230，两笔账都记在这里。
+        <!-- min-width 188 → 204 → 230 → 296，三笔账都记在这里。
              .env-name-wrap 是 flex + gap:8px，多插一个子元素就多出一份 gap，
              所以每一笔净增都是「新元素自身宽度」+「新增的那一份 gap 8px」，不是只有元素自身：
                188 → 204：名称【前】多了一枚 8px 状态圆点 → 8 + 8 = 16px；
                204 → 230：名称【后】多了一颗「只看这个变量名」图标按钮 →
-                          按钮自身 18px（图标 14 + .env-name-filter-btn 的 padding 2×2）+ 8 = 26px。
+                          按钮自身 18px（图标 14 + .env-name-filter-btn 的 padding 2×2）+ 8 = 26px；
+               230 → 296：v3.3.6 名称【后】多了「重要」标签（约 58px）→ 58 + 8 = 66px。
+                          浏览器实测 1280×900、侧栏展开：230 时既置顶又重要的行变量名只剩约 29px、可见 2 个字符，
+                          加宽 66px 后与只置顶的行看到的字符数相当（约 11 个）。
              不补回来的话名称的可见宽度会净减同样多，长变量名的省略号会提前出现。 -->
-        <el-table-column prop="name" label="名称" min-width="230">
+        <el-table-column prop="name" label="名称" min-width="296">
           <template #default="{ row }">
             <div class="env-name-wrap">
               <!-- 状态圆点：独立的「状态」列已删除，启用/禁用状态改由这枚圆点表达
@@ -1600,7 +1603,7 @@ function handleStatusFilter(value: '' | 'enabled' | 'disabled') {
                 </el-button>
               </el-tooltip>
               <!-- 「重要」（APP #16）排在「置顶」前面，两枚一起靠在最右缘（靠的是上面按钮的 margin-right:auto）。
-                   与置顶标签一样不计入本列 min-width：只在标记过的行出现，变量名照常收缩出省略号、title 挂全名。 -->
+                   置顶标签不计入本列 min-width；「重要」从 v3.3.6 起计入（见上方列注释第三笔账），两枚都有的行照样可能收缩出省略号、title 挂全名。 -->
               <span v-if="row.important" class="important-chip" title="重要变量：删除时会再确认一次">
                 <el-icon><Lock /></el-icon>
                 重要
