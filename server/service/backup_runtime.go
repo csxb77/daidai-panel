@@ -206,7 +206,14 @@ func buildBackupManifest(selection BackupSelection) (BackupManifest, error) {
 
 	if selection.Logs {
 		var taskLogs []model.TaskLog
-		if err := database.DB.Preload("Task").Order("id ASC").Find(&taskLogs).Error; err != nil {
+		// 日志和执行趋势的按天计数（#158）必须在同一个读事务里取：两次读之间要是碰上一次清理，
+		// 同一批行会既在日志里、又在计数里，恢复之后趋势就重复算了。事务里只能用 tx（连接池只有一条连接）。
+		if err := database.DB.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Order("day ASC").Find(&manifest.Data.TaskLogDailyStats).Error; err != nil {
+				return err
+			}
+			return tx.Preload("Task").Order("id ASC").Find(&taskLogs).Error
+		}); err != nil {
 			return BackupManifest{}, fmt.Errorf("load task logs: %w", err)
 		}
 		for _, logItem := range taskLogs {
@@ -773,8 +780,31 @@ func restoreBackupManifest(manifest BackupManifest, extractedDir string) error {
 		return err
 	}
 
-	if selection.Logs || selection.Tasks {
+	// 执行趋势的按天计数（task_log_daily_stats，#158）跟着日志走：
+	//   - 勾「日志」（青龙除外）：日志与计数整体回到备份那一刻——两张表都清空，计数写回备份里的
+	//     （老备份没有这个键 = 清零；下面 restoreTaskLogs 因任务对不上而跳过的日志不并计）；
+	//   - 只勾「任务」或青龙导入：现存日志照旧要清掉（只勾任务时任务 id 会重排、外键不允许留着；
+	//     青龙勾「日志」时也照旧整表替换日志，与改动前一致），先经 DeleteTaskLogs 并入计数再删，计数表不清——
+	//     青龙包里没有呆呆面板的执行历史，清零只会丢信息。
+	// 这一段必须是恢复事务里的第一批语句：DeleteTaskLogs 的归档 INSERT 要打头（原因见它的注释）。
+	if selection.Logs && manifest.Source != "qinglong" {
 		if err := deleteAll(tx, "task_logs"); err != nil {
+			return rollback(err)
+		}
+		if err := deleteAll(tx, "task_log_daily_stats"); err != nil {
+			return rollback(err)
+		}
+		for _, stat := range manifest.Data.TaskLogDailyStats {
+			// upsert 而不是 Create：手工拼过的备份里同一天出现两次时累加，不让整次恢复因主键冲突回滚。
+			if err := tx.Exec(`INSERT INTO task_log_daily_stats (day, success, failed, aborted, other) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(day) DO UPDATE SET success = success + excluded.success, failed = failed + excluded.failed,
+aborted = aborted + excluded.aborted, other = other + excluded.other`,
+				stat.Day, stat.Success, stat.Failed, stat.Aborted, stat.Other).Error; err != nil {
+				return rollback(err)
+			}
+		}
+	} else if selection.Logs || selection.Tasks {
+		if _, _, err := DeleteTaskLogs(tx, "1 = 1"); err != nil {
 			return rollback(err)
 		}
 	}

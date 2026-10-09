@@ -1556,11 +1556,12 @@ func syncSubscriptionTasks(sub *model.Subscription, emit PullCallback) {
 //
 // 事务里的顺序是「先删日志、再按条件删任务、条件不满足就回滚」：task_logs 对 tasks 有外键
 // （PRAGMA foreign_keys 开着），任务行在、日志还在时删任务会报 FOREIGN KEY constraint failed。
+// 删日志经 DeleteTaskLogs，先并入执行趋势的按天计数（#158）；它必须是事务第一条语句，这里本来就是。
 // 事务里只能用 tx：库连接池只有 1 个连接，事务里再用 database.DB 会把自己锁死。
 func deleteSubscriptionTaskIfUnchanged(task *model.Task) (bool, error) {
 	removed, changed := false, false
 	err := database.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("task_id = ?", task.ID).Delete(&model.TaskLog{}).Error; err != nil {
+		if _, _, err := DeleteTaskLogs(tx, "task_id = ?", task.ID); err != nil {
 			return fmt.Errorf("删除历史日志失败: %w", err)
 		}
 		result := tx.Where("id = ? AND command = ?", task.ID, task.Command).Delete(&model.Task{})
@@ -1568,7 +1569,7 @@ func deleteSubscriptionTaskIfUnchanged(task *model.Task) (bool, error) {
 			return fmt.Errorf("删除任务失败: %w", result.Error)
 		}
 		if result.RowsAffected != 1 {
-			// 返回非 nil 让事务回滚，刚删的日志原样恢复。
+			// 返回非 nil 让事务回滚，刚删的日志与刚并入的计数原样恢复。
 			changed = true
 			return fmt.Errorf("任务在同步期间被修改或已删除")
 		}

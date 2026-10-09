@@ -122,6 +122,8 @@ func allModels() []interface{} {
 		&model.TokenBlocklist{},
 		&model.Task{},
 		&model.TaskLog{},
+		// 执行趋势里已删日志的按天计数（#158，v3.3.6）。新表，存量库 AutoMigrate 时建出来即可，不补列、不回填。
+		&model.TaskLogDailyStat{},
 		&model.SystemConfig{},
 		&model.EnvVar{},
 		&model.ScriptVersion{},

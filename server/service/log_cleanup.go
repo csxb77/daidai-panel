@@ -8,6 +8,8 @@ import (
 	"daidai-panel/config"
 	"daidai-panel/database"
 	"daidai-panel/model"
+
+	"gorm.io/gorm"
 )
 
 var (
@@ -104,7 +106,8 @@ func CleanLogsOlderThan(days int) (int64, int) {
 }
 
 // cleanExpiredTaskLogRows 删掉一批过期的 task_logs 行，并连带删掉它们的磁盘日志文件，
-// 返回（删掉的记录数, 删掉的文件数）。
+// 返回（删掉的记录数, 删掉的文件数）。删行经 DeleteTaskLogs，先并入执行趋势的按天计数（#158）；
+// 删行失败时整批回滚、返回 (0, 0)，也不按 log_path 删文件。
 //
 // extraCond / extraArg 是额外的任务范围限定（"task_id = ?" 或 "task_id NOT IN ?"），
 // 传空串表示不限定、整张表一起算。按任务分组清理（issue #144 / v3.3.2）之后有三个调用点
@@ -122,28 +125,28 @@ func cleanExpiredTaskLogRows(extraCond string, extraArg interface{}, days int, l
 	}
 	cutoff := time.Now().AddDate(0, 0, -days)
 
-	// 必须先 Pluck 再 Delete：行一删，log_path 就再也查不回来了。
-	// 两条查询各自从 database.DB 重新起手，不复用同一个链式对象，避免条件互相串味。
-	pathQuery := database.DB.Model(&model.TaskLog{}).
-		Where("started_at < ? AND (status IS NULL OR status <> ?)", cutoff, model.LogStatusRunning).
-		Where("log_path IS NOT NULL AND log_path <> ''")
-	deleteQuery := database.DB.
-		Where("started_at < ? AND (status IS NULL OR status <> ?)", cutoff, model.LogStatusRunning)
+	// 归档（并入执行趋势的按天计数，#158）→ 取 log_path → 删行，全在 DeleteTaskLogs 里、同一个事务内用同一条 WHERE，
+	// 所以条件只拼这一份。extraCond 有 "task_id = ?" 与 "task_id NOT IN ?" 两种，后者的参数是切片，GORM 会展开成 (?,?,…)。
+	where := "started_at < ? AND (status IS NULL OR status <> ?)"
+	args := []interface{}{cutoff, model.LogStatusRunning}
 	if extraCond != "" {
-		pathQuery = pathQuery.Where(extraCond, extraArg)
-		deleteQuery = deleteQuery.Where(extraCond, extraArg)
+		where += " AND " + extraCond
+		args = append(args, extraArg)
 	}
 
 	var paths []string
-	pathQuery.Pluck("log_path", &paths)
-
 	var deletedRecords int64
-	if result := deleteQuery.Delete(&model.TaskLog{}); result.Error != nil {
-		log.Printf("log cleanup: delete TaskLog records failed: %v", result.Error)
-	} else {
-		deletedRecords = result.RowsAffected
+	if err := database.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		deletedRecords, paths, err = DeleteTaskLogs(tx, where, args...)
+		return err
+	}); err != nil {
+		// 事务已整体回滚：行和计数都没动。这一轮也不按 log_path 删文件，免得删出「行还在、文件没了」。
+		log.Printf("log cleanup: delete TaskLog records failed: %v", err)
+		return 0, 0
 	}
 
+	// 事务提交之后再按路径删磁盘文件。
 	return deletedRecords, DeleteLogFilesForRecords(paths, logDir)
 }
 

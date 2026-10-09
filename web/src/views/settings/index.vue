@@ -33,7 +33,8 @@ const activeTab = ref('overview')
 
 const overview = useSettingsOverview()
 const config = useSettingsConfig()
-const panelLogViewer = usePanelLogViewer()
+// 只在「面板日志」子标签激活时自动刷新（#159 修复 E），停在别的子标签不再后台轮询
+const panelLogViewer = usePanelLogViewer(computed(() => activeTab.value === 'panel-log'))
 const security = useSettingsSecurity()
 
 const {

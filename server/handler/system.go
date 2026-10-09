@@ -19,6 +19,7 @@ import (
 	"daidai-panel/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func shellQuote(s string) string {
@@ -108,57 +109,6 @@ func (h *SystemHandler) MachineCode(c *gin.Context) {
 }
 
 func (h *SystemHandler) Dashboard(c *gin.Context) {
-	var taskCount int64
-	database.DB.Model(&model.Task{}).Count(&taskCount)
-
-	var enabledTasks int64
-	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusEnabled).Count(&enabledTasks)
-
-	var runningTasks int64
-	database.DB.Model(&model.Task{}).Where("status = ?", model.TaskStatusRunning).Count(&runningTasks)
-
-	now := time.Now()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-	var todayLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ?", today).Count(&todayLogs)
-
-	var successLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusSuccess).Count(&successLogs)
-
-	var failedLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusFailed).Count(&failedLogs)
-
-	var abortedLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusAborted).Count(&abortedLogs)
-
-	var envCount int64
-	database.DB.Model(&model.EnvVar{}).Count(&envCount)
-
-	var subCount int64
-	database.DB.Model(&model.Subscription{}).Count(&subCount)
-
-	var prevTaskCount int64
-	database.DB.Model(&model.Task{}).Where("created_at < ?", today).Count(&prevTaskCount)
-
-	yesterday := today.AddDate(0, 0, -1)
-	var yesterdayLogs int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ?", yesterday, today).Count(&yesterdayLogs)
-	var yesterdaySuccess int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusSuccess).Count(&yesterdaySuccess)
-	var yesterdayFailed int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusFailed).Count(&yesterdayFailed)
-	var yesterdayAborted int64
-	database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusAborted).Count(&yesterdayAborted)
-
-	var recentLogs []model.TaskLog
-	database.DB.Preload("Task").Order("created_at DESC").Limit(10).Find(&recentLogs)
-
-	recentData := make([]map[string]interface{}, len(recentLogs))
-	for i, l := range recentLogs {
-		recentData[i] = l.ToDict()
-	}
-
 	rangeDays := 7
 	if r := c.Query("range"); r != "" {
 		if n, err := strconv.Atoi(r); err == nil && n > 0 && n <= 90 {
@@ -173,17 +123,85 @@ func (h *SystemHandler) Dashboard(c *gin.Context) {
 		Aborted int64  `json:"aborted"`
 	}
 
-	var dailyStats []DailyStat
-	for i := rangeDays - 1; i >= 0; i-- {
-		day := today.AddDate(0, 0, -i)
-		nextDay := day.Add(24 * time.Hour)
-		date := day.Format("01-02")
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	yesterday := today.AddDate(0, 0, -1)
 
-		var s, f, a int64
-		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusSuccess).Count(&s)
-		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusFailed).Count(&f)
-		database.DB.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusAborted).Count(&a)
-		dailyStats = append(dailyStats, DailyStat{Date: date, Success: s, Failed: f, Aborted: a})
+	var taskCount, enabledTasks, runningTasks int64
+	var todayLogs, successLogs, failedLogs, abortedLogs int64
+	var envCount, subCount, prevTaskCount int64
+	var yesterdayLogs, yesterdaySuccess, yesterdayFailed, yesterdayAborted int64
+	var recentLogs []model.TaskLog
+	var dailyStats []DailyStat
+
+	// #158：一次请求的全部读取放进同一个只读事务（同一个 WAL 快照）。删日志可能排进任意两条查询之间：
+	// 落在「读计数表」和「按天现算」之间，被删的行两边都数不到；落在「现算」和「读计数表」之间又会算两次。
+	// 只读事务不升级写锁，不会撞 517。事务里只能用 tx：连接池只有一条连接，再碰 database.DB 会自己等自己。
+	// 下面的查询与改动前逐条相同（顺序、条件一字不改），#153 的口径锁与执行计划护栏照旧成立。
+	_ = database.DB.Transaction(func(tx *gorm.DB) error {
+		tx.Model(&model.Task{}).Count(&taskCount)
+		tx.Model(&model.Task{}).Where("status = ?", model.TaskStatusEnabled).Count(&enabledTasks)
+		tx.Model(&model.Task{}).Where("status = ?", model.TaskStatusRunning).Count(&runningTasks)
+
+		tx.Model(&model.TaskLog{}).Where("created_at >= ?", today).Count(&todayLogs)
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusSuccess).Count(&successLogs)
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusFailed).Count(&failedLogs)
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND status = ?", today, model.LogStatusAborted).Count(&abortedLogs)
+
+		tx.Model(&model.EnvVar{}).Count(&envCount)
+		tx.Model(&model.Subscription{}).Count(&subCount)
+		tx.Model(&model.Task{}).Where("created_at < ?", today).Count(&prevTaskCount)
+
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ?", yesterday, today).Count(&yesterdayLogs)
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusSuccess).Count(&yesterdaySuccess)
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusFailed).Count(&yesterdayFailed)
+		tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", yesterday, today, model.LogStatusAborted).Count(&yesterdayAborted)
+
+		tx.Preload("Task").Order("created_at DESC").Limit(10).Find(&recentLogs)
+
+		// 已经删掉的日志按天留在 task_log_daily_stats（键 YYYY-MM-DD），今日 / 昨日 / 按天都把它加回来，
+		// 趋势与卡片不再随日志清理变少。下界取 min(趋势第一天, 昨天)：range=1 时昨天不在趋势里，「昨日执行」卡片照样要加。
+		first := today.AddDate(0, 0, -(rangeDays - 1))
+		if yesterday.Before(first) {
+			first = yesterday
+		}
+		var archivedRows []model.TaskLogDailyStat
+		tx.Where("day >= ? AND day <= ?", first.Format("2006-01-02"), today.Format("2006-01-02")).Find(&archivedRows)
+		archived := make(map[string]model.TaskLogDailyStat, len(archivedRows))
+		for _, row := range archivedRows {
+			archived[row.Day] = row
+		}
+		// 总数要连 Other（被删时 status 为 NULL 或还在运行中的行）一起加，与现算的 today_logs / yesterday_logs 口径一致。
+		td := archived[today.Format("2006-01-02")]
+		todayLogs += td.Success + td.Failed + td.Aborted + td.Other
+		successLogs += td.Success
+		failedLogs += td.Failed
+		abortedLogs += td.Aborted
+		yd := archived[yesterday.Format("2006-01-02")]
+		yesterdayLogs += yd.Success + yd.Failed + yd.Aborted + yd.Other
+		yesterdaySuccess += yd.Success
+		yesterdayFailed += yd.Failed
+		yesterdayAborted += yd.Aborted
+
+		for i := rangeDays - 1; i >= 0; i-- {
+			day := today.AddDate(0, 0, -i)
+			nextDay := day.Add(24 * time.Hour)
+			date := day.Format("01-02")
+
+			var s, f, a int64
+			tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusSuccess).Count(&s)
+			tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusFailed).Count(&f)
+			tx.Model(&model.TaskLog{}).Where("created_at >= ? AND created_at < ? AND status = ?", day, nextDay, model.LogStatusAborted).Count(&a)
+			// 按天的三条折线只加对应的三列；Other 不进折线（与现算时 NULL / 运行中不进任何一桶一致）。
+			gone := archived[day.Format("2006-01-02")]
+			dailyStats = append(dailyStats, DailyStat{Date: date, Success: s + gone.Success, Failed: f + gone.Failed, Aborted: a + gone.Aborted})
+		}
+		return nil
+	})
+
+	recentData := make([]map[string]interface{}, len(recentLogs))
+	for i, l := range recentLogs {
+		recentData[i] = l.ToDict()
 	}
 
 	response.Success(c, gin.H{
@@ -616,7 +634,10 @@ func (h *SystemHandler) PanelLog(c *gin.Context) {
 	}
 	defer file.Close()
 
-	var allLines []string
+	// #159 修复 E：照旧扫完整个文件（total 仍是全文件命中筛选的行数，网页显示「共 N 行」），
+	// 但只用环形缓冲留最后 lines 行：内存只和 lines（最多 10000）有关，不再把整份 panel.log 读进内存。
+	ring := make([]string, lines)
+	total := 0
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -625,19 +646,29 @@ func (h *SystemHandler) PanelLog(c *gin.Context) {
 			continue
 		}
 		if keyword == "" || strings.Contains(line, keyword) {
-			allLines = append(allLines, line)
+			// 第 total 条命中行放进 total%lines 号格子，绕圈时正好覆盖掉最老的那一行。
+			ring[total%lines] = line
+			total++
 		}
 	}
 
-	start := len(allLines) - lines
-	if start < 0 {
-		start = 0
+	// 按文件顺序取出最后 min(total, lines) 行；一行都没命中时保持 nil（JSON 为 null），与改动前逐字节一致。
+	var tail []string
+	if total > 0 {
+		n := total
+		if n > lines {
+			n = lines
+		}
+		tail = make([]string, 0, n)
+		for i := total - n; i < total; i++ {
+			tail = append(tail, ring[i%lines])
+		}
 	}
 
 	response.Success(c, gin.H{
 		"data": gin.H{
-			"logs":  allLines[start:],
-			"total": len(allLines),
+			"logs":  tail,
+			"total": total,
 			"level": level,
 		},
 	})

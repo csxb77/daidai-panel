@@ -9,6 +9,7 @@ import notificationTypesFixture from './fixtures/notification-types.json'
 import {
   appendEnvToSortBucket,
   appendTaskRunLog,
+  archiveDemoLogs,
   buildDashboard,
   buildLogContent,
   buildScriptList,
@@ -1219,6 +1220,8 @@ route('DELETE', '/tasks/clean-logs', (ctx) => {
   const current = db()
   const cutoff = Date.now() - (Number.isFinite(days) && days > 0 ? days : 7) * 24 * 60 * 60 * 1000
   const before = current.logs.length
+  // 删之前先按天并进执行趋势计数（#158），清理之后仪表盘的趋势与今日 / 昨日不跟着变少
+  archiveDemoLogs(current.logs.filter((log) => new Date(log.started_at).getTime() < cutoff))
   current.logs = current.logs.filter((log) => new Date(log.started_at).getTime() >= cutoff)
   return { message: `已清理 ${before - current.logs.length} 条日志` }
 })
@@ -1604,6 +1607,8 @@ route('DELETE', '/logs/clean', (ctx) => {
   const current = db()
   const cutoff = Date.now() - (Number.isFinite(days) && days > 0 ? days : 7) * 24 * 60 * 60 * 1000
   const before = current.logs.length
+  // 同 /tasks/clean-logs：删之前先按天并进执行趋势计数（#158）
+  archiveDemoLogs(current.logs.filter((log) => new Date(log.started_at).getTime() < cutoff))
   current.logs = current.logs.filter((log) => new Date(log.started_at).getTime() >= cutoff)
   return { message: `已清理 ${before - current.logs.length} 条日志（保留最近 ${Number.isFinite(days) ? days : 7} 天）` }
 })
@@ -1611,6 +1616,8 @@ route('DELETE', '/logs/clean', (ctx) => {
 function deleteLogsByIds(ids: number[]) {
   const current = db()
   const before = current.logs.length
+  // 单删、批删（/logs/batch、/logs/batch-delete、DELETE /logs/:id）都走这里：删之前先按天并进执行趋势计数（#158）
+  archiveDemoLogs(current.logs.filter((log) => ids.includes(log.id)))
   current.logs = current.logs.filter((log) => !ids.includes(log.id))
   return before - current.logs.length
 }

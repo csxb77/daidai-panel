@@ -1175,6 +1175,8 @@ export function createSeedState(now: number = Date.now()): DemoDbState {
     scriptFiles,
     configScript: DEMO_CONFIG_SCRIPT,
     configs: buildConfigs(),
+    // 已删日志的按天计数（#158）：初始为空，「重置演示数据」时跟着清空
+    archivedDaily: {},
     seq: {
       task: maxId(tasks),
       taskView: maxId(taskViews),

@@ -59,7 +59,11 @@ func (h *TaskHandler) Batch(c *gin.Context) {
 			if scheduler != nil {
 				scheduler.RemoveJob(id)
 			}
-			database.DB.Where("task_id = ?", id).Delete(&model.TaskLog{})
+			// 同单个删除：历史日志先经 DeleteTaskLogs 并入执行趋势计数再删（#158），出错不拦流程。
+			_ = database.DB.Transaction(func(tx *gorm.DB) error {
+				_, _, err := service.DeleteTaskLogs(tx, "task_id = ?", id)
+				return err
+			})
 			// 同单个删除：任务没了，logs/task_<ID>_* 目录也要一起收走（issue #144 / v3.3.2）。
 			service.RemoveTaskLogDirs(id, config.C.Data.LogDir)
 			database.DB.Delete(&task)
@@ -202,7 +206,11 @@ func (h *TaskHandler) BatchDelete(c *gin.Context) {
 		if scheduler != nil {
 			scheduler.RemoveJob(id)
 		}
-		database.DB.Where("task_id = ?", id).Delete(&model.TaskLog{})
+		// 同单个删除：历史日志先经 DeleteTaskLogs 并入执行趋势计数再删（#158），出错不拦流程。
+		_ = database.DB.Transaction(func(tx *gorm.DB) error {
+			_, _, err := service.DeleteTaskLogs(tx, "task_id = ?", id)
+			return err
+		})
 		// 同单个删除：任务没了，logs/task_<ID>_* 目录也要一起收走（issue #144 / v3.3.2）。
 		// 这里连不存在的 id 也会走一遭，listTaskLogDirs 匹配不到目录时是空转，没有副作用。
 		service.RemoveTaskLogDirs(id, config.C.Data.LogDir)

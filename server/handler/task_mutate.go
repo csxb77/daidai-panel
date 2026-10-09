@@ -451,7 +451,12 @@ func (h *TaskHandler) Delete(c *gin.Context) {
 	if scheduler := service.GetSchedulerV2(); scheduler != nil {
 		scheduler.RemoveJob(uint(taskID))
 	}
-	database.DB.Where("task_id = ?", taskID).Delete(&model.TaskLog{})
+	// 任务的历史日志先经 DeleteTaskLogs 并入执行趋势的按天计数再删（#158），仪表板不跟着变少。
+	// 出错照旧不拦流程（与改动前一致）；路径不用取回，下面整目录收走。
+	_ = database.DB.Transaction(func(tx *gorm.DB) error {
+		_, _, err := service.DeleteTaskLogs(tx, "task_id = ?", taskID)
+		return err
+	})
 	// 任务都删了，logs/task_<ID>_* 留着只会变成永远没人认领的垃圾目录（issue #144 / v3.3.2）。
 	// 必须在删行之后调：日志行还在的时候清理目录，会让「记录还在、文件没了」更难排查。
 	service.RemoveTaskLogDirs(uint(taskID), config.C.Data.LogDir)

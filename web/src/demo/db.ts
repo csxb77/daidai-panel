@@ -32,6 +32,8 @@ import { normalizeScriptPath, splitCommandTokens } from '@/utils/taskCommandScri
  *   3. **所有汇总数字都从这里的事实现算**，不写死常量。
  *      仪表盘、执行统计、任务列表读的是同一批 tasks / logs，
  *      所以「总执行数 1367 但日志列表 0 条」这类自相矛盾在结构上就不可能出现。
+ *      唯一的例外是仪表盘的今日 / 昨日 / 按天：另加 archivedDaily（已删日志的按天计数，对齐服务端 #158），
+ *      所以清理日志之后，仪表盘上的数字可以大于日志列表的条数——这是对的。
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -1152,6 +1154,12 @@ interface DailyBucket {
 function bucketLogsByDay(): Map<string, DailyBucket> {
   const buckets = new Map<string, DailyBucket>()
 
+  // #158：已删日志的按天计数先放进来（拷一份，别把下面的现存日志累加进 archivedDaily 本身），
+  // 这样清理 / 删除日志之后，趋势与今日 / 昨日都不跟着变少
+  for (const [key, archived] of Object.entries(db().archivedDaily)) {
+    buckets.set(key, { ...archived })
+  }
+
   for (const log of db().logs) {
     const key = monthDayKey(new Date(log.started_at).getTime())
     let bucket = buckets.get(key)
@@ -1171,10 +1179,31 @@ function bucketLogsByDay(): Map<string, DailyBucket> {
 const EMPTY_BUCKET: DailyBucket = { success: 0, failed: 0, aborted: 0, total: 0 }
 
 /**
+ * 删日志之前先把它们按天并进 archivedDaily（#158，对齐服务端 DeleteTaskLogs），
+ * 「清理日志」「删除日志」之后仪表盘的趋势与今日 / 昨日不跟着变少。三处删日志的路由共用它。
+ * 分桶口径必须与上面的 bucketLogsByDay 一致：started_at 的本地 MM-DD，total 含运行中的行。
+ */
+export function archiveDemoLogs(removed: DemoTaskLog[]) {
+  const archived = db().archivedDaily
+  for (const log of removed) {
+    const key = monthDayKey(new Date(log.started_at).getTime())
+    let bucket = archived[key]
+    if (!bucket) {
+      bucket = { success: 0, failed: 0, aborted: 0, total: 0 }
+      archived[key] = bucket
+    }
+    bucket.total += 1
+    if (log.status === LOG_STATUS_SUCCESS) bucket.success += 1
+    else if (log.status === LOG_STATUS_FAILED) bucket.failed += 1
+    else if (log.status === LOG_STATUS_ABORTED) bucket.aborted += 1
+  }
+}
+
+/**
  * GET /system/dashboard 的响应体（不含外层 `data`）。
  * 字段清单对齐 server/handler/system.go:185-205。
  *
- * ⚠️ 这里的每一个数字都是从 tasks / logs 现算的。
+ * ⚠️ 这里的每一个数字都是从 tasks / logs 现算的（今日 / 昨日 / 按天另加 archivedDaily，即已删日志的按天计数，#158）。
  *    历史上这一块出过「成功率恒 100%」的问题，根因就是各处各写一份常量。
  *    改这里时请继续保持「只算不写死」，尤其是 failed_logs / yesterday_* 这几个
  *    ——少下发一个，前端的对比卡片就会拿 0 去比，直接显示 +100%。

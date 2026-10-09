@@ -21,6 +21,7 @@ import (
 // 所以这里对真实 handler 发出的每一条 task_logs 查询跑 EXPLAIN QUERY PLAN：
 //   - 仪表板与角标的计数：只读 idx_task_logs_created_at_status（SEARCH … COVERING INDEX，不回表）；
 //   - 仪表板最近 10 条：顺着 idx_task_logs_created_at_status 倒序取，不能出现 USE TEMP B-TREE；
+//   - 仪表板读执行趋势计数表（#158）：按主键 day 取一段范围（SEARCH … USING INDEX sqlite_autoindex_task_log_daily_stats_1）；
 //   - 日志列表首页：顺着 idx_task_logs_started_at_status 倒序取，不能出现 USE TEMP B-TREE；
 //   - latest-log：只断言用上了 idx_task_logs_task_id_started_at。GORM 的 First() 会在 ORDER BY 后面追加主键 id，
 //     started_at DESC 加 id ASC 方向不一致，任何普通索引都覆盖不了，所以允许出现
@@ -65,7 +66,8 @@ func TestTaskLogHotQueriesUseQueryIndexes(t *testing.T) {
 	var captured []capturedQuery
 	captureTaskLogQuery := func(db *gorm.DB) {
 		sql := db.Statement.SQL.String()
-		if strings.Contains(sql, "task_logs") {
+		// 执行趋势计数表（#158）的表名不含 task_logs 子串，要单独点名截下来，仪表板读它的那条也得有执行计划断言。
+		if strings.Contains(sql, "task_logs") || strings.Contains(sql, "task_log_daily_stats") {
 			// 复制一份参数：这条语句执行完，GORM 会清掉 Statement 上的 SQL 与 Vars。
 			captured = append(captured, capturedQuery{sql: sql, vars: append([]interface{}(nil), db.Statement.Vars...)})
 		}
@@ -121,9 +123,10 @@ func TestTaskLogHotQueriesUseQueryIndexes(t *testing.T) {
 		return strings.Join(details, " | ")
 	}
 
-	// 仪表板（7 天视图）：29 条计数（今日 4 + 昨日 4 + 按天 7×3）加 1 条最近 10 条。
+	// 仪表板（7 天视图）：29 条计数（今日 4 + 昨日 4 + 按天 7×3）、1 条最近 10 条，
+	// 加 1 条读执行趋势计数表（#158，已删日志的按天计数，按主键 day 取一段范围）。
 	// 条数也要对上，否则截获机制失灵、一条都没截到时这个用例会空跑通过。
-	counts, recent := 0, 0
+	counts, recent, archives := 0, 0, 0
 	for _, query := range queriesOf(t, "/api/v1/system/dashboard?range=7") {
 		plan := planOf(t, query)
 		switch {
@@ -137,13 +140,18 @@ func TestTaskLogHotQueriesUseQueryIndexes(t *testing.T) {
 			if !strings.Contains(plan, "idx_task_logs_created_at_status") || strings.Contains(plan, "USE TEMP B-TREE") {
 				t.Fatalf("仪表板最近 10 条应顺着 idx_task_logs_created_at_status 倒序取、不再排序，实际计划：%s\nSQL：%s", plan, query.sql)
 			}
+		case strings.Contains(query.sql, "task_log_daily_stats"):
+			archives++
+			if !strings.Contains(plan, "SEARCH task_log_daily_stats USING INDEX sqlite_autoindex_task_log_daily_stats_1") {
+				t.Fatalf("仪表板读执行趋势计数表应按主键 day 范围取，实际计划：%s\nSQL：%s", plan, query.sql)
+			}
 		default:
-			// 仪表板上新增或改写的 task_logs 查询，先看一眼执行计划，再在这里补上对应的断言。
-			t.Fatalf("仪表板出现了没有执行计划断言的 task_logs 查询：%s\n实际计划：%s", query.sql, plan)
+			// 仪表板上新增或改写的 task_logs / 计数表查询，先看一眼执行计划，再在这里补上对应的断言。
+			t.Fatalf("仪表板出现了没有执行计划断言的 task_logs / 计数表查询：%s\n实际计划：%s", query.sql, plan)
 		}
 	}
-	if counts != 29 || recent != 1 {
-		t.Fatalf("仪表板 7 天视图应截到 29 条 task_logs 计数、1 条最近 10 条，实际 %d 条、%d 条", counts, recent)
+	if counts != 29 || recent != 1 || archives != 1 {
+		t.Fatalf("仪表板 7 天视图应截到 29 条 task_logs 计数、1 条最近 10 条、1 条计数表查询，实际 %d 条、%d 条、%d 条", counts, recent, archives)
 	}
 
 	// 侧栏角标：每个标签页 30 秒轮询一次的「今日失败」。

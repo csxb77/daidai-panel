@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"daidai-panel/pkg/crypto"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func closeExistingDB() {
@@ -73,6 +75,7 @@ func SetupTestEnv(t *testing.T) string {
 		&model.TokenBlocklist{},
 		&model.Task{},
 		&model.TaskLog{},
+		&model.TaskLogDailyStat{},
 		&model.SystemConfig{},
 		&model.EnvVar{},
 		&model.ScriptVersion{},
@@ -96,6 +99,21 @@ func SetupTestEnv(t *testing.T) string {
 		&model.TaskView{},
 		&model.WecomTrigger{},
 	)
+	// #158 测试期护栏：删 task_logs 必须经 service.DeleteTaskLogs（它先把要删的行并入执行趋势计数，
+	// 并给自己那条 Delete 打上 model.TaskLogDeleteGuardKey 标记）。漏走它的 GORM 删除——Where(...).Delete(&model.TaskLog{})、
+	// Delete(&logs)、Table("task_logs")…Delete 等写法——在这里直接报错、一行不删，用例会红。
+	// 每次 SetupTestEnv 都是新建的 database.DB，回调挂在它自己身上，不会重复注册。
+	// 原生 Exec("DELETE …") 不走 Delete 回调链，由 service 包的语法扫描用例兜。
+	if err := database.DB.Callback().Delete().Before("gorm:delete").Register("testutil:task_logs_delete_guard", func(db *gorm.DB) {
+		if db.Statement.Table != "task_logs" {
+			return
+		}
+		if _, ok := db.Get(model.TaskLogDeleteGuardKey); !ok {
+			_ = db.AddError(errors.New("task_logs 只能经 service.DeleteTaskLogs 删除（先并入执行趋势计数，#158）"))
+		}
+	}); err != nil {
+		t.Fatalf("register task_logs delete guard: %v", err)
+	}
 	model.InitDefaultConfigs()
 
 	// middleware 的可信代理列表是包级全局，只在 middleware 包 init() 时装一次默认私网段，

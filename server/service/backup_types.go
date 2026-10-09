@@ -166,14 +166,15 @@ type BackupConfigBundle struct {
 }
 
 type BackupPayload struct {
-	Configs       BackupConfigBundle   `json:"configs,omitempty"`
-	Tasks         []BackupTask         `json:"tasks,omitempty"`
-	EnvVars       []BackupEnvVar       `json:"env_vars,omitempty"`
-	Subscriptions []BackupSubscription `json:"subscriptions,omitempty"`
-	SSHKeys       []BackupSSHKey       `json:"ssh_keys,omitempty"`
-	Dependencies  []BackupDependency   `json:"dependencies,omitempty"`
-	TaskLogs      []BackupTaskLog      `json:"task_logs,omitempty"`
-	TaskViews     []model.TaskView     `json:"task_views,omitempty"`
+	Configs           BackupConfigBundle       `json:"configs,omitempty"`
+	Tasks             []BackupTask             `json:"tasks,omitempty"`
+	EnvVars           []BackupEnvVar           `json:"env_vars,omitempty"`
+	Subscriptions     []BackupSubscription     `json:"subscriptions,omitempty"`
+	SSHKeys           []BackupSSHKey           `json:"ssh_keys,omitempty"`
+	Dependencies      []BackupDependency       `json:"dependencies,omitempty"`
+	TaskLogs          []BackupTaskLog          `json:"task_logs,omitempty"`
+	TaskViews         []model.TaskView         `json:"task_views,omitempty"`
+	TaskLogDailyStats []model.TaskLogDailyStat `json:"task_log_daily_stats,omitempty"` // 执行趋势里已删日志的按天计数（#158），跟着「日志」勾选项走；老备份没有这个键 = nil
 }
 
 type BackupManifest struct {

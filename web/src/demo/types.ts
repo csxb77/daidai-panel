@@ -391,4 +391,10 @@ export interface DemoDbState {
   configs: Record<string, DemoConfigItem>
   /** 各表的自增游标，保证新建对象的 id 不与快照里的冲突 */
   seq: Record<string, number>
+  /**
+   * 已删除日志按天留下的计数（#158，对齐服务端 task_log_daily_stats）。
+   * 键与 db.ts 的 bucketLogsByDay 相同（started_at 的本地 MM-DD），total 含运行中等不进三条折线的行。
+   * 只有仪表盘的今日 / 昨日 / 按天会加回它，角标与系统概况照旧只看现存日志。
+   */
+  archivedDaily: Record<string, { success: number; failed: number; aborted: number; total: number }>
 }

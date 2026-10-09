@@ -15,6 +15,7 @@ import (
 	"daidai-panel/service"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type LogHandler struct{}
@@ -421,18 +422,25 @@ func (h *LogHandler) Delete(c *gin.Context) {
 		response.BadRequest(c, "无效的日志ID")
 		return
 	}
-	// 先把 log_path 捞出来再删行：行一删路径就查不回来了，磁盘上的 .log 会变成没人认领的垃圾
-	// （issue #144 / v3.3.2）。这里是按 id 删单条，用户点的就是这一条，不需要 status 条件。
+	// 删日志一律经 service.DeleteTaskLogs（#158）：同一个事务里先把这一行并进执行趋势的按天计数（仪表板数字不跟着变少），
+	// 再取 log_path（行一删路径就查不回来，磁盘上的 .log 会变成没人认领的垃圾，issue #144 / v3.3.2），最后删行。
+	// 这里是按 id 删单条，用户点的就是这一条，不需要 status 条件。
+	var deleted int64
 	var paths []string
-	database.DB.Model(&model.TaskLog{}).
-		Where("id = ? AND log_path IS NOT NULL AND log_path <> ''", logID).
-		Pluck("log_path", &paths)
-
-	result := database.DB.Where("id = ?", logID).Delete(&model.TaskLog{})
-	if result.RowsAffected == 0 {
+	if err := database.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		deleted, paths, err = service.DeleteTaskLogs(tx, "id = ?", logID)
+		return err
+	}); err != nil {
+		// 数据库出错：事务已回滚，行和计数都没动。回 500，不再误报成「日志不存在」。
+		response.InternalError(c, "删除日志失败")
+		return
+	}
+	if deleted == 0 {
 		response.NotFound(c, "日志不存在")
 		return
 	}
+	// 事务提交之后再按路径删磁盘文件。
 	service.DeleteLogFilesForRecords(paths, config.C.Data.LogDir)
 	response.Success(c, gin.H{"message": "日志已删除"})
 }
@@ -446,16 +454,21 @@ func (h *LogHandler) BatchDelete(c *gin.Context) {
 		return
 	}
 
-	// 同 Delete：先 Pluck 出这批行的 log_path，删完行再按路径删磁盘文件（issue #144 / v3.3.2）。
+	// 同 Delete：并入计数 → 取 log_path → 删行在同一个事务里（#158、#144），提交后再按路径删磁盘文件。
+	// 一条都没命中照旧回 200「已删除 0 条日志」；只有数据库出错才回 500。
+	var deleted int64
 	var paths []string
-	database.DB.Model(&model.TaskLog{}).
-		Where("id IN ? AND log_path IS NOT NULL AND log_path <> ''", req.IDs).
-		Pluck("log_path", &paths)
-
-	result := database.DB.Where("id IN ?", req.IDs).Delete(&model.TaskLog{})
+	if err := database.DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		deleted, paths, err = service.DeleteTaskLogs(tx, "id IN ?", req.IDs)
+		return err
+	}); err != nil {
+		response.InternalError(c, "删除日志失败")
+		return
+	}
 	service.DeleteLogFilesForRecords(paths, config.C.Data.LogDir)
 	response.Success(c, gin.H{
-		"message": fmt.Sprintf("已删除 %d 条日志", result.RowsAffected),
+		"message": fmt.Sprintf("已删除 %d 条日志", deleted),
 	})
 }
 
